@@ -457,6 +457,10 @@ body {
   transform-origin: center bottom;
   animation: toast-in 160ms var(--ease-out-soft) both;
 }
+.power-menu {
+  transform-origin: right bottom;
+  animation: power-menu-in 130ms var(--ease-out-soft) both;
+}
 
 @keyframes launcher-in {
   from {
@@ -496,6 +500,12 @@ body {
   from {
     opacity: 0;
     transform: translateY(10px) scale(0.96);
+  }
+}
+@keyframes power-menu-in {
+  from {
+    opacity: 0;
+    transform: translateY(5px) scale(0.98);
   }
 }
 

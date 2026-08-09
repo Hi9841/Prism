@@ -75,6 +75,7 @@ function appPaletteItem(app: AppEntry): PaletteItem {
     subtitle: "Application",
     icon: { kind: "app", name: app.name, icon: app.icon },
     historyTitle: app.name,
+    appId: app.appId,
     run: () => launchApp(app.appId),
   };
 }
@@ -230,7 +231,20 @@ export function PaletteProvider({ children }: { children: ReactNode }) {
 
   const visibleApps = useMemo(() => dedupeApps(apps), [apps]);
   const sortedApps = useMemo(() => sortApps(visibleApps), [visibleApps]);
-  const quickItems = useMemo(() => quickAccess.map(quickAccessPaletteItem), [quickAccess]);
+  const pinnedApps = useMemo(() => {
+    const appsById = new Map(visibleApps.map((entry) => [entry.appId, entry]));
+    return app.settings.pinnedApps.flatMap((appId) => {
+      const entry = appsById.get(appId);
+      return entry ? [entry] : [];
+    });
+  }, [visibleApps, app.settings.pinnedApps]);
+  const quickItems = useMemo(() => {
+    const entriesByKind = new Map(quickAccess.map((entry) => [entry.kind, entry]));
+    return app.settings.quickAccess.flatMap((kind) => {
+      const entry = entriesByKind.get(kind);
+      return entry ? [quickAccessPaletteItem(entry)] : [];
+    });
+  }, [quickAccess, app.settings.quickAccess]);
   const filesBusy = filesSearching || (!filePathBrowse && !fileIndexReady && fileIndexing);
 
   const { sections, flatItems } = useMemo(() => {
@@ -239,9 +253,15 @@ export function PaletteProvider({ children }: { children: ReactNode }) {
     const out: Section[] = [];
 
     if (normalized.length === 0) {
+      const pinnedItems = pinnedApps.map(appPaletteItem);
+      if (pinnedItems.length > 0) {
+        out.push({ id: "pinned", label: "Pinned", items: pinnedItems });
+      }
+      const pinnedItemIds = new Set(pinnedItems.map((item) => item.id));
       const recentItems: PaletteItem[] = [];
       for (const entry of app.history) {
         const item = rehydrate(entry, visibleApps, existingHistoryPaths);
+        if (item && pinnedItemIds.has(item.id)) continue;
         if (item) recentItems.push(item);
         if (recentItems.length >= 5) break;
       }
@@ -254,7 +274,13 @@ export function PaletteProvider({ children }: { children: ReactNode }) {
       }
 
       if (sortedApps.length > 0) {
-        out.push({ id: "apps", label: "Apps", items: sortedApps.slice(0, 8).map(appPaletteItem) });
+        const availableApps = sortedApps
+          .filter((entry) => !app.settings.pinnedApps.includes(entry.appId))
+          .slice(0, 8)
+          .map(appPaletteItem);
+        if (availableApps.length > 0) {
+          out.push({ id: "apps", label: "Apps", items: availableApps });
+        }
       }
     } else {
       const math = isMathLike(normalized) ? tryEvaluate(normalized) : null;
@@ -293,6 +319,8 @@ export function PaletteProvider({ children }: { children: ReactNode }) {
     existingHistoryPaths,
     visibleApps,
     sortedApps,
+    pinnedApps,
+    app.settings.pinnedApps,
     quickItems,
     fileResults,
     fileResultQuery,

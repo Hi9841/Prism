@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { DEFAULT_SETTINGS, stepViewZoom } from "../lib/types";
+import { DEFAULT_QUICK_ACCESS, DEFAULT_SETTINGS, stepViewZoom } from "../lib/types";
 import { SHORTCUT_OPTIONS, sanitizeHistory, sanitizeSettings } from "./app";
 
 describe("default shortcut", () => {
@@ -27,6 +27,49 @@ describe("view zoom", () => {
     expect(sanitizeSettings({ viewZoom: 130 }).viewZoom).toBe(130);
     expect(sanitizeSettings({ viewZoom: 135 }).viewZoom).toBe(DEFAULT_SETTINGS.viewZoom);
     expect(sanitizeSettings({}).viewZoom).toBe(DEFAULT_SETTINGS.viewZoom);
+  });
+});
+
+describe("quick access settings", () => {
+  it("keeps the current pins as the default for older state", () => {
+    expect(sanitizeSettings({}).quickAccess).toEqual(DEFAULT_QUICK_ACCESS);
+  });
+
+  it("allows an empty list and filters duplicates, unknown values, and excess pins", () => {
+    expect(sanitizeSettings({ quickAccess: [] }).quickAccess).toEqual([]);
+    expect(
+      sanitizeSettings({
+        quickAccess: [
+          "videos",
+          "home",
+          "videos",
+          "invalid",
+          "desktop",
+          "downloads",
+          "documents",
+          "pictures",
+          "music",
+        ],
+      }).quickAccess,
+    ).toEqual(["videos", "home", "desktop", "downloads", "documents", "pictures"]);
+  });
+});
+
+describe("pinned app settings", () => {
+  it("defaults older state to no pins", () => {
+    expect(sanitizeSettings({}).pinnedApps).toEqual([]);
+  });
+
+  it("keeps valid unique app ids and rejects malformed ids", () => {
+    expect(sanitizeSettings({ pinnedApps: ["app-a", "app-b", "app-a", "", 4] }).pinnedApps).toEqual([
+      "app-a",
+      "app-b",
+    ]);
+  });
+
+  it("caps persisted pins", () => {
+    const pinnedApps = Array.from({ length: 80 }, (_, index) => `app-${index}`);
+    expect(sanitizeSettings({ pinnedApps }).pinnedApps).toHaveLength(64);
   });
 });
 

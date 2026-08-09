@@ -1,8 +1,23 @@
-import { History, Keyboard, LogOut, Minus, Plus, RotateCcw, X } from "lucide-react";
+import {
+  Download,
+  FileText,
+  FileVideo,
+  History,
+  Home,
+  Images,
+  Keyboard,
+  LogOut,
+  Minus,
+  Monitor,
+  Music,
+  Plus,
+  RotateCcw,
+  X,
+} from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { quitApp, setShortcut } from "../lib/bridge";
-import type { AccentId, ThemeMode, WindowEffect, WindowWidth } from "../lib/types";
-import { DEFAULT_SETTINGS, stepViewZoom, VIEW_ZOOM_LEVELS } from "../lib/types";
+import type { AccentId, QuickAccessKind, ThemeMode, WindowEffect, WindowWidth } from "../lib/types";
+import { DEFAULT_SETTINGS, QUICK_ACCESS_LIMIT, stepViewZoom, VIEW_ZOOM_LEVELS } from "../lib/types";
 import { SHORTCUT_OPTIONS, THEME_OPTIONS, useApp } from "../state/app";
 import { Segmented, Toggle } from "./ui";
 
@@ -138,6 +153,61 @@ function ViewZoomControl() {
       >
         <RotateCcw className="h-3.5 w-3.5" />
       </button>
+    </fieldset>
+  );
+}
+
+const QUICK_ACCESS_OPTIONS: {
+  kind: QuickAccessKind;
+  label: string;
+  icon: typeof Home;
+}[] = [
+  { kind: "home", label: "Home", icon: Home },
+  { kind: "desktop", label: "Desktop", icon: Monitor },
+  { kind: "downloads", label: "Downloads", icon: Download },
+  { kind: "documents", label: "Documents", icon: FileText },
+  { kind: "pictures", label: "Pictures", icon: Images },
+  { kind: "music", label: "Music", icon: Music },
+  { kind: "videos", label: "Videos", icon: FileVideo },
+];
+
+function QuickAccessPicker() {
+  const { settings, updateSettings } = useApp();
+
+  const toggle = (kind: QuickAccessKind) => {
+    const active = settings.quickAccess.includes(kind);
+    const quickAccess = active
+      ? settings.quickAccess.filter((entry) => entry !== kind)
+      : [...settings.quickAccess, kind];
+    updateSettings({ quickAccess });
+  };
+
+  return (
+    <fieldset
+      aria-label="Pinned Quick Access folders"
+      className="grid w-[198px] grid-cols-2 gap-1.5 border-0 p-0"
+    >
+      {QUICK_ACCESS_OPTIONS.map(({ kind, label, icon: FolderIcon }) => {
+        const active = settings.quickAccess.includes(kind);
+        const disabled = !active && settings.quickAccess.length >= QUICK_ACCESS_LIMIT;
+        return (
+          <button
+            key={kind}
+            type="button"
+            aria-pressed={active}
+            disabled={disabled}
+            onClick={() => toggle(kind)}
+            className={`focus-ring flex h-8 min-w-0 cursor-pointer items-center gap-1.5 rounded-[8px] px-2 text-[11px] font-medium transition-colors duration-150 disabled:cursor-default disabled:opacity-35 ${
+              active
+                ? "bg-accent-soft text-fg"
+                : "bg-surface text-fg-tertiary hover:bg-surface-hover hover:text-fg-secondary"
+            }`}
+          >
+            <FolderIcon className={`h-3.5 w-3.5 shrink-0 ${active ? "text-accent" : ""}`} />
+            <span className="truncate">{label}</span>
+          </button>
+        );
+      })}
     </fieldset>
   );
 }
@@ -296,6 +366,9 @@ export function SettingsSheet() {
               label="Keep window on top"
             />
           </Row>
+          <Row title="Quick Access" detail="Choose up to 6 pinned folders">
+            <QuickAccessPicker />
+          </Row>
           <Row title="Recent items" detail="Items are kept in order of use">
             <button
               type="button"
@@ -311,7 +384,7 @@ export function SettingsSheet() {
           <div className="flex items-center justify-between py-3">
             <div>
               <div className="text-[13px] font-medium text-fg">Prism</div>
-              <div className="mt-0.5 text-[11.5px] text-fg-tertiary">Version 0.3.0</div>
+              <div className="mt-0.5 text-[11.5px] text-fg-tertiary">Version 0.4.0</div>
             </div>
             <button
               type="button"
