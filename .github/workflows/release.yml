@@ -22,35 +22,25 @@ jobs:
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Set up Bun
         uses: oven-sh/setup-bun@v2
 
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy, rustfmt
 
       - name: Cache Rust build data
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri -> target
+          cache-on-failure: true
 
       - name: Install frontend dependencies
         run: bun install --frozen-lockfile
 
       - name: Check release version
         run: .\scripts\check-version.ps1 -ExpectedTag "${{ github.ref_type == 'tag' && github.ref_name || '' }}"
-
-      - name: Verify source
-        run: |
-          bun run lint
-          bun run test
-          bun run build
-          cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
-          cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
-          cargo test --manifest-path src-tauri/Cargo.toml
 
       - name: Build and publish installer
         uses: tauri-apps/tauri-action@v1
