@@ -1,18 +1,20 @@
 //! Win-key interception (disabled by default).
 //!
 //! Turns a standalone Win-key press into a Prism toggle while leaving
-//! Win+* combos intact. Design rules:
+//! Win+* combos and other global keyboard tools intact. Design rules:
 //!
 //! - A pure, side-aware state machine (`WinKeyMachine`) decides everything;
 //!   it is unit-tested without Win32 involvement.
-//! - The hook callback only feeds the machine, inserts the two-event menu
-//!   mask, and queues window work. It never blocks on UI or filesystem work.
-//! - Every Win32 result is checked. A failed replay triggers a safe
-//!   recovery path that disables interception.
-//! - A short, exact-host guard dismisses Start when a shell replacement
-//!   opens it independently of the swallowed Windows-key events.
-//! - Disabling, quitting or failing mid-keypress resets all state, so no
-//!   key is ever left stuck or swallowed.
+//! - With StartAllBack integration, a message-only raw-input observer detects
+//!   standalone Win without installing a low-level hook or changing legacy
+//!   keyboard delivery.
+//! - Without provider integration, every physical event is forwarded through
+//!   the hook chain unchanged and a two-event menu mask follows Win-down.
+//! - Every Win32 result is checked. A failed menu mask triggers a safe
+//!   recovery path that disables observation.
+//! - A short, exact-host guard dismisses Start if a shell replacement opens
+//!   it despite the inert menu-mask chord.
+//! - Disabling, quitting or failing mid-keypress resets all observation state.
 
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{mpsc, Mutex, OnceLock};
@@ -55,37 +57,18 @@ const SYNTH_TAG: usize = 0x50524953; // "PRIS"
 /// unassigned virtual keys, it is honored by StartAllBack on this machine.
 const MENU_MASK_KEY: VIRTUAL_KEY = VK_CONTROL;
 
-/// Number of input events a successful combo replay must send.
-const REPLAY_EVENTS: u32 = 2;
-
 /// Keep watching briefly because StartAllBack can react after our hook has
 /// already consumed the physical Win-key release.
 const START_GUARD_DURATION: Duration = Duration::from_millis(300);
 const START_GUARD_INTERVAL: Duration = Duration::from_millis(8);
 const ACTION_MESSAGE: u32 = WM_APP + 1;
-const REFRESH_HOOK_MESSAGE: u32 = WM_APP + 2;
 const TOGGLE_DEBOUNCE_MS: u64 = 50;
 
-/// Event the frontend receives when interception self-disables (e.g. a
-/// replay was rejected because the foreground app is elevated).
+/// Event the frontend receives when Win observation self-disables.
 pub const FAILED_EVENT: &str = "win-mode-failed";
 
 pub fn is_start_guard_active() -> bool {
     START_GUARD_ACTIVE.load(Ordering::Acquire)
-}
-
-/// Reinstalls the low-level hook at the front of the chain without leaving an
-/// interception gap. Shell replacements can rehook after focus transitions.
-pub fn refresh_hook_priority() {
-    if !ACTIVE.load(Ordering::Acquire) || RAW_PROVIDER_ACTIVE.load(Ordering::Acquire) {
-        return;
-    }
-    let tid = THREAD_ID.load(Ordering::Acquire);
-    if tid != 0 {
-        unsafe {
-            let _ = PostThreadMessageW(tid, REFRESH_HOOK_MESSAGE, WPARAM(0), LPARAM(0));
-        }
-    }
 }
 
 /* ------------------------------------------------------------------ */
@@ -108,15 +91,10 @@ pub enum KeyKind {
 pub enum Decision {
     /// Deliver the event unchanged.
     Pass,
-    /// Suppress the event.
-    Swallow,
-    /// Suppress the first Win-down and queue the inert menu-mask key.
+    /// Deliver the first Win-down and queue the inert menu-mask key.
     Mask,
-    /// Suppress and toggle the palette (a standalone Win press completed).
+    /// Deliver the Win-up and toggle the palette (a standalone press completed).
     Toggle(WinSide),
-    /// Suppress and replay a synthesized Win+key down (the system then sees
-    /// the combo exactly once, with the originating Win key).
-    Replay { side: WinSide, key: u16 },
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -127,10 +105,17 @@ struct Press {
 
 /// Side-aware press tracking. Both Windows keys keep independent state so
 /// their identity and balanced down/up transitions are preserved.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct WinKeyMachine {
     left: Press,
     right: Press,
+    non_win_down: [bool; 256],
+}
+
+impl Default for WinKeyMachine {
+    fn default() -> Self {
+        Self::EMPTY
+    }
 }
 
 impl WinKeyMachine {
@@ -144,20 +129,37 @@ impl WinKeyMachine {
             down: false,
             combo: false,
         },
+        non_win_down: [false; 256],
     };
     /// Feeds one key event into the machine and returns the decision.
     pub fn feed(&mut self, kind: KeyKind, is_down: bool) -> Decision {
         match kind {
             KeyKind::Win(side) => {
+                let other_win_down = match side {
+                    WinSide::Left => self.right.down,
+                    WinSide::Right => self.left.down,
+                };
+                let preexisting_chord =
+                    other_win_down || self.non_win_down.iter().any(|down| *down);
+                if is_down && other_win_down {
+                    match side {
+                        WinSide::Left => self.right.combo = true,
+                        WinSide::Right => self.left.combo = true,
+                    }
+                }
                 let press = self.press_mut(side);
                 if is_down {
                     if press.down {
                         // Auto-repeat or extra press while already held.
-                        Decision::Swallow
+                        Decision::Pass
                     } else {
                         press.down = true;
-                        press.combo = false;
-                        Decision::Mask
+                        press.combo = preexisting_chord;
+                        if preexisting_chord {
+                            Decision::Pass
+                        } else {
+                            Decision::Mask
+                        }
                     }
                 } else if press.down {
                     let standalone = !press.combo;
@@ -166,9 +168,6 @@ impl WinKeyMachine {
                     if standalone {
                         Decision::Toggle(side)
                     } else {
-                        // Part of a replay: the synthesized Win-down needs
-                        // the real release to pass so the system stays
-                        // balanced.
                         Decision::Pass
                     }
                 } else {
@@ -183,34 +182,20 @@ impl WinKeyMachine {
                     // mistaken for a standalone press.
                     self.left.combo |= left_down;
                     self.right.combo |= right_down;
-                    if is_modifier(key) {
-                        // Modifiers (Shift/Ctrl/Alt) pass through untouched -
-                        // the user is already holding them. Replaying them
-                        // would duplicate Win-downs and risk stuck keys.
-                        Decision::Pass
-                    } else {
-                        // Replay with the originating side (left wins when
-                        // both are held) so the system sees the combo exactly
-                        // once.
-                        let side = if left_down {
-                            WinSide::Left
-                        } else {
-                            WinSide::Right
-                        };
-                        Decision::Replay { side, key }
-                    }
-                } else {
-                    Decision::Pass
                 }
+                if let Some(down) = self.non_win_down.get_mut(key as usize) {
+                    *down = is_down;
+                }
+                Decision::Pass
             }
         }
     }
 
-    /// Clears all press state (used when interception is disabled
-    /// mid-keypress; no key stays stuck or half-swallowed).
+    /// Clears all press state when Win observation is disabled mid-keypress.
     pub fn reset(&mut self) {
         self.left = Press::default();
         self.right = Press::default();
+        self.non_win_down.fill(false);
     }
 
     fn press_mut(&mut self, side: WinSide) -> &mut Press {
@@ -221,25 +206,14 @@ impl WinKeyMachine {
     }
 }
 
-/// True for Shift/Ctrl/Alt (both left and right variants). These pass
-/// through the interception untouched; only their presence marks a combo.
-fn is_modifier(key: u16) -> bool {
-    matches!(
-        key,
-        0x10 | 0xA0 | 0xA1 // Shift / LShift / RShift
-        | 0x11 | 0xA2 | 0xA3 // Ctrl / LCtrl / RCtrl
-        | 0x12 | 0xA4 | 0xA5 // Alt / LAlt / RAlt
-    )
-}
-
 /* ------------------------------------------------------------------ */
 /*  Hook plumbing                                                       */
 /* ------------------------------------------------------------------ */
 
 static APP: OnceLock<AppHandle> = OnceLock::new();
 static ACTIVE: AtomicBool = AtomicBool::new(false);
-static SHELL_SUPPRESSES_START: AtomicBool = AtomicBool::new(false);
-static RAW_PROVIDER_ACTIVE: AtomicBool = AtomicBool::new(false);
+static PROVIDER_SUPPRESSES_START: AtomicBool = AtomicBool::new(false);
+static RAW_OBSERVER_ACTIVE: AtomicBool = AtomicBool::new(false);
 static THREAD_ID: AtomicU32 = AtomicU32::new(0);
 type HookReady = mpsc::SyncSender<Result<(), String>>;
 type StopReady = mpsc::SyncSender<()>;
@@ -256,7 +230,6 @@ static TOGGLE_CLOCK: OnceLock<Instant> = OnceLock::new();
 enum Action {
     MaskFailed,
     Toggle(WinSide),
-    Replay { side: WinSide, key: u16 },
 }
 
 static ACTION_TX: OnceLock<mpsc::Sender<Action>> = OnceLock::new();
@@ -268,8 +241,8 @@ pub fn init(app: AppHandle) {
     let _ = APP.set(app);
 }
 
-pub fn set_shell_suppression(active: bool) {
-    SHELL_SUPPRESSES_START.store(active, Ordering::Release);
+pub fn set_provider_suppression(active: bool) {
+    PROVIDER_SUPPRESSES_START.store(active, Ordering::Release);
     RAW_MACHINE.lock().map(|mut machine| machine.reset()).ok();
 }
 
@@ -353,20 +326,20 @@ fn pump_loop(rx: mpsc::Receiver<HookReady>) {
 
 /// Installs the hook and pumps messages until a stop request arrives.
 unsafe fn run_pump(ready: HookReady) {
-    let provider_mode = SHELL_SUPPRESSES_START.load(Ordering::Acquire);
+    let provider_mode = PROVIDER_SUPPRESSES_START.load(Ordering::Acquire);
     let raw_input_window = if provider_mode {
         match create_raw_input_window() {
             Ok(window) => Some(window),
             Err(error) => {
                 let _ = ready.send(Err(error));
-                disable_interception("raw keyboard input registration failed");
+                disable_interception("raw keyboard observer registration failed");
                 return;
             }
         }
     } else {
         None
     };
-    let mut hook = if provider_mode {
+    let hook = if provider_mode {
         None
     } else {
         match SetWindowsHookExW(WH_KEYBOARD_LL, Some(hook_proc), None, 0) {
@@ -381,8 +354,8 @@ unsafe fn run_pump(ready: HookReady) {
     let show_hook = if provider_mode {
         None
     } else {
-        // Generic fallback only: watch exact Start surfaces because an
-        // earlier replacement hook may run before Prism's hook.
+        // Generic fallback only: watch exact Start surfaces because a
+        // replacement shell may run before Prism's observer.
         let show_hook = SetWinEventHook(
             EVENT_OBJECT_SHOW,
             EVENT_OBJECT_SHOW,
@@ -402,7 +375,7 @@ unsafe fn run_pump(ready: HookReady) {
         }
         Some(show_hook)
     };
-    RAW_PROVIDER_ACTIVE.store(provider_mode, Ordering::Release);
+    RAW_OBSERVER_ACTIVE.store(provider_mode, Ordering::Release);
     let _ = ready.send(Ok(()));
     let mut msg = MSG::default();
     'pump: loop {
@@ -413,24 +386,10 @@ unsafe fn run_pump(ready: HookReady) {
             if msg.message == ACTION_MESSAGE {
                 continue;
             }
-            if msg.message == REFRESH_HOOK_MESSAGE {
-                if let Some(old_hook) = hook {
-                    if let Ok(new_hook) =
-                        SetWindowsHookExW(WH_KEYBOARD_LL, Some(hook_proc), None, 0)
-                    {
-                        if UnhookWindowsHookEx(old_hook).is_ok() {
-                            hook = Some(new_hook);
-                        } else {
-                            let _ = UnhookWindowsHookEx(new_hook);
-                        }
-                    }
-                }
-                continue;
-            }
             let _ = TranslateMessage(&msg);
             let _ = DispatchMessageW(&msg);
         }
-        // Drain window and replay actions outside the callback.
+        // Drain native actions outside the callback.
         if let Ok(mut rx_slot) = ACTION_RX.lock() {
             if let Some(rx) = rx_slot.as_mut() {
                 while let Ok(action) = rx.try_recv() {
@@ -443,10 +402,9 @@ unsafe fn run_pump(ready: HookReady) {
                             break 'pump;
                         }
                         Action::Toggle(_side) => {
-                            if !provider_mode {
-                                // Generic fallback: dismiss only a positively
-                                // identified Start surface if another shell
-                                // hook opened one before Prism's hook ran.
+                            if !PROVIDER_SUPPRESSES_START.load(Ordering::Acquire) {
+                                // Dismiss only a positively identified Start
+                                // surface if another shell hook opened one.
                                 if unsafe { dismiss_start_menus() } {
                                     refocus_palette();
                                 }
@@ -459,23 +417,13 @@ unsafe fn run_pump(ready: HookReady) {
                                 });
                             }
                         }
-                        Action::Replay { side, key } => {
-                            let win_vk = match side {
-                                WinSide::Left => VK_LWIN.0,
-                                WinSide::Right => VK_RWIN.0,
-                            };
-                            if !send_combo(win_vk, key) {
-                                disable_interception("input replay rejected (elevated app?)");
-                                break 'pump;
-                            }
-                        }
                     }
                 }
             }
         }
         let _ = MsgWaitForMultipleObjectsEx(None, 100, QS_ALLINPUT, Default::default());
     }
-    RAW_PROVIDER_ACTIVE.store(false, Ordering::Release);
+    RAW_OBSERVER_ACTIVE.store(false, Ordering::Release);
     RAW_MACHINE.lock().map(|mut machine| machine.reset()).ok();
     if let Some(show_hook) = show_hook {
         let _ = UnhookWinEvent(show_hook);
@@ -514,10 +462,10 @@ unsafe extern "system" fn start_window_shown(
         return;
     }
 
-    let Some(host) = start_menu_host(window) else {
+    if start_menu_host(window).is_none() {
         return;
-    };
-    if host == StartMenuHost::Native && !START_GUARD_ACTIVE.load(Ordering::Acquire) {
+    }
+    if !START_GUARD_ACTIVE.load(Ordering::Acquire) {
         return;
     }
 
@@ -552,14 +500,8 @@ unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -
         if kb.dwExtraInfo == SYNTH_TAG {
             return CallNextHookEx(None, code, wparam, lparam);
         }
-        // The supported Start-provider path uses raw keyboard HID events for
-        // standalone-Win detection. Raw input is independent of ordered hook
-        // delivery, so another hook cannot starve Prism of the release event.
-        if SHELL_SUPPRESSES_START.load(Ordering::Acquire) {
-            return CallNextHookEx(None, code, wparam, lparam);
-        }
-        // Remappers and macro tools must follow the selected binding too.
-        // Only Prism's own tagged replay is exempt above.
+        // Other hooks must receive every physical event, including Win and
+        // Win+key chords. Prism only observes the stream and queues work.
         {
             let msg = wparam.0 as u32;
             let is_down = msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN;
@@ -582,25 +524,20 @@ unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -
                 };
                 match decision {
                     Decision::Pass => {}
-                    Decision::Swallow => return LRESULT(1),
                     Decision::Mask => {
-                        // Insert the inert chord marker before returning from
-                        // Win-down. This prevents replacement hooks earlier
-                        // in the chain from treating Win-up as standalone.
-                        if !send_mask_key() {
-                            queue_action(Action::MaskFailed);
+                        if !PROVIDER_SUPPRESSES_START.load(Ordering::Acquire) {
+                            // Let text expanders and other global tools observe
+                            // the physical Win-down first, then insert the mask
+                            // before the matching Win-up can reach Start.
+                            let next = CallNextHookEx(None, code, wparam, lparam);
+                            if !send_mask_key() {
+                                queue_action(Action::MaskFailed);
+                            }
+                            return next;
                         }
-                        return LRESULT(1);
                     }
                     Decision::Toggle(side) => {
                         queue_toggle(side);
-                        return LRESULT(1);
-                    }
-                    Decision::Replay { side, key } => {
-                        if let Some(tx) = ACTION_TX.get() {
-                            let _ = tx.send(Action::Replay { side, key });
-                        }
-                        return LRESULT(1);
                     }
                 }
             }
@@ -609,7 +546,7 @@ unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -
     CallNextHookEx(None, code, wparam, lparam)
 }
 
-const RAW_INPUT_WINDOW_CLASS: &str = "PrismRawKeyboardInput";
+const RAW_INPUT_WINDOW_CLASS: &str = "PrismRawKeyboardObserver";
 
 unsafe fn ensure_raw_input_class() -> Result<(), String> {
     RAW_INPUT_CLASS
@@ -624,7 +561,7 @@ unsafe fn ensure_raw_input_class() -> Result<(), String> {
                 ..Default::default()
             };
             if RegisterClassW(&class) == 0 {
-                Err("register raw keyboard window class failed".to_string())
+                Err("register raw keyboard observer class failed".to_string())
             } else {
                 Ok(())
             }
@@ -637,7 +574,7 @@ unsafe fn create_raw_input_window() -> Result<HWND, String> {
     let module = GetModuleHandleW(None).map_err(|error| format!("get Prism module: {error}"))?;
     let instance = HINSTANCE(module.0);
     let class_name = wide(RAW_INPUT_WINDOW_CLASS);
-    let window = match CreateWindowExW(
+    let window = CreateWindowExW(
         WINDOW_EX_STYLE::default(),
         PCWSTR(class_name.as_ptr()),
         PCWSTR::null(),
@@ -650,10 +587,11 @@ unsafe fn create_raw_input_window() -> Result<HWND, String> {
         None,
         Some(instance),
         None,
-    ) {
-        Ok(window) => window,
-        Err(error) => return Err(format!("create raw keyboard window: {error}")),
-    };
+    )
+    .map_err(|error| format!("create raw keyboard observer window: {error}"))?;
+    // INPUTSINK only observes input while Prism is in the background. It does
+    // not set NOLEGACY, so normal key messages and third-party tools continue
+    // to receive the original keyboard stream.
     let device = RAWINPUTDEVICE {
         usUsagePage: HID_USAGE_PAGE_GENERIC,
         usUsage: HID_USAGE_GENERIC_KEYBOARD,
@@ -664,7 +602,7 @@ unsafe fn create_raw_input_window() -> Result<HWND, String> {
         RegisterRawInputDevices(&[device], std::mem::size_of::<RAWINPUTDEVICE>() as u32)
     {
         let _ = DestroyWindow(window);
-        return Err(format!("register raw keyboard input: {error}"));
+        return Err(format!("register raw keyboard observer: {error}"));
     }
     Ok(window)
 }
@@ -680,6 +618,31 @@ unsafe fn destroy_raw_input_window(window: HWND) {
     let _ = DestroyWindow(window);
 }
 
+fn classify_raw_key(
+    virtual_key: u16,
+    make_code: u16,
+    flags: u16,
+    message: u32,
+) -> Option<(KeyKind, bool)> {
+    let is_up = flags as u32 & RI_KEY_BREAK != 0;
+    let message_down = message == WM_KEYDOWN || message == WM_SYSKEYDOWN;
+    let message_up = message == WM_KEYUP || message == WM_SYSKEYUP;
+    if make_code as u32 == KEYBOARD_OVERRUN_MAKE_CODE
+        || virtual_key >= 255
+        || !((message_down && !is_up) || (message_up && is_up))
+    {
+        return None;
+    }
+    let kind = if virtual_key == VK_LWIN.0 {
+        KeyKind::Win(WinSide::Left)
+    } else if virtual_key == VK_RWIN.0 {
+        KeyKind::Win(WinSide::Right)
+    } else {
+        KeyKind::Other(virtual_key)
+    };
+    Some((kind, !is_up))
+}
+
 unsafe extern "system" fn raw_input_window_proc(
     window: HWND,
     message: u32,
@@ -688,7 +651,7 @@ unsafe extern "system" fn raw_input_window_proc(
 ) -> LRESULT {
     if message == WM_INPUT
         && ACTIVE.load(Ordering::Acquire)
-        && RAW_PROVIDER_ACTIVE.load(Ordering::Acquire)
+        && RAW_OBSERVER_ACTIVE.load(Ordering::Acquire)
     {
         let mut input = RAWINPUT::default();
         let mut size = std::mem::size_of::<RAWINPUT>() as u32;
@@ -703,23 +666,15 @@ unsafe extern "system" fn raw_input_window_proc(
             (std::mem::size_of::<RAWINPUTHEADER>() + std::mem::size_of::<RAWKEYBOARD>()) as u32;
         if read != u32::MAX && read >= keyboard_bytes && input.header.dwType == RIM_TYPEKEYBOARD.0 {
             let keyboard = input.data.keyboard;
-            let message_down = keyboard.Message == WM_KEYDOWN || keyboard.Message == WM_SYSKEYDOWN;
-            let message_up = keyboard.Message == WM_KEYUP || keyboard.Message == WM_SYSKEYUP;
-            let is_up = keyboard.Flags as u32 & RI_KEY_BREAK != 0;
-            if keyboard.MakeCode as u32 != KEYBOARD_OVERRUN_MAKE_CODE
-                && keyboard.VKey < 255
-                && ((message_down && !is_up) || (message_up && is_up))
-            {
-                let kind = if keyboard.VKey == VK_LWIN.0 {
-                    KeyKind::Win(WinSide::Left)
-                } else if keyboard.VKey == VK_RWIN.0 {
-                    KeyKind::Win(WinSide::Right)
-                } else {
-                    KeyKind::Other(keyboard.VKey)
-                };
+            if let Some((kind, is_down)) = classify_raw_key(
+                keyboard.VKey,
+                keyboard.MakeCode,
+                keyboard.Flags,
+                keyboard.Message,
+            ) {
                 let decision = RAW_MACHINE
                     .lock()
-                    .map(|mut machine| machine.feed(kind, !is_up))
+                    .map(|mut machine| machine.feed(kind, is_down))
                     .unwrap_or(Decision::Pass);
                 if let Decision::Toggle(side) = decision {
                     queue_toggle(side);
@@ -728,38 +683,6 @@ unsafe extern "system" fn raw_input_window_proc(
         }
     }
     DefWindowProcW(window, message, wparam, lparam)
-}
-
-/// Sends a Win-down + key-down pair in one `SendInput` call so the combo
-/// exists as a single atomic sequence. Returns whether every event was
-/// accepted (a partial or zero send means the foreground app is elevated
-/// or the input was rejected elsewhere).
-unsafe fn send_combo(win_vk: u16, key_vk: u16) -> bool {
-    let inputs = [
-        INPUT {
-            r#type: INPUT_KEYBOARD,
-            Anonymous: INPUT_0 {
-                ki: KEYBDINPUT {
-                    wVk: VIRTUAL_KEY(win_vk),
-                    dwFlags: KEYBD_EVENT_FLAGS(0),
-                    dwExtraInfo: SYNTH_TAG,
-                    ..Default::default()
-                },
-            },
-        },
-        INPUT {
-            r#type: INPUT_KEYBOARD,
-            Anonymous: INPUT_0 {
-                ki: KEYBDINPUT {
-                    wVk: VIRTUAL_KEY(key_vk),
-                    dwFlags: KEYBD_EVENT_FLAGS(0),
-                    dwExtraInfo: SYNTH_TAG,
-                    ..Default::default()
-                },
-            },
-        },
-    ];
-    SendInput(&inputs, std::mem::size_of::<INPUT>() as i32) == REPLAY_EVENTS
 }
 
 unsafe fn send_mask_key() -> bool {
@@ -793,7 +716,6 @@ fn start_menu_guard() {
         }
         START_GUARD_ACTIVE.store(false, Ordering::Release);
         START_GUARD_WORKER.store(false, Ordering::Release);
-        refresh_hook_priority();
 
         // A new standalone press can arm the guard while the old worker is
         // exiting. Its queued toggle will start a fresh worker; keep the
@@ -835,10 +757,7 @@ fn queue_toggle(side: WinSide) {
         }
     }
     if let Some(tx) = ACTION_TX.get() {
-        // The installed provider has already been configured to consume
-        // standalone Start requests. The guard is only needed by the generic
-        // fallback used on systems without that integration.
-        if !SHELL_SUPPRESSES_START.load(Ordering::Acquire) {
+        if !PROVIDER_SUPPRESSES_START.load(Ordering::Acquire) {
             arm_start_menu_guard();
         }
         if tx.send(Action::Toggle(side)).is_ok() {
@@ -1063,6 +982,30 @@ mod tests {
     }
 
     #[test]
+    fn raw_keyboard_packets_preserve_valid_transitions_only() {
+        assert_eq!(
+            classify_raw_key(VK_LWIN.0, 0x5b, 0, WM_KEYDOWN),
+            Some((KeyKind::Win(WinSide::Left), true))
+        );
+        assert_eq!(
+            classify_raw_key(VK_RWIN.0, 0x5c, RI_KEY_BREAK as u16, WM_KEYUP),
+            Some((KeyKind::Win(WinSide::Right), false))
+        );
+        assert_eq!(
+            classify_raw_key(0x41, 0x1e, 0, WM_KEYDOWN),
+            Some((KeyKind::Other(0x41), true))
+        );
+        assert_eq!(
+            classify_raw_key(VK_LWIN.0, KEYBOARD_OVERRUN_MAKE_CODE as u16, 0, WM_KEYDOWN),
+            None
+        );
+        assert_eq!(
+            classify_raw_key(VK_LWIN.0, 0x5b, RI_KEY_BREAK as u16, WM_KEYDOWN),
+            None
+        );
+    }
+
+    #[test]
     fn start_menu_identity_matching_is_case_insensitive_and_exact() {
         let wide = |value: &str| value.encode_utf16().collect::<Vec<_>>();
         assert_eq!(
@@ -1119,7 +1062,7 @@ mod tests {
     }
 
     #[test]
-    fn held_win_repeats_stay_suppressed_and_toggle_once() {
+    fn held_win_repeats_pass_through_and_toggle_once() {
         assert_eq!(
             run(&[
                 (win(WinSide::Left), true),
@@ -1128,7 +1071,7 @@ mod tests {
             ]),
             vec![
                 Decision::Mask,
-                Decision::Swallow,
+                Decision::Pass,
                 Decision::Toggle(WinSide::Left)
             ]
         );
@@ -1148,69 +1091,7 @@ mod tests {
     }
 
     #[test]
-    fn left_win_plus_e_replays_left() {
-        assert_eq!(
-            run(&[
-                (win(WinSide::Left), true),
-                (KeyKind::Other(0x45), true), // E
-                (KeyKind::Other(0x45), false),
-                (win(WinSide::Left), false),
-            ]),
-            vec![
-                Decision::Mask,
-                Decision::Replay {
-                    side: WinSide::Left,
-                    key: 0x45
-                },
-                Decision::Pass,
-                Decision::Pass,
-            ]
-        );
-    }
-
-    #[test]
-    fn right_win_plus_e_replays_right_not_left() {
-        let d = run(&[(win(WinSide::Right), true), (KeyKind::Other(0x45), true)]);
-        assert_eq!(
-            d[1],
-            Decision::Replay {
-                side: WinSide::Right,
-                key: 0x45
-            }
-        );
-    }
-
-    #[test]
-    fn multi_modifier_chord_win_ctrl_shift_b() {
-        assert_eq!(
-            run(&[
-                (KeyKind::Other(0x11), true),  // Ctrl down - untouched
-                (KeyKind::Other(0x10), true),  // Shift down - untouched
-                (win(WinSide::Left), true),    // Win down - swallowed
-                (KeyKind::Other(0x42), true),  // B down - replayed
-                (KeyKind::Other(0x42), false), // B up
-                (KeyKind::Other(0x10), false), // Shift up
-                (KeyKind::Other(0x11), false), // Ctrl up
-                (win(WinSide::Left), false),   // Win up passes (combo)
-            ]),
-            vec![
-                Decision::Pass,
-                Decision::Pass,
-                Decision::Mask,
-                Decision::Replay {
-                    side: WinSide::Left,
-                    key: 0x42
-                },
-                Decision::Pass,
-                Decision::Pass,
-                Decision::Pass,
-                Decision::Pass,
-            ]
-        );
-    }
-
-    #[test]
-    fn win_shift_s_and_other_combos_pass_through() {
+    fn win_key_combos_pass_every_non_win_event_through() {
         for key in [
             0x45, /*E*/
             0x44, /*D*/
@@ -1236,10 +1117,7 @@ mod tests {
                 vec![
                     Decision::Mask,
                     Decision::Pass,
-                    Decision::Replay {
-                        side: WinSide::Left,
-                        key
-                    },
+                    Decision::Pass,
                     Decision::Pass,
                     Decision::Pass,
                     Decision::Pass,
@@ -1250,23 +1128,7 @@ mod tests {
     }
 
     #[test]
-    fn modifiers_while_win_held_pass_but_win_does_not_toggle() {
-        // Win+Shift alone must not open the palette on release.
-        assert_eq!(
-            run(&[
-                (win(WinSide::Left), true),
-                (KeyKind::Other(0x10), true), // Shift
-                (KeyKind::Other(0x10), false),
-                (win(WinSide::Left), false),
-            ]),
-            vec![
-                Decision::Mask,
-                Decision::Pass,
-                Decision::Pass,
-                Decision::Pass
-            ]
-        );
-        // Same for Ctrl and Alt (both left/right variants).
+    fn modifiers_while_win_held_pass_and_prevent_a_toggle() {
         for mod_key in [0x11, 0x12, 0xA0, 0xA1, 0xA2, 0xA3, 0xA4, 0xA5] {
             let d = run(&[
                 (win(WinSide::Left), true),
@@ -1288,8 +1150,7 @@ mod tests {
     }
 
     #[test]
-    fn shift_then_win_then_key_works() {
-        // Shift pressed before Win still yields a working chord.
+    fn shift_then_win_then_key_all_pass_through() {
         assert_eq!(
             run(&[
                 (KeyKind::Other(0x10), true), // Shift first
@@ -1301,11 +1162,8 @@ mod tests {
             ]),
             vec![
                 Decision::Pass,
-                Decision::Mask,
-                Decision::Replay {
-                    side: WinSide::Left,
-                    key: 0x53
-                },
+                Decision::Pass,
+                Decision::Pass,
                 Decision::Pass,
                 Decision::Pass,
                 Decision::Pass,
@@ -1314,7 +1172,28 @@ mod tests {
     }
 
     #[test]
-    fn both_wins_held_replays_left_first_and_releases_pass() {
+    fn preheld_keys_prevent_masking_and_standalone_toggle() {
+        for key in [0x10, 0x11, 0x12, 0x41] {
+            assert_eq!(
+                run(&[
+                    (KeyKind::Other(key), true),
+                    (win(WinSide::Left), true),
+                    (win(WinSide::Left), false),
+                    (KeyKind::Other(key), false),
+                ]),
+                vec![
+                    Decision::Pass,
+                    Decision::Pass,
+                    Decision::Pass,
+                    Decision::Pass,
+                ],
+                "pre-held key {key:#x}"
+            );
+        }
+    }
+
+    #[test]
+    fn both_win_keys_and_chord_releases_pass_through() {
         assert_eq!(
             run(&[
                 (win(WinSide::Left), true),
@@ -1326,11 +1205,26 @@ mod tests {
             ]),
             vec![
                 Decision::Mask,
+                Decision::Pass,
+                Decision::Pass,
+                Decision::Pass,
+                Decision::Pass,
+                Decision::Pass,
+            ]
+        );
+    }
+
+    #[test]
+    fn both_win_keys_without_another_key_never_toggle() {
+        assert_eq!(
+            run(&[
+                (win(WinSide::Left), true),
+                (win(WinSide::Right), true),
+                (win(WinSide::Right), false),
+                (win(WinSide::Left), false),
+            ]),
+            vec![
                 Decision::Mask,
-                Decision::Replay {
-                    side: WinSide::Left,
-                    key: 0x45
-                },
                 Decision::Pass,
                 Decision::Pass,
                 Decision::Pass,
@@ -1343,13 +1237,7 @@ mod tests {
         let mut m = WinKeyMachine::default();
         // Win+E combo
         assert_eq!(m.feed(win(WinSide::Left), true), Decision::Mask);
-        assert_eq!(
-            m.feed(KeyKind::Other(0x45), true),
-            Decision::Replay {
-                side: WinSide::Left,
-                key: 0x45
-            }
-        );
+        assert_eq!(m.feed(KeyKind::Other(0x45), true), Decision::Pass);
         assert_eq!(m.feed(KeyKind::Other(0x45), false), Decision::Pass);
         assert_eq!(m.feed(win(WinSide::Left), false), Decision::Pass);
         // Standalone again
@@ -1371,10 +1259,7 @@ mod tests {
             ]),
             vec![
                 Decision::Mask,
-                Decision::Replay {
-                    side: WinSide::Left,
-                    key: 0x45
-                },
+                Decision::Pass,
                 Decision::Pass,
                 Decision::Pass,
             ]
