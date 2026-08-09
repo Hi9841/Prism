@@ -1,75 +1,57 @@
-//! Win-key interception (disabled by default).
+//! Win-key observation (disabled by default).
 //!
 //! Turns a standalone Win-key press into a Prism toggle while leaving
 //! Win+* combos and other global keyboard tools intact. Design rules:
 //!
 //! - A pure, side-aware state machine (`WinKeyMachine`) decides everything;
 //!   it is unit-tested without Win32 involvement.
-//! - With StartAllBack integration, a message-only raw-input observer detects
-//!   standalone Win without installing a low-level hook or changing legacy
-//!   keyboard delivery.
-//! - Without provider integration, every physical event is forwarded through
-//!   the hook chain unchanged and a two-event menu mask follows Win-down.
-//! - Every Win32 result is checked. A failed menu mask triggers a safe
-//!   recovery path that disables observation.
-//! - A short, exact-host guard dismisses Start if a shell replacement opens
-//!   it despite the inert menu-mask chord.
+//! - A message-only raw-input observer detects standalone Win in every mode.
+//!   Prism never installs a low-level keyboard hook or modifies physical input.
+//! - StartAllBack integration disables the provider's Win action reversibly.
+//! - Without provider integration, a small Explorer message hook takes ownership
+//!   of `SC_TASKLIST` before native Start is launched. It fails open if Prism's
+//!   observer disappears.
+//! - Every Win32 result is checked. Registration failures disable observation.
 //! - Disabling, quitting or failing mid-keypress resets all observation state.
 
+use std::fs::OpenOptions;
+use std::io::Write;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{mpsc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-use tauri::{AppHandle, Emitter, Manager};
-use windows::core::{BOOL, PCWSTR, PWSTR};
+use tauri::{AppHandle, Emitter};
+use windows::core::{PCSTR, PCWSTR};
 use windows::Win32::Devices::HumanInterfaceDevice::{
     HID_USAGE_GENERIC_KEYBOARD, HID_USAGE_PAGE_GENERIC, KEYBOARD_OVERRUN_MAKE_CODE,
 };
-use windows::Win32::Foundation::{CloseHandle, HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
-use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows::Win32::System::Threading::{
-    GetCurrentThreadId, OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32,
-    PROCESS_QUERY_LIMITED_INFORMATION,
-};
-use windows::Win32::UI::Accessibility::{SetWinEventHook, UnhookWinEvent, HWINEVENTHOOK};
-use windows::Win32::UI::Input::KeyboardAndMouse::{
-    SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP,
-    VIRTUAL_KEY, VK_CONTROL, VK_ESCAPE, VK_LWIN, VK_RWIN,
-};
+use windows::Win32::Foundation::{FreeLibrary, HINSTANCE, HMODULE, HWND, LPARAM, LRESULT, WPARAM};
+use windows::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress, LoadLibraryW};
+use windows::Win32::System::Threading::GetCurrentThreadId;
+use windows::Win32::UI::Input::KeyboardAndMouse::{VK_LWIN, VK_RWIN};
 use windows::Win32::UI::Input::{
     GetRawInputData, RegisterRawInputDevices, HRAWINPUT, RAWINPUT, RAWINPUTDEVICE, RAWINPUTHEADER,
     RAWKEYBOARD, RIDEV_INPUTSINK, RIDEV_REMOVE, RID_INPUT, RIM_TYPEKEYBOARD,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CallNextHookEx, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, EnumWindows,
-    GetClassNameW, GetForegroundWindow, GetWindowThreadProcessId, IsWindowVisible,
-    MsgWaitForMultipleObjectsEx, PeekMessageW, PostThreadMessageW, RegisterClassW,
-    SetWindowsHookExW, ShowWindow, TranslateMessage, UnhookWindowsHookEx, EVENT_OBJECT_SHOW,
-    HWND_MESSAGE, KBDLLHOOKSTRUCT, MSG, OBJID_WINDOW, PM_REMOVE, QS_ALLINPUT, RI_KEY_BREAK,
-    SW_HIDE, WH_KEYBOARD_LL, WINDOW_EX_STYLE, WINDOW_STYLE, WINEVENT_OUTOFCONTEXT, WM_APP,
-    WM_INPUT, WM_KEYDOWN, WM_KEYUP, WM_SYSKEYDOWN, WM_SYSKEYUP, WNDCLASSW,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, FindWindowW,
+    GetWindowThreadProcessId, MsgWaitForMultipleObjectsEx, PeekMessageW, PostThreadMessageW,
+    RegisterClassW, RegisterWindowMessageW, SetWindowsHookExW, TranslateMessage,
+    UnhookWindowsHookEx, HHOOK, HWND_MESSAGE, MSG, PM_REMOVE, QS_ALLINPUT, RI_KEY_BREAK,
+    WH_GETMESSAGE, WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_INPUT, WM_KEYDOWN, WM_KEYUP,
+    WM_SYSKEYDOWN, WM_SYSKEYUP, WNDCLASSW,
 };
 
-/// Magic `dwExtraInfo` value tagging events we synthesize ourselves.
-const SYNTH_TAG: usize = 0x50524953; // "PRIS"
-/// A short Ctrl tap marks Win as a chord before replacement Start-menu hooks
-/// receive Win-up. This is the standard Windows menu-mask sequence; unlike
-/// unassigned virtual keys, it is honored by StartAllBack on this machine.
-const MENU_MASK_KEY: VIRTUAL_KEY = VK_CONTROL;
-
-/// Keep watching briefly because StartAllBack can react after our hook has
-/// already consumed the physical Win-key release.
-const START_GUARD_DURATION: Duration = Duration::from_millis(300);
-const START_GUARD_INTERVAL: Duration = Duration::from_millis(8);
 const ACTION_MESSAGE: u32 = WM_APP + 1;
 const TOGGLE_DEBOUNCE_MS: u64 = 50;
+const SHELL_BRIDGE_MESSAGE_NAME: &str = "Prism.ShellBridge.v1";
+const SHELL_CONTROL_DISABLE_WIN_HOTKEY: usize = 1;
+const SHELL_EVENT_HOTKEY_DISABLED: usize = 2;
+const SHELL_EVENT_TOGGLE_PRISM: usize = 3;
 
 /// Event the frontend receives when Win observation self-disables.
 pub const FAILED_EVENT: &str = "win-mode-failed";
-
-pub fn is_start_guard_active() -> bool {
-    START_GUARD_ACTIVE.load(Ordering::Acquire)
-}
 
 /* ------------------------------------------------------------------ */
 /*  Pure state machine (unit-tested)                                    */
@@ -91,7 +73,7 @@ pub enum KeyKind {
 pub enum Decision {
     /// Deliver the event unchanged.
     Pass,
-    /// Deliver the first Win-down and queue the inert menu-mask key.
+    /// A standalone Win press began; arm generic shell suppression.
     Mask,
     /// Deliver the Win-up and toggle the palette (a standalone press completed).
     Toggle(WinSide),
@@ -219,16 +201,13 @@ type HookReady = mpsc::SyncSender<Result<(), String>>;
 type StopReady = mpsc::SyncSender<()>;
 
 static START_TX: OnceLock<mpsc::Sender<HookReady>> = OnceLock::new();
-static MACHINE: Mutex<WinKeyMachine> = Mutex::new(WinKeyMachine::EMPTY);
 static RAW_MACHINE: Mutex<WinKeyMachine> = Mutex::new(WinKeyMachine::EMPTY);
-static START_GUARD_ACTIVE: AtomicBool = AtomicBool::new(false);
-static START_GUARD_WORKER: AtomicBool = AtomicBool::new(false);
-static START_GUARD_UNTIL_MS: AtomicU64 = AtomicU64::new(0);
+static SHELL_BRIDGE_ACTIVE: AtomicBool = AtomicBool::new(false);
+static SHELL_BRIDGE_ACK: AtomicU32 = AtomicU32::new(0);
 static LAST_TOGGLE_MS: AtomicU64 = AtomicU64::new(0);
 static TOGGLE_CLOCK: OnceLock<Instant> = OnceLock::new();
 
 enum Action {
-    MaskFailed,
     Toggle(WinSide),
 }
 
@@ -246,16 +225,15 @@ pub fn set_provider_suppression(active: bool) {
     RAW_MACHINE.lock().map(|mut machine| machine.reset()).ok();
 }
 
-/// Turns Win-key interception on or off. Disabling resets the machine and
-/// tears the hook down so normal input is restored immediately.
+/// Turns Win-key observation on or off. Disabling resets the machine and
+/// tears down native observers immediately.
 pub fn set_enabled(on: bool) -> Result<(), String> {
     if on == ACTIVE.load(Ordering::SeqCst) {
         return Ok(());
     }
     ACTIVE.store(on, Ordering::SeqCst);
     if !on {
-        START_GUARD_ACTIVE.store(false, Ordering::Release);
-        MACHINE.lock().map(|mut m| m.reset()).ok();
+        SHELL_BRIDGE_ACTIVE.store(false, Ordering::Release);
         RAW_MACHINE.lock().map(|mut m| m.reset()).ok();
         clear_queued_actions();
         LAST_TOGGLE_MS.store(0, Ordering::Release);
@@ -269,7 +247,7 @@ pub fn set_enabled(on: bool) -> Result<(), String> {
                 let _ = PostThreadMessageW(tid, WM_APP, WPARAM(0), LPARAM(0));
             }
             if stop_rx.recv_timeout(Duration::from_secs(2)).is_err() {
-                return Err("timed out while stopping Windows-key interception".to_string());
+                return Err("timed out while stopping Windows-key observation".to_string());
             }
         }
         return Ok(());
@@ -289,12 +267,12 @@ pub fn set_enabled(on: bool) -> Result<(), String> {
     let (ready_tx, ready_rx) = mpsc::sync_channel(1);
     if START_TX
         .get()
-        .ok_or_else(|| "hook thread unavailable".to_string())?
+        .ok_or_else(|| "observer thread unavailable".to_string())?
         .send(ready_tx)
         .is_err()
     {
         ACTIVE.store(false, Ordering::SeqCst);
-        return Err("hook thread unavailable".to_string());
+        return Err("observer thread unavailable".to_string());
     }
 
     match ready_rx.recv_timeout(Duration::from_secs(2)) {
@@ -307,7 +285,7 @@ pub fn set_enabled(on: bool) -> Result<(), String> {
                     let _ = PostThreadMessageW(tid, WM_APP, WPARAM(0), LPARAM(0));
                 }
             }
-            Err("timed out while installing Windows-key interception".to_string())
+            Err("timed out while starting Windows-key observation".to_string())
         }
     }
 }
@@ -318,64 +296,41 @@ fn pump_loop(rx: mpsc::Receiver<HookReady>) {
         if ACTIVE.load(Ordering::SeqCst) {
             unsafe { run_pump(ready) };
         } else {
-            let _ = ready.send(Err("Windows-key interception was cancelled".to_string()));
+            let _ = ready.send(Err("Windows-key observation was cancelled".to_string()));
         }
     }
     THREAD_ID.store(0, Ordering::SeqCst);
 }
 
-/// Installs the hook and pumps messages until a stop request arrives.
+/// Registers raw input and, when needed, the Explorer Start-command bridge.
 unsafe fn run_pump(ready: HookReady) {
     let provider_mode = PROVIDER_SUPPRESSES_START.load(Ordering::Acquire);
-    let raw_input_window = if provider_mode {
-        match create_raw_input_window() {
-            Ok(window) => Some(window),
-            Err(error) => {
-                let _ = ready.send(Err(error));
-                disable_interception("raw keyboard observer registration failed");
-                return;
-            }
-        }
-    } else {
-        None
-    };
-    let hook = if provider_mode {
-        None
-    } else {
-        match SetWindowsHookExW(WH_KEYBOARD_LL, Some(hook_proc), None, 0) {
-            Ok(hook) => Some(hook),
-            Err(_) => {
-                let _ = ready.send(Err("keyboard hook installation failed".to_string()));
-                disable_interception("hook installation failed");
-                return;
-            }
-        }
-    };
-    let show_hook = if provider_mode {
-        None
-    } else {
-        // Generic fallback only: watch exact Start surfaces because a
-        // replacement shell may run before Prism's observer.
-        let show_hook = SetWinEventHook(
-            EVENT_OBJECT_SHOW,
-            EVENT_OBJECT_SHOW,
-            None,
-            Some(start_window_shown),
-            0,
-            0,
-            WINEVENT_OUTOFCONTEXT,
-        );
-        if show_hook.0.is_null() {
-            if let Some(hook) = hook {
-                let _ = UnhookWindowsHookEx(hook);
-            }
-            let _ = ready.send(Err("Start-menu event hook installation failed".to_string()));
-            disable_interception("Start-menu event hook installation failed");
+    let raw_input_window = match create_raw_input_window() {
+        Ok(window) => window,
+        Err(error) => {
+            let _ = ready.send(Err(error));
+            disable_observation("raw keyboard observer registration failed");
             return;
         }
-        Some(show_hook)
     };
-    RAW_OBSERVER_ACTIVE.store(provider_mode, Ordering::Release);
+    RAW_OBSERVER_ACTIVE.store(true, Ordering::Release);
+    let shell_bridge = if provider_mode {
+        None
+    } else {
+        match ShellBridge::install() {
+            Ok(bridge) => {
+                SHELL_BRIDGE_ACTIVE.store(true, Ordering::Release);
+                Some(bridge)
+            }
+            Err(error) => {
+                RAW_OBSERVER_ACTIVE.store(false, Ordering::Release);
+                destroy_raw_input_window(raw_input_window);
+                let _ = ready.send(Err(error));
+                disable_observation("Explorer Start-command bridge installation failed");
+                return;
+            }
+        }
+    };
     let _ = ready.send(Ok(()));
     let mut msg = MSG::default();
     'pump: loop {
@@ -397,19 +352,7 @@ unsafe fn run_pump(ready: HookReady) {
                         break 'pump;
                     }
                     match action {
-                        Action::MaskFailed => {
-                            disable_interception("menu-mask input rejected (elevated app?)");
-                            break 'pump;
-                        }
                         Action::Toggle(_side) => {
-                            if !PROVIDER_SUPPRESSES_START.load(Ordering::Acquire) {
-                                // Dismiss only a positively identified Start
-                                // surface if another shell hook opened one.
-                                if unsafe { dismiss_start_menus() } {
-                                    refocus_palette();
-                                }
-                                start_menu_guard();
-                            }
                             if let Some(app) = APP.get() {
                                 let toggle_app = app.clone();
                                 let _ = app.run_on_main_thread(move || {
@@ -423,17 +366,13 @@ unsafe fn run_pump(ready: HookReady) {
         }
         let _ = MsgWaitForMultipleObjectsEx(None, 100, QS_ALLINPUT, Default::default());
     }
+    SHELL_BRIDGE_ACTIVE.store(false, Ordering::Release);
     RAW_OBSERVER_ACTIVE.store(false, Ordering::Release);
     RAW_MACHINE.lock().map(|mut machine| machine.reset()).ok();
-    if let Some(show_hook) = show_hook {
-        let _ = UnhookWinEvent(show_hook);
-    }
-    if let Some(hook) = hook {
-        let _ = UnhookWindowsHookEx(hook);
-    }
-    if let Some(raw_input_window) = raw_input_window {
-        destroy_raw_input_window(raw_input_window);
-    }
+    // Destroy the observer first. During the brief unhook window, the helper
+    // then fails open and leaves native Start commands untouched.
+    destroy_raw_input_window(raw_input_window);
+    drop(shell_bridge);
     if !ACTIVE.load(Ordering::Acquire) {
         clear_queued_actions();
     }
@@ -444,41 +383,11 @@ unsafe fn run_pump(ready: HookReady) {
     }
 }
 
-unsafe extern "system" fn start_window_shown(
-    _hook: HWINEVENTHOOK,
-    event: u32,
-    window: HWND,
-    object_id: i32,
-    child_id: i32,
-    _event_thread: u32,
-    _event_time: u32,
-) {
-    if event != EVENT_OBJECT_SHOW
-        || object_id != OBJID_WINDOW.0
-        || child_id != 0
-        || !ACTIVE.load(Ordering::Acquire)
-        || window.0.is_null()
-    {
-        return;
-    }
-
-    if start_menu_host(window).is_none() {
-        return;
-    }
-    if !START_GUARD_ACTIVE.load(Ordering::Acquire) {
-        return;
-    }
-
-    let _ = ShowWindow(window, SW_HIDE);
-    refocus_palette();
-}
-
-/// Safe recovery path: stop intercepting, restore normal input, and tell
-/// the frontend so the user can react.
-fn disable_interception(reason: &str) {
+/// Safe recovery path: stop observing and tell the frontend so the user can react.
+fn disable_observation(reason: &str) {
     ACTIVE.store(false, Ordering::SeqCst);
-    START_GUARD_ACTIVE.store(false, Ordering::Release);
-    MACHINE.lock().map(|mut m| m.reset()).ok();
+    SHELL_BRIDGE_ACTIVE.store(false, Ordering::Release);
+    RAW_MACHINE.lock().map(|mut m| m.reset()).ok();
     LAST_TOGGLE_MS.store(0, Ordering::Release);
     if let Some(app) = APP.get() {
         let _ = app.emit(FAILED_EVENT, reason.to_string());
@@ -493,57 +402,232 @@ fn clear_queued_actions() {
     }
 }
 
-unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
-    if code >= 0 && ACTIVE.load(Ordering::SeqCst) {
-        let kb = &*(lparam.0 as *const KBDLLHOOKSTRUCT);
-        // Skip our own synthesized events.
-        if kb.dwExtraInfo == SYNTH_TAG {
-            return CallNextHookEx(None, code, wparam, lparam);
-        }
-        // Other hooks must receive every physical event, including Win and
-        // Win+key chords. Prism only observes the stream and queues work.
-        {
-            let msg = wparam.0 as u32;
-            let is_down = msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN;
-            let is_up = msg == WM_KEYUP || msg == WM_SYSKEYUP;
-            let vk = kb.vkCode as u16;
-            let kind = if vk == VK_LWIN.0 {
-                KeyKind::Win(WinSide::Left)
-            } else if vk == VK_RWIN.0 {
-                KeyKind::Win(WinSide::Right)
-            } else {
-                KeyKind::Other(vk)
-            };
-            if is_down || is_up {
-                let decision = {
-                    let mut machine = match MACHINE.lock() {
-                        Ok(m) => m,
-                        Err(_) => return CallNextHookEx(None, code, wparam, lparam),
-                    };
-                    machine.feed(kind, is_down)
-                };
-                match decision {
-                    Decision::Pass => {}
-                    Decision::Mask => {
-                        if !PROVIDER_SUPPRESSES_START.load(Ordering::Acquire) {
-                            // Let text expanders and other global tools observe
-                            // the physical Win-down first, then insert the mask
-                            // before the matching Win-up can reach Start.
-                            let next = CallNextHookEx(None, code, wparam, lparam);
-                            if !send_mask_key() {
-                                queue_action(Action::MaskFailed);
-                            }
-                            return next;
-                        }
-                    }
-                    Decision::Toggle(side) => {
-                        queue_toggle(side);
-                    }
+type ShellHookProc = unsafe extern "system" fn(i32, WPARAM, LPARAM) -> LRESULT;
+
+struct ShellBridge {
+    module: HMODULE,
+    progman_hook: HHOOK,
+    library_path: PathBuf,
+}
+
+impl ShellBridge {
+    unsafe fn install() -> Result<Self, String> {
+        let library_path = write_shell_hook_library()?;
+        let library_wide = wide(&library_path.to_string_lossy());
+        let module = LoadLibraryW(PCWSTR(library_wide.as_ptr()))
+            .map_err(|error| format!("load Explorer bridge: {error}"))?;
+        let hook_proc =
+            match GetProcAddress(module, PCSTR(c"PrismShellGetMessageHook".as_ptr().cast())) {
+                Some(proc) => {
+                    std::mem::transmute::<unsafe extern "system" fn() -> isize, ShellHookProc>(proc)
                 }
+                None => {
+                    let _ = FreeLibrary(module);
+                    let _ = std::fs::remove_file(&library_path);
+                    return Err("Explorer bridge export is missing".to_string());
+                }
+            };
+
+        let progman = match find_shell_window("Progman") {
+            Ok(window) => window,
+            Err(error) => {
+                let _ = FreeLibrary(module);
+                let _ = std::fs::remove_file(&library_path);
+                return Err(error);
+            }
+        };
+        let progman_thread = GetWindowThreadProcessId(progman, None);
+        if progman_thread == 0 {
+            let _ = FreeLibrary(module);
+            let _ = std::fs::remove_file(&library_path);
+            return Err("Explorer desktop thread is unavailable".to_string());
+        }
+        let progman_hook = match SetWindowsHookExW(
+            WH_GETMESSAGE,
+            Some(hook_proc),
+            Some(HINSTANCE(module.0)),
+            progman_thread,
+        ) {
+            Ok(hook) => hook,
+            Err(error) => {
+                let _ = FreeLibrary(module);
+                let _ = std::fs::remove_file(&library_path);
+                return Err(format!("hook Explorer Start command: {error}"));
+            }
+        };
+
+        let app_manager = match find_shell_window("ApplicationManager_ImmersiveShellWindow") {
+            Ok(window) => window,
+            Err(error) => {
+                cleanup_shell_hook(progman_hook, module, &library_path);
+                return Err(error);
+            }
+        };
+        let app_manager_thread = GetWindowThreadProcessId(app_manager, None);
+        if app_manager_thread == 0 {
+            cleanup_shell_hook(progman_hook, module, &library_path);
+            return Err("Explorer application-manager thread is unavailable".to_string());
+        }
+
+        let app_manager_hook = if app_manager_thread == progman_thread {
+            None
+        } else {
+            match SetWindowsHookExW(
+                WH_GETMESSAGE,
+                Some(hook_proc),
+                Some(HINSTANCE(module.0)),
+                app_manager_thread,
+            ) {
+                Ok(hook) => Some(hook),
+                Err(error) => {
+                    cleanup_shell_hook(progman_hook, module, &library_path);
+                    return Err(format!("enter Explorer hotkey thread: {error}"));
+                }
+            }
+        };
+
+        SHELL_BRIDGE_ACK.store(0, Ordering::Release);
+        let message = match shell_bridge_message() {
+            Ok(message) => message,
+            Err(error) => {
+                if let Some(hook) = app_manager_hook {
+                    let _ = UnhookWindowsHookEx(hook);
+                }
+                cleanup_shell_hook(progman_hook, module, &library_path);
+                return Err(error);
+            }
+        };
+        if let Err(error) = PostThreadMessageW(
+            app_manager_thread,
+            message,
+            WPARAM(SHELL_CONTROL_DISABLE_WIN_HOTKEY),
+            LPARAM(0),
+        ) {
+            if let Some(hook) = app_manager_hook {
+                let _ = UnhookWindowsHookEx(hook);
+            }
+            cleanup_shell_hook(progman_hook, module, &library_path);
+            return Err(format!("ask Explorer to release bare Win: {error}"));
+        }
+
+        let acknowledged = wait_for_shell_bridge_ack(Duration::from_secs(1));
+        if let Some(hook) = app_manager_hook {
+            let _ = UnhookWindowsHookEx(hook);
+        }
+        if acknowledged == 0 {
+            cleanup_shell_hook(progman_hook, module, &library_path);
+            return Err("Explorer did not acknowledge the bare-Win handoff".to_string());
+        }
+
+        #[cfg(debug_assertions)]
+        eprintln!(
+            "[win-key] Explorer bridge active (Progman thread {progman_thread}, hotkey thread {app_manager_thread}, hotkey {})",
+            if acknowledged == 2 {
+                "released"
+            } else {
+                "already released"
+            }
+        );
+        Ok(Self {
+            module,
+            progman_hook,
+            library_path,
+        })
+    }
+}
+
+impl Drop for ShellBridge {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = UnhookWindowsHookEx(self.progman_hook);
+            let _ = FreeLibrary(self.module);
+        }
+        let _ = std::fs::remove_file(&self.library_path);
+        #[cfg(debug_assertions)]
+        eprintln!("[win-key] Explorer bridge released");
+    }
+}
+
+unsafe fn cleanup_shell_hook(hook: HHOOK, module: HMODULE, library_path: &PathBuf) {
+    let _ = UnhookWindowsHookEx(hook);
+    let _ = FreeLibrary(module);
+    let _ = std::fs::remove_file(library_path);
+}
+
+fn shell_bridge_message() -> Result<u32, String> {
+    let name = wide(SHELL_BRIDGE_MESSAGE_NAME);
+    let message = unsafe { RegisterWindowMessageW(PCWSTR(name.as_ptr())) };
+    if message == 0 {
+        Err("register Explorer bridge message failed".to_string())
+    } else {
+        Ok(message)
+    }
+}
+
+unsafe fn find_shell_window(class_name: &str) -> Result<HWND, String> {
+    let class_name_wide = wide(class_name);
+    FindWindowW(PCWSTR(class_name_wide.as_ptr()), PCWSTR::null())
+        .map_err(|error| format!("Explorer window '{class_name}' is unavailable: {error}"))
+}
+
+fn wait_for_shell_bridge_ack(timeout: Duration) -> u32 {
+    let started = Instant::now();
+    let mut msg = MSG::default();
+    while started.elapsed() < timeout {
+        unsafe {
+            while PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
+                let _ = TranslateMessage(&msg);
+                let _ = DispatchMessageW(&msg);
+            }
+        }
+        let acknowledged = SHELL_BRIDGE_ACK.load(Ordering::Acquire);
+        if acknowledged != 0 {
+            return acknowledged;
+        }
+        unsafe {
+            let _ = MsgWaitForMultipleObjectsEx(None, 25, QS_ALLINPUT, Default::default());
+        }
+    }
+    SHELL_BRIDGE_ACK.load(Ordering::Acquire)
+}
+
+fn write_shell_hook_library() -> Result<PathBuf, String> {
+    let directory = std::env::temp_dir().join("Prism").join("shell-hooks");
+    std::fs::create_dir_all(&directory)
+        .map_err(|error| format!("create Explorer bridge directory: {error}"))?;
+    if let Ok(entries) = std::fs::read_dir(&directory) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let is_stale_hook =
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| {
+                        name.starts_with("prism-shell-hook-") && name.ends_with(".dll")
+                    });
+            if is_stale_hook {
+                // Loaded DLLs remain locked on Windows, so this removes only
+                // debris from already-terminated Prism instances.
+                let _ = std::fs::remove_file(path);
             }
         }
     }
-    CallNextHookEx(None, code, wparam, lparam)
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let path = directory.join(format!(
+        "prism-shell-hook-{}-{nonce}.dll",
+        std::process::id()
+    ));
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+        .map_err(|error| format!("create Explorer bridge DLL: {error}"))?;
+    file.write_all(include_bytes!(env!("PRISM_SHELL_HOOK_DLL")))
+        .and_then(|_| file.sync_all())
+        .map_err(|error| format!("write Explorer bridge DLL: {error}"))?;
+    Ok(path)
 }
 
 const RAW_INPUT_WINDOW_CLASS: &str = "PrismRawKeyboardObserver";
@@ -649,6 +733,22 @@ unsafe extern "system" fn raw_input_window_proc(
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> LRESULT {
+    if shell_bridge_message().is_ok_and(|bridge_message| message == bridge_message) {
+        match wparam.0 {
+            SHELL_EVENT_HOTKEY_DISABLED => {
+                SHELL_BRIDGE_ACK.store(if lparam.0 != 0 { 2 } else { 1 }, Ordering::Release);
+            }
+            SHELL_EVENT_TOGGLE_PRISM
+                if ACTIVE.load(Ordering::Acquire)
+                    && RAW_OBSERVER_ACTIVE.load(Ordering::Acquire)
+                    && SHELL_BRIDGE_ACTIVE.load(Ordering::Acquire) =>
+            {
+                queue_toggle(WinSide::Left);
+            }
+            _ => {}
+        }
+        return LRESULT(0);
+    }
     if message == WM_INPUT
         && ACTIVE.load(Ordering::Acquire)
         && RAW_OBSERVER_ACTIVE.load(Ordering::Acquire)
@@ -676,63 +776,26 @@ unsafe extern "system" fn raw_input_window_proc(
                     .lock()
                     .map(|mut machine| machine.feed(kind, is_down))
                     .unwrap_or(Decision::Pass);
-                if let Decision::Toggle(side) = decision {
-                    queue_toggle(side);
+                match decision {
+                    Decision::Toggle(side) if PROVIDER_SUPPRESSES_START.load(Ordering::Acquire) => {
+                        queue_toggle(side);
+                    }
+                    Decision::Mask | Decision::Toggle(_) => {}
+                    Decision::Pass => {}
+                }
+                #[cfg(debug_assertions)]
+                if matches!(kind, KeyKind::Win(_)) {
+                    eprintln!(
+                        "[win-key] raw {:?} {} -> {:?}",
+                        kind,
+                        if is_down { "down" } else { "up" },
+                        decision
+                    );
                 }
             }
         }
     }
     DefWindowProcW(window, message, wparam, lparam)
-}
-
-unsafe fn send_mask_key() -> bool {
-    let inputs = [
-        keyboard_input(MENU_MASK_KEY, KEYBD_EVENT_FLAGS(0)),
-        keyboard_input(MENU_MASK_KEY, KEYEVENTF_KEYUP),
-    ];
-    SendInput(&inputs, std::mem::size_of::<INPUT>() as i32) == inputs.len() as u32
-}
-
-/// Covers delayed Start activation without blocking the low-level hook
-/// thread. Repeated toggles share the active guard instead of spawning an
-/// unbounded number of workers.
-fn start_menu_guard() {
-    if START_GUARD_WORKER.swap(true, Ordering::AcqRel) {
-        return;
-    }
-    std::thread::spawn(|| {
-        loop {
-            if !ACTIVE.load(Ordering::Acquire) {
-                break;
-            }
-            if unsafe { dismiss_start_menus() } {
-                refocus_palette();
-            }
-            let now = toggle_clock_ms();
-            if now >= START_GUARD_UNTIL_MS.load(Ordering::Acquire) {
-                break;
-            }
-            std::thread::sleep(START_GUARD_INTERVAL);
-        }
-        START_GUARD_ACTIVE.store(false, Ordering::Release);
-        START_GUARD_WORKER.store(false, Ordering::Release);
-
-        // A new standalone press can arm the guard while the old worker is
-        // exiting. Its queued toggle will start a fresh worker; keep the
-        // active flag intact for the show-event callback in the meantime.
-        if ACTIVE.load(Ordering::Acquire)
-            && toggle_clock_ms() < START_GUARD_UNTIL_MS.load(Ordering::Acquire)
-        {
-            START_GUARD_ACTIVE.store(true, Ordering::Release);
-            start_menu_guard();
-        }
-    });
-}
-
-fn arm_start_menu_guard() {
-    let until = toggle_clock_ms() + START_GUARD_DURATION.as_millis() as u64;
-    START_GUARD_UNTIL_MS.fetch_max(until, Ordering::AcqRel);
-    START_GUARD_ACTIVE.store(true, Ordering::Release);
 }
 
 fn toggle_clock_ms() -> u64 {
@@ -757,9 +820,6 @@ fn queue_toggle(side: WinSide) {
         }
     }
     if let Some(tx) = ACTION_TX.get() {
-        if !PROVIDER_SUPPRESSES_START.load(Ordering::Acquire) {
-            arm_start_menu_guard();
-        }
         if tx.send(Action::Toggle(side)).is_ok() {
             let thread_id = THREAD_ID.load(Ordering::SeqCst);
             if thread_id != 0 {
@@ -767,200 +827,12 @@ fn queue_toggle(side: WinSide) {
                     let _ = PostThreadMessageW(thread_id, ACTION_MESSAGE, WPARAM(0), LPARAM(0));
                 }
             }
-        } else {
-            START_GUARD_ACTIVE.store(false, Ordering::Release);
         }
     }
-}
-
-fn queue_action(action: Action) {
-    if let Some(tx) = ACTION_TX.get() {
-        if tx.send(action).is_ok() {
-            let thread_id = THREAD_ID.load(Ordering::SeqCst);
-            if thread_id != 0 {
-                unsafe {
-                    let _ = PostThreadMessageW(thread_id, ACTION_MESSAGE, WPARAM(0), LPARAM(0));
-                }
-            }
-        }
-    }
-}
-
-unsafe fn dismiss_start_menus() -> bool {
-    // A replacement menu can remain visible behind Prism after Prism takes
-    // focus, so foreground-only detection is insufficient. Enumerate only
-    // exact, documented menu-container classes; never touch their hook or
-    // settings windows.
-    let mut dismissed = false;
-    let state = &mut dismissed as *mut bool;
-    let _ = EnumWindows(
-        Some(dismiss_replacement_start_window),
-        LPARAM(state as isize),
-    );
-    match foreground_start_menu() {
-        Some((_window, StartMenuHost::Native)) => {
-            let inputs = [
-                keyboard_input(VK_ESCAPE, KEYBD_EVENT_FLAGS(0)),
-                keyboard_input(VK_ESCAPE, KEYEVENTF_KEYUP),
-            ];
-            dismissed |=
-                SendInput(&inputs, std::mem::size_of::<INPUT>() as i32) == inputs.len() as u32;
-        }
-        None => {}
-        Some((_window, StartMenuHost::StartAllBack | StartMenuHost::OpenShell)) => {}
-    }
-    dismissed
-}
-
-unsafe extern "system" fn dismiss_replacement_start_window(window: HWND, state: LPARAM) -> BOOL {
-    if IsWindowVisible(window).as_bool() {
-        let mut class_name = [0u16; 128];
-        let class_len = GetClassNameW(window, &mut class_name).max(0) as usize;
-        match start_menu_class(&class_name[..class_len]) {
-            Some(StartMenuHost::StartAllBack | StartMenuHost::OpenShell) => {
-                let _ = ShowWindow(window, SW_HIDE);
-                if state.0 != 0 {
-                    *(state.0 as *mut bool) = true;
-                }
-            }
-            Some(StartMenuHost::Native) | None => {}
-        }
-    }
-    BOOL(1)
-}
-
-fn refocus_palette() {
-    let Some(app) = APP.get() else {
-        return;
-    };
-    let Some(window) = app.get_webview_window("main") else {
-        return;
-    };
-    let focus_window = window.clone();
-    let _ = app.run_on_main_thread(move || {
-        if focus_window.is_visible().unwrap_or(false) {
-            let _ = focus_window.set_focus();
-        }
-    });
-}
-
-fn keyboard_input(key: VIRTUAL_KEY, flags: KEYBD_EVENT_FLAGS) -> INPUT {
-    INPUT {
-        r#type: INPUT_KEYBOARD,
-        Anonymous: INPUT_0 {
-            ki: KEYBDINPUT {
-                wVk: key,
-                dwFlags: flags,
-                dwExtraInfo: SYNTH_TAG,
-                ..Default::default()
-            },
-        },
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum StartMenuHost {
-    StartAllBack,
-    OpenShell,
-    Native,
-}
-
-fn start_menu_class(class_name: &[u16]) -> Option<StartMenuHost> {
-    if wide_eq_ascii(class_name, "DV2ControlHost")
-        || wide_eq_ascii(class_name, "SIBTranslucentLayer")
-    {
-        Some(StartMenuHost::StartAllBack)
-    } else if wide_eq_ascii(class_name, "OpenShell.CMenuContainer")
-        || wide_eq_ascii(class_name, "ClassicShell.CMenuContainer")
-    {
-        Some(StartMenuHost::OpenShell)
-    } else {
-        None
-    }
-}
-
-fn is_native_start_process(executable: &[u16]) -> bool {
-    wide_eq_ascii(executable, "StartMenuExperienceHost.exe")
-        || wide_eq_ascii(executable, "ShellExperienceHost.exe")
-}
-
-fn is_search_host_start_surface(class_name: &[u16], executable: &[u16]) -> bool {
-    wide_eq_ascii(class_name, "Windows.UI.Core.CoreWindow")
-        && wide_eq_ascii(executable, "SearchHost.exe")
-}
-
-unsafe fn foreground_start_menu() -> Option<(HWND, StartMenuHost)> {
-    let window = GetForegroundWindow();
-    if window.0.is_null() {
-        return None;
-    }
-
-    start_menu_host(window).map(|host| (window, host))
-}
-
-unsafe fn start_menu_host(window: HWND) -> Option<StartMenuHost> {
-    let mut class_name = [0u16; 128];
-    let class_len = GetClassNameW(window, &mut class_name).max(0) as usize;
-    if let Some(host) = start_menu_class(&class_name[..class_len]) {
-        return Some(host);
-    }
-
-    let executable = window_process_executable(window)?;
-    if is_native_start_process(&executable)
-        || is_search_host_start_surface(&class_name[..class_len], &executable)
-    {
-        Some(StartMenuHost::Native)
-    } else {
-        None
-    }
-}
-
-unsafe fn window_process_executable(window: HWND) -> Option<Vec<u16>> {
-    let mut process_id = 0u32;
-    GetWindowThreadProcessId(window, Some(&mut process_id));
-    if process_id == 0 {
-        return None;
-    }
-    let Ok(process) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, process_id) else {
-        return None;
-    };
-    let mut path = [0u16; 512];
-    let mut path_len = path.len() as u32;
-    let queried = QueryFullProcessImageNameW(
-        process,
-        PROCESS_NAME_WIN32,
-        PWSTR(path.as_mut_ptr()),
-        &mut path_len,
-    )
-    .is_ok();
-    let _ = CloseHandle(process);
-    queried.then(|| {
-        path[..path_len as usize]
-            .rsplit(|value| *value == b'\\' as u16 || *value == b'/' as u16)
-            .next()
-            .unwrap_or_default()
-            .to_vec()
-    })
 }
 
 fn wide(value: &str) -> Vec<u16> {
     value.encode_utf16().chain(Some(0)).collect()
-}
-
-fn wide_eq_ascii(wide: &[u16], ascii: &str) -> bool {
-    wide.len() == ascii.len()
-        && wide
-            .iter()
-            .zip(ascii.bytes())
-            .all(|(left, right)| ascii_lower(*left) == ascii_lower(right as u16))
-}
-
-fn ascii_lower(value: u16) -> u16 {
-    if (b'A' as u16..=b'Z' as u16).contains(&value) {
-        value + 32
-    } else {
-        value
-    }
 }
 
 /* ------------------------------------------------------------------ */
@@ -1003,46 +875,6 @@ mod tests {
             classify_raw_key(VK_LWIN.0, 0x5b, RI_KEY_BREAK as u16, WM_KEYDOWN),
             None
         );
-    }
-
-    #[test]
-    fn start_menu_identity_matching_is_case_insensitive_and_exact() {
-        let wide = |value: &str| value.encode_utf16().collect::<Vec<_>>();
-        assert_eq!(
-            start_menu_class(&wide("dv2controlhost")),
-            Some(StartMenuHost::StartAllBack)
-        );
-        assert_eq!(
-            start_menu_class(&wide("sibtranslucentlayer")),
-            Some(StartMenuHost::StartAllBack)
-        );
-        assert_eq!(
-            start_menu_class(&wide("OpenShell.CMenuContainer")),
-            Some(StartMenuHost::OpenShell)
-        );
-        assert_eq!(
-            start_menu_class(&wide("CLASSICSHELL.CMENUCONTAINER")),
-            Some(StartMenuHost::OpenShell)
-        );
-        assert_eq!(start_menu_class(&wide("CabinetWClass")), None);
-        assert_eq!(start_menu_class(&wide("OpenShell.CStartHookWindow")), None);
-        assert!(is_native_start_process(&wide(
-            "StartMenuExperienceHost.exe"
-        )));
-        assert!(is_native_start_process(&wide("shellexperiencehost.exe")));
-        assert!(!is_native_start_process(&wide("explorer.exe")));
-        assert!(is_search_host_start_surface(
-            &wide("Windows.UI.Core.CoreWindow"),
-            &wide("SearchHost.exe")
-        ));
-        assert!(!is_search_host_start_surface(
-            &wide("ServiceWorkerGlobalScopeHost Window Class"),
-            &wide("SearchHost.exe")
-        ));
-        assert!(!is_search_host_start_surface(
-            &wide("Windows.UI.Core.CoreWindow"),
-            &wide("TextInputHost.exe")
-        ));
     }
 
     #[test]
