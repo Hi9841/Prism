@@ -702,6 +702,14 @@ fn validate_state(state: &serde_json::Value) -> Result<(), String> {
             return Err(format!("unsupported width '{width}'"));
         }
     }
+    if let Some(zoom) = settings.get("viewZoom") {
+        let zoom = zoom
+            .as_u64()
+            .ok_or("state.settings.viewZoom must be an integer")?;
+        if !(70..=150).contains(&zoom) || zoom % 10 != 0 {
+            return Err(format!("unsupported view zoom '{zoom}'"));
+        }
+    }
     if let Some(history) = obj.get("history") {
         let Some(entries) = history.as_array() else {
             return Err("state.history must be an array".to_string());
@@ -781,6 +789,7 @@ mod tests {
             "settings": {
                 "accent": "iris",
                 "width": 640,
+                "viewZoom": 100,
                 "effect": "solid",
                 "shortcut": "Ctrl+Alt+Space",
                 "alwaysOnTop": true,
@@ -796,6 +805,8 @@ mod tests {
             serde_json::json!({"settings": {"theme": "sepia"}}),
             serde_json::json!({"settings": {"shortcut": "X"}}),
             serde_json::json!({"settings": {"width": 999}}),
+            serde_json::json!({"settings": {"viewZoom": 135}}),
+            serde_json::json!({"settings": {"viewZoom": "large"}}),
             serde_json::json!({"settings": []}),
             serde_json::json!({"history": "nope"}),
             serde_json::json!({
