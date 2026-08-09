@@ -131,7 +131,7 @@ function Launcher() {
     >
       <div
         className="relative h-full w-full max-w-full"
-        style={inTauri ? undefined : { width: app.settings.width }}
+        style={inTauri ? undefined : { width: app.settings.width / (app.settings.viewZoom / 100) }}
       >
         <Palette />
         <SettingsSheet />

@@ -1,7 +1,8 @@
-import { History, Keyboard, LogOut, X } from "lucide-react";
+import { History, Keyboard, LogOut, Minus, Plus, RotateCcw, X } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { quitApp, setShortcut } from "../lib/bridge";
 import type { AccentId, ThemeMode, WindowEffect, WindowWidth } from "../lib/types";
+import { DEFAULT_SETTINGS, stepViewZoom, VIEW_ZOOM_LEVELS } from "../lib/types";
 import { SHORTCUT_OPTIONS, THEME_OPTIONS, useApp } from "../state/app";
 import { Segmented, Toggle } from "./ui";
 
@@ -87,6 +88,57 @@ function KeybindPicker() {
         </p>
       )}
     </div>
+  );
+}
+
+function ViewZoomControl() {
+  const { settings, updateSettings } = useApp();
+  const atMinimum = settings.viewZoom === VIEW_ZOOM_LEVELS[0];
+  const atMaximum = settings.viewZoom === VIEW_ZOOM_LEVELS[VIEW_ZOOM_LEVELS.length - 1];
+
+  const adjust = (direction: -1 | 1) => {
+    updateSettings({ viewZoom: stepViewZoom(settings.viewZoom, direction) });
+  };
+
+  return (
+    <fieldset
+      aria-label="View zoom"
+      className="m-0 flex items-center gap-1 rounded-[10px] border-0 bg-surface p-[3px]"
+    >
+      <button
+        type="button"
+        aria-label="Zoom out"
+        title="Zoom out"
+        disabled={atMinimum}
+        onClick={() => adjust(-1)}
+        className="focus-ring grid h-7 w-7 cursor-pointer place-items-center rounded-[7px] text-fg-tertiary transition-colors hover:bg-surface-hover hover:text-fg disabled:cursor-default disabled:opacity-35"
+      >
+        <Minus className="h-3.5 w-3.5" />
+      </button>
+      <output aria-live="polite" className="w-11 text-center text-[12px] font-medium text-fg tabular-nums">
+        {settings.viewZoom}%
+      </output>
+      <button
+        type="button"
+        aria-label="Zoom in"
+        title="Zoom in"
+        disabled={atMaximum}
+        onClick={() => adjust(1)}
+        className="focus-ring grid h-7 w-7 cursor-pointer place-items-center rounded-[7px] text-fg-tertiary transition-colors hover:bg-surface-hover hover:text-fg disabled:cursor-default disabled:opacity-35"
+      >
+        <Plus className="h-3.5 w-3.5" />
+      </button>
+      <button
+        type="button"
+        aria-label="Reset zoom"
+        title="Reset zoom"
+        disabled={settings.viewZoom === DEFAULT_SETTINGS.viewZoom}
+        onClick={() => updateSettings({ viewZoom: DEFAULT_SETTINGS.viewZoom })}
+        className="focus-ring grid h-7 w-7 cursor-pointer place-items-center rounded-[7px] text-fg-tertiary transition-colors hover:bg-surface-hover hover:text-fg disabled:cursor-default disabled:opacity-35"
+      >
+        <RotateCcw className="h-3.5 w-3.5" />
+      </button>
+    </fieldset>
   );
 }
 
@@ -216,6 +268,9 @@ export function SettingsSheet() {
                 { value: 720, label: "L" },
               ]}
             />
+          </Row>
+          <Row title="View zoom" detail="Ctrl + Up/Down or Ctrl + wheel">
+            <ViewZoomControl />
           </Row>
           <Row title="Window material" detail="Solid avoids DWM blur issues">
             <Segmented<WindowEffect>
