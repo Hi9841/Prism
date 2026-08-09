@@ -1,0 +1,48 @@
+[package]
+name = "prism"
+version = "0.3.1"
+description = "Prism - a keyboard-first command palette for Windows"
+edition = "2021"
+
+[lib]
+name = "prism_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-global-shortcut = "2"
+tauri-plugin-single-instance = "2"
+tauri-plugin-clipboard-manager = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["time"] }
+windows = { version = "0.61", features = [
+  "Win32_Devices_HumanInterfaceDevice",
+  "Win32_Foundation",
+  "Win32_Graphics_Gdi",
+  "Win32_Storage_EnhancedStorage",
+  "Win32_Storage_FileSystem",
+  "Win32_System_Com",
+  "Win32_System_Com_StructuredStorage",
+  "Win32_System_Registry",
+  "Win32_System_LibraryLoader",
+  "Win32_System_Threading",
+  "Win32_System_Variant",
+  "Win32_UI_Input_KeyboardAndMouse",
+  "Win32_UI_Accessibility",
+  "Win32_UI_Shell",
+  "Win32_UI_Shell_Common",
+  "Win32_UI_Shell_PropertiesSystem",
+  "Win32_UI_WindowsAndMessaging",
+] }
+image = { version = "0.25", default-features = false, features = ["png"] }
+
+[profile.release]
+panic = "abort"
+codegen-units = 1
+lto = true
+opt-level = "s"
+strip = true

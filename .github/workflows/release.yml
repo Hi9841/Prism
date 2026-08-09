@@ -1,0 +1,67 @@
+name: Release
+run-name: Release Prism from ${{ github.ref_name }}
+
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: prism-release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Build and publish Windows installer
+    runs-on: windows-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Cache Rust build data
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
+      - name: Install frontend dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Check release version
+        run: .\scripts\check-version.ps1 -ExpectedTag "${{ github.ref_type == 'tag' && github.ref_name || '' }}"
+
+      - name: Verify source
+        run: |
+          bun run lint
+          bun run test
+          bun run build
+          cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
+          cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+          cargo test --manifest-path src-tauri/Cargo.toml
+
+      - name: Build and publish installer
+        uses: tauri-apps/tauri-action@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: v__VERSION__
+          releaseName: Prism v__VERSION__
+          releaseBody: Download the Windows x64 setup executable below.
+          generateReleaseNotes: true
+          releaseDraft: false
+          prerelease: false
+          releaseAssetNamePattern: Prism_[version]_[arch][setup].[ext]
+          args: --target x86_64-pc-windows-msvc

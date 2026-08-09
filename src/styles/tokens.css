@@ -1,0 +1,511 @@
+@import "tailwindcss";
+
+/* ------------------------------------------------------------------ */
+/*  Prism design tokens                                                */
+/*  Semantic colors resolve per theme via the --t-* variables below,   */
+/*  so every surface, text level and control flips with the system.    */
+/* ------------------------------------------------------------------ */
+
+@theme {
+  --font-sans: "Segoe UI Variable Text", "Segoe UI", system-ui, -apple-system, sans-serif;
+  --font-mono: "Cascadia Code", "JetBrains Mono", ui-monospace, "SF Mono", monospace;
+
+  /* Semantic colors - resolved at runtime per theme */
+  --color-bg: var(--t-bg);
+  --color-bg-raised: var(--t-bg-raised);
+  --color-surface: var(--t-surface);
+  --color-surface-hover: var(--t-surface-hover);
+  --color-surface-active: var(--t-surface-active);
+  --color-seg-active: var(--t-seg-active);
+  --color-track: var(--t-track);
+  --color-line: var(--t-line);
+  --color-divider: var(--t-divider);
+  --color-backdrop: var(--t-backdrop);
+  --color-toast: var(--t-toast);
+  --color-danger: var(--t-danger);
+  --color-danger-soft: var(--t-danger-soft);
+  --color-fg: var(--t-fg);
+  --color-fg-secondary: var(--t-fg-secondary);
+  --color-fg-tertiary: var(--t-fg-tertiary);
+  --color-fg-quiet: var(--t-fg-quiet);
+
+  /* Ink ramp - dark neutrals, kept for bespoke surfaces */
+  --color-ink-950: oklch(0.135 0.006 268);
+  --color-ink-925: oklch(0.157 0.007 268);
+  --color-ink-900: oklch(0.183 0.008 268);
+  --color-ink-850: oklch(0.207 0.009 268);
+  --color-ink-800: oklch(0.235 0.01 268);
+  --color-ink-700: oklch(0.295 0.011 268);
+  --color-ink-600: oklch(0.375 0.012 268);
+
+  /* Accent - resolved at runtime via --accent preset variables */
+  --color-accent: var(--accent);
+  --color-accent-strong: var(--accent-strong);
+  --color-accent-fg: var(--accent-fg);
+  --color-accent-soft: color-mix(in oklab, var(--accent) 17%, transparent);
+  --color-accent-softer: color-mix(in oklab, var(--accent) 9%, transparent);
+  --color-accent-ring: color-mix(in oklab, var(--accent) 45%, transparent);
+
+  /* Radii - generous, floating surfaces */
+  --radius-xs: 6px;
+  --radius-sm: 10px;
+  --radius-md: 14px;
+  --radius-lg: 18px;
+  --radius-xl: 22px;
+  --radius-2xl: 26px;
+  --radius-3xl: 32px;
+
+  /* Elevation - soft, layered, never harsh */
+  --shadow-pop: 0 1px 2px rgb(0 0 0 / 0.35), 0 8px 24px rgb(0 0 0 / 0.28), 0 24px 64px rgb(0 0 0 / 0.35);
+  --shadow-raised: 0 1px 2px rgb(0 0 0 / 0.3), 0 4px 14px rgb(0 0 0 / 0.24);
+  --shadow-tile: 0 1px 1.5px rgb(0 0 0 / 0.4), 0 4px 10px rgb(0 0 0 / 0.3);
+
+  /* Motion */
+  --ease-out-soft: cubic-bezier(0.22, 1, 0.36, 1);
+  --ease-in-out-soft: cubic-bezier(0.65, 0, 0.35, 1);
+  --duration-fast: 110ms;
+  --duration-base: 170ms;
+  --duration-slow: 260ms;
+
+  --text-2xs: 0.6875rem;
+}
+
+/* ------------------------------------------------------------------ */
+/*  Theme definitions                                                  */
+/* ------------------------------------------------------------------ */
+
+:root,
+:root[data-theme="dark"] {
+  --t-bg: linear-gradient(180deg, oklch(0.16 0.008 268 / 0.62), oklch(0.135 0.007 268 / 0.58));
+  --t-shell-solid: linear-gradient(180deg, oklch(0.17 0.009 268 / 0.92), oklch(0.152 0.008 268 / 0.9));
+  --t-shell-line: rgb(255 255 255 / 0.08);
+  --t-shell-hi: rgb(255 255 255 / 0.06);
+  --t-field-bg: rgb(255 255 255 / 0.045);
+  --t-field-bg-focus: rgb(255 255 255 / 0.06);
+  --t-field-hi: rgb(255 255 255 / 0.05);
+  --t-field-line: rgb(255 255 255 / 0.05);
+  --t-surface: rgb(255 255 255 / 0.06);
+  --t-surface-hover: rgb(255 255 255 / 0.06);
+  --t-surface-active: rgb(255 255 255 / 0.075);
+  --t-seg-active: rgb(255 255 255 / 0.1);
+  --t-track: rgb(255 255 255 / 0.12);
+  --t-kbd: linear-gradient(180deg, rgb(255 255 255 / 0.08), rgb(255 255 255 / 0.03));
+  --t-kbd-line: rgb(255 255 255 / 0.09);
+  --t-kbd-hi: rgb(255 255 255 / 0.06);
+  --t-line: rgb(255 255 255 / 0.08);
+  --t-divider: rgb(255 255 255 / 0.2);
+  --t-backdrop: rgb(5 5 9 / 0.5);
+  --t-toast: oklch(0.16 0.008 268 / 0.85);
+  --t-bg-raised: oklch(0.19 0.009 268 / 0.85);
+  --t-fg: oklch(0.955 0.003 268);
+  --t-fg-secondary: oklch(0.78 0.007 268);
+  --t-fg-tertiary: oklch(0.66 0.007 268);
+  --t-fg-quiet: oklch(0.61 0.006 268);
+  --t-danger: oklch(0.78 0.14 20);
+  --t-danger-soft: oklch(0.78 0.14 20 / 0.12);
+  --t-scroll: rgb(255 255 255 / 0.12);
+  --t-scroll-hover: rgb(255 255 255 / 0.2);
+}
+
+:root[data-theme="light"] {
+  --t-bg: linear-gradient(180deg, oklch(0.985 0.003 268 / 0.74), oklch(0.952 0.004 268 / 0.7));
+  --t-shell-solid: linear-gradient(180deg, oklch(0.995 0.002 268 / 0.94), oklch(0.965 0.004 268 / 0.92));
+  --t-shell-line: rgb(0 0 0 / 0.08);
+  --t-shell-hi: rgb(255 255 255 / 0.85);
+  --t-field-bg: rgb(0 0 0 / 0.03);
+  --t-field-bg-focus: rgb(0 0 0 / 0.04);
+  --t-field-hi: rgb(255 255 255 / 0.8);
+  --t-field-line: rgb(0 0 0 / 0.05);
+  --t-surface: rgb(0 0 0 / 0.04);
+  --t-surface-hover: rgb(0 0 0 / 0.05);
+  --t-surface-active: rgb(0 0 0 / 0.06);
+  --t-seg-active: rgb(255 255 255 / 0.85);
+  --t-track: rgb(0 0 0 / 0.12);
+  --t-kbd: linear-gradient(180deg, rgb(255 255 255 / 0.95), rgb(255 255 255 / 0.65));
+  --t-kbd-line: rgb(0 0 0 / 0.1);
+  --t-kbd-hi: rgb(255 255 255 / 0.9);
+  --t-line: rgb(0 0 0 / 0.08);
+  --t-divider: rgb(0 0 0 / 0.15);
+  --t-backdrop: rgb(0 0 0 / 0.28);
+  --t-toast: oklch(0.995 0.002 268 / 0.9);
+  --t-bg-raised: oklch(0.995 0.002 268 / 0.88);
+  --t-fg: oklch(0.22 0.012 268);
+  --t-fg-secondary: oklch(0.4 0.012 268);
+  --t-fg-tertiary: oklch(0.46 0.01 268);
+  --t-fg-quiet: oklch(0.48 0.008 268);
+  --t-danger: oklch(0.55 0.16 20);
+  --t-danger-soft: oklch(0.55 0.16 20 / 0.1);
+  --t-scroll: rgb(0 0 0 / 0.12);
+  --t-scroll-hover: rgb(0 0 0 / 0.2);
+}
+
+/* ------------------------------------------------------------------ */
+/*  Accent presets                                                     */
+/* ------------------------------------------------------------------ */
+
+:root {
+  /* Static preset colors for the accent picker swatches - each swatch
+     shows its own hue, independent of the active data-accent. */
+  --accent-iris: oklch(0.665 0.17 292);
+  --accent-azure: oklch(0.66 0.145 245);
+  --accent-mint: oklch(0.735 0.125 168);
+  --accent-amber: oklch(0.77 0.145 78);
+  --accent-rose: oklch(0.665 0.17 12);
+}
+
+:root,
+:root[data-accent="iris"] {
+  --accent: oklch(0.665 0.17 292);
+  --accent-strong: oklch(0.72 0.17 292);
+  --accent-fg: oklch(0.985 0.004 292);
+}
+:root[data-accent="azure"] {
+  --accent: oklch(0.66 0.145 245);
+  --accent-strong: oklch(0.71 0.145 245);
+  --accent-fg: oklch(0.985 0.003 245);
+}
+:root[data-accent="mint"] {
+  --accent: oklch(0.735 0.125 168);
+  --accent-strong: oklch(0.785 0.115 168);
+  --accent-fg: oklch(0.19 0.02 168);
+}
+:root[data-accent="amber"] {
+  --accent: oklch(0.77 0.145 78);
+  --accent-strong: oklch(0.81 0.135 78);
+  --accent-fg: oklch(0.2 0.03 78);
+}
+:root[data-accent="rose"] {
+  --accent: oklch(0.665 0.17 12);
+  --accent-strong: oklch(0.71 0.16 12);
+  --accent-fg: oklch(0.985 0.004 12);
+}
+
+/* ------------------------------------------------------------------ */
+/*  Base                                                               */
+/* ------------------------------------------------------------------ */
+
+html {
+  color-scheme: dark;
+  background: transparent;
+}
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+}
+body {
+  background: transparent;
+}
+:root[data-theme="light"] {
+  color-scheme: light;
+}
+
+body {
+  font-family: var(--font-sans);
+  color: var(--color-fg);
+  font-size: 14px;
+  line-height: 1.45;
+  font-feature-settings: "cv11", "ss01";
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  user-select: none;
+  cursor: default;
+}
+
+::selection {
+  background: color-mix(in oklab, var(--accent) 40%, transparent);
+}
+
+/* ------------------------------------------------------------------ */
+/*  Surfaces                                                           */
+/* ------------------------------------------------------------------ */
+
+@layer components {
+  /* The floating window shell - sits on the native acrylic layer */
+  .shell {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    overflow: hidden;
+    border-radius: 24px 24px 8px 8px;
+    border: 1px solid var(--t-shell-line);
+    background:
+      radial-gradient(
+        120% 90% at 50% -20%,
+        color-mix(in oklab, var(--accent) 7%, transparent) 0%,
+        transparent 55%
+      ),
+      var(--t-bg);
+    /* DWM owns the window material; a second CSS backdrop blur repaints the
+       full launcher during every transition without improving clarity. */
+    backdrop-filter: none;
+    box-shadow:
+      inset 0 1px 0 var(--t-shell-hi),
+      inset 0 0 0 1px rgb(255 255 255 / 0.018),
+      inset 0 -1px 0 rgb(0 0 0 / 0.18);
+  }
+
+  /* Solid surface mode (no native blur available): a slightly more opaque
+     glass so text stays readable without DWM blur behind the window. */
+  :root[data-surface="solid"] .shell {
+    border-radius: 24px 24px 8px 8px;
+    background:
+      radial-gradient(
+        120% 90% at 50% -20%,
+        color-mix(in oklab, var(--accent) 8%, transparent) 0%,
+        transparent 55%
+      ),
+      var(--t-shell-solid);
+    backdrop-filter: none;
+    box-shadow:
+      inset 0 1px 0 var(--t-shell-hi),
+      inset 0 0 0 1px rgb(255 255 255 / 0.02);
+  }
+
+  /* Input field - soft inset glass */
+  .search-field {
+    border-radius: var(--radius-md);
+    background: var(--t-field-bg);
+    box-shadow:
+      inset 0 1px 0 var(--t-field-hi),
+      inset 0 0 0 1px var(--t-field-line);
+  }
+  .search-field:focus-within {
+    background: var(--t-field-bg-focus);
+    box-shadow:
+      inset 0 1px 0 var(--t-field-hi),
+      inset 0 0 0 1px color-mix(in oklab, var(--accent) 52%, transparent),
+      0 4px 16px color-mix(in oklab, var(--accent) 5%, transparent);
+  }
+  .search-field > svg {
+    transition: color 120ms ease-out;
+  }
+  .search-field:focus-within > svg {
+    color: color-mix(in oklab, var(--accent) 72%, var(--t-fg-secondary));
+  }
+
+  /* Result row */
+  .row {
+    position: relative;
+    display: grid;
+    grid-template-columns: 40px minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 12px;
+    padding: 7px 10px;
+    border-radius: var(--radius-sm);
+  }
+  .row[data-selected="true"] {
+    background:
+      linear-gradient(90deg, color-mix(in oklab, var(--accent) 7%, transparent), transparent 58%),
+      var(--t-surface-active);
+    box-shadow:
+      inset 0 0 0 1px color-mix(in oklab, var(--accent) 13%, transparent),
+      inset 0 1px 0 rgb(255 255 255 / 0.025);
+  }
+
+  /* Focus ring - keyboard-first, never decorative */
+  .focus-ring {
+    outline: none;
+  }
+  .focus-ring:focus-visible {
+    box-shadow:
+      0 0 0 1px color-mix(in oklab, var(--accent) 65%, transparent),
+      0 0 0 4px color-mix(in oklab, var(--accent) 18%, transparent);
+  }
+
+  /* Kbd chip */
+  .kbd {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 20px;
+    height: 20px;
+    padding: 0 6px;
+    border-radius: 6px;
+    border: 1px solid var(--t-kbd-line);
+    background: var(--t-kbd);
+    box-shadow: inset 0 1px 0 var(--t-kbd-hi);
+    color: var(--color-fg-secondary);
+    font-size: 11px;
+    font-weight: 550;
+    letter-spacing: 0;
+  }
+
+  /* Icon tile - soft gradient chip for interactive results */
+  .tile {
+    display: grid;
+    place-items: center;
+    width: 40px;
+    height: 40px;
+    border-radius: var(--radius-sm);
+    box-shadow:
+      inset 0 1px 0 rgb(255 255 255 / 0.14),
+      var(--shadow-tile);
+  }
+  .tile svg {
+    width: 19px;
+    height: 19px;
+  }
+
+  .footer-bar {
+    border-top: 1px solid color-mix(in oklab, var(--t-line) 72%, transparent);
+    background: linear-gradient(180deg, transparent, rgb(0 0 0 / 0.06));
+    box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.012);
+  }
+  .tile-iris {
+    background: linear-gradient(145deg, oklch(0.72 0.16 292 / 0.9), oklch(0.5 0.19 295 / 0.9));
+  }
+  .tile-azure {
+    background: linear-gradient(145deg, oklch(0.74 0.14 243 / 0.9), oklch(0.52 0.16 248 / 0.9));
+  }
+  .tile-mint {
+    background: linear-gradient(145deg, oklch(0.8 0.11 168 / 0.9), oklch(0.6 0.14 172 / 0.9));
+  }
+  .tile-amber {
+    background: linear-gradient(145deg, oklch(0.82 0.12 80 / 0.9), oklch(0.64 0.15 72 / 0.9));
+  }
+  .tile-rose {
+    background: linear-gradient(145deg, oklch(0.74 0.15 14 / 0.9), oklch(0.54 0.18 8 / 0.9));
+  }
+  .tile-slate {
+    background: linear-gradient(145deg, oklch(0.42 0.01 268 / 0.95), oklch(0.3 0.012 268 / 0.95));
+  }
+
+  /* Monogram tile for apps - deterministic hue from name */
+  .tile-mono {
+    background: linear-gradient(
+      145deg,
+      oklch(var(--mono-h) 0.09 268),
+      oklch(calc(var(--mono-h) - 0.12) 0.12 268)
+    );
+  }
+
+  :root[data-theme="light"] .tile-slate {
+    background: linear-gradient(145deg, oklch(0.55 0.02 268 / 0.95), oklch(0.42 0.015 268 / 0.95));
+  }
+  :root[data-theme="light"] .tile-mono {
+    background: linear-gradient(
+      145deg,
+      oklch(var(--mono-h) 0.12 268),
+      oklch(calc(var(--mono-h) - 0.15) 0.15 268)
+    );
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/*  Scrollbar                                                          */
+/* ------------------------------------------------------------------ */
+
+.scroll-thin {
+  scrollbar-width: thin;
+  scrollbar-color: var(--t-scroll) transparent;
+}
+.scroll-thin::-webkit-scrollbar {
+  width: 8px;
+}
+.scroll-thin::-webkit-scrollbar-track {
+  background: transparent;
+}
+.scroll-thin::-webkit-scrollbar-thumb {
+  border-radius: 999px;
+  background: var(--t-scroll);
+  background-clip: padding-box;
+  border: 2px solid transparent;
+}
+.scroll-thin::-webkit-scrollbar-thumb:hover {
+  background: var(--t-scroll-hover);
+  background-clip: padding-box;
+  border: 2px solid transparent;
+}
+
+/* ------------------------------------------------------------------ */
+/*  Utilities                                                          */
+/* ------------------------------------------------------------------ */
+
+@utility no-scrollbar {
+  scrollbar-width: none;
+  &::-webkit-scrollbar {
+    display: none;
+  }
+}
+
+.launcher-stage {
+  transform-origin: center bottom;
+  opacity: 0;
+  transform: translateY(12px) scale(0.994);
+  pointer-events: none;
+  contain: layout paint;
+}
+.launcher-stage-visible {
+  pointer-events: auto;
+  animation: launcher-in 150ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+.launcher-stage-exiting {
+  pointer-events: none;
+  animation: launcher-out 105ms cubic-bezier(0.4, 0, 1, 1) both;
+}
+.settings-backdrop {
+  animation: fade-in 120ms ease-out both;
+}
+.settings-panel {
+  animation: panel-in 180ms var(--ease-out-soft) both;
+}
+.toast-enter {
+  transform-origin: center bottom;
+  animation: toast-in 160ms var(--ease-out-soft) both;
+}
+
+@keyframes launcher-in {
+  from {
+    opacity: 0;
+    transform: translateY(12px) scale(0.994);
+  }
+  55% {
+    opacity: 1;
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+@keyframes launcher-out {
+  from {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+  to {
+    opacity: 0;
+    transform: translateY(9px) scale(0.996);
+  }
+}
+@keyframes fade-in {
+  from {
+    opacity: 0;
+  }
+}
+@keyframes panel-in {
+  from {
+    opacity: 0;
+    transform: translateX(32px);
+  }
+}
+@keyframes toast-in {
+  from {
+    opacity: 0;
+    transform: translateY(10px) scale(0.96);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}

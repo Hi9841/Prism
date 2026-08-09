@@ -1,0 +1,33 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+src-tauri/target/
+src-tauri/gen/
+artifacts/*.exe
+
+# Temporary diagnostics
+.tmp-*/
+
+# Keep only the curated benchmark evidence in source control
+performance/*-resources.csv
+performance/*-timings.csv
+performance/*-native.jsonl
+!performance/before-resources.csv
+!performance/before-timings.csv
+!performance/final-resources.csv
+!performance/final-timings.csv
+!performance/final-native.jsonl
+
+# Logs
+*.log
+
+# Editor
+.vscode/
+.idea/
+*.swp
+
+# OS
+Thumbs.db
+.DS_Store

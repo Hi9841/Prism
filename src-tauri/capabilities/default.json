@@ -1,0 +1,16 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Permissions for the main launcher window",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "core:window:allow-hide",
+    "core:window:allow-show",
+    "core:window:allow-set-focus",
+    "core:window:allow-center",
+    "core:window:allow-set-always-on-top",
+    "core:event:allow-listen",
+    "clipboard-manager:allow-write-text"
+  ]
+}
