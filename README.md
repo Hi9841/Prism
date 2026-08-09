@@ -49,7 +49,9 @@ The NSIS installer is written to `src-tauri\target\release\bundle\nsis\`.
 
 ## Releases
 
-Every push and pull request is verified by `.github/workflows/ci.yml`. A semantic version tag such as `v0.3.1` triggers `.github/workflows/release.yml`, which runs the full checks, builds the NSIS installer, creates a GitHub Release, and uploads the installer.
+Every push and pull request is verified by `.github/workflows/ci.yml`. After a merge reaches `main`, the same workflow builds a fresh NSIS installer after all checks pass. Download it from the **Artifacts** section of that run on the repository's Actions page.
+
+A semantic version tag such as `v0.3.1` triggers `.github/workflows/release.yml`, which builds the NSIS installer, creates a permanent GitHub Release, and uploads the installer. Use tagged releases for versions intended for general distribution; per-merge workflow artifacts are development builds.
 
 Before publishing, keep the version identical in `package.json`, `src-tauri\Cargo.toml`, `src-tauri\tauri.conf.json`, and `src-tauri\Cargo.lock`. Verify it with:
 
