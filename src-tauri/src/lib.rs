@@ -1,6 +1,7 @@
 mod apps;
 mod files;
 mod perf;
+mod power;
 mod start_menu;
 mod taskbar;
 mod theme;
@@ -136,6 +137,7 @@ pub fn run() {
             set_shortcut,
             load_state,
             save_state,
+            perform_power_action,
             quit_app
         ])
         .run(tauri::generate_context!())
@@ -485,6 +487,13 @@ fn existing_paths(paths: Vec<String>) -> Vec<String> {
 }
 
 #[tauri::command]
+async fn perform_power_action(action: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || power::perform(&action))
+        .await
+        .map_err(|error| format!("power action task failed: {error}"))?
+}
+
+#[tauri::command]
 fn set_window_effect(
     app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
@@ -745,6 +754,47 @@ fn validate_state(state: &serde_json::Value) -> Result<(), String> {
             return Err(format!("unsupported view zoom '{zoom}'"));
         }
     }
+    if let Some(quick_access) = settings.get("quickAccess") {
+        let entries = quick_access
+            .as_array()
+            .ok_or("state.settings.quickAccess must be an array")?;
+        if entries.len() > 6 {
+            return Err("state.settings.quickAccess has too many entries".to_string());
+        }
+        let mut seen = std::collections::HashSet::new();
+        for entry in entries {
+            let kind = entry
+                .as_str()
+                .ok_or("quick access entries must be strings")?;
+            if !matches!(
+                kind,
+                "home" | "desktop" | "downloads" | "documents" | "pictures" | "music" | "videos"
+            ) {
+                return Err(format!("unknown quick access entry '{kind}'"));
+            }
+            if !seen.insert(kind) {
+                return Err(format!("duplicate quick access entry '{kind}'"));
+            }
+        }
+    }
+    if let Some(pinned_apps) = settings.get("pinnedApps") {
+        let entries = pinned_apps
+            .as_array()
+            .ok_or("state.settings.pinnedApps must be an array")?;
+        if entries.len() > 64 {
+            return Err("state.settings.pinnedApps has too many entries".to_string());
+        }
+        let mut seen = std::collections::HashSet::new();
+        for entry in entries {
+            let app_id = entry
+                .as_str()
+                .filter(|value| !value.is_empty() && value.len() <= 4096)
+                .ok_or("pinned app ids must be non-empty strings")?;
+            if !seen.insert(app_id) {
+                return Err("state.settings.pinnedApps contains duplicates".to_string());
+            }
+        }
+    }
     if let Some(history) = obj.get("history") {
         let Some(entries) = history.as_array() else {
             return Err("state.history must be an array".to_string());
@@ -881,7 +931,9 @@ mod tests {
                 "effect": "solid",
                 "shortcut": "Ctrl+Alt+Space",
                 "alwaysOnTop": true,
-                "theme": "system"
+                "theme": "system",
+                "quickAccess": ["home", "desktop", "downloads", "documents", "pictures", "music"],
+                "pinnedApps": ["app-one", "app-two"]
             },
             "history": []
         });
@@ -895,6 +947,13 @@ mod tests {
             serde_json::json!({"settings": {"width": 999}}),
             serde_json::json!({"settings": {"viewZoom": 135}}),
             serde_json::json!({"settings": {"viewZoom": "large"}}),
+            serde_json::json!({"settings": {"quickAccess": "home"}}),
+            serde_json::json!({"settings": {"quickAccess": ["home", "home"]}}),
+            serde_json::json!({"settings": {"quickAccess": ["network"]}}),
+            serde_json::json!({"settings": {"quickAccess": ["home", "desktop", "downloads", "documents", "pictures", "music", "videos"]}}),
+            serde_json::json!({"settings": {"pinnedApps": "app-one"}}),
+            serde_json::json!({"settings": {"pinnedApps": [""]}}),
+            serde_json::json!({"settings": {"pinnedApps": ["app-one", "app-one"]}}),
             serde_json::json!({"settings": []}),
             serde_json::json!({"history": "nope"}),
             serde_json::json!({

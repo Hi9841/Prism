@@ -13,8 +13,24 @@ import {
   setWindowTheme,
   setWindowWidth,
 } from "../lib/bridge";
-import type { AccentId, HistoryEntry, Settings, ThemeMode, WindowEffect, WindowWidth } from "../lib/types";
-import { DEFAULT_SETTINGS, stepViewZoom, VIEW_ZOOM_LEVELS } from "../lib/types";
+import type {
+  AccentId,
+  HistoryEntry,
+  QuickAccessKind,
+  Settings,
+  ThemeMode,
+  WindowEffect,
+  WindowWidth,
+} from "../lib/types";
+import {
+  DEFAULT_QUICK_ACCESS,
+  DEFAULT_SETTINGS,
+  PINNED_APP_LIMIT,
+  QUICK_ACCESS_KINDS,
+  QUICK_ACCESS_LIMIT,
+  stepViewZoom,
+  VIEW_ZOOM_LEVELS,
+} from "../lib/types";
 
 export interface Toast {
   id: number;
@@ -357,7 +373,40 @@ export function sanitizeSettings(raw: unknown): Settings {
     ),
     alwaysOnTop: typeof src.alwaysOnTop === "boolean" ? src.alwaysOnTop : DEFAULT_SETTINGS.alwaysOnTop,
     theme: pick(src.theme, ["system", "dark", "light"], DEFAULT_SETTINGS.theme),
+    quickAccess: sanitizeQuickAccess(src.quickAccess),
+    pinnedApps: sanitizePinnedApps(src.pinnedApps),
   };
+}
+
+function sanitizePinnedApps(raw: unknown): string[] {
+  if (!Array.isArray(raw)) return [];
+  const seen = new Set<string>();
+  const result: string[] = [];
+  for (const value of raw) {
+    if (typeof value !== "string" || value.length === 0 || value.length > 4096 || seen.has(value)) {
+      continue;
+    }
+    seen.add(value);
+    result.push(value);
+    if (result.length === PINNED_APP_LIMIT) break;
+  }
+  return result;
+}
+
+function sanitizeQuickAccess(raw: unknown): QuickAccessKind[] {
+  if (!Array.isArray(raw)) return [...DEFAULT_QUICK_ACCESS];
+  const seen = new Set<QuickAccessKind>();
+  const result: QuickAccessKind[] = [];
+  for (const value of raw) {
+    if (!QUICK_ACCESS_KINDS.includes(value as QuickAccessKind) || seen.has(value as QuickAccessKind)) {
+      continue;
+    }
+    const kind = value as QuickAccessKind;
+    seen.add(kind);
+    result.push(kind);
+    if (result.length === QUICK_ACCESS_LIMIT) break;
+  }
+  return result;
 }
 
 export function sanitizeHistory(raw: unknown): HistoryEntry[] {
