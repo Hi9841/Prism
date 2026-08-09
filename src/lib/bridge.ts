@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import type { AppEntry, FileSearchResponse, PersistedState, QuickAccessEntry, WindowEffect } from "./types";
@@ -41,6 +42,18 @@ export function centerPaletteWindow(): Promise<void> {
 export function setAlwaysOnTop(on: boolean): Promise<void> {
   if (!inTauri) return Promise.resolve();
   return getCurrentWindow().setAlwaysOnTop(on);
+}
+
+export function setViewZoom(percent: number): Promise<void> {
+  const scaleFactor = percent / 100;
+  if (!inTauri) {
+    const root = document.documentElement;
+    root.style.setProperty("zoom", String(scaleFactor));
+    root.style.width = `${100 / scaleFactor}%`;
+    root.style.height = `${100 / scaleFactor}%`;
+    return Promise.resolve();
+  }
+  return getCurrentWebview().setZoom(scaleFactor);
 }
 
 /** Emitted by Rust with the authoritative native visibility state. */

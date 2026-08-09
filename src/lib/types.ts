@@ -75,10 +75,19 @@ export type AccentId = "iris" | "azure" | "mint" | "amber" | "rose";
 export type WindowEffect = "acrylic" | "mica" | "solid";
 export type WindowWidth = 560 | 640 | 720;
 export type ThemeMode = "system" | "dark" | "light";
+export const VIEW_ZOOM_LEVELS = [70, 80, 90, 100, 110, 120, 130, 140, 150] as const;
+export type ViewZoom = (typeof VIEW_ZOOM_LEVELS)[number];
+
+export function stepViewZoom(current: ViewZoom, direction: -1 | 1): ViewZoom {
+  const currentIndex = VIEW_ZOOM_LEVELS.indexOf(current);
+  const nextIndex = Math.min(VIEW_ZOOM_LEVELS.length - 1, Math.max(0, currentIndex + direction));
+  return VIEW_ZOOM_LEVELS[nextIndex];
+}
 
 export interface Settings {
   accent: AccentId;
   width: WindowWidth;
+  viewZoom: ViewZoom;
   effect: WindowEffect;
   shortcut: string;
   alwaysOnTop: boolean;
@@ -88,6 +97,7 @@ export interface Settings {
 export const DEFAULT_SETTINGS: Settings = {
   accent: "iris",
   width: 640,
+  viewZoom: 100,
   effect: "solid",
   shortcut: "Ctrl+Alt+Space",
   alwaysOnTop: true,
