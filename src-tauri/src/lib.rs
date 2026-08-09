@@ -112,7 +112,6 @@ pub fn run() {
             if window.label() == "main"
                 && matches!(event, WindowEvent::Focused(false))
                 && window.is_visible().unwrap_or(false)
-                && !win_key::is_start_guard_active()
             {
                 PALETTE_OPEN.store(false, Ordering::Release);
                 PALETTE_TRANSITION.fetch_add(1, Ordering::AcqRel);
