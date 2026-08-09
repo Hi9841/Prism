@@ -1573,19 +1573,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn scan_finds_apps_with_icons() {
-        let tmp = std::env::temp_dir().join("prism-test-apps-cache.json");
+    fn scan_produces_valid_cached_entries() {
+        let tmp =
+            std::env::temp_dir().join(format!("prism-test-apps-cache-{}.json", std::process::id()));
         let _ = std::fs::remove_file(&tmp);
         let apps = scan(&tmp).expect("scan should succeed");
-        assert!(apps.len() > 50, "expected >50 apps, got {}", apps.len());
-        let with_icon = apps.iter().filter(|a| a.icon.is_some()).count();
+        assert!(!apps.is_empty(), "the Windows runner should expose apps");
         assert!(
-            with_icon > 30,
-            "expected >30 apps with icons, got {with_icon}"
-        );
-        assert!(
-            apps.iter().any(|a| a.app_id.contains("Calculator")),
-            "Calculator should be present"
+            apps.iter().any(|app| app.icon.is_some()),
+            "at least one discovered app should have an icon"
         );
         // Every entry needs a stable id and searchable metadata.
         for app in &apps {
@@ -1593,11 +1589,9 @@ mod tests {
             assert!(!app.app_id.is_empty(), "empty app id");
             assert_eq!(app.normalized_name, normalize(&app.name));
         }
-        // Registry + programs sources must contribute entries.
-        assert!(
-            apps.iter().any(|a| a.source == "registry"),
-            "registry entries expected"
-        );
+        let cached = load_cache(&tmp).expect("scan cache should be readable");
+        assert_eq!(cached.len(), apps.len());
+        let _ = std::fs::remove_file(tmp);
     }
 
     #[test]

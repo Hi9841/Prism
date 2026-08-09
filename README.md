@@ -73,9 +73,7 @@ The same workflow can be started manually from the repository's Actions page. It
 - `src-tauri/src/` - native Windows integration, indexing, and launcher behavior
 - `src-tauri/icons/` - source and Windows bundle icons
 - `src-tauri/nsis/` - installer artwork and lifecycle hooks
-- `scripts/` - version checks, profiling, asset generation, and cleanup
-- `performance/` - curated baseline/final measurements and report
-- `artifacts/` - local release builds; executable files are ignored
+- `scripts/` - version checks, asset generation, and cleanup
 
 Generated directories such as `dist/`, `src-tauri/gen/`, and `src-tauri/target/` are disposable. Remove them with:
 
