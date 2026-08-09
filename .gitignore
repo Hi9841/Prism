@@ -3,15 +3,34 @@ node_modules/
 
 # Build output
 dist/
+coverage/
+*.tsbuildinfo
 src-tauri/target/
 src-tauri/gen/
-artifacts/*.exe
+artifacts/
+
+# Generated Tauri icon variants; source bundle icons stay tracked
+src-tauri/icons/32x32.png
+src-tauri/icons/64x64.png
+src-tauri/icons/128x128.png
+src-tauri/icons/128x128@2x.png
+src-tauri/icons/icon.icns
+src-tauri/icons/Square*Logo.png
+src-tauri/icons/StoreLogo.png
+src-tauri/icons/android/
+src-tauri/icons/ios/
 
 # Temporary diagnostics
 .tmp-*/
+.vite/
 
 # Local performance captures
 performance/
+
+# Local environment and secrets
+.env
+.env.*
+!.env.example
 
 # Logs
 *.log
