@@ -1,11 +1,22 @@
-import { Pin, PinOff, RefreshCw, Search, Settings2 } from "lucide-react";
-import { useCallback, useEffect, useRef } from "react";
+import { GripVertical, Pin, PinOff, RefreshCw, Search, Settings2 } from "lucide-react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { PowerMenu } from "../../components/PowerMenu";
 import { IconButton, Kbd, RowIcon, SectionLabel } from "../../components/ui";
 import type { PaletteItem } from "../../lib/types";
-import { PINNED_APP_LIMIT } from "../../lib/types";
+import { PINNED_APP_LIMIT, reorderPinnedApps } from "../../lib/types";
 import { useApp } from "../../state/app";
 import { usePalette } from "../../state/palette";
+
+interface PinDragState {
+  item: PaletteItem;
+  pointerId: number;
+  startX: number;
+  startY: number;
+  x: number;
+  y: number;
+  active: boolean;
+  targetAppId: string | null;
+}
 
 export function Palette() {
   const palette = usePalette();
@@ -14,6 +25,8 @@ export function Palette() {
 
   const inputRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
+  const pinDragRef = useRef<PinDragState | null>(null);
+  const [pinDrag, setPinDrag] = useState<PinDragState | null>(null);
 
   const togglePin = useCallback(
     (item: PaletteItem) => {
@@ -40,6 +53,91 @@ export function Palette() {
     },
     [app, settings.pinnedApps],
   );
+
+  const reorderPin = useCallback(
+    (sourceAppId: string, targetAppId: string) => {
+      const pinnedApps = reorderPinnedApps(settings.pinnedApps, sourceAppId, targetAppId);
+      if (pinnedApps.every((appId, index) => appId === settings.pinnedApps[index])) return;
+      app.updateSettings({ pinnedApps });
+    },
+    [app, settings.pinnedApps],
+  );
+
+  const movePin = useCallback(
+    (appId: string, direction: -1 | 1) => {
+      const index = settings.pinnedApps.indexOf(appId);
+      const targetAppId = settings.pinnedApps[index + direction];
+      if (index < 0 || !targetAppId) return;
+      reorderPin(appId, targetAppId);
+    },
+    [reorderPin, settings.pinnedApps],
+  );
+
+  const updatePinDragState = useCallback((next: PinDragState | null) => {
+    pinDragRef.current = next;
+    setPinDrag(next);
+  }, []);
+
+  const startPinDrag = useCallback(
+    (item: PaletteItem, pointerId: number, x: number, y: number) => {
+      updatePinDragState({
+        item,
+        pointerId,
+        startX: x,
+        startY: y,
+        x,
+        y,
+        active: false,
+        targetAppId: null,
+      });
+    },
+    [updatePinDragState],
+  );
+
+  const updatePinDrag = useCallback(
+    (pointerId: number, x: number, y: number) => {
+      const current = pinDragRef.current;
+      if (!current || current.pointerId !== pointerId) return;
+
+      const active = current.active || Math.hypot(x - current.startX, y - current.startY) >= 4;
+      const hoveredRow = active
+        ? document.elementFromPoint(x, y)?.closest<HTMLElement>("[data-pinned-app-id]")
+        : null;
+      const hoveredAppId = hoveredRow?.dataset.pinnedAppId ?? null;
+      const targetAppId = hoveredAppId === current.item.appId ? null : hoveredAppId;
+      updatePinDragState({ ...current, x, y, active, targetAppId });
+    },
+    [updatePinDragState],
+  );
+
+  const finishPinDrag = useCallback(
+    (pointerId: number) => {
+      const current = pinDragRef.current;
+      if (!current || current.pointerId !== pointerId) return;
+      if (current.active && current.item.appId && current.targetAppId) {
+        reorderPin(current.item.appId, current.targetAppId);
+      }
+      updatePinDragState(null);
+    },
+    [reorderPin, updatePinDragState],
+  );
+
+  const cancelPinDrag = useCallback(
+    (pointerId: number) => {
+      if (pinDragRef.current?.pointerId === pointerId) updatePinDragState(null);
+    },
+    [updatePinDragState],
+  );
+
+  useEffect(() => {
+    if (!pinDrag) return;
+    const cancelOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") updatePinDragState(null);
+    };
+    window.addEventListener("keydown", cancelOnEscape);
+    return () => window.removeEventListener("keydown", cancelOnEscape);
+  }, [pinDrag, updatePinDragState]);
+
   /* Keyboard-first navigation. */
   const onKeyDown = useCallback(
     (e: React.KeyboardEvent) => {
@@ -156,6 +254,7 @@ export function Palette() {
                 <ul aria-label={section.label} className="m-0 flex list-none flex-col gap-[2px] p-0">
                   {section.items.map((item) => {
                     const index = flat++;
+                    const reorderable = section.id === "pinned";
                     return (
                       <ResultRow
                         key={item.id}
@@ -163,9 +262,17 @@ export function Palette() {
                         index={index}
                         selected={palette.selected === index}
                         pinned={item.appId ? settings.pinnedApps.includes(item.appId) : false}
+                        reorderable={reorderable}
+                        draggedPin={pinDrag?.active ? (pinDrag.item.appId ?? null) : null}
+                        dropTargetPin={pinDrag?.active ? pinDrag.targetAppId : null}
                         onSelect={palette.select}
                         onRun={palette.runItem}
                         onTogglePin={togglePin}
+                        onMovePin={movePin}
+                        onStartPinDrag={startPinDrag}
+                        onUpdatePinDrag={updatePinDrag}
+                        onFinishPinDrag={finishPinDrag}
+                        onCancelPinDrag={cancelPinDrag}
                       />
                     );
                   })}
@@ -175,6 +282,8 @@ export function Palette() {
           })()
         )}
       </div>
+
+      {pinDrag?.active ? <PinDragPreview drag={pinDrag} /> : null}
 
       {/* ------- footer ------- */}
       <div className="footer-bar flex min-h-12 items-center justify-between px-5 py-2.5">
@@ -214,6 +323,32 @@ export function Palette() {
           </IconButton>
           <PowerMenu />
         </div>
+      </div>
+    </div>
+  );
+}
+
+function PinDragPreview({ drag }: { drag: PinDragState }) {
+  const previewWidth = 232;
+  const previewHeight = 54;
+  const x = Math.min(Math.max(8, drag.x - previewWidth - 14), window.innerWidth - previewWidth - 8);
+  const y = Math.min(Math.max(8, drag.y - previewHeight / 2), window.innerHeight - previewHeight - 8);
+
+  return (
+    <div
+      aria-hidden="true"
+      className="pointer-events-none fixed top-0 left-0 z-50 will-change-transform"
+      style={{ transform: `translate3d(${x}px, ${y}px, 0)` }}
+    >
+      <div className="pin-drag-preview">
+        <RowIcon icon={drag.item.icon} />
+        <div className="min-w-0">
+          <div className="truncate text-[13.5px] leading-tight font-semibold text-fg">{drag.item.title}</div>
+          <div className="mt-[3px] truncate text-[11.5px] leading-tight text-fg-tertiary">
+            {drag.item.subtitle ?? "Application"}
+          </div>
+        </div>
+        <GripVertical className="h-4 w-4 shrink-0 text-accent" />
       </div>
     </div>
   );
@@ -289,22 +424,44 @@ function ResultRow({
   index,
   selected,
   pinned,
+  reorderable,
+  draggedPin,
+  dropTargetPin,
   onSelect,
   onRun,
   onTogglePin,
+  onMovePin,
+  onStartPinDrag,
+  onUpdatePinDrag,
+  onFinishPinDrag,
+  onCancelPinDrag,
 }: {
   item: PaletteItem;
   index: number;
   selected: boolean;
   pinned: boolean;
+  reorderable: boolean;
+  draggedPin: string | null;
+  dropTargetPin: string | null;
   onSelect: (i: number) => void;
   onRun: (item: PaletteItem) => void;
   onTogglePin: (item: PaletteItem) => void;
+  onMovePin: (appId: string, direction: -1 | 1) => void;
+  onStartPinDrag: (item: PaletteItem, pointerId: number, x: number, y: number) => void;
+  onUpdatePinDrag: (pointerId: number, x: number, y: number) => void;
+  onFinishPinDrag: (pointerId: number) => void;
+  onCancelPinDrag: (pointerId: number) => void;
 }) {
+  const appId = item.appId;
+  const canReorder = reorderable && Boolean(appId);
+
   return (
     <li
       id={`prism-opt-${index}`}
       data-selected={selected}
+      data-drop-target={canReorder && dropTargetPin === appId}
+      data-dragging={canReorder && draggedPin === appId}
+      data-pinned-app-id={canReorder ? appId : undefined}
       onMouseEnter={() => onSelect(index)}
       className={`group row w-full text-left transition-[background-color,box-shadow] duration-100 ${
         selected ? "bg-surface-active" : "hover:bg-surface-hover"
@@ -334,7 +491,45 @@ function ResultRow({
           </div>
         ) : null}
       </div>
-      <div className="relative z-10 flex items-center">
+      <div className="relative z-10 flex items-center gap-0.5">
+        {canReorder && appId ? (
+          <button
+            type="button"
+            aria-label={`Reorder ${item.title}. Use Up and Down arrow keys.`}
+            title={`Reorder ${item.title}`}
+            tabIndex={selected ? 0 : -1}
+            onPointerDown={(event) => {
+              if (event.button !== 0) return;
+              event.preventDefault();
+              event.currentTarget.setPointerCapture(event.pointerId);
+              onStartPinDrag(item, event.pointerId, event.clientX, event.clientY);
+            }}
+            onPointerMove={(event) => {
+              if (!event.currentTarget.hasPointerCapture(event.pointerId)) return;
+              onUpdatePinDrag(event.pointerId, event.clientX, event.clientY);
+            }}
+            onPointerUp={(event) => {
+              if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+                event.currentTarget.releasePointerCapture(event.pointerId);
+              }
+              onFinishPinDrag(event.pointerId);
+            }}
+            onPointerCancel={(event) => {
+              onCancelPinDrag(event.pointerId);
+            }}
+            onKeyDown={(event) => {
+              if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
+              event.preventDefault();
+              event.stopPropagation();
+              onMovePin(appId, event.key === "ArrowUp" ? -1 : 1);
+            }}
+            className={`focus-ring grid h-7 w-7 touch-none place-items-center rounded-[7px] text-fg-quiet transition-[color,background-color] duration-100 hover:bg-surface-hover hover:text-fg ${
+              draggedPin === appId ? "cursor-grabbing bg-accent-soft text-accent" : "cursor-grab"
+            }`}
+          >
+            <GripVertical className="h-3.5 w-3.5" />
+          </button>
+        ) : null}
         {item.appId ? (
           <button
             type="button"

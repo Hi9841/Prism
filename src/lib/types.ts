@@ -81,6 +81,23 @@ export const DEFAULT_QUICK_ACCESS: QuickAccessKind[] = [
 export const QUICK_ACCESS_LIMIT = 6;
 export const PINNED_APP_LIMIT = 64;
 
+export function reorderPinnedApps(
+  pinnedApps: readonly string[],
+  sourceAppId: string,
+  targetAppId: string,
+): string[] {
+  const sourceIndex = pinnedApps.indexOf(sourceAppId);
+  const targetIndex = pinnedApps.indexOf(targetAppId);
+  if (sourceIndex < 0 || targetIndex < 0 || sourceIndex === targetIndex) {
+    return [...pinnedApps];
+  }
+
+  const reordered = [...pinnedApps];
+  const [movedAppId] = reordered.splice(sourceIndex, 1);
+  reordered.splice(targetIndex, 0, movedAppId);
+  return reordered;
+}
+
 export interface QuickAccessEntry {
   name: string;
   path: string;
