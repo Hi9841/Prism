@@ -20,6 +20,8 @@ export interface PaletteItem {
   historyTitle: string;
   /** Extra line shown in the toast after a clipboard-style run */
   toastDetail?: string;
+  /** Stable app id when this result can be pinned. */
+  appId?: string;
 }
 
 export interface HistoryEntry {
@@ -45,7 +47,7 @@ export interface AppEntry {
   /** AppUserModelID for packaged apps, when available. */
   aumid?: string;
   /** Where the entry came from: startMenu, desktop, documents, profile,
-   *  taskbar, appsFolder, registry, programs. */
+   *  taskbar, appsFolder, registry, appPaths, applications, programs. */
   source?: string;
   /** Searchable aliases: exe names, folder names, publisher, description. */
   keywords?: string[];
@@ -58,10 +60,31 @@ export interface FileEntry {
   isDirectory: boolean;
 }
 
+export const QUICK_ACCESS_KINDS = [
+  "home",
+  "desktop",
+  "downloads",
+  "documents",
+  "pictures",
+  "music",
+  "videos",
+] as const;
+export type QuickAccessKind = (typeof QUICK_ACCESS_KINDS)[number];
+export const DEFAULT_QUICK_ACCESS: QuickAccessKind[] = [
+  "home",
+  "desktop",
+  "downloads",
+  "documents",
+  "pictures",
+  "music",
+];
+export const QUICK_ACCESS_LIMIT = 6;
+export const PINNED_APP_LIMIT = 64;
+
 export interface QuickAccessEntry {
   name: string;
   path: string;
-  kind: "home" | "desktop" | "downloads" | "documents" | "pictures" | "music" | "videos";
+  kind: QuickAccessKind;
 }
 
 export interface FileSearchResponse {
@@ -92,6 +115,8 @@ export interface Settings {
   shortcut: string;
   alwaysOnTop: boolean;
   theme: ThemeMode;
+  quickAccess: QuickAccessKind[];
+  pinnedApps: string[];
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -102,6 +127,8 @@ export const DEFAULT_SETTINGS: Settings = {
   shortcut: "Win",
   alwaysOnTop: true,
   theme: "system",
+  quickAccess: [...DEFAULT_QUICK_ACCESS],
+  pinnedApps: [],
 };
 
 export interface PersistedState {
