@@ -127,6 +127,8 @@ function sourcePriority(source?: string): number {
     case "appsFolder":
       return 3;
     case "registry":
+    case "appPaths":
+    case "applications":
       return 2;
     case "programs":
       return 1;

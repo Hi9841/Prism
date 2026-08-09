@@ -5,6 +5,8 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import type { AppEntry, FileSearchResponse, PersistedState, QuickAccessEntry, WindowEffect } from "./types";
 
+export type PowerAction = "lock" | "shutdown" | "restart";
+
 export const inTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
 /* ---------------- clipboard ---------------- */
@@ -133,9 +135,15 @@ export async function getQuickAccess(): Promise<QuickAccessEntry[]> {
       { name: "Documents", path: "C:\\Users\\You\\Documents", kind: "documents" },
       { name: "Pictures", path: "C:\\Users\\You\\Pictures", kind: "pictures" },
       { name: "Music", path: "C:\\Users\\You\\Music", kind: "music" },
+      { name: "Videos", path: "C:\\Users\\You\\Videos", kind: "videos" },
     ];
   }
   return invoke<QuickAccessEntry[]>("get_quick_access");
+}
+
+export async function performPowerAction(action: PowerAction): Promise<void> {
+  if (!inTauri) return;
+  await invoke("perform_power_action", { action });
 }
 
 export async function existingPaths(paths: string[]): Promise<string[]> {

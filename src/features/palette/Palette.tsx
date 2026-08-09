@@ -1,7 +1,9 @@
-import { RefreshCw, Search, Settings2 } from "lucide-react";
+import { Pin, PinOff, RefreshCw, Search, Settings2 } from "lucide-react";
 import { useCallback, useEffect, useRef } from "react";
+import { PowerMenu } from "../../components/PowerMenu";
 import { IconButton, Kbd, RowIcon, SectionLabel } from "../../components/ui";
 import type { PaletteItem } from "../../lib/types";
+import { PINNED_APP_LIMIT } from "../../lib/types";
 import { useApp } from "../../state/app";
 import { usePalette } from "../../state/palette";
 
@@ -12,6 +14,32 @@ export function Palette() {
 
   const inputRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
+
+  const togglePin = useCallback(
+    (item: PaletteItem) => {
+      const appId = item.appId;
+      if (!appId) return;
+      const pinned = settings.pinnedApps.includes(appId);
+      if (pinned) {
+        app.updateSettings({
+          pinnedApps: settings.pinnedApps.filter((candidate) => candidate !== appId),
+        });
+        app.showToast("Unpinned", item.title);
+        requestAnimationFrame(() => inputRef.current?.focus());
+        return;
+      }
+      if (settings.pinnedApps.length >= PINNED_APP_LIMIT) {
+        app.showToast("Pin limit reached", `Unpin an app before adding ${item.title}`);
+        return;
+      }
+      app.updateSettings({
+        pinnedApps: [...settings.pinnedApps, appId],
+      });
+      app.showToast("Pinned", item.title);
+      requestAnimationFrame(() => inputRef.current?.focus());
+    },
+    [app, settings.pinnedApps],
+  );
   /* Keyboard-first navigation. */
   const onKeyDown = useCallback(
     (e: React.KeyboardEvent) => {
@@ -19,10 +47,6 @@ export function Palette() {
         case "ArrowDown":
           e.preventDefault();
           palette.move(1);
-          break;
-        case "Tab":
-          e.preventDefault();
-          palette.move(e.shiftKey ? -1 : 1);
           break;
         case "ArrowUp":
           e.preventDefault();
@@ -86,15 +110,7 @@ export function Palette() {
             ref={inputRef}
             data-prism-search
             type="text"
-            role="combobox"
-            aria-expanded="true"
             aria-controls="prism-results"
-            aria-activedescendant={
-              palette.selected >= 0 && palette.selected < palette.flatItems.length
-                ? `prism-opt-${palette.selected}`
-                : undefined
-            }
-            aria-autocomplete="list"
             aria-label="Search files, folders, or apps, or type a calculation"
             value={palette.query}
             onChange={(e) => palette.setQuery(e.target.value)}
@@ -119,9 +135,7 @@ export function Palette() {
       {/* ------- results ------- */}
       <div
         ref={listRef}
-        role="listbox"
         id="prism-results"
-        aria-label="Search results"
         aria-busy={!palette.appsLoaded || palette.filesBusy}
         className="scroll-thin min-h-0 flex-1 overflow-y-auto px-2.5 pb-2"
       >
@@ -139,7 +153,7 @@ export function Palette() {
             return palette.sections.map((section) => (
               <div key={section.id}>
                 <SectionLabel>{section.label}</SectionLabel>
-                <div className="flex flex-col gap-[2px]">
+                <ul aria-label={section.label} className="m-0 flex list-none flex-col gap-[2px] p-0">
                   {section.items.map((item) => {
                     const index = flat++;
                     return (
@@ -148,12 +162,14 @@ export function Palette() {
                         item={item}
                         index={index}
                         selected={palette.selected === index}
+                        pinned={item.appId ? settings.pinnedApps.includes(item.appId) : false}
                         onSelect={palette.select}
                         onRun={palette.runItem}
+                        onTogglePin={togglePin}
                       />
                     );
                   })}
-                </div>
+                </ul>
               </div>
             ));
           })()
@@ -196,6 +212,7 @@ export function Palette() {
           >
             <RefreshCw className="h-3.5 w-3.5" />
           </IconButton>
+          <PowerMenu />
         </div>
       </div>
     </div>
@@ -271,31 +288,39 @@ function ResultRow({
   item,
   index,
   selected,
+  pinned,
   onSelect,
   onRun,
+  onTogglePin,
 }: {
   item: PaletteItem;
   index: number;
   selected: boolean;
+  pinned: boolean;
   onSelect: (i: number) => void;
   onRun: (item: PaletteItem) => void;
+  onTogglePin: (item: PaletteItem) => void;
 }) {
   return (
-    <button
-      type="button"
-      role="option"
+    <li
       id={`prism-opt-${index}`}
-      aria-selected={selected}
-      tabIndex={-1}
       data-selected={selected}
       onMouseEnter={() => onSelect(index)}
-      onClick={() => onRun(item)}
-      className={`row w-full cursor-pointer text-left transition-[background-color,box-shadow] duration-100 ${
+      className={`group row w-full text-left transition-[background-color,box-shadow] duration-100 ${
         selected ? "bg-surface-active" : "hover:bg-surface-hover"
       }`}
     >
-      <RowIcon icon={item.icon} />
-      <div className="relative min-w-0">
+      <button
+        type="button"
+        tabIndex={-1}
+        aria-label={`Open ${item.title}`}
+        onClick={() => onRun(item)}
+        className="focus-ring absolute inset-0 z-0 cursor-pointer rounded-[10px]"
+      />
+      <div className="pointer-events-none relative z-[1]">
+        <RowIcon icon={item.icon} />
+      </div>
+      <div className="pointer-events-none relative z-[1] min-w-0">
         <div
           className={`truncate text-[13.5px] leading-tight font-medium transition-colors duration-150 ${
             selected ? "text-fg" : "text-fg/90"
@@ -309,14 +334,27 @@ function ResultRow({
           </div>
         ) : null}
       </div>
-      <div className="relative flex items-center">
-        {selected && item.id.startsWith("calc::") && (
+      <div className="relative z-10 flex items-center">
+        {item.appId ? (
+          <button
+            type="button"
+            aria-label={`${pinned ? "Unpin" : "Pin"} ${item.title}`}
+            aria-pressed={pinned}
+            title={`${pinned ? "Unpin" : "Pin"} ${item.title}`}
+            tabIndex={selected ? 0 : -1}
+            onClick={() => onTogglePin(item)}
+            className={`focus-ring grid h-7 w-7 cursor-pointer place-items-center rounded-[7px] opacity-0 transition-[opacity,color,background-color] duration-100 group-hover:opacity-100 focus:opacity-100 ${
+              pinned ? "bg-accent-soft text-accent" : "text-fg-tertiary hover:bg-surface-hover hover:text-fg"
+            }`}
+          >
+            {pinned ? <PinOff className="h-3.5 w-3.5" /> : <Pin className="h-3.5 w-3.5" />}
+          </button>
+        ) : selected && item.id.startsWith("calc::") ? (
           <span className="text-[12px] font-semibold text-accent tabular-nums">Enter to copy</span>
-        )}
-        {selected && item.id.startsWith("file::") && (
+        ) : selected && item.id.startsWith("file::") ? (
           <span className="text-[11.5px] font-medium text-fg-tertiary">Enter to open</span>
-        )}
+        ) : null}
       </div>
-    </button>
+    </li>
   );
 }

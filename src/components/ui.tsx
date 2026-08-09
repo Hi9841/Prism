@@ -195,6 +195,9 @@ export function IconButton({
   active,
   disabled,
   "data-settings-trigger": settingsTrigger,
+  "aria-haspopup": ariaHasPopup,
+  "aria-expanded": ariaExpanded,
+  "aria-controls": ariaControls,
 }: {
   onClick: () => void;
   label: string;
@@ -202,6 +205,9 @@ export function IconButton({
   active?: boolean;
   disabled?: boolean;
   "data-settings-trigger"?: boolean;
+  "aria-haspopup"?: "menu";
+  "aria-expanded"?: boolean;
+  "aria-controls"?: string;
 }) {
   return (
     <button
@@ -209,6 +215,9 @@ export function IconButton({
       aria-label={label}
       title={label}
       aria-disabled={disabled}
+      aria-haspopup={ariaHasPopup}
+      aria-expanded={ariaExpanded}
+      aria-controls={ariaControls}
       data-settings-trigger={settingsTrigger || undefined}
       onClick={onClick}
       disabled={disabled}
