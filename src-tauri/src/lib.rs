@@ -271,7 +271,6 @@ pub(crate) fn toggle_palette(app: &tauri::AppHandle) {
     // Send the desired state, not an ambiguous toggle, so native and webview
     // state cannot diverge if an event is delayed.
     let _ = window.emit("prism-toggle", opening);
-    win_key::refresh_hook_priority();
     perf::finish(timer, "palette_toggle", || format!("open={opening}"));
 }
 
@@ -590,10 +589,8 @@ fn apply_shortcut(app: &tauri::AppHandle, combo: &str) -> Result<(), String> {
         // Standalone Win mode uses the native hook rather than a plugin
         // registration. If the hook later fails, it self-disables and the
         // frontend is notified.
-        let provider_suppression = start_menu::enable(app)?;
-        win_key::set_shell_suppression(provider_suppression);
+        start_menu::enable(app)?;
         if let Err(error) = win_key::set_enabled(true) {
-            win_key::set_shell_suppression(false);
             let _ = start_menu::restore(app);
             return Err(error);
         }
@@ -619,7 +616,6 @@ fn apply_shortcut(app: &tauri::AppHandle, combo: &str) -> Result<(), String> {
             }
             return Err(error);
         }
-        win_key::set_shell_suppression(false);
         if let Ok(old) = prev.parse::<Shortcut>() {
             let _ = gs.unregister(old);
         }
@@ -743,7 +739,6 @@ fn quit_app(app: tauri::AppHandle) {
     // Ensure interception is fully torn down before exiting.
     taskbar::release();
     let _ = win_key::set_enabled(false);
-    win_key::set_shell_suppression(false);
     let _ = start_menu::restore(&app);
     app.exit(0);
 }
