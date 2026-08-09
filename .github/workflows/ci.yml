@@ -14,17 +14,41 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  verify:
-    name: Verify Windows build
+  frontend:
+    name: Frontend
     runs-on: windows-latest
-    timeout-minutes: 30
+    timeout-minutes: 10
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Set up Bun
         uses: oven-sh/setup-bun@v2
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Check version consistency
+        run: .\scripts\check-version.ps1
+
+      - name: Lint
+        run: bun run lint
+
+      - name: Test
+        run: bun run test
+
+      - name: Build
+        run: bun run build
+
+  rust-lint:
+    name: Rust lint
+    runs-on: windows-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
 
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
@@ -35,30 +59,34 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri -> target
+          cache-on-failure: true
 
-      - name: Install frontend dependencies
-        run: bun install --frozen-lockfile
-
-      - name: Check version consistency
-        run: .\scripts\check-version.ps1
-
-      - name: Lint frontend
-        run: bun run lint
-
-      - name: Test frontend
-        run: bun run test
-
-      - name: Build frontend
-        run: bun run build
-
-      - name: Check Rust formatting
+      - name: Check formatting
         working-directory: src-tauri
         run: cargo fmt --all -- --check
 
-      - name: Lint Rust
+      - name: Run Clippy
         working-directory: src-tauri
         run: cargo clippy --all-targets -- -D warnings
 
-      - name: Test Rust
+  rust-test:
+    name: Rust tests
+    runs-on: windows-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build data
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+          cache-on-failure: true
+
+      - name: Test
         working-directory: src-tauri
         run: cargo test

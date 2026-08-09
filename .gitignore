@@ -10,15 +10,8 @@ artifacts/*.exe
 # Temporary diagnostics
 .tmp-*/
 
-# Keep only the curated benchmark evidence in source control
-performance/*-resources.csv
-performance/*-timings.csv
-performance/*-native.jsonl
-!performance/before-resources.csv
-!performance/before-timings.csv
-!performance/final-resources.csv
-!performance/final-timings.csv
-!performance/final-native.jsonl
+# Local performance captures
+performance/
 
 # Logs
 *.log
