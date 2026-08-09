@@ -130,7 +130,12 @@ fn restore_from_journal(path: &Path) -> Result<(), String> {
     }
 
     let Some((key, current)) = open_provider_key()? else {
-        return Err("Start provider registry key is unavailable".to_string());
+        // The provider was uninstalled while Prism was active. There is no
+        // setting left to restore, so retire the journal and let its watchdog
+        // exit instead of retrying forever.
+        std::fs::remove_file(path)
+            .map_err(|error| format!("remove obsolete Start restore journal: {error}"))?;
+        return Ok(());
     };
     let key_guard = RegistryKey(key);
     // A settings UI may have changed this while Prism was running. Only undo
@@ -290,8 +295,14 @@ fn open_provider_key() -> Result<Option<(HKEY, Option<u32>)>, String> {
             &mut key,
         )
     };
-    if error.0 != 0 || key.0.is_null() {
+    if error.0 == 2 {
         return Ok(None);
+    }
+    if error.0 != 0 || key.0.is_null() {
+        return Err(format!(
+            "open Start provider registry key: Win32 error {}",
+            error.0
+        ));
     }
     let key_guard = RegistryKey(key);
     let value = read_dword(key_guard.0)?;
@@ -301,13 +312,19 @@ fn open_provider_key() -> Result<Option<(HKEY, Option<u32>)>, String> {
 }
 
 fn supported_provider_installed() -> bool {
-    let Ok(local_app_data) = std::env::var("LOCALAPPDATA") else {
-        return false;
-    };
-    let dll = PathBuf::from(local_app_data)
-        .join("StartAllBack")
-        .join("StartAllBackX64.dll");
-    file_version(&dll).is_some_and(|version| version == (3, 9, 24, 5377))
+    ["LOCALAPPDATA", "ProgramFiles", "ProgramFiles(x86)"]
+        .into_iter()
+        .filter_map(std::env::var_os)
+        .map(PathBuf::from)
+        .map(|base| base.join("StartAllBack").join("StartAllBackX64.dll"))
+        .any(|dll| file_version(&dll).is_some_and(supported_provider_version))
+}
+
+fn supported_provider_version(version: (u16, u16, u16, u16)) -> bool {
+    // The inspected utility and StartAllBack's current registry contract both
+    // target the v3 product line. Minor/build revisions retain WinkeyFunction
+    // semantics, so pinning one exact build strands otherwise compatible users.
+    version.0 == 3
 }
 
 fn file_version(path: &Path) -> Option<(u16, u16, u16, u16)> {
@@ -488,5 +505,19 @@ mod tests {
             assert_eq!(decoded.value_existed, journal.value_existed);
             assert_eq!(decoded.value, journal.value);
         }
+    }
+
+    #[test]
+    fn every_startallback_v3_build_uses_provider_suppression() {
+        assert!(supported_provider_version((3, 0, 0, 0)));
+        assert!(supported_provider_version((3, 9, 24, 5377)));
+        assert!(supported_provider_version((
+            3,
+            u16::MAX,
+            u16::MAX,
+            u16::MAX
+        )));
+        assert!(!supported_provider_version((2, 9, 24, 5377)));
+        assert!(!supported_provider_version((4, 0, 0, 0)));
     }
 }
