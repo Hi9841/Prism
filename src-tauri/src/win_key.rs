@@ -5,8 +5,11 @@
 //!
 //! - A pure, side-aware state machine (`WinKeyMachine`) decides everything;
 //!   it is unit-tested without Win32 involvement.
-//! - Every physical event is forwarded through the hook chain unchanged.
-//!   The callback only feeds the machine and queues native work.
+//! - With StartAllBack integration, a message-only raw-input observer detects
+//!   standalone Win without installing a low-level hook or changing legacy
+//!   keyboard delivery.
+//! - Without provider integration, every physical event is forwarded through
+//!   the hook chain unchanged and a two-event menu mask follows Win-down.
 //! - Every Win32 result is checked. A failed menu mask triggers a safe
 //!   recovery path that disables observation.
 //! - A short, exact-host guard dismisses Start if a shell replacement opens
@@ -18,8 +21,12 @@ use std::sync::{mpsc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use tauri::{AppHandle, Emitter, Manager};
-use windows::core::{BOOL, PWSTR};
-use windows::Win32::Foundation::{CloseHandle, HWND, LPARAM, LRESULT, WPARAM};
+use windows::core::{BOOL, PCWSTR, PWSTR};
+use windows::Win32::Devices::HumanInterfaceDevice::{
+    HID_USAGE_GENERIC_KEYBOARD, HID_USAGE_PAGE_GENERIC, KEYBOARD_OVERRUN_MAKE_CODE,
+};
+use windows::Win32::Foundation::{CloseHandle, HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
+use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Threading::{
     GetCurrentThreadId, OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32,
     PROCESS_QUERY_LIMITED_INFORMATION,
@@ -29,13 +36,18 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP,
     VIRTUAL_KEY, VK_CONTROL, VK_ESCAPE, VK_LWIN, VK_RWIN,
 };
+use windows::Win32::UI::Input::{
+    GetRawInputData, RegisterRawInputDevices, HRAWINPUT, RAWINPUT, RAWINPUTDEVICE, RAWINPUTHEADER,
+    RAWKEYBOARD, RIDEV_INPUTSINK, RIDEV_REMOVE, RID_INPUT, RIM_TYPEKEYBOARD,
+};
 use windows::Win32::UI::WindowsAndMessaging::{
-    CallNextHookEx, DispatchMessageW, EnumWindows, GetClassNameW, GetForegroundWindow,
-    GetWindowThreadProcessId, IsWindowVisible, MsgWaitForMultipleObjectsEx, PeekMessageW,
-    PostThreadMessageW, SetWindowsHookExW, ShowWindow, TranslateMessage, UnhookWindowsHookEx,
-    EVENT_OBJECT_SHOW, KBDLLHOOKSTRUCT, MSG, OBJID_WINDOW, PM_REMOVE, QS_ALLINPUT, SW_HIDE,
-    WH_KEYBOARD_LL, WINEVENT_OUTOFCONTEXT, WM_APP, WM_KEYDOWN, WM_KEYUP, WM_SYSKEYDOWN,
-    WM_SYSKEYUP,
+    CallNextHookEx, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, EnumWindows,
+    GetClassNameW, GetForegroundWindow, GetWindowThreadProcessId, IsWindowVisible,
+    MsgWaitForMultipleObjectsEx, PeekMessageW, PostThreadMessageW, RegisterClassW,
+    SetWindowsHookExW, ShowWindow, TranslateMessage, UnhookWindowsHookEx, EVENT_OBJECT_SHOW,
+    HWND_MESSAGE, KBDLLHOOKSTRUCT, MSG, OBJID_WINDOW, PM_REMOVE, QS_ALLINPUT, RI_KEY_BREAK,
+    SW_HIDE, WH_KEYBOARD_LL, WINDOW_EX_STYLE, WINDOW_STYLE, WINEVENT_OUTOFCONTEXT, WM_APP,
+    WM_INPUT, WM_KEYDOWN, WM_KEYUP, WM_SYSKEYDOWN, WM_SYSKEYUP, WNDCLASSW,
 };
 
 /// Magic `dwExtraInfo` value tagging events we synthesize ourselves.
@@ -200,12 +212,15 @@ impl WinKeyMachine {
 
 static APP: OnceLock<AppHandle> = OnceLock::new();
 static ACTIVE: AtomicBool = AtomicBool::new(false);
+static PROVIDER_SUPPRESSES_START: AtomicBool = AtomicBool::new(false);
+static RAW_OBSERVER_ACTIVE: AtomicBool = AtomicBool::new(false);
 static THREAD_ID: AtomicU32 = AtomicU32::new(0);
 type HookReady = mpsc::SyncSender<Result<(), String>>;
 type StopReady = mpsc::SyncSender<()>;
 
 static START_TX: OnceLock<mpsc::Sender<HookReady>> = OnceLock::new();
 static MACHINE: Mutex<WinKeyMachine> = Mutex::new(WinKeyMachine::EMPTY);
+static RAW_MACHINE: Mutex<WinKeyMachine> = Mutex::new(WinKeyMachine::EMPTY);
 static START_GUARD_ACTIVE: AtomicBool = AtomicBool::new(false);
 static START_GUARD_WORKER: AtomicBool = AtomicBool::new(false);
 static START_GUARD_UNTIL_MS: AtomicU64 = AtomicU64::new(0);
@@ -213,16 +228,22 @@ static LAST_TOGGLE_MS: AtomicU64 = AtomicU64::new(0);
 static TOGGLE_CLOCK: OnceLock<Instant> = OnceLock::new();
 
 enum Action {
-    Mask,
+    MaskFailed,
     Toggle(WinSide),
 }
 
 static ACTION_TX: OnceLock<mpsc::Sender<Action>> = OnceLock::new();
 static ACTION_RX: Mutex<Option<mpsc::Receiver<Action>>> = Mutex::new(None);
 static STOP_READY: Mutex<Option<StopReady>> = Mutex::new(None);
+static RAW_INPUT_CLASS: OnceLock<Result<(), String>> = OnceLock::new();
 
 pub fn init(app: AppHandle) {
     let _ = APP.set(app);
+}
+
+pub fn set_provider_suppression(active: bool) {
+    PROVIDER_SUPPRESSES_START.store(active, Ordering::Release);
+    RAW_MACHINE.lock().map(|mut machine| machine.reset()).ok();
 }
 
 /// Turns Win-key interception on or off. Disabling resets the machine and
@@ -235,6 +256,7 @@ pub fn set_enabled(on: bool) -> Result<(), String> {
     if !on {
         START_GUARD_ACTIVE.store(false, Ordering::Release);
         MACHINE.lock().map(|mut m| m.reset()).ok();
+        RAW_MACHINE.lock().map(|mut m| m.reset()).ok();
         clear_queued_actions();
         LAST_TOGGLE_MS.store(0, Ordering::Release);
         let tid = THREAD_ID.load(Ordering::SeqCst);
@@ -304,31 +326,56 @@ fn pump_loop(rx: mpsc::Receiver<HookReady>) {
 
 /// Installs the hook and pumps messages until a stop request arrives.
 unsafe fn run_pump(ready: HookReady) {
-    let hook = match SetWindowsHookExW(WH_KEYBOARD_LL, Some(hook_proc), None, 0) {
-        Ok(hook) => hook,
-        Err(_) => {
-            let _ = ready.send(Err("keyboard hook installation failed".to_string()));
-            disable_interception("hook installation failed");
-            return;
+    let provider_mode = PROVIDER_SUPPRESSES_START.load(Ordering::Acquire);
+    let raw_input_window = if provider_mode {
+        match create_raw_input_window() {
+            Ok(window) => Some(window),
+            Err(error) => {
+                let _ = ready.send(Err(error));
+                disable_interception("raw keyboard observer registration failed");
+                return;
+            }
+        }
+    } else {
+        None
+    };
+    let hook = if provider_mode {
+        None
+    } else {
+        match SetWindowsHookExW(WH_KEYBOARD_LL, Some(hook_proc), None, 0) {
+            Ok(hook) => Some(hook),
+            Err(_) => {
+                let _ = ready.send(Err("keyboard hook installation failed".to_string()));
+                disable_interception("hook installation failed");
+                return;
+            }
         }
     };
-    // Watch exact Start surfaces because a replacement shell may run its own
-    // hook before Prism's observer after a focus transition.
-    let show_hook = SetWinEventHook(
-        EVENT_OBJECT_SHOW,
-        EVENT_OBJECT_SHOW,
-        None,
-        Some(start_window_shown),
-        0,
-        0,
-        WINEVENT_OUTOFCONTEXT,
-    );
-    if show_hook.0.is_null() {
-        let _ = UnhookWindowsHookEx(hook);
-        let _ = ready.send(Err("Start-menu event hook installation failed".to_string()));
-        disable_interception("Start-menu event hook installation failed");
-        return;
-    }
+    let show_hook = if provider_mode {
+        None
+    } else {
+        // Generic fallback only: watch exact Start surfaces because a
+        // replacement shell may run before Prism's observer.
+        let show_hook = SetWinEventHook(
+            EVENT_OBJECT_SHOW,
+            EVENT_OBJECT_SHOW,
+            None,
+            Some(start_window_shown),
+            0,
+            0,
+            WINEVENT_OUTOFCONTEXT,
+        );
+        if show_hook.0.is_null() {
+            if let Some(hook) = hook {
+                let _ = UnhookWindowsHookEx(hook);
+            }
+            let _ = ready.send(Err("Start-menu event hook installation failed".to_string()));
+            disable_interception("Start-menu event hook installation failed");
+            return;
+        }
+        Some(show_hook)
+    };
+    RAW_OBSERVER_ACTIVE.store(provider_mode, Ordering::Release);
     let _ = ready.send(Ok(()));
     let mut msg = MSG::default();
     'pump: loop {
@@ -350,19 +397,19 @@ unsafe fn run_pump(ready: HookReady) {
                         break 'pump;
                     }
                     match action {
-                        Action::Mask => {
-                            if !send_mask_key() {
-                                disable_interception("menu-mask input rejected (elevated app?)");
-                                break 'pump;
-                            }
+                        Action::MaskFailed => {
+                            disable_interception("menu-mask input rejected (elevated app?)");
+                            break 'pump;
                         }
                         Action::Toggle(_side) => {
-                            // Dismiss only a positively identified Start
-                            // surface if another shell hook opened one.
-                            if unsafe { dismiss_start_menus() } {
-                                refocus_palette();
+                            if !PROVIDER_SUPPRESSES_START.load(Ordering::Acquire) {
+                                // Dismiss only a positively identified Start
+                                // surface if another shell hook opened one.
+                                if unsafe { dismiss_start_menus() } {
+                                    refocus_palette();
+                                }
+                                start_menu_guard();
                             }
-                            start_menu_guard();
                             if let Some(app) = APP.get() {
                                 let toggle_app = app.clone();
                                 let _ = app.run_on_main_thread(move || {
@@ -376,8 +423,17 @@ unsafe fn run_pump(ready: HookReady) {
         }
         let _ = MsgWaitForMultipleObjectsEx(None, 100, QS_ALLINPUT, Default::default());
     }
-    let _ = UnhookWinEvent(show_hook);
-    let _ = UnhookWindowsHookEx(hook);
+    RAW_OBSERVER_ACTIVE.store(false, Ordering::Release);
+    RAW_MACHINE.lock().map(|mut machine| machine.reset()).ok();
+    if let Some(show_hook) = show_hook {
+        let _ = UnhookWinEvent(show_hook);
+    }
+    if let Some(hook) = hook {
+        let _ = UnhookWindowsHookEx(hook);
+    }
+    if let Some(raw_input_window) = raw_input_window {
+        destroy_raw_input_window(raw_input_window);
+    }
     if !ACTIVE.load(Ordering::Acquire) {
         clear_queued_actions();
     }
@@ -406,10 +462,10 @@ unsafe extern "system" fn start_window_shown(
         return;
     }
 
-    let Some(host) = start_menu_host(window) else {
+    if start_menu_host(window).is_none() {
         return;
-    };
-    if host == StartMenuHost::Native && !START_GUARD_ACTIVE.load(Ordering::Acquire) {
+    }
+    if !START_GUARD_ACTIVE.load(Ordering::Acquire) {
         return;
     }
 
@@ -469,10 +525,16 @@ unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -
                 match decision {
                     Decision::Pass => {}
                     Decision::Mask => {
-                        // Run after this callback returns so the original
-                        // physical Win-down reaches every downstream hook
-                        // before Prism inserts the inert chord marker.
-                        queue_action(Action::Mask);
+                        if !PROVIDER_SUPPRESSES_START.load(Ordering::Acquire) {
+                            // Let text expanders and other global tools observe
+                            // the physical Win-down first, then insert the mask
+                            // before the matching Win-up can reach Start.
+                            let next = CallNextHookEx(None, code, wparam, lparam);
+                            if !send_mask_key() {
+                                queue_action(Action::MaskFailed);
+                            }
+                            return next;
+                        }
                     }
                     Decision::Toggle(side) => {
                         queue_toggle(side);
@@ -482,6 +544,145 @@ unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -
         }
     }
     CallNextHookEx(None, code, wparam, lparam)
+}
+
+const RAW_INPUT_WINDOW_CLASS: &str = "PrismRawKeyboardObserver";
+
+unsafe fn ensure_raw_input_class() -> Result<(), String> {
+    RAW_INPUT_CLASS
+        .get_or_init(|| {
+            let module =
+                GetModuleHandleW(None).map_err(|error| format!("get Prism module: {error}"))?;
+            let class_name = wide(RAW_INPUT_WINDOW_CLASS);
+            let class = WNDCLASSW {
+                hInstance: HINSTANCE(module.0),
+                lpfnWndProc: Some(raw_input_window_proc),
+                lpszClassName: PCWSTR(class_name.as_ptr()),
+                ..Default::default()
+            };
+            if RegisterClassW(&class) == 0 {
+                Err("register raw keyboard observer class failed".to_string())
+            } else {
+                Ok(())
+            }
+        })
+        .clone()
+}
+
+unsafe fn create_raw_input_window() -> Result<HWND, String> {
+    ensure_raw_input_class()?;
+    let module = GetModuleHandleW(None).map_err(|error| format!("get Prism module: {error}"))?;
+    let instance = HINSTANCE(module.0);
+    let class_name = wide(RAW_INPUT_WINDOW_CLASS);
+    let window = CreateWindowExW(
+        WINDOW_EX_STYLE::default(),
+        PCWSTR(class_name.as_ptr()),
+        PCWSTR::null(),
+        WINDOW_STYLE::default(),
+        0,
+        0,
+        0,
+        0,
+        Some(HWND_MESSAGE),
+        None,
+        Some(instance),
+        None,
+    )
+    .map_err(|error| format!("create raw keyboard observer window: {error}"))?;
+    // INPUTSINK only observes input while Prism is in the background. It does
+    // not set NOLEGACY, so normal key messages and third-party tools continue
+    // to receive the original keyboard stream.
+    let device = RAWINPUTDEVICE {
+        usUsagePage: HID_USAGE_PAGE_GENERIC,
+        usUsage: HID_USAGE_GENERIC_KEYBOARD,
+        dwFlags: RIDEV_INPUTSINK,
+        hwndTarget: window,
+    };
+    if let Err(error) =
+        RegisterRawInputDevices(&[device], std::mem::size_of::<RAWINPUTDEVICE>() as u32)
+    {
+        let _ = DestroyWindow(window);
+        return Err(format!("register raw keyboard observer: {error}"));
+    }
+    Ok(window)
+}
+
+unsafe fn destroy_raw_input_window(window: HWND) {
+    let remove = RAWINPUTDEVICE {
+        usUsagePage: HID_USAGE_PAGE_GENERIC,
+        usUsage: HID_USAGE_GENERIC_KEYBOARD,
+        dwFlags: RIDEV_REMOVE,
+        hwndTarget: HWND::default(),
+    };
+    let _ = RegisterRawInputDevices(&[remove], std::mem::size_of::<RAWINPUTDEVICE>() as u32);
+    let _ = DestroyWindow(window);
+}
+
+fn classify_raw_key(
+    virtual_key: u16,
+    make_code: u16,
+    flags: u16,
+    message: u32,
+) -> Option<(KeyKind, bool)> {
+    let is_up = flags as u32 & RI_KEY_BREAK != 0;
+    let message_down = message == WM_KEYDOWN || message == WM_SYSKEYDOWN;
+    let message_up = message == WM_KEYUP || message == WM_SYSKEYUP;
+    if make_code as u32 == KEYBOARD_OVERRUN_MAKE_CODE
+        || virtual_key >= 255
+        || !((message_down && !is_up) || (message_up && is_up))
+    {
+        return None;
+    }
+    let kind = if virtual_key == VK_LWIN.0 {
+        KeyKind::Win(WinSide::Left)
+    } else if virtual_key == VK_RWIN.0 {
+        KeyKind::Win(WinSide::Right)
+    } else {
+        KeyKind::Other(virtual_key)
+    };
+    Some((kind, !is_up))
+}
+
+unsafe extern "system" fn raw_input_window_proc(
+    window: HWND,
+    message: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
+    if message == WM_INPUT
+        && ACTIVE.load(Ordering::Acquire)
+        && RAW_OBSERVER_ACTIVE.load(Ordering::Acquire)
+    {
+        let mut input = RAWINPUT::default();
+        let mut size = std::mem::size_of::<RAWINPUT>() as u32;
+        let read = GetRawInputData(
+            HRAWINPUT(lparam.0 as *mut _),
+            RID_INPUT,
+            Some((&mut input as *mut RAWINPUT).cast()),
+            &mut size,
+            std::mem::size_of::<RAWINPUTHEADER>() as u32,
+        );
+        let keyboard_bytes =
+            (std::mem::size_of::<RAWINPUTHEADER>() + std::mem::size_of::<RAWKEYBOARD>()) as u32;
+        if read != u32::MAX && read >= keyboard_bytes && input.header.dwType == RIM_TYPEKEYBOARD.0 {
+            let keyboard = input.data.keyboard;
+            if let Some((kind, is_down)) = classify_raw_key(
+                keyboard.VKey,
+                keyboard.MakeCode,
+                keyboard.Flags,
+                keyboard.Message,
+            ) {
+                let decision = RAW_MACHINE
+                    .lock()
+                    .map(|mut machine| machine.feed(kind, is_down))
+                    .unwrap_or(Decision::Pass);
+                if let Decision::Toggle(side) = decision {
+                    queue_toggle(side);
+                }
+            }
+        }
+    }
+    DefWindowProcW(window, message, wparam, lparam)
 }
 
 unsafe fn send_mask_key() -> bool {
@@ -556,7 +757,9 @@ fn queue_toggle(side: WinSide) {
         }
     }
     if let Some(tx) = ACTION_TX.get() {
-        arm_start_menu_guard();
+        if !PROVIDER_SUPPRESSES_START.load(Ordering::Acquire) {
+            arm_start_menu_guard();
+        }
         if tx.send(Action::Toggle(side)).is_ok() {
             let thread_id = THREAD_ID.load(Ordering::SeqCst);
             if thread_id != 0 {
@@ -740,6 +943,10 @@ unsafe fn window_process_executable(window: HWND) -> Option<Vec<u16>> {
     })
 }
 
+fn wide(value: &str) -> Vec<u16> {
+    value.encode_utf16().chain(Some(0)).collect()
+}
+
 fn wide_eq_ascii(wide: &[u16], ascii: &str) -> bool {
     wide.len() == ascii.len()
         && wide
@@ -772,6 +979,30 @@ mod tests {
     fn run(events: &[(KeyKind, bool)]) -> Vec<Decision> {
         let mut m = WinKeyMachine::default();
         events.iter().map(|(k, d)| m.feed(*k, *d)).collect()
+    }
+
+    #[test]
+    fn raw_keyboard_packets_preserve_valid_transitions_only() {
+        assert_eq!(
+            classify_raw_key(VK_LWIN.0, 0x5b, 0, WM_KEYDOWN),
+            Some((KeyKind::Win(WinSide::Left), true))
+        );
+        assert_eq!(
+            classify_raw_key(VK_RWIN.0, 0x5c, RI_KEY_BREAK as u16, WM_KEYUP),
+            Some((KeyKind::Win(WinSide::Right), false))
+        );
+        assert_eq!(
+            classify_raw_key(0x41, 0x1e, 0, WM_KEYDOWN),
+            Some((KeyKind::Other(0x41), true))
+        );
+        assert_eq!(
+            classify_raw_key(VK_LWIN.0, KEYBOARD_OVERRUN_MAKE_CODE as u16, 0, WM_KEYDOWN),
+            None
+        );
+        assert_eq!(
+            classify_raw_key(VK_LWIN.0, 0x5b, RI_KEY_BREAK as u16, WM_KEYDOWN),
+            None
+        );
     }
 
     #[test]
