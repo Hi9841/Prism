@@ -1,7 +1,6 @@
 # Prism
 
-[![CI](https://github.com/Hi9841/Prism/actions/workflows/ci.yml/badge.svg)](https://github.com/Hi9841/Prism/actions/workflows/ci.yml)
-[![Release](https://github.com/Hi9841/Prism/actions/workflows/release.yml/badge.svg)](https://github.com/Hi9841/Prism/actions/workflows/release.yml)
+
 
 Prism is a lightweight, keyboard-first launcher for Windows. It provides fast local application, file, and folder search, plus quick access to frequently used locations.
 
