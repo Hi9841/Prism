@@ -1,5 +1,21 @@
 import { describe, expect, it } from "vitest";
-import { sanitizeHistory } from "./app";
+import { DEFAULT_SETTINGS, stepViewZoom } from "../lib/types";
+import { sanitizeHistory, sanitizeSettings } from "./app";
+
+describe("view zoom", () => {
+  it("steps within the supported range", () => {
+    expect(stepViewZoom(100, 1)).toBe(110);
+    expect(stepViewZoom(100, -1)).toBe(90);
+    expect(stepViewZoom(150, 1)).toBe(150);
+    expect(stepViewZoom(70, -1)).toBe(70);
+  });
+
+  it("sanitizes persisted zoom values and defaults older state", () => {
+    expect(sanitizeSettings({ viewZoom: 130 }).viewZoom).toBe(130);
+    expect(sanitizeSettings({ viewZoom: 135 }).viewZoom).toBe(DEFAULT_SETTINGS.viewZoom);
+    expect(sanitizeSettings({}).viewZoom).toBe(DEFAULT_SETTINGS.viewZoom);
+  });
+});
 
 describe("sanitizeHistory", () => {
   it("keeps valid unique entries and rejects malformed state", () => {

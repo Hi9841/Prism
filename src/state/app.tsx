@@ -8,12 +8,13 @@ import {
   saveState,
   setAlwaysOnTop,
   setShortcut,
+  setViewZoom,
   setWindowEffect,
   setWindowTheme,
   setWindowWidth,
 } from "../lib/bridge";
 import type { AccentId, HistoryEntry, Settings, ThemeMode, WindowEffect, WindowWidth } from "../lib/types";
-import { DEFAULT_SETTINGS } from "../lib/types";
+import { DEFAULT_SETTINGS, stepViewZoom, VIEW_ZOOM_LEVELS } from "../lib/types";
 
 export interface Toast {
   id: number;
@@ -133,6 +134,67 @@ export function AppProvider({ children }: { children: ReactNode }) {
     [schedulePersist],
   );
 
+  const changeViewZoom = useCallback(
+    (direction: -1 | 1) => {
+      const current = settingsRef.current.viewZoom;
+      const next = stepViewZoom(current, direction);
+      if (next !== current) updateSettings({ viewZoom: next });
+    },
+    [updateSettings],
+  );
+
+  // Keep zoom shortcuts global so they work from both search and settings.
+  // Capturing prevents the palette's Up/Down navigation from also firing.
+  useEffect(() => {
+    if (!ready) return;
+    let wheelDelta = 0;
+    let wheelResetTimer: ReturnType<typeof setTimeout> | null = null;
+
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (!event.ctrlKey || event.altKey || event.metaKey) return;
+      let direction: -1 | 1 | null = null;
+      if (event.key === "ArrowUp" || event.key === "+" || event.key === "=") direction = 1;
+      if (event.key === "ArrowDown" || event.key === "-" || event.key === "_") direction = -1;
+
+      if (event.key === "0") {
+        event.preventDefault();
+        event.stopPropagation();
+        updateSettings({ viewZoom: DEFAULT_SETTINGS.viewZoom });
+      } else if (direction !== null) {
+        event.preventDefault();
+        event.stopPropagation();
+        changeViewZoom(direction);
+      }
+    };
+
+    const onWheel = (event: WheelEvent) => {
+      if (!event.ctrlKey || event.deltaY === 0) return;
+      event.preventDefault();
+      event.stopPropagation();
+
+      const delta = event.deltaY * (event.deltaMode === WheelEvent.DOM_DELTA_PIXEL ? 1 : 16);
+      if (wheelDelta !== 0 && Math.sign(delta) !== Math.sign(wheelDelta)) wheelDelta = 0;
+      wheelDelta += delta;
+
+      if (Math.abs(wheelDelta) >= 40) {
+        changeViewZoom(wheelDelta < 0 ? 1 : -1);
+        wheelDelta = 0;
+      }
+      if (wheelResetTimer) clearTimeout(wheelResetTimer);
+      wheelResetTimer = setTimeout(() => {
+        wheelDelta = 0;
+      }, 180);
+    };
+
+    window.addEventListener("keydown", onKeyDown, true);
+    window.addEventListener("wheel", onWheel, { capture: true, passive: false });
+    return () => {
+      window.removeEventListener("keydown", onKeyDown, true);
+      window.removeEventListener("wheel", onWheel, true);
+      if (wheelResetTimer) clearTimeout(wheelResetTimer);
+    };
+  }, [ready, changeViewZoom, updateSettings]);
+
   const pushHistory = useCallback(
     (id: string, title: string) => {
       const next = [
@@ -214,6 +276,11 @@ export function AppProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     if (!ready) return;
+    setViewZoom(settings.viewZoom).catch(() => {});
+  }, [ready, settings.viewZoom]);
+
+  useEffect(() => {
+    if (!ready) return;
     // The persisted shortcut must be applied at startup too, not just on
     // change. The command validates and registers before committing.
     setShortcut(settings.shortcut)
@@ -274,13 +341,14 @@ export function useApp(): AppCtx {
 
 /** Validates loaded settings against the known value sets; anything
  * unexpected falls back to the default. Mirrors the backend validator. */
-function sanitizeSettings(raw: unknown): Settings {
+export function sanitizeSettings(raw: unknown): Settings {
   const src = (raw ?? {}) as Record<string, unknown>;
   const pick = <T,>(value: unknown, allowed: readonly T[], fallback: T): T =>
     allowed.includes(value as T) ? (value as T) : fallback;
   return {
     accent: pick(src.accent, ["iris", "azure", "mint", "amber", "rose"], DEFAULT_SETTINGS.accent),
     width: pick(src.width, [560, 640, 720], DEFAULT_SETTINGS.width),
+    viewZoom: pick(src.viewZoom, VIEW_ZOOM_LEVELS, DEFAULT_SETTINGS.viewZoom),
     effect: pick(src.effect, ["acrylic", "mica", "solid"], DEFAULT_SETTINGS.effect),
     shortcut: pick(
       src.shortcut,
