@@ -1,6 +1,19 @@
 import { describe, expect, it } from "vitest";
 import { DEFAULT_SETTINGS, stepViewZoom } from "../lib/types";
-import { sanitizeHistory, sanitizeSettings } from "./app";
+import { SHORTCUT_OPTIONS, sanitizeHistory, sanitizeSettings } from "./app";
+
+describe("default shortcut", () => {
+  it("uses standalone Win for a fresh or invalid state", () => {
+    expect(DEFAULT_SETTINGS.shortcut).toBe("Win");
+    expect(SHORTCUT_OPTIONS[0]?.value).toBe("Win");
+    expect(sanitizeSettings({}).shortcut).toBe("Win");
+    expect(sanitizeSettings({ shortcut: "invalid" }).shortcut).toBe("Win");
+  });
+
+  it("preserves a valid shortcut selected by an existing user", () => {
+    expect(sanitizeSettings({ shortcut: "Ctrl+Alt+Space" }).shortcut).toBe("Ctrl+Alt+Space");
+  });
+});
 
 describe("view zoom", () => {
   it("steps within the supported range", () => {

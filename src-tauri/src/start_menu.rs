@@ -57,7 +57,8 @@ pub fn recover_stale(app: &AppHandle) -> Result<(), String> {
 }
 
 /// Makes the installed provider consume standalone Win. Returns `false` when
-/// StartAllBack is not installed, allowing the generic hook fallback to run.
+/// a supported StartAllBack installation is unavailable, allowing the
+/// generic hook fallback to mask Start instead.
 pub fn enable(app: &AppHandle) -> Result<bool, String> {
     if OVERRIDE_ACTIVE.load(Ordering::Acquire) {
         return Ok(true);

@@ -28,6 +28,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 /// The only accepted global shortcuts. Bare typing keys, reserved keys and
 /// known system/security combos are never accepted.
 const ALLOWED_SHORTCUTS: &[&str] = &[
+    "Win", // standalone Win-key interception and first-run default
     "Ctrl+Alt+Space",
     "Ctrl+Alt+S",
     "Ctrl+Alt+Shift+S",
@@ -35,10 +36,11 @@ const ALLOWED_SHORTCUTS: &[&str] = &[
     "Ctrl+Alt+Shift+P",
     "Ctrl+Alt+Enter",
     "Ctrl+Alt+Shift+Enter",
-    "Win", // standalone Win-key interception, off by default
 ];
 
-const STATE_VERSION: u32 = 2;
+const DEFAULT_SHORTCUT: &str = "Win";
+const LEGACY_STATE_VERSION: u32 = 2;
+const STATE_VERSION: u32 = 3;
 const PALETTE_HIDE_DELAY: Duration = Duration::from_millis(125);
 const PALETTE_RAISE_RETRY_DELAY: Duration = Duration::from_millis(40);
 
@@ -96,18 +98,12 @@ pub fn run() {
             if let Some(window) = app.get_webview_window("main") {
                 let _ = apply_window_look(&window, "solid", "dark");
             }
-            // Register the persisted, validated shortcut immediately so the
-            // hotkey works before the webview finishes loading. The
-            // frontend's startup apply is then an idempotent no-op.
-            if let Ok(Some(state)) = load_state_value(app.handle()) {
-                if let Some(combo) = state
-                    .get("settings")
-                    .and_then(|s| s.get("shortcut"))
-                    .and_then(|s| s.as_str())
-                {
-                    let _ = apply_shortcut(app.handle(), combo);
-                }
-            }
+            // Install the persisted shortcut before the webview loads. A
+            // fresh, corrupt, or incomplete state defaults natively to Win,
+            // so first-run activation never waits on frontend startup.
+            let persisted = load_state_value(app.handle()).ok().flatten();
+            let combo = startup_shortcut(persisted.as_ref());
+            let _ = apply_shortcut(app.handle(), &combo);
             perf::finish(startup_timer, "startup_setup", String::new);
             Ok(())
         })
@@ -244,7 +240,7 @@ pub(crate) fn toggle_palette(app: &tauri::AppHandle) {
     let Some(window) = app.get_webview_window("main") else {
         return;
     };
-    let opening = !PALETTE_OPEN.fetch_xor(true, Ordering::AcqRel);
+    let opening = toggle_open_state(&PALETTE_OPEN);
     let transition = PALETTE_TRANSITION.fetch_add(1, Ordering::AcqRel) + 1;
     if !opening {
         let close_app = app.clone();
@@ -271,8 +267,11 @@ pub(crate) fn toggle_palette(app: &tauri::AppHandle) {
     // Send the desired state, not an ambiguous toggle, so native and webview
     // state cannot diverge if an event is delayed.
     let _ = window.emit("prism-toggle", opening);
-    win_key::refresh_hook_priority();
     perf::finish(timer, "palette_toggle", || format!("open={opening}"));
+}
+
+fn toggle_open_state(open: &AtomicBool) -> bool {
+    !open.fetch_xor(true, Ordering::AcqRel)
 }
 
 #[tauri::command]
@@ -573,6 +572,16 @@ fn validate_shortcut(combo: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn startup_shortcut(state: Option<&serde_json::Value>) -> String {
+    state
+        .and_then(|value| value.get("settings"))
+        .and_then(|settings| settings.get("shortcut"))
+        .and_then(|shortcut| shortcut.as_str())
+        .filter(|shortcut| validate_shortcut(shortcut).is_ok())
+        .unwrap_or(DEFAULT_SHORTCUT)
+        .to_string()
+}
+
 /// Applies a global shortcut. The new binding is activated and proven
 /// BEFORE the old one is released; on any failure the previous shortcut
 /// stays active and an error is returned. State is only updated on success.
@@ -591,9 +600,9 @@ fn apply_shortcut(app: &tauri::AppHandle, combo: &str) -> Result<(), String> {
         // registration. If the hook later fails, it self-disables and the
         // frontend is notified.
         let provider_suppression = start_menu::enable(app)?;
-        win_key::set_shell_suppression(provider_suppression);
+        win_key::set_provider_suppression(provider_suppression);
         if let Err(error) = win_key::set_enabled(true) {
-            win_key::set_shell_suppression(false);
+            win_key::set_provider_suppression(false);
             let _ = start_menu::restore(app);
             return Err(error);
         }
@@ -619,7 +628,7 @@ fn apply_shortcut(app: &tauri::AppHandle, combo: &str) -> Result<(), String> {
             }
             return Err(error);
         }
-        win_key::set_shell_suppression(false);
+        win_key::set_provider_suppression(false);
         if let Ok(old) = prev.parse::<Shortcut>() {
             let _ = gs.unregister(old);
         }
@@ -633,9 +642,9 @@ fn set_shortcut(app: tauri::AppHandle, combo: String) -> Result<(), String> {
     apply_shortcut(&app, &combo)
 }
 
-/// Reads the persisted state file if it exists and has a known version.
-/// Anything malformed is reported as absent so the frontend falls back to
-/// defaults rather than crashing.
+/// Reads persisted state and performs the one-time 0.3.3 shortcut migration.
+/// Version 2 settings are preserved except for the shortcut, which the 0.3.3
+/// installer contract intentionally changes to the new Win default.
 fn load_state_value(app: &tauri::AppHandle) -> Result<Option<serde_json::Value>, String> {
     let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
     let path = dir.join("prism.json");
@@ -645,11 +654,34 @@ fn load_state_value(app: &tauri::AppHandle) -> Result<Option<serde_json::Value>,
     let text = std::fs::read_to_string(&path).map_err(|e| format!("failed to read state: {e}"))?;
     let value: serde_json::Value =
         serde_json::from_str(&text).map_err(|e| format!("corrupt state file: {e}"))?;
-    if value.get("version").and_then(|v| v.as_u64()) == Some(STATE_VERSION as u64) {
-        Ok(Some(value))
-    } else {
-        Ok(None)
+    let Some((value, migrated)) = migrate_state_value(value)? else {
+        return Ok(None);
+    };
+    if migrated {
+        persist_state_value(&dir, &value)?;
     }
+    Ok(Some(value))
+}
+
+fn migrate_state_value(
+    mut value: serde_json::Value,
+) -> Result<Option<(serde_json::Value, bool)>, String> {
+    let version = value.get("version").and_then(|v| v.as_u64());
+    if version == Some(STATE_VERSION as u64) {
+        return Ok(Some((value, false)));
+    }
+    if version != Some(LEGACY_STATE_VERSION as u64) {
+        return Ok(None);
+    }
+
+    let settings = value
+        .get_mut("settings")
+        .and_then(|settings| settings.as_object_mut())
+        .ok_or_else(|| "legacy state.settings must be an object".to_string())?;
+    settings.insert("shortcut".to_string(), serde_json::json!(DEFAULT_SHORTCUT));
+    value["version"] = serde_json::json!(STATE_VERSION);
+    validate_state(&value)?;
+    Ok(Some((value, true)))
 }
 
 #[tauri::command]
@@ -664,7 +696,11 @@ fn save_state(app: tauri::AppHandle, state: serde_json::Value) -> Result<(), Str
     let mut value = state;
     value["version"] = serde_json::json!(STATE_VERSION);
     let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
-    std::fs::create_dir_all(&dir).map_err(|e| format!("failed to create data dir: {e}"))?;
+    persist_state_value(&dir, &value)
+}
+
+fn persist_state_value(dir: &std::path::Path, value: &serde_json::Value) -> Result<(), String> {
+    std::fs::create_dir_all(dir).map_err(|e| format!("failed to create data dir: {e}"))?;
     let text = serde_json::to_string_pretty(&value).map_err(|e| e.to_string())?;
     let final_path = dir.join("prism.json");
     let tmp_path = dir.join("prism.json.tmp");
@@ -743,8 +779,8 @@ fn quit_app(app: tauri::AppHandle) {
     // Ensure interception is fully torn down before exiting.
     taskbar::release();
     let _ = win_key::set_enabled(false);
-    win_key::set_shell_suppression(false);
     let _ = start_menu::restore(&app);
+    win_key::set_provider_suppression(false);
     app.exit(0);
 }
 
@@ -771,6 +807,59 @@ mod tests {
         ] {
             assert!(validate_shortcut(bad).is_err(), "should reject {bad}");
         }
+    }
+
+    #[test]
+    fn startup_shortcut_defaults_to_win_and_preserves_valid_choices() {
+        assert_eq!(startup_shortcut(None), DEFAULT_SHORTCUT);
+        assert_eq!(
+            startup_shortcut(Some(&serde_json::json!({
+                "settings": { "shortcut": "Ctrl+Alt+Space" }
+            }))),
+            "Ctrl+Alt+Space"
+        );
+        assert_eq!(
+            startup_shortcut(Some(&serde_json::json!({
+                "settings": { "shortcut": "Win+L" }
+            }))),
+            DEFAULT_SHORTCUT
+        );
+    }
+
+    #[test]
+    fn version_two_state_migrates_only_the_shortcut_once() {
+        let legacy = serde_json::json!({
+            "version": LEGACY_STATE_VERSION,
+            "settings": {
+                "accent": "mint",
+                "width": 720,
+                "viewZoom": 110,
+                "effect": "mica",
+                "shortcut": "Ctrl+Alt+Space",
+                "alwaysOnTop": false,
+                "theme": "dark"
+            },
+            "history": [{ "id": "app::test", "title": "Test", "ts": 7 }]
+        });
+        let (migrated, changed) = migrate_state_value(legacy).unwrap().unwrap();
+        assert!(changed);
+        assert_eq!(migrated["version"], STATE_VERSION);
+        assert_eq!(migrated["settings"]["shortcut"], DEFAULT_SHORTCUT);
+        assert_eq!(migrated["settings"]["accent"], "mint");
+        assert_eq!(migrated["history"][0]["id"], "app::test");
+
+        let (unchanged, changed_again) = migrate_state_value(migrated).unwrap().unwrap();
+        assert!(!changed_again);
+        assert_eq!(unchanged["settings"]["shortcut"], DEFAULT_SHORTCUT);
+    }
+
+    #[test]
+    fn repeated_toggle_state_alternates_open_and_closed() {
+        let open = AtomicBool::new(false);
+        assert!(toggle_open_state(&open));
+        assert!(!toggle_open_state(&open));
+        assert!(toggle_open_state(&open));
+        assert!(!toggle_open_state(&open));
     }
 
     #[test]

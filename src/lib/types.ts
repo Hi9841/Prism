@@ -99,7 +99,7 @@ export const DEFAULT_SETTINGS: Settings = {
   width: 640,
   viewZoom: 100,
   effect: "solid",
-  shortcut: "Ctrl+Alt+Space",
+  shortcut: "Win",
   alwaysOnTop: true,
   theme: "system",
 };
