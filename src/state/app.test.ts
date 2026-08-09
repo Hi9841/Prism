@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { DEFAULT_QUICK_ACCESS, DEFAULT_SETTINGS, stepViewZoom } from "../lib/types";
+import { DEFAULT_QUICK_ACCESS, DEFAULT_SETTINGS, reorderPinnedApps, stepViewZoom } from "../lib/types";
 import { SHORTCUT_OPTIONS, sanitizeHistory, sanitizeSettings } from "./app";
 
 describe("default shortcut", () => {
@@ -70,6 +70,28 @@ describe("pinned app settings", () => {
   it("caps persisted pins", () => {
     const pinnedApps = Array.from({ length: 80 }, (_, index) => `app-${index}`);
     expect(sanitizeSettings({ pinnedApps }).pinnedApps).toHaveLength(64);
+  });
+});
+
+describe("pinned app ordering", () => {
+  it("moves an app up or down to the target position", () => {
+    expect(reorderPinnedApps(["app-a", "app-b", "app-c"], "app-a", "app-b")).toEqual([
+      "app-b",
+      "app-a",
+      "app-c",
+    ]);
+    expect(reorderPinnedApps(["app-a", "app-b", "app-c"], "app-c", "app-a")).toEqual([
+      "app-c",
+      "app-a",
+      "app-b",
+    ]);
+  });
+
+  it("leaves the input untouched when a move is invalid", () => {
+    const pinnedApps = ["app-a", "app-b"];
+    expect(reorderPinnedApps(pinnedApps, "missing", "app-b")).toEqual(pinnedApps);
+    expect(reorderPinnedApps(pinnedApps, "app-a", "app-a")).toEqual(pinnedApps);
+    expect(pinnedApps).toEqual(["app-a", "app-b"]);
   });
 });
 

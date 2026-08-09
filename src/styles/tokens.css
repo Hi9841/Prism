@@ -305,6 +305,30 @@ body {
       inset 0 0 0 1px color-mix(in oklab, var(--accent) 13%, transparent),
       inset 0 1px 0 rgb(255 255 255 / 0.025);
   }
+  .row[data-drop-target="true"] {
+    background: color-mix(in oklab, var(--accent) 13%, var(--t-surface-active));
+    box-shadow:
+      inset 0 0 0 1px color-mix(in oklab, var(--accent) 52%, transparent),
+      0 3px 10px color-mix(in oklab, var(--accent) 9%, transparent);
+  }
+  .row[data-dragging="true"] {
+    opacity: 0.42;
+  }
+
+  .pin-drag-preview {
+    display: grid;
+    grid-template-columns: 40px minmax(0, 1fr) auto;
+    width: 232px;
+    align-items: center;
+    gap: 10px;
+    padding: 7px 9px;
+    border-radius: var(--radius-sm);
+    background: var(--t-bg-raised);
+    box-shadow:
+      inset 0 1px 0 color-mix(in oklab, var(--t-fg) 10%, transparent),
+      0 8px 22px rgb(0 0 0 / 0.34);
+    animation: pin-drag-pickup 120ms var(--ease-out-soft) both;
+  }
 
   /* Focus ring - keyboard-first, never decorative */
   .focus-ring {
@@ -506,6 +530,12 @@ body {
   from {
     opacity: 0;
     transform: translateY(5px) scale(0.98);
+  }
+}
+@keyframes pin-drag-pickup {
+  from {
+    opacity: 0.72;
+    transform: scale(0.96);
   }
 }
 
