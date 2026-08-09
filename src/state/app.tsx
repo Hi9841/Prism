@@ -39,6 +39,7 @@ interface AppCtx {
 const Ctx = createContext<AppCtx | null>(null);
 
 export const SHORTCUT_OPTIONS: { value: string; label: string }[] = [
+  { value: "Win", label: "Win key" },
   { value: "Ctrl+Alt+Space", label: "Ctrl + Alt + Space" },
   { value: "Ctrl+Alt+S", label: "Ctrl + Alt + S" },
   { value: "Ctrl+Alt+Shift+S", label: "Ctrl + Alt + Shift + S" },
@@ -46,7 +47,6 @@ export const SHORTCUT_OPTIONS: { value: string; label: string }[] = [
   { value: "Ctrl+Alt+Shift+P", label: "Ctrl + Alt + Shift + P" },
   { value: "Ctrl+Alt+Enter", label: "Ctrl + Alt + Enter" },
   { value: "Ctrl+Alt+Shift+Enter", label: "Ctrl + Alt + Shift + Enter" },
-  { value: "Win", label: "Win key" },
 ];
 
 export const THEME_OPTIONS: { value: ThemeMode; label: string }[] = [
@@ -106,7 +106,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
     if (persistTimer.current) clearTimeout(persistTimer.current);
     persistTimer.current = setTimeout(() => {
       saveState({
-        version: 2,
+        version: 3,
         settings: settingsRef.current,
         history: historyRef.current,
       }).catch(() => {});

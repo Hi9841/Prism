@@ -1,16 +1,26 @@
-//! Migration recovery for Start-menu settings changed by older Prism builds.
+//! Reversible integration with installed Start-menu providers.
 //!
-//! Prism no longer changes StartAllBack's global `WinkeyFunction`. The journal
-//! reader and watchdog entry point remain so an upgrade or an already-running
-//! watchdog can restore the exact pre-Prism value from an older session.
+//! StartAllBack keeps its Explorer hook active even when its classic menu is
+//! disabled. `WinkeyFunction=1` forwards standalone Win to native Start;
+//! `2` consumes it. Prism temporarily selects `2` while it owns Win and
+//! restores the exact previous registry state afterward.
 
+use std::fs::OpenOptions;
+use std::io::Write;
 use std::os::windows::ffi::OsStrExt;
+use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager};
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::{CloseHandle, LPARAM, WAIT_TIMEOUT, WPARAM};
+use windows::Win32::Storage::FileSystem::{
+    GetFileVersionInfoSizeW, GetFileVersionInfoW, VerQueryValueW, VS_FIXEDFILEINFO,
+};
 use windows::Win32::System::Registry::{
     RegCloseKey, RegDeleteValueW, RegOpenKeyExW, RegQueryValueExW, RegSetValueExW, HKEY,
     HKEY_CURRENT_USER, KEY_QUERY_VALUE, KEY_SET_VALUE, REG_DWORD, REG_VALUE_TYPE,
@@ -27,7 +37,11 @@ const JOURNAL_NAME: &str = "start-menu-restore.json";
 const SETTINGS_MESSAGE: &str = "SIBSettings";
 const WATCHDOG_ARGUMENT: &str = "--prism-start-restore-watchdog";
 const RESTORE_ARGUMENT: &str = "--prism-restore-start-menu";
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 const WATCHDOG_POLL_MS: u32 = 500;
+const WATCHDOG_READY_TIMEOUT: Duration = Duration::from_secs(2);
+
+static OVERRIDE_ACTIVE: AtomicBool = AtomicBool::new(false);
 
 #[derive(Debug, Deserialize, Serialize)]
 struct RestoreJournal {
@@ -42,17 +56,65 @@ pub fn recover_stale(app: &AppHandle) -> Result<(), String> {
     restore_from_journal(&journal_path(app)?)
 }
 
-/// Restores any override left by an older Prism build, then selects the
-/// cooperative keyboard-hook path. Prism no longer changes another shell
-/// provider's global keyboard policy while it is running.
-pub fn enable(app: &AppHandle) -> Result<(), String> {
-    recover_stale(app)
+/// Makes the installed provider consume standalone Win. Returns `false` when
+/// a supported StartAllBack installation is unavailable, allowing the
+/// generic hook fallback to mask Start instead.
+pub fn enable(app: &AppHandle) -> Result<bool, String> {
+    if OVERRIDE_ACTIVE.load(Ordering::Acquire) {
+        return Ok(true);
+    }
+
+    if !supported_provider_installed() {
+        return Ok(false);
+    }
+
+    let journal_path = journal_path(app)?;
+    if journal_path.exists() {
+        restore_from_journal(&journal_path)?;
+    }
+
+    let Some((key, original)) = open_provider_key()? else {
+        return Ok(false);
+    };
+    let key_guard = RegistryKey(key);
+    if original == Some(DO_NOTHING) {
+        return Ok(true);
+    }
+
+    let journal = RestoreJournal {
+        version: 2,
+        token: journal_token(),
+        value_existed: original.is_some(),
+        value: original.unwrap_or_default(),
+    };
+    write_journal(&journal_path, &journal)?;
+    if let Err(error) = start_watchdog(&journal_path, journal.token) {
+        let _ = std::fs::remove_file(&journal_path);
+        return Err(error);
+    }
+
+    if let Err(error) = set_dword(key_guard.0, DO_NOTHING).and_then(|_| notify_provider()) {
+        if restore_value(key_guard.0, &journal)
+            .and_then(|_| notify_provider())
+            .is_ok()
+        {
+            let _ = std::fs::remove_file(&journal_path);
+        }
+        return Err(error);
+    }
+
+    OVERRIDE_ACTIVE.store(true, Ordering::Release);
+    Ok(true)
 }
 
 /// Restores the exact value (including absence) that existed before Prism
 /// claimed Win.
 pub fn restore(app: &AppHandle) -> Result<(), String> {
-    restore_from_journal(&journal_path(app)?)
+    let result = restore_from_journal(&journal_path(app)?);
+    if result.is_ok() {
+        OVERRIDE_ACTIVE.store(false, Ordering::Release);
+    }
+    result
 }
 
 fn restore_from_journal(path: &Path) -> Result<(), String> {
@@ -78,6 +140,41 @@ fn restore_from_journal(path: &Path) -> Result<(), String> {
         notify_provider()?;
     }
     std::fs::remove_file(path).map_err(|error| format!("remove Start restore journal: {error}"))?;
+    Ok(())
+}
+
+fn journal_token() -> u64 {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos() as u64;
+    nanos ^ ((std::process::id() as u64) << 32)
+}
+
+fn start_watchdog(journal_path: &Path, token: u64) -> Result<(), String> {
+    let ready_path = watchdog_ready_path(journal_path, token);
+    let _ = std::fs::remove_file(&ready_path);
+    let executable = std::env::current_exe()
+        .map_err(|error| format!("locate Prism crash-recovery executable: {error}"))?;
+    let mut child = Command::new(executable)
+        .arg(WATCHDOG_ARGUMENT)
+        .arg(std::process::id().to_string())
+        .arg(journal_path)
+        .arg(token.to_string())
+        .creation_flags(CREATE_NO_WINDOW)
+        .spawn()
+        .map_err(|error| format!("start Prism crash-recovery watchdog: {error}"))?;
+
+    let deadline = std::time::Instant::now() + WATCHDOG_READY_TIMEOUT;
+    while !ready_path.exists() {
+        if std::time::Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err("Prism crash-recovery watchdog did not become ready".to_string());
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let _ = std::fs::remove_file(ready_path);
     Ok(())
 }
 
@@ -163,6 +260,24 @@ fn journal_path(app: &AppHandle) -> Result<PathBuf, String> {
         .map_err(|error| error.to_string())
 }
 
+fn write_journal(path: &Path, journal: &RestoreJournal) -> Result<(), String> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| "Start restore journal has no parent".to_string())?;
+    std::fs::create_dir_all(parent)
+        .map_err(|error| format!("create Start restore directory: {error}"))?;
+    let bytes = serde_json::to_vec(journal).map_err(|error| error.to_string())?;
+    let mut file = OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .open(path)
+        .map_err(|error| format!("create Start restore journal: {error}"))?;
+    file.write_all(&bytes)
+        .and_then(|_| file.sync_all())
+        .map_err(|error| format!("persist Start restore journal: {error}"))
+}
+
 fn open_provider_key() -> Result<Option<(HKEY, Option<u32>)>, String> {
     let key_path = wide(KEY_PATH);
     let mut key = HKEY::default();
@@ -183,6 +298,58 @@ fn open_provider_key() -> Result<Option<(HKEY, Option<u32>)>, String> {
     let key = key_guard.0;
     std::mem::forget(key_guard);
     Ok(Some((key, value)))
+}
+
+fn supported_provider_installed() -> bool {
+    let Ok(local_app_data) = std::env::var("LOCALAPPDATA") else {
+        return false;
+    };
+    let dll = PathBuf::from(local_app_data)
+        .join("StartAllBack")
+        .join("StartAllBackX64.dll");
+    file_version(&dll).is_some_and(|version| version == (3, 9, 24, 5377))
+}
+
+fn file_version(path: &Path) -> Option<(u16, u16, u16, u16)> {
+    let path_wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+    let size = unsafe { GetFileVersionInfoSizeW(PCWSTR(path_wide.as_ptr()), None) };
+    if size == 0 {
+        return None;
+    }
+    let mut bytes = vec![0u8; size as usize];
+    unsafe {
+        GetFileVersionInfoW(
+            PCWSTR(path_wide.as_ptr()),
+            None,
+            size,
+            bytes.as_mut_ptr().cast(),
+        )
+        .ok()?;
+    }
+    let root = wide(r"\");
+    let mut fixed = std::ptr::null_mut();
+    let mut fixed_size = 0u32;
+    if !unsafe {
+        VerQueryValueW(
+            bytes.as_ptr().cast(),
+            PCWSTR(root.as_ptr()),
+            &mut fixed,
+            &mut fixed_size,
+        )
+    }
+    .as_bool()
+        || fixed.is_null()
+        || fixed_size < std::mem::size_of::<VS_FIXEDFILEINFO>() as u32
+    {
+        return None;
+    }
+    let fixed = unsafe { &*(fixed as *const VS_FIXEDFILEINFO) };
+    Some((
+        (fixed.dwFileVersionMS >> 16) as u16,
+        fixed.dwFileVersionMS as u16,
+        (fixed.dwFileVersionLS >> 16) as u16,
+        fixed.dwFileVersionLS as u16,
+    ))
 }
 
 fn read_dword(key: HKEY) -> Result<Option<u32>, String> {
