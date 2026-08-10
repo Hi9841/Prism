@@ -20,7 +20,12 @@ pub fn present() {
     };
     unsafe {
         let was_topmost = GetWindowLongPtrW(taskbar, GWL_EXSTYLE) as u32 & WS_EX_TOPMOST.0 != 0;
-        MADE_TOPMOST.store(!was_topmost, Ordering::Release);
+        // Preserve ownership across duplicate presentation requests. Otherwise
+        // a second call observes our own topmost change, clears this flag, and
+        // prevents `release` from restoring the taskbar afterward.
+        if !was_topmost {
+            MADE_TOPMOST.store(true, Ordering::Release);
+        }
         let mut appbar = APPBARDATA {
             cbSize: std::mem::size_of::<APPBARDATA>() as u32,
             hWnd: taskbar,

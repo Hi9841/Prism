@@ -226,20 +226,26 @@ impl ScanCtx {
     }
 }
 
-struct ComGuard;
+struct ComGuard {
+    initialized: bool,
+}
 
 impl ComGuard {
     fn init() -> Self {
-        unsafe {
-            let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+        Self {
+            initialized: unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) }.is_ok(),
         }
-        Self
     }
 }
 
 impl Drop for ComGuard {
     fn drop(&mut self) {
-        unsafe { CoUninitialize() }
+        // CoUninitialize must only balance a successful CoInitializeEx call.
+        // In particular, RPC_E_CHANGED_MODE means this thread already belongs
+        // to a different apartment and must be left untouched.
+        if self.initialized {
+            unsafe { CoUninitialize() }
+        }
     }
 }
 

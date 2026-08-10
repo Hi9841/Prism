@@ -15,7 +15,7 @@ import {
   X,
 } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { quitApp, setShortcut } from "../lib/bridge";
+import { getAppVersion, quitApp, setShortcut } from "../lib/bridge";
 import type { AccentId, QuickAccessKind, ThemeMode, WindowEffect, WindowWidth } from "../lib/types";
 import { DEFAULT_SETTINGS, QUICK_ACCESS_LIMIT, stepViewZoom, VIEW_ZOOM_LEVELS } from "../lib/types";
 import { SHORTCUT_OPTIONS, THEME_OPTIONS, useApp } from "../state/app";
@@ -216,6 +216,13 @@ export function SettingsSheet() {
   const { settings, updateSettings, openSettings, setOpenSettings, clearHistory } = useApp();
   const panelRef = useRef<HTMLDivElement>(null);
   const [titleId] = useState(() => `prism-settings-title-${Math.random().toString(36).slice(2, 8)}`);
+  const [version, setVersion] = useState("");
+
+  useEffect(() => {
+    void getAppVersion()
+      .then(setVersion)
+      .catch(() => {});
+  }, []);
 
   // Focus management: focus the panel on open, restore it on close.
   useEffect(() => {
@@ -384,7 +391,9 @@ export function SettingsSheet() {
           <div className="flex items-center justify-between py-3">
             <div>
               <div className="text-[13px] font-medium text-fg">Prism</div>
-              <div className="mt-0.5 text-[11.5px] text-fg-tertiary">Version 0.4.0</div>
+              <div className="mt-0.5 text-[11.5px] text-fg-tertiary">
+                {version ? `Version ${version}` : "Version"}
+              </div>
             </div>
             <button
               type="button"
