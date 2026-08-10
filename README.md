@@ -10,6 +10,8 @@ Download the latest `Prism_*_x64-setup.exe` from [GitHub Releases](https://githu
 
 Prism installs for the current Windows user without administrator access. The installer downloads the WebView2 bootstrapper only when the runtime is missing. Builds are currently unsigned, so Windows SmartScreen may display a warning.
 
+The installer registers Prism as a per-user startup app. It starts hidden at Windows sign-in so the global shortcut is ready immediately, and it can be managed from **Task Manager > Startup apps**.
+
 ## Development
 
 Requirements:

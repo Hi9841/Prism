@@ -72,6 +72,8 @@ pub fn run() {
             if let Some(window) = app.get_webview_window("main") {
                 if window.is_visible().unwrap_or(false) {
                     let _ = window.set_focus();
+                } else {
+                    toggle_palette(app);
                 }
             }
         }))
