@@ -1,3 +1,4 @@
+import { getVersion } from "@tauri-apps/api/app";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
@@ -8,6 +9,11 @@ import type { AppEntry, FileSearchResponse, PersistedState, QuickAccessEntry, Wi
 export type PowerAction = "lock" | "shutdown" | "restart";
 
 export const inTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+
+export function getAppVersion(): Promise<string> {
+  if (!inTauri) return Promise.resolve("");
+  return getVersion();
+}
 
 /* ---------------- clipboard ---------------- */
 
