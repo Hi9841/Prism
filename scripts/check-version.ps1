@@ -31,8 +31,8 @@ if ($versions | Where-Object { $_ -ne $versions[0] }) {
   throw "Version mismatch: package=$($versions[0]), tauri=$($versions[1]), cargo=$($versions[2]), lock=$($versions[3])"
 }
 
-if ($ExpectedTag -and $ExpectedTag -ne "v$($versions[0])") {
-  throw "Release tag '$ExpectedTag' does not match application version 'v$($versions[0])'."
+if ($ExpectedTag -and $ExpectedTag -notin @($versions[0], "v$($versions[0])")) {
+  throw "Release tag '$ExpectedTag' does not match application version '$($versions[0])'."
 }
 
 Write-Host "Prism version $($versions[0]) is consistent."
