@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { DEFAULT_QUICK_ACCESS, DEFAULT_SETTINGS, reorderPinnedApps, stepViewZoom } from "../lib/types";
+import {
+  DEFAULT_QUICK_ACCESS,
+  DEFAULT_SETTINGS,
+  isElevatablePath,
+  reorderPinnedApps,
+  stepViewZoom,
+} from "../lib/types";
 import { SHORTCUT_OPTIONS, sanitizeHistory, sanitizeSettings } from "./app";
 
 describe("default shortcut", () => {
@@ -101,6 +107,36 @@ describe("pinned app ordering", () => {
     expect(reorderPinnedApps(pinnedApps, "missing", "app-b")).toEqual(pinnedApps);
     expect(reorderPinnedApps(pinnedApps, "app-a", "app-a")).toEqual(pinnedApps);
     expect(pinnedApps).toEqual(["app-a", "app-b"]);
+  });
+});
+
+describe("administrator launch eligibility", () => {
+  it("allows desktop applications and supported Windows scripts", () => {
+    for (const path of [
+      "tool.exe",
+      "tool.COM",
+      "task.bat",
+      "task.cmd",
+      "task.ps1",
+      "task.vbs",
+      "task.js",
+      "task.wsf",
+    ]) {
+      expect(isElevatablePath(`C:\\Tools\\${path}`)).toBe(true);
+    }
+  });
+
+  it("rejects folders, shortcuts, documents, URLs, and missing targets", () => {
+    for (const path of [
+      undefined,
+      "",
+      "C:\\Tools",
+      "tool.lnk",
+      "notes.txt",
+      "https://example.com/tool.exe/",
+    ]) {
+      expect(isElevatablePath(path)).toBe(false);
+    }
   });
 });
 
