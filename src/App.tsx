@@ -18,9 +18,7 @@ function Launcher() {
   const palette = usePalette();
   const { reset } = palette;
   const { setOpenSettings } = app;
-  const [phase, setPhase] = useState<"hidden" | "preparing" | "visible" | "exiting">(
-    inTauri ? "hidden" : "visible",
-  );
+  const [phase, setPhase] = useState<"hidden" | "preparing" | "visible">(inTauri ? "hidden" : "visible");
   const visible = phase !== "hidden";
   const visibleRef = useRef(false);
   const blurCheck = useRef<number | null>(null);
@@ -29,7 +27,8 @@ function Launcher() {
 
   const hide = useCallback(() => {
     if (!visibleRef.current) return;
-    setPhase("exiting");
+    setPhase("hidden");
+    hidePaletteWindow().catch(() => {});
   }, []);
 
   // Rust-side: global hotkey pressed, or user clicked away (blur).
@@ -109,16 +108,6 @@ function Launcher() {
     };
   }, [phase]);
 
-  const onAnimationEnd = useCallback(
-    (event: React.AnimationEvent<HTMLDivElement>) => {
-      if (event.currentTarget !== event.target) return;
-      if (phase !== "exiting") return;
-      setPhase("hidden");
-      hidePaletteWindow().catch(() => {});
-    },
-    [phase],
-  );
-
   // Open settings action from the palette.
   useEffect(() => {
     const open = () => setOpenSettings(true);
@@ -130,7 +119,6 @@ function Launcher() {
     <div
       aria-hidden={phase === "hidden"}
       className={`launcher-stage launcher-stage-${phase} absolute inset-0`}
-      onAnimationEnd={onAnimationEnd}
     >
       <div
         className="relative h-full w-full max-w-full"

@@ -69,6 +69,10 @@ const SHELL_CONTROL_START_RECT_BOTTOM: usize = 7;
 const SHELL_EVENT_START_RECT_CONFIGURED: usize = 8;
 const SHELL_EVENT_TASKBAR_START_CLICK_X: usize = 9;
 const SHELL_EVENT_TASKBAR_START_CLICK_Y: usize = 10;
+const SHELL_CONTROL_START_ICON_REFRESH: usize = 11;
+const SHELL_CONTROL_START_ICON_SHUTDOWN: usize = 12;
+const SHELL_EVENT_START_ICON_SHUTDOWN: usize = 13;
+const SHELL_EVENT_START_ICON_REFRESHED: usize = 14;
 
 /// Event the frontend receives when Win observation self-disables.
 pub const FAILED_EVENT: &str = "win-mode-failed";
@@ -226,6 +230,8 @@ static SHELL_BRIDGE_ACTIVE: AtomicBool = AtomicBool::new(false);
 static SHELL_BRIDGE_ACK: AtomicU32 = AtomicU32::new(0);
 static SHELL_START_RECT_ACK: AtomicU32 = AtomicU32::new(0);
 static SHELL_START_CLICK_X: AtomicI32 = AtomicI32::new(0);
+static SHELL_TASKBAR_THREAD: AtomicU32 = AtomicU32::new(0);
+static SHELL_ICON_SHUTDOWN_ACK: AtomicU32 = AtomicU32::new(0);
 static LAST_TOGGLE_MS: AtomicU64 = AtomicU64::new(0);
 static TOGGLE_CLOCK: OnceLock<Instant> = OnceLock::new();
 
@@ -246,6 +252,23 @@ pub fn init(app: AppHandle) {
 pub fn set_provider_suppression(active: bool) {
     PROVIDER_SUPPRESSES_START.store(active, Ordering::Release);
     RAW_MACHINE.lock().map(|mut machine| machine.reset()).ok();
+}
+
+pub(crate) fn notify_start_icon_changed() {
+    let taskbar_thread = SHELL_TASKBAR_THREAD.load(Ordering::Acquire);
+    let Ok(message) = shell_bridge_message() else {
+        return;
+    };
+    if taskbar_thread != 0 {
+        unsafe {
+            let _ = PostThreadMessageW(
+                taskbar_thread,
+                message,
+                WPARAM(SHELL_CONTROL_START_ICON_REFRESH),
+                LPARAM(0),
+            );
+        }
+    }
 }
 
 /// Turns Win-key observation on or off. Disabling resets the machine and
@@ -355,6 +378,8 @@ unsafe fn run_pump(ready: HookReady) {
             return;
         }
     };
+    SHELL_TASKBAR_THREAD.store(shell_bridge.taskbar_thread, Ordering::Release);
+    notify_start_icon_changed();
     let _ = ready.send(Ok(()));
     debug_trace("bridge-install-ok");
     let mut msg = MSG::default();
@@ -407,12 +432,13 @@ unsafe fn run_pump(ready: HookReady) {
         let _ = MsgWaitForMultipleObjectsEx(None, 1_000, QS_ALLINPUT, Default::default());
     }
     SHELL_BRIDGE_ACTIVE.store(false, Ordering::Release);
+    SHELL_TASKBAR_THREAD.store(0, Ordering::Release);
     RAW_OBSERVER_ACTIVE.store(false, Ordering::Release);
     RAW_MACHINE.lock().map(|mut machine| machine.reset()).ok();
-    // Destroy the observer first. During the brief unhook window, the helper
-    // then fails open and leaves native Start commands untouched.
-    destroy_raw_input_window(raw_input_window);
+    // Ask the Explorer-thread renderer to tear down its window while the hook
+    // and observer are still alive, then release the bridge.
     drop(shell_bridge);
+    destroy_raw_input_window(raw_input_window);
     if com_initialized {
         CoUninitialize();
     }
@@ -899,6 +925,7 @@ fn post_start_button_rect(thread: u32, message: u32, rect: RECT) -> Result<(), S
 
 impl Drop for ShellBridge {
     fn drop(&mut self) {
+        request_start_icon_shutdown(self.taskbar_thread);
         unsafe {
             let _ = UnhookWindowsHookEx(self.progman_hook);
             if let Some(hook) = self.taskbar_message_hook {
@@ -911,6 +938,22 @@ impl Drop for ShellBridge {
         #[cfg(debug_assertions)]
         eprintln!("[win-key] Explorer bridge released");
     }
+}
+
+fn request_start_icon_shutdown(thread: u32) {
+    let Ok(message) = shell_bridge_message() else {
+        return;
+    };
+    SHELL_ICON_SHUTDOWN_ACK.store(0, Ordering::Release);
+    unsafe {
+        let _ = PostThreadMessageW(
+            thread,
+            message,
+            WPARAM(SHELL_CONTROL_START_ICON_SHUTDOWN),
+            LPARAM(0),
+        );
+    }
+    let _ = wait_for_ack(&SHELL_ICON_SHUTDOWN_ACK, Duration::from_millis(250));
 }
 
 unsafe fn cleanup_shell_hook(hook: HHOOK, module: HMODULE, library_path: &PathBuf) {
@@ -1117,6 +1160,12 @@ unsafe extern "system" fn raw_input_window_proc(
             }
             SHELL_EVENT_START_RECT_CONFIGURED => {
                 SHELL_START_RECT_ACK.store(if lparam.0 != 0 { 2 } else { 1 }, Ordering::Release);
+            }
+            SHELL_EVENT_START_ICON_SHUTDOWN => {
+                SHELL_ICON_SHUTDOWN_ACK.store(if lparam.0 != 0 { 2 } else { 1 }, Ordering::Release);
+            }
+            SHELL_EVENT_START_ICON_REFRESHED => {
+                debug_trace(&format!("start-icon-refresh {}", lparam.0));
             }
             SHELL_EVENT_TOGGLE_PRISM
                 if ACTIVE.load(Ordering::Acquire)
