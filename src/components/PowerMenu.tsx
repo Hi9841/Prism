@@ -1,6 +1,7 @@
 import { Lock, Power, RotateCcw } from "lucide-react";
 import { useCallback, useEffect, useId, useRef, useState } from "react";
 import { type PowerAction, performPowerAction } from "../lib/bridge";
+import { onTransientUiDismiss } from "../lib/transientUi";
 import { useApp } from "../state/app";
 import { IconButton } from "./ui";
 
@@ -38,9 +39,11 @@ export function PowerMenu() {
       if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
     };
     const closeWithPalette = () => setOpen(false);
+    const offTransientDismiss = onTransientUiDismiss(closeWithPalette);
     document.addEventListener("pointerdown", closeOnOutsidePress);
     document.addEventListener("prism:close", closeWithPalette);
     return () => {
+      offTransientDismiss();
       document.removeEventListener("pointerdown", closeOnOutsidePress);
       document.removeEventListener("prism:close", closeWithPalette);
     };

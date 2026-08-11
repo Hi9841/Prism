@@ -10,6 +10,7 @@ import {
   onWindowFocused,
   presentPaletteWindow,
 } from "./lib/bridge";
+import { dismissTransientUi } from "./lib/transientUi";
 import { AppProvider, useApp } from "./state/app";
 import { PaletteProvider, usePalette } from "./state/palette";
 
@@ -26,6 +27,7 @@ function Launcher() {
   visibleRef.current = visible;
 
   const hide = useCallback(() => {
+    dismissTransientUi();
     if (!visibleRef.current) return;
     setPhase("hidden");
     hidePaletteWindow().catch(() => {});
@@ -37,6 +39,7 @@ function Launcher() {
       if (!request.open) {
         hide();
       } else {
+        dismissTransientUi();
         // Fresh state on every open: no leftover query, selection or
         // settings overlay - the palette starts from zero.
         reset();
@@ -56,6 +59,7 @@ function Launcher() {
         isWindowVisible()
           .then((nativeVisible) => {
             if (!nativeVisible) {
+              dismissTransientUi();
               setPhase("hidden");
             }
           })

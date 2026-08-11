@@ -1,5 +1,6 @@
 import { ShieldCheck } from "lucide-react";
 import { useEffect, useRef } from "react";
+import { onTransientUiDismiss } from "../../lib/transientUi";
 import type { PaletteItem } from "../../lib/types";
 
 const MENU_WIDTH = 196;
@@ -35,9 +36,11 @@ export function ResultContextMenu({
     itemRef.current?.focus();
     const closeWithPalette = () => onClose(false);
     const closeOnViewportChange = () => onClose(true);
+    const offTransientDismiss = onTransientUiDismiss(closeWithPalette);
     document.addEventListener("prism:close", closeWithPalette);
     window.addEventListener("resize", closeOnViewportChange);
     return () => {
+      offTransientDismiss();
       document.removeEventListener("prism:close", closeWithPalette);
       window.removeEventListener("resize", closeOnViewportChange);
     };
