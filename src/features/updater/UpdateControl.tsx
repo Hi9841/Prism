@@ -7,7 +7,6 @@ import { useApp } from "../../state/app";
 import { updatePercent } from "./update-progress";
 
 const CHECK_INTERVAL_MS = 60 * 60 * 1000;
-const OPEN_RECHECK_MS = 15 * 60 * 1000;
 const NETWORK_TIMEOUT_MS = 15 * 1000;
 const DOWNLOAD_TIMEOUT_MS = 10 * 60 * 1000;
 
@@ -24,14 +23,12 @@ export function UpdateControl() {
   const [viewState, setViewState] = useState<UpdateViewState>({ phase: "hidden" });
   const updateRef = useRef<Update | null>(null);
   const checkInFlightRef = useRef<Promise<void> | null>(null);
-  const lastCheckedAtRef = useRef(0);
+  const installInFlightRef = useRef(false);
   const disposedRef = useRef(false);
 
-  const checkForUpdate = useCallback((force = false) => {
-    if (!inTauri || updateRef.current || checkInFlightRef.current) return;
-    if (!force && Date.now() - lastCheckedAtRef.current < OPEN_RECHECK_MS) return;
+  const checkForUpdate = useCallback(() => {
+    if (!inTauri || checkInFlightRef.current || installInFlightRef.current) return;
 
-    lastCheckedAtRef.current = Date.now();
     const pending = check({ timeout: NETWORK_TIMEOUT_MS })
       .then(async (availableUpdate) => {
         if (disposedRef.current) {
@@ -39,15 +36,20 @@ export function UpdateControl() {
           return;
         }
         if (!availableUpdate) {
+          const previousUpdate = updateRef.current;
+          updateRef.current = null;
+          if (previousUpdate) await previousUpdate.close().catch(() => {});
           setViewState({ phase: "hidden" });
           return;
         }
+        const previousUpdate = updateRef.current;
         updateRef.current = availableUpdate;
+        if (previousUpdate) await previousUpdate.close().catch(() => {});
         setViewState({ phase: "available", version: availableUpdate.version });
       })
       .catch(() => {
-        // Background update checks are intentionally quiet. The hourly retry
-        // keeps temporary network and GitHub failures from becoming UI noise.
+        // Background checks are intentionally quiet. The next palette open or
+        // hourly retry handles temporary network and GitHub failures.
       })
       .finally(() => {
         checkInFlightRef.current = null;
@@ -57,7 +59,7 @@ export function UpdateControl() {
 
   useEffect(() => {
     disposedRef.current = false;
-    checkForUpdate(true);
+    checkForUpdate();
     const interval = window.setInterval(checkForUpdate, CHECK_INTERVAL_MS);
     const offToggle = onToggleRequest((request) => {
       if (request.open) checkForUpdate();
@@ -77,6 +79,7 @@ export function UpdateControl() {
     if (!update || viewState.phase === "downloading" || viewState.phase === "installing") return;
 
     let downloadedBytes = 0;
+    installInFlightRef.current = true;
     setViewState({
       phase: "downloading",
       version: update.version,
@@ -115,6 +118,8 @@ export function UpdateControl() {
       if (disposedRef.current) return;
       setViewState({ phase: "failed", version: update.version });
       showToast("Update failed", "Check your connection and try again");
+    } finally {
+      installInFlightRef.current = false;
     }
   }, [showToast, viewState.phase]);
 
