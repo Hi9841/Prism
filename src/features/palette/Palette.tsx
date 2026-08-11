@@ -7,6 +7,7 @@ import { PINNED_APP_LIMIT, reorderPinnedApps } from "../../lib/types";
 import { useApp } from "../../state/app";
 import { usePalette } from "../../state/palette";
 import { UpdateControl } from "../updater/UpdateControl";
+import { type ContextMenuPosition, clampContextMenuPosition, ResultContextMenu } from "./ResultContextMenu";
 
 interface PinDragState {
   item: PaletteItem;
@@ -17,6 +18,11 @@ interface PinDragState {
   y: number;
   active: boolean;
   targetAppId: string | null;
+}
+
+interface ResultMenuState {
+  item: PaletteItem;
+  position: ContextMenuPosition;
 }
 
 export function Palette() {
@@ -30,6 +36,21 @@ export function Palette() {
   const pendingPinDragRef = useRef<{ pointerId: number; x: number; y: number } | null>(null);
   const pinDragFrameRef = useRef<number | null>(null);
   const [pinDrag, setPinDrag] = useState<PinDragState | null>(null);
+  const [resultMenu, setResultMenu] = useState<ResultMenuState | null>(null);
+
+  const closeResultMenu = useCallback((restoreFocus: boolean) => {
+    setResultMenu(null);
+    if (restoreFocus) requestAnimationFrame(() => inputRef.current?.focus());
+  }, []);
+
+  const openResultMenu = useCallback(
+    (item: PaletteItem, index: number, x: number, y: number) => {
+      if (!item.runAsAdmin) return;
+      palette.select(index);
+      setResultMenu({ item, position: clampContextMenuPosition(x, y) });
+    },
+    [palette],
+  );
 
   const togglePin = useCallback(
     (item: PaletteItem) => {
@@ -177,6 +198,20 @@ export function Palette() {
   /* Keyboard-first navigation. */
   const onKeyDown = useCallback(
     (e: React.KeyboardEvent) => {
+      if (e.key === "ContextMenu" || (e.key === "F10" && e.shiftKey)) {
+        e.preventDefault();
+        const item = palette.flatItems[palette.selected];
+        if (!item?.runAsAdmin) return;
+        const row = document.getElementById(`prism-opt-${palette.selected}`);
+        const bounds = row?.getBoundingClientRect();
+        openResultMenu(
+          item,
+          palette.selected,
+          bounds ? bounds.right - 12 : window.innerWidth / 2,
+          bounds ? bounds.top + 12 : window.innerHeight / 2,
+        );
+        return;
+      }
       switch (e.key) {
         case "ArrowDown":
           e.preventDefault();
@@ -214,7 +249,7 @@ export function Palette() {
           break;
       }
     },
-    [palette, app.openSettings, setOpenSettings],
+    [palette, app.openSettings, setOpenSettings, openResultMenu],
   );
 
   // The component mounts fresh each time the window is shown - grab focus
@@ -303,6 +338,7 @@ export function Palette() {
                         dropTargetPin={pinDrag?.active ? pinDrag.targetAppId : null}
                         onSelect={palette.select}
                         onRun={palette.runItem}
+                        onOpenContextMenu={openResultMenu}
                         onTogglePin={togglePin}
                         onMovePin={movePin}
                         onStartPinDrag={startPinDrag}
@@ -318,6 +354,19 @@ export function Palette() {
           })()
         )}
       </div>
+
+      {resultMenu ? (
+        <ResultContextMenu
+          item={resultMenu.item}
+          position={resultMenu.position}
+          onRunAsAdmin={() => {
+            const { item } = resultMenu;
+            setResultMenu(null);
+            palette.runItemAsAdmin(item);
+          }}
+          onClose={closeResultMenu}
+        />
+      ) : null}
 
       {pinDrag?.active ? <PinDragPreview drag={pinDrag} /> : null}
 
@@ -466,6 +515,7 @@ function ResultRow({
   dropTargetPin,
   onSelect,
   onRun,
+  onOpenContextMenu,
   onTogglePin,
   onMovePin,
   onStartPinDrag,
@@ -482,6 +532,7 @@ function ResultRow({
   dropTargetPin: string | null;
   onSelect: (i: number) => void;
   onRun: (item: PaletteItem) => void;
+  onOpenContextMenu: (item: PaletteItem, index: number, x: number, y: number) => void;
   onTogglePin: (item: PaletteItem) => void;
   onMovePin: (appId: string, direction: -1 | 1) => void;
   onStartPinDrag: (item: PaletteItem, pointerId: number, x: number, y: number) => void;
@@ -500,6 +551,10 @@ function ResultRow({
       data-dragging={canReorder && draggedPin === appId}
       data-pinned-app-id={canReorder ? appId : undefined}
       onMouseEnter={() => onSelect(index)}
+      onContextMenu={(event) => {
+        event.preventDefault();
+        if (item.runAsAdmin) onOpenContextMenu(item, index, event.clientX, event.clientY);
+      }}
       className={`group row w-full text-left transition-[background-color,box-shadow] duration-100 ${
         selected ? "bg-surface-active" : "hover:bg-surface-hover"
       }`}

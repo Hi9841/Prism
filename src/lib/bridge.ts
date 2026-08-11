@@ -130,9 +130,19 @@ export async function launchApp(appId: string): Promise<void> {
   await invoke("launch_app", { id: appId });
 }
 
+export async function launchAppAsAdmin(appId: string): Promise<void> {
+  if (!inTauri) return;
+  await invoke("launch_app_as_admin", { id: appId });
+}
+
 export async function openPath(path: string): Promise<void> {
   if (!inTauri) return;
   await invoke("open_path", { path });
+}
+
+export async function runPathAsAdmin(path: string): Promise<void> {
+  if (!inTauri) return;
+  await invoke("run_path_as_admin", { path });
 }
 
 export async function searchFiles(query: string, limit = 8): Promise<FileSearchResponse> {

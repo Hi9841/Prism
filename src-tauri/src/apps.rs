@@ -1747,6 +1747,90 @@ pub fn launch(app: &AppEntry) -> Result<(), String> {
     }
 }
 
+/// Launches a scanned desktop application or script through Windows' `runas`
+/// verb. Packaged apps have no local process target and are intentionally not
+/// eligible for elevation.
+pub fn launch_elevated(app: &AppEntry) -> Result<(), String> {
+    let path = app
+        .path
+        .as_deref()
+        .map(Path::new)
+        .filter(|path| path.is_absolute() && path.is_file())
+        .ok_or_else(|| format!("{} cannot be run as administrator", app.name))?;
+    launch_path_elevated(path, app.args.as_deref(), app.working_directory.as_deref())
+}
+
+pub fn launch_path_elevated(
+    path: &Path,
+    args: Option<&str>,
+    working_directory: Option<&str>,
+) -> Result<(), String> {
+    if !path.is_file() || !is_elevatable_path(path) {
+        return Err(format!(
+            "{} is not a supported application or script",
+            path.display()
+        ));
+    }
+
+    let path_text = path.to_string_lossy();
+    let extension = path
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let fallback_directory = path.parent().map(|parent| parent.to_string_lossy());
+    let directory = working_directory
+        .filter(|value| !value.is_empty())
+        .or(fallback_directory.as_deref());
+    let (target, parameters) = elevated_command(&path_text, &extension, args);
+
+    unsafe { shell_execute("runas", &target, parameters.as_deref(), directory) }.map_err(|code| {
+        if code == 5 {
+            "Administrator permission was not granted".to_string()
+        } else {
+            format!(
+                "failed to run {} as administrator (Shell error {code})",
+                path.display()
+            )
+        }
+    })
+}
+
+pub fn is_elevatable_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|value| value.to_str())
+        .is_some_and(|extension| {
+            matches!(
+                extension.to_ascii_lowercase().as_str(),
+                "exe" | "com" | "bat" | "cmd" | "ps1" | "vbs" | "js" | "wsf"
+            )
+        })
+}
+
+fn elevated_command(path: &str, extension: &str, args: Option<&str>) -> (String, Option<String>) {
+    let trailing_args = args
+        .filter(|value| !value.trim().is_empty())
+        .map(|value| format!(" {value}"))
+        .unwrap_or_default();
+    match extension {
+        "bat" | "cmd" => (
+            "cmd.exe".to_string(),
+            Some(format!("/d /s /c \"\"{path}\"{trailing_args}\"")),
+        ),
+        "ps1" => (
+            "powershell.exe".to_string(),
+            Some(format!(
+                "-NoLogo -NoProfile -File \"{path}\"{trailing_args}"
+            )),
+        ),
+        "vbs" | "js" | "wsf" => (
+            "wscript.exe".to_string(),
+            Some(format!("//nologo \"{path}\"{trailing_args}")),
+        ),
+        _ => (path.to_string(), args.map(str::to_string)),
+    }
+}
+
 fn activate_packaged_app(aumid: &str) -> Result<(), String> {
     let _com = ComGuard::init();
     unsafe {
@@ -1778,8 +1862,17 @@ fn is_executable(path: &str) -> bool {
 }
 
 unsafe fn shell_open(path: &str, args: Option<&str>, working_directory: Option<&str>) -> bool {
+    shell_execute("open", path, args, working_directory).is_ok()
+}
+
+unsafe fn shell_execute(
+    operation: &str,
+    path: &str,
+    args: Option<&str>,
+    working_directory: Option<&str>,
+) -> Result<(), isize> {
     let file = wide(path);
-    let operation = wide("open");
+    let operation = wide(operation);
     let params = args.map(wide);
     let directory = working_directory
         .filter(|value| !value.is_empty())
@@ -1795,8 +1888,13 @@ unsafe fn shell_open(path: &str, args: Option<&str>, working_directory: Option<&
             .as_ref(),
         SW_SHOWNORMAL,
     );
-    // HINSTANCE values > 32 mean success.
-    (result.0 as isize) > 32
+    // HINSTANCE values > 32 mean success; lower values are Shell error codes.
+    let code = result.0 as isize;
+    if code > 32 {
+        Ok(())
+    } else {
+        Err(code)
+    }
 }
 
 fn explorer_arg(arg: &str) -> Result<(), String> {
@@ -1810,6 +1908,50 @@ fn explorer_arg(arg: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn elevated_targets_are_limited_to_apps_and_supported_scripts() {
+        for path in [
+            "tool.exe",
+            "tool.COM",
+            "setup.bat",
+            "setup.CMD",
+            "task.ps1",
+            "task.vbs",
+            "task.js",
+            "task.wsf",
+        ] {
+            assert!(is_elevatable_path(Path::new(path)), "should allow {path}");
+        }
+        for path in ["notes.txt", "archive.zip", "shortcut.lnk", "folder", ""] {
+            assert!(!is_elevatable_path(Path::new(path)), "should reject {path}");
+        }
+    }
+
+    #[test]
+    fn elevated_script_commands_use_the_expected_windows_hosts() {
+        assert_eq!(
+            elevated_command(r"C:\Tools\deploy.cmd", "cmd", Some("--quiet")),
+            (
+                "cmd.exe".to_string(),
+                Some(r#"/d /s /c ""C:\Tools\deploy.cmd" --quiet""#.to_string())
+            )
+        );
+        assert_eq!(
+            elevated_command(r"C:\Tools\deploy.ps1", "ps1", None),
+            (
+                "powershell.exe".to_string(),
+                Some(r#"-NoLogo -NoProfile -File "C:\Tools\deploy.ps1""#.to_string())
+            )
+        );
+        assert_eq!(
+            elevated_command(r"C:\Tools\deploy.vbs", "vbs", None),
+            (
+                "wscript.exe".to_string(),
+                Some(r#"//nologo "C:\Tools\deploy.vbs""#.to_string())
+            )
+        );
+    }
 
     #[test]
     fn scan_produces_valid_cached_entries() {

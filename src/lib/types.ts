@@ -16,6 +16,8 @@ export interface PaletteItem {
   icon: PaletteIcon;
   /** Runs the selected result. */
   run: () => Promise<void> | void;
+  /** Runs an eligible application or script through the Windows UAC prompt. */
+  runAsAdmin?: () => Promise<void> | void;
   /** Display title used when persisting to history */
   historyTitle: string;
   /** Extra line shown in the toast after a clipboard-style run */
@@ -80,6 +82,15 @@ export const DEFAULT_QUICK_ACCESS: QuickAccessKind[] = [
 ];
 export const QUICK_ACCESS_LIMIT = 6;
 export const PINNED_APP_LIMIT = 64;
+
+const ELEVATABLE_EXTENSIONS = new Set(["exe", "com", "bat", "cmd", "ps1", "vbs", "js", "wsf"]);
+
+export function isElevatablePath(path: string | undefined): boolean {
+  if (!path || /^[a-z][a-z0-9+.-]*:\/\//i.test(path)) return false;
+  const filename = path.split(/[\\/]/).pop() ?? "";
+  const boundary = filename.lastIndexOf(".");
+  return boundary > 0 && ELEVATABLE_EXTENSIONS.has(filename.slice(boundary + 1).toLowerCase());
+}
 
 export function reorderPinnedApps(
   pinnedApps: readonly string[],

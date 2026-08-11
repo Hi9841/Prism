@@ -207,7 +207,9 @@ pub fn run() {
             get_quick_access,
             existing_paths,
             launch_app,
+            launch_app_as_admin,
             open_path,
+            run_path_as_admin,
             present_palette,
             hide_palette,
             set_window_style,
@@ -801,6 +803,18 @@ fn launch_app(id: String, state: tauri::State<'_, AppState>) -> Result<(), Strin
 }
 
 #[tauri::command]
+fn launch_app_as_admin(id: String, state: tauri::State<'_, AppState>) -> Result<(), String> {
+    let entry = {
+        let apps = state.apps_cache.lock().map_err(|e| e.to_string())?;
+        apps.as_ref()
+            .and_then(|list| list.iter().find(|app| app.app_id == id))
+            .cloned()
+            .ok_or_else(|| "unknown app id".to_string())?
+    };
+    apps::launch_elevated(&entry)
+}
+
+#[tauri::command]
 fn open_path(path: String) -> Result<(), String> {
     let timer = perf::start();
     let path = PathBuf::from(path);
@@ -812,6 +826,15 @@ fn open_path(path: String) -> Result<(), String> {
         format!("kind={}", if path.is_dir() { "directory" } else { "file" })
     });
     result
+}
+
+#[tauri::command]
+fn run_path_as_admin(path: String) -> Result<(), String> {
+    let path = PathBuf::from(path);
+    if !path.is_absolute() || !path.is_file() {
+        return Err("path must be an existing absolute file".to_string());
+    }
+    apps::launch_path_elevated(&path, None, None)
 }
 
 #[tauri::command]

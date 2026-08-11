@@ -22,9 +22,11 @@ import {
   getQuickAccess,
   hidePaletteWindow,
   launchApp,
+  launchAppAsAdmin,
   onFileIndexUpdated,
   onWindowFocused,
   openPath,
+  runPathAsAdmin,
   searchFiles,
 } from "../lib/bridge";
 import { sortApps } from "../lib/emoji";
@@ -38,6 +40,7 @@ import type {
   QuickAccessEntry,
   TileTint,
 } from "../lib/types";
+import { isElevatablePath } from "../lib/types";
 import { useApp } from "./app";
 
 export interface Section {
@@ -56,6 +59,7 @@ interface PaletteCtx {
   select: (index: number) => void;
   runSelected: () => void;
   runItem: (item: PaletteItem) => void;
+  runItemAsAdmin: (item: PaletteItem) => void;
   appsLoaded: boolean;
   appsError: boolean;
   filesBusy: boolean;
@@ -77,6 +81,7 @@ function appPaletteItem(app: AppEntry): PaletteItem {
     historyTitle: app.name,
     appId: app.appId,
     run: () => launchApp(app.appId),
+    runAsAdmin: isElevatablePath(app.path) ? () => launchAppAsAdmin(app.appId) : undefined,
   };
 }
 
@@ -359,6 +364,20 @@ export function PaletteProvider({ children }: { children: ReactNode }) {
     if (item) void runItem(item);
   }, [flatItems, selected, runItem]);
 
+  const runItemAsAdmin = useCallback(
+    async (item: PaletteItem) => {
+      if (!item.runAsAdmin) return;
+      try {
+        await hidePaletteWindow();
+        await item.runAsAdmin();
+        app.pushHistory(item.id, item.historyTitle);
+      } catch (error) {
+        app.showToast("Could not run as administrator", String(error));
+      }
+    },
+    [app],
+  );
+
   const reset = useCallback(() => {
     setQuery("");
     setSelected(0);
@@ -375,6 +394,7 @@ export function PaletteProvider({ children }: { children: ReactNode }) {
       select: setSelected,
       runSelected,
       runItem,
+      runItemAsAdmin,
       appsLoaded,
       appsError,
       filesBusy,
@@ -393,6 +413,7 @@ export function PaletteProvider({ children }: { children: ReactNode }) {
       move,
       runSelected,
       runItem,
+      runItemAsAdmin,
       appsLoaded,
       appsError,
       filesBusy,
@@ -481,6 +502,8 @@ function filePaletteItem(entry: FileEntry): PaletteItem {
     icon: { kind: "tile", icon, tint },
     historyTitle: entry.name,
     run: () => openPath(entry.path),
+    runAsAdmin:
+      !entry.isDirectory && isElevatablePath(entry.path) ? () => runPathAsAdmin(entry.path) : undefined,
   };
 }
 
