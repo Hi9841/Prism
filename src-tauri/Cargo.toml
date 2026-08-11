@@ -1,6 +1,6 @@
 [package]
 name = "prism"
-version = "0.6.0"
+version = "0.6.3"
 description = "Prism - a keyboard-first command palette for Windows"
 edition = "2021"
 
@@ -18,7 +18,8 @@ tauri-plugin-single-instance = "2"
 tauri-plugin-clipboard-manager = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tokio = { version = "1", features = ["time"] }
+tokio = { version = "1", features = ["sync", "time"] }
+webview2-com = "0.38"
 windows = { version = "0.61", features = [
   "Win32_Devices_HumanInterfaceDevice",
   "Win32_Foundation",
@@ -30,6 +31,7 @@ windows = { version = "0.61", features = [
   "Win32_System_Registry",
   "Win32_System_Shutdown",
   "Win32_System_LibraryLoader",
+  "Win32_System_Ole",
   "Win32_System_Threading",
   "Win32_System_Variant",
   "Win32_UI_Input_KeyboardAndMouse",
@@ -40,6 +42,8 @@ windows = { version = "0.61", features = [
   "Win32_UI_WindowsAndMessaging",
 ] }
 image = { version = "0.25", default-features = false, features = ["png"] }
+tauri-plugin-updater = "2"
+tauri-plugin-process = "2"
 
 [profile.release]
 panic = "abort"

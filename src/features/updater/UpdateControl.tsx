@@ -1,0 +1,175 @@
+import { relaunch } from "@tauri-apps/plugin-process";
+import { check, type Update } from "@tauri-apps/plugin-updater";
+import { AlertCircle, ArrowDownToLine, LoaderCircle } from "lucide-react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { inTauri, onToggleRequest } from "../../lib/bridge";
+import { useApp } from "../../state/app";
+import { updatePercent } from "./update-progress";
+
+const CHECK_INTERVAL_MS = 60 * 60 * 1000;
+const OPEN_RECHECK_MS = 15 * 60 * 1000;
+const NETWORK_TIMEOUT_MS = 15 * 1000;
+const DOWNLOAD_TIMEOUT_MS = 10 * 60 * 1000;
+
+type UpdateViewState =
+  | { phase: "hidden" }
+  | { phase: "available"; version: string }
+  | { phase: "downloading"; version: string; downloadedBytes: number; totalBytes?: number }
+  | { phase: "installing"; version: string }
+  | { phase: "restarting"; version: string }
+  | { phase: "failed"; version: string };
+
+export function UpdateControl() {
+  const { showToast } = useApp();
+  const [viewState, setViewState] = useState<UpdateViewState>({ phase: "hidden" });
+  const updateRef = useRef<Update | null>(null);
+  const checkInFlightRef = useRef<Promise<void> | null>(null);
+  const lastCheckedAtRef = useRef(0);
+  const disposedRef = useRef(false);
+
+  const checkForUpdate = useCallback((force = false) => {
+    if (!inTauri || updateRef.current || checkInFlightRef.current) return;
+    if (!force && Date.now() - lastCheckedAtRef.current < OPEN_RECHECK_MS) return;
+
+    lastCheckedAtRef.current = Date.now();
+    const pending = check({ timeout: NETWORK_TIMEOUT_MS })
+      .then(async (availableUpdate) => {
+        if (disposedRef.current) {
+          await availableUpdate?.close();
+          return;
+        }
+        if (!availableUpdate) {
+          setViewState({ phase: "hidden" });
+          return;
+        }
+        updateRef.current = availableUpdate;
+        setViewState({ phase: "available", version: availableUpdate.version });
+      })
+      .catch(() => {
+        // Background update checks are intentionally quiet. The hourly retry
+        // keeps temporary network and GitHub failures from becoming UI noise.
+      })
+      .finally(() => {
+        checkInFlightRef.current = null;
+      });
+    checkInFlightRef.current = pending;
+  }, []);
+
+  useEffect(() => {
+    disposedRef.current = false;
+    checkForUpdate(true);
+    const interval = window.setInterval(checkForUpdate, CHECK_INTERVAL_MS);
+    const offToggle = onToggleRequest((request) => {
+      if (request.open) checkForUpdate();
+    });
+    return () => {
+      disposedRef.current = true;
+      window.clearInterval(interval);
+      offToggle();
+      const update = updateRef.current;
+      updateRef.current = null;
+      update?.close().catch(() => {});
+    };
+  }, [checkForUpdate]);
+
+  const installUpdate = useCallback(async () => {
+    const update = updateRef.current;
+    if (!update || viewState.phase === "downloading" || viewState.phase === "installing") return;
+
+    let downloadedBytes = 0;
+    setViewState({
+      phase: "downloading",
+      version: update.version,
+      downloadedBytes,
+    });
+    try {
+      await update.downloadAndInstall(
+        (event) => {
+          if (disposedRef.current) return;
+          if (event.event === "Started") {
+            setViewState({
+              phase: "downloading",
+              version: update.version,
+              downloadedBytes,
+              totalBytes: event.data.contentLength,
+            });
+          } else if (event.event === "Progress") {
+            downloadedBytes += event.data.chunkLength;
+            setViewState((current) => ({
+              phase: "downloading",
+              version: update.version,
+              downloadedBytes,
+              totalBytes: current.phase === "downloading" ? current.totalBytes : undefined,
+            }));
+          } else {
+            setViewState({ phase: "installing", version: update.version });
+          }
+        },
+        { timeout: DOWNLOAD_TIMEOUT_MS },
+      );
+      if (disposedRef.current) return;
+      setViewState({ phase: "restarting", version: update.version });
+      await relaunch();
+    } catch (error) {
+      console.error("Prism update failed", error);
+      if (disposedRef.current) return;
+      setViewState({ phase: "failed", version: update.version });
+      showToast("Update failed", "Check your connection and try again");
+    }
+  }, [showToast, viewState.phase]);
+
+  if (viewState.phase === "hidden") return null;
+
+  const version = viewState.version.replace(/^v/i, "");
+  const busy =
+    viewState.phase === "downloading" || viewState.phase === "installing" || viewState.phase === "restarting";
+  const percent =
+    viewState.phase === "downloading" ? updatePercent(viewState.downloadedBytes, viewState.totalBytes) : null;
+  const label =
+    viewState.phase === "available"
+      ? `Update v${version}`
+      : viewState.phase === "downloading"
+        ? percent === null
+          ? "Downloading"
+          : `Update ${percent}%`
+        : viewState.phase === "installing"
+          ? "Installing"
+          : viewState.phase === "restarting"
+            ? "Restarting"
+            : "Retry update";
+  const title =
+    viewState.phase === "failed"
+      ? `Retry Prism v${version} update`
+      : busy
+        ? `${label} Prism v${version}`
+        : `Install Prism v${version}`;
+
+  return (
+    <button
+      type="button"
+      title={title}
+      aria-label={title}
+      aria-busy={busy}
+      disabled={busy}
+      onClick={installUpdate}
+      className={`focus-ring inline-flex h-8 w-28 min-w-0 items-center justify-center gap-1.5 rounded-[7px] px-2.5 text-[11px] font-semibold transition-colors duration-150 ${
+        viewState.phase === "failed"
+          ? "bg-danger-soft text-danger hover:opacity-90"
+          : busy
+            ? "cursor-wait bg-surface text-fg-secondary"
+            : "cursor-pointer bg-accent-soft text-accent hover:bg-surface-active hover:text-fg"
+      }`}
+    >
+      {viewState.phase === "failed" ? (
+        <AlertCircle className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+      ) : busy ? (
+        <LoaderCircle className="h-3.5 w-3.5 shrink-0 animate-spin" aria-hidden="true" />
+      ) : (
+        <ArrowDownToLine className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+      )}
+      <span className="truncate" aria-live="polite">
+        {label}
+      </span>
+    </button>
+  );
+}

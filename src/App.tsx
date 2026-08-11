@@ -34,8 +34,8 @@ function Launcher() {
 
   // Rust-side: global hotkey pressed, or user clicked away (blur).
   useEffect(() => {
-    const offToggle = onToggleRequest((open) => {
-      if (!open) {
+    const offToggle = onToggleRequest((request) => {
+      if (!request.open) {
         hide();
       } else {
         // Fresh state on every open: no leftover query, selection or
@@ -69,7 +69,10 @@ function Launcher() {
     // the palette isn't stuck invisible inside a visible window.
     isWindowVisible()
       .then((isVisible) => {
-        if (isVisible && !visibleRef.current) setPhase("visible");
+        // A webview refresh can leave the native window visible while Rust's
+        // presentation path has not run. Re-enter the preparing phase so the
+        // native reconciliation moves Prism and the taskbar together.
+        if (isVisible && !visibleRef.current) setPhase(inTauri ? "preparing" : "visible");
       })
       .catch(() => {});
     return () => {

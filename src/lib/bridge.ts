@@ -8,6 +8,19 @@ import type { AppEntry, FileSearchResponse, PersistedState, QuickAccessEntry, Wi
 
 export type PowerAction = "lock" | "shutdown" | "restart";
 
+export interface PalettePresentation {
+  open: boolean;
+  source: string;
+  anchor: {
+    startButton: { left: number; top: number; right: number; bottom: number } | null;
+    clickPoint: { x: number; y: number } | null;
+    taskbarEdge: string | null;
+    monitor: { left: number; top: number; right: number; bottom: number } | null;
+    workArea: { left: number; top: number; right: number; bottom: number } | null;
+  } | null;
+  generation: number;
+}
+
 export const inTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
 export function getAppVersion(): Promise<string> {
@@ -65,9 +78,9 @@ export function setViewZoom(percent: number): Promise<void> {
 }
 
 /** Emitted by Rust with the authoritative native visibility state. */
-export function onToggleRequest(cb: (open: boolean) => void): () => void {
+export function onToggleRequest(cb: (request: PalettePresentation) => void): () => void {
   if (!inTauri) return () => {};
-  const unlisten = listen<boolean>("prism-toggle", (event) => cb(event.payload));
+  const unlisten = listen<PalettePresentation>("prism-toggle", (event) => cb(event.payload));
   return () => {
     unlisten.then((f) => f());
   };
@@ -165,19 +178,19 @@ export function onFileIndexUpdated(cb: () => void): () => void {
   };
 }
 
-export async function setWindowEffect(effect: WindowEffect): Promise<void> {
+export async function setWindowStyle(theme: "light" | "dark", effect: WindowEffect): Promise<void> {
   if (!inTauri) return;
-  await invoke("set_window_effect", { effect });
-}
-
-export async function setWindowTheme(theme: "light" | "dark"): Promise<void> {
-  if (!inTauri) return;
-  await invoke("set_window_theme", { theme });
+  await invoke("set_window_style", { theme, effect });
 }
 
 export async function setWindowWidth(width: number): Promise<void> {
   if (!inTauri) return;
   await invoke("set_window_width", { width });
+}
+
+export async function setTaskbarAlignment(alignment: "left" | "center" | "right"): Promise<void> {
+  if (!inTauri) return;
+  await invoke("set_taskbar_alignment", { alignment });
 }
 
 export async function getSystemTheme(): Promise<"light" | "dark"> {

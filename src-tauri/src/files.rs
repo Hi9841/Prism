@@ -20,7 +20,11 @@ use windows::Win32::UI::Shell::{
 
 const CACHE_VERSION: u32 = 2;
 const CACHE_TTL_SECONDS: u64 = 6 * 60 * 60;
-const REFRESH_INTERVAL: Duration = Duration::from_secs(60);
+// The index is a bounded snapshot, not a filesystem watcher. Refreshing it
+// every minute causes a full recursive scan and an atomic cache write while
+// the launcher is usually hidden. Keep the snapshot reasonably fresh without
+// turning idle time into sustained disk I/O.
+const REFRESH_INTERVAL: Duration = Duration::from_secs(15 * 60);
 const MAX_ENTRIES: usize = 100_000;
 const MAX_DEPTH: usize = 16;
 const DEFAULT_LIMIT: usize = 10;

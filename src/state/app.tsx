@@ -9,8 +9,7 @@ import {
   setAlwaysOnTop,
   setShortcut,
   setViewZoom,
-  setWindowEffect,
-  setWindowTheme,
+  setWindowStyle,
   setWindowWidth,
 } from "../lib/bridge";
 import type {
@@ -138,11 +137,14 @@ export function AppProvider({ children }: { children: ReactNode }) {
 
   const updateSettings = useCallback(
     (patch: Partial<Settings>) => {
-      // NOTE: shortcut changes are NOT applied here - the KeybindPicker
-      // calls setShortcut directly and only updates state after the OS
-      // registration succeeded. This avoids double-application and
-      // persisting shortcuts that never activated.
+      // Shortcut and taskbar alignment changes are applied by their pickers
+      // before state is updated. Keeping native calls out of this generic
+      // path prevents duplicate shell transitions.
       const next = { ...settingsRef.current, ...patch };
+      const changed = (Object.keys(patch) as (keyof Settings)[]).some(
+        (key) => !Object.is(settingsRef.current[key], next[key]),
+      );
+      if (!changed) return;
       settingsRef.current = next;
       setSettings(next);
       schedulePersist();
@@ -254,8 +256,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     if (!ready) return;
-    setWindowTheme(effectiveTheme).catch(() => {});
-    setWindowEffect(settings.effect).catch(() => {});
+    setWindowStyle(effectiveTheme, settings.effect).catch(() => {});
   }, [ready, settings.effect, effectiveTheme]);
 
   useEffect(() => {
@@ -372,6 +373,7 @@ export function sanitizeSettings(raw: unknown): Settings {
       DEFAULT_SETTINGS.shortcut,
     ),
     alwaysOnTop: typeof src.alwaysOnTop === "boolean" ? src.alwaysOnTop : DEFAULT_SETTINGS.alwaysOnTop,
+    taskbarAlignment: pick(src.taskbarAlignment, ["left", "center"], DEFAULT_SETTINGS.taskbarAlignment),
     theme: pick(src.theme, ["system", "dark", "light"], DEFAULT_SETTINGS.theme),
     quickAccess: sanitizeQuickAccess(src.quickAccess),
     pinnedApps: sanitizePinnedApps(src.pinnedApps),
