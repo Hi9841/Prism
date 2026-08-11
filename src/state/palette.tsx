@@ -164,11 +164,6 @@ export function PaletteProvider({ children }: { children: ReactNode }) {
   useEffect(() => onWindowFocused((focused) => focused && validateHistoryPaths()), [validateHistoryPaths]);
 
   useEffect(() => {
-    const timer = window.setInterval(validateHistoryPaths, 60_000);
-    return () => window.clearInterval(timer);
-  }, [validateHistoryPaths]);
-
-  useEffect(() => {
     void fileIndexTick;
     const searchText = query.trim();
     const normalized = searchText.toLowerCase();

@@ -119,6 +119,9 @@ jobs:
 
       - name: Build installer artifact
         uses: tauri-apps/tauri-action@v1
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           uploadWorkflowArtifacts: true
           workflowArtifactNamePattern: Prism-[version]-Windows-[arch]-[bundle]

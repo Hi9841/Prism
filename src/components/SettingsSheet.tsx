@@ -15,8 +15,15 @@ import {
   X,
 } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { getAppVersion, quitApp, setShortcut } from "../lib/bridge";
-import type { AccentId, QuickAccessKind, ThemeMode, WindowEffect, WindowWidth } from "../lib/types";
+import { getAppVersion, quitApp, setShortcut, setTaskbarAlignment } from "../lib/bridge";
+import type {
+  AccentId,
+  QuickAccessKind,
+  TaskbarAlignment,
+  ThemeMode,
+  WindowEffect,
+  WindowWidth,
+} from "../lib/types";
 import { DEFAULT_SETTINGS, QUICK_ACCESS_LIMIT, stepViewZoom, VIEW_ZOOM_LEVELS } from "../lib/types";
 import { SHORTCUT_OPTIONS, THEME_OPTIONS, useApp } from "../state/app";
 import { Segmented, Toggle } from "./ui";
@@ -103,6 +110,41 @@ function KeybindPicker() {
         </p>
       )}
     </div>
+  );
+}
+
+function TaskbarAlignmentPicker() {
+  const { settings, updateSettings, showToast } = useApp();
+  const [busy, setBusy] = useState(false);
+
+  const applyAlignment = useCallback(
+    async (taskbarAlignment: TaskbarAlignment) => {
+      if (taskbarAlignment === settings.taskbarAlignment || busy) return;
+      setBusy(true);
+      try {
+        await setTaskbarAlignment(taskbarAlignment);
+        updateSettings({ taskbarAlignment });
+      } catch (error) {
+        showToast("Taskbar not changed", String(error));
+      } finally {
+        setBusy(false);
+      }
+    },
+    [busy, settings.taskbarAlignment, showToast, updateSettings],
+  );
+
+  return (
+    <fieldset disabled={busy} className="m-0 min-w-0 border-0 p-0 disabled:opacity-55">
+      <Segmented<TaskbarAlignment>
+        label="Taskbar alignment"
+        value={settings.taskbarAlignment}
+        onChange={applyAlignment}
+        options={[
+          { value: "left", label: "Left" },
+          { value: "center", label: "Center" },
+        ]}
+      />
+    </fieldset>
   );
 }
 
@@ -365,6 +407,9 @@ export function SettingsSheet() {
           <SectionTitle>Behavior</SectionTitle>
           <Row title="Global shortcut" detail="Open Prism from anywhere">
             <KeybindPicker />
+          </Row>
+          <Row title="Taskbar alignment">
+            <TaskbarAlignmentPicker />
           </Row>
           <Row title="Keep on top" detail="Prism floats above other windows">
             <Toggle

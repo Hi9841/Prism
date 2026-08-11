@@ -2,12 +2,11 @@
 //! (`AppsUseLightTheme`), with a background watcher that emits an event
 //! whenever the OS theme flips so the UI can follow live.
 
-use std::time::Duration;
-
 use tauri::{AppHandle, Emitter};
 use windows::core::PCWSTR;
 use windows::Win32::System::Registry::{
-    RegCloseKey, RegOpenKeyExW, RegQueryValueExW, HKEY, HKEY_CURRENT_USER, KEY_READ,
+    RegCloseKey, RegNotifyChangeKeyValue, RegOpenKeyExW, RegQueryValueExW, HKEY, HKEY_CURRENT_USER,
+    KEY_NOTIFY, KEY_READ, REG_NOTIFY_CHANGE_LAST_SET,
 };
 
 const PERSONALIZE_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize";
@@ -56,16 +55,36 @@ struct ThemeEvent {
     theme: &'static str,
 }
 
-/// Polls the registry and emits `system-theme-changed` when the mode flips.
+/// Waits for registry changes and emits `system-theme-changed` when the mode flips.
 pub fn watch(app: AppHandle) {
     std::thread::spawn(move || {
+        let mut wide_path: Vec<u16> = PERSONALIZE_KEY.encode_utf16().chain(Some(0)).collect();
+        let mut key = HKEY::default();
+        let open = unsafe {
+            RegOpenKeyExW(
+                HKEY_CURRENT_USER,
+                PCWSTR(wide_path.as_mut_ptr()),
+                None,
+                KEY_READ | KEY_NOTIFY,
+                &mut key,
+            )
+        };
+        if open.is_err() {
+            return;
+        }
+
         let mut last = apps_light().unwrap_or(false);
-        eprintln!("[theme-watch] initial light={last}");
         loop {
-            std::thread::sleep(Duration::from_secs(2));
-            match apps_light() {
-                Some(current) if current != last => {
-                    eprintln!("[theme-watch] flip detected: light={current}");
+            // Synchronous registry notification blocks this one thread without
+            // periodic wakeups, CPU work, or repeated key open/close calls.
+            let changed = unsafe {
+                RegNotifyChangeKeyValue(key, false, REG_NOTIFY_CHANGE_LAST_SET, None, false)
+            };
+            if changed.is_err() {
+                break;
+            }
+            if let Some(current) = apps_light() {
+                if current != last {
                     last = current;
                     let _ = app.emit(
                         "system-theme-changed",
@@ -74,9 +93,10 @@ pub fn watch(app: AppHandle) {
                         },
                     );
                 }
-                Some(_) => {}
-                None => eprintln!("[theme-watch] registry read failed"),
             }
+        }
+        unsafe {
+            let _ = RegCloseKey(key);
         }
     });
 }

@@ -115,6 +115,7 @@ export type AccentId = "iris" | "azure" | "mint" | "amber" | "rose";
 export type WindowEffect = "acrylic" | "mica" | "solid";
 export type WindowWidth = 560 | 640 | 720;
 export type ThemeMode = "system" | "dark" | "light";
+export type TaskbarAlignment = "left" | "center";
 export const VIEW_ZOOM_LEVELS = [70, 80, 90, 100, 110, 120, 130, 140, 150] as const;
 export type ViewZoom = (typeof VIEW_ZOOM_LEVELS)[number];
 
@@ -131,6 +132,7 @@ export interface Settings {
   effect: WindowEffect;
   shortcut: string;
   alwaysOnTop: boolean;
+  taskbarAlignment: TaskbarAlignment;
   theme: ThemeMode;
   quickAccess: QuickAccessKind[];
   pinnedApps: string[];
@@ -143,6 +145,7 @@ export const DEFAULT_SETTINGS: Settings = {
   effect: "solid",
   shortcut: "Win",
   alwaysOnTop: true,
+  taskbarAlignment: "center",
   theme: "system",
   quickAccess: [...DEFAULT_QUICK_ACCESS],
   pinnedApps: [],

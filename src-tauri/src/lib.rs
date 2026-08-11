@@ -4,6 +4,7 @@ mod perf;
 mod power;
 mod start_menu;
 mod taskbar;
+mod taskbar_alignment;
 mod theme;
 mod win_key;
 
@@ -17,7 +18,7 @@ use tauri::{
     Emitter, Manager, Theme, WindowEvent,
 };
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
-use windows::Win32::Foundation::{HWND, POINT};
+use windows::Win32::Foundation::{HWND, POINT, RECT};
 use windows::Win32::Graphics::Gdi::{
     GetMonitorInfoW, MonitorFromPoint, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST,
 };
@@ -44,16 +45,72 @@ const LEGACY_STATE_VERSION: u32 = 2;
 const STATE_VERSION: u32 = 3;
 const PALETTE_HIDE_DELAY: Duration = Duration::from_millis(125);
 const PALETTE_RAISE_RETRY_DELAY: Duration = Duration::from_millis(40);
+const PALETTE_STARTUP_DELAY: Duration = Duration::from_millis(100);
+const STARTUP_SHELL_RETRY_DELAY: Duration = Duration::from_millis(250);
+const STARTUP_SHELL_RETRY_ATTEMPTS: usize = 120;
 
 static PALETTE_OPEN: AtomicBool = AtomicBool::new(false);
 static PALETTE_TRANSITION: AtomicU64 = AtomicU64::new(0);
+static ACTIVATION_FOCUS_PENDING: AtomicBool = AtomicBool::new(false);
+static PRESENTATION_ANCHOR: Mutex<Option<PresentationAnchor>> = Mutex::new(None);
+
+#[derive(Clone, Copy, Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+enum PresentationSource {
+    WinKey,
+    TaskbarStartClick,
+    ConfiguredShortcut,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PhysicalPoint {
+    x: i32,
+    y: i32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PhysicalRect {
+    left: i32,
+    top: i32,
+    right: i32,
+    bottom: i32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+enum TaskbarEdge {
+    Bottom,
+    Top,
+    Left,
+    Right,
+}
+
+#[derive(Clone, Copy, Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PresentationAnchor {
+    start_button: Option<PhysicalRect>,
+    click_point: Option<PhysicalPoint>,
+    taskbar_edge: Option<TaskbarEdge>,
+    monitor: Option<PhysicalRect>,
+    work_area: Option<PhysicalRect>,
+}
+
+#[derive(Clone, Copy, Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PresentationEvent {
+    open: bool,
+    source: PresentationSource,
+    anchor: Option<PresentationAnchor>,
+    generation: u64,
+}
 
 pub struct AppState {
     apps_cache: Mutex<Option<Vec<apps::AppEntry>>>,
+    apps_scan_lock: tokio::sync::Mutex<()>,
     file_index: files::FileIndex,
     shortcut: Mutex<String>,
-    effect: Mutex<String>,
-    theme: Mutex<String>,
 }
 
 /// Handles the internal crash-recovery mode before Tauri or the single-instance
@@ -64,28 +121,31 @@ pub fn run_start_restore_watchdog_if_requested() -> bool {
 
 pub fn run() {
     let startup_timer = perf::start();
+    let show_on_start = !launched_for_autostart();
     tauri::Builder::default()
+        // Register this before every other plugin so a relaunch is redirected
+        // before another plugin can initialize a second app instance.
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            let activation_app = app.clone();
+            let _ = app.run_on_main_thread(move || {
+                activate_palette(&activation_app);
+            });
+        }))
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
-        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
-            // A second launch just brings the running instance forward.
-            if let Some(window) = app.get_webview_window("main") {
-                if window.is_visible().unwrap_or(false) {
-                    let _ = window.set_focus();
-                } else {
-                    toggle_palette(app);
-                }
-            }
-        }))
+        .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(AppState {
             apps_cache: Mutex::new(None),
+            apps_scan_lock: tokio::sync::Mutex::new(()),
             file_index: files::FileIndex::default(),
             shortcut: Mutex::new(String::new()),
-            effect: Mutex::new("solid".to_string()),
-            theme: Mutex::new("dark".to_string()),
         })
         .setup(move |app| {
             let _ = start_menu::recover_stale(app.handle());
+            let persisted = load_state_value(app.handle()).ok().flatten();
+            let alignment = startup_taskbar_alignment(persisted.as_ref());
+            let _ = taskbar_alignment::set(&alignment);
             win_key::init(app.handle().clone());
             theme::watch(app.handle().clone());
             let file_cache = app
@@ -100,13 +160,16 @@ pub fn run() {
             );
             if let Some(window) = app.get_webview_window("main") {
                 let _ = apply_window_look(&window, "solid", "dark");
+                schedule_hidden_memory_trim(app.handle().clone());
             }
             // Install the persisted shortcut before the webview loads. A
             // fresh, corrupt, or incomplete state defaults natively to Win,
             // so first-run activation never waits on frontend startup.
-            let persisted = load_state_value(app.handle()).ok().flatten();
             let combo = startup_shortcut(persisted.as_ref());
-            let _ = apply_shortcut(app.handle(), &combo);
+            apply_startup_shortcut(app.handle(), combo);
+            if show_on_start {
+                schedule_initial_palette(app.handle().clone());
+            }
             perf::finish(startup_timer, "startup_setup", String::new);
             Ok(())
         })
@@ -116,10 +179,22 @@ pub fn run() {
                 && matches!(event, WindowEvent::Focused(false))
                 && window.is_visible().unwrap_or(false)
             {
+                // Windows may report the palette as unfocused once before
+                // granting foreground activation to the existing process.
+                if ACTIVATION_FOCUS_PENDING.swap(false, Ordering::AcqRel) {
+                    return;
+                }
                 PALETTE_OPEN.store(false, Ordering::Release);
                 PALETTE_TRANSITION.fetch_add(1, Ordering::AcqRel);
+                PRESENTATION_ANCHOR
+                    .lock()
+                    .map(|mut value| *value = None)
+                    .ok();
                 taskbar::release();
                 let _ = window.hide();
+                if let Some(webview) = window.app_handle().get_webview_window("main") {
+                    set_webview_memory_target(&webview, true);
+                }
             }
         })
         .invoke_handler(tauri::generate_handler![
@@ -132,9 +207,9 @@ pub fn run() {
             open_path,
             present_palette,
             hide_palette,
-            set_window_effect,
-            set_window_theme,
+            set_window_style,
             set_window_width,
+            set_taskbar_alignment,
             get_system_theme,
             set_shortcut,
             load_state,
@@ -146,34 +221,72 @@ pub fn run() {
         .expect("failed to run Prism");
 }
 
+fn launched_for_autostart() -> bool {
+    std::env::args_os()
+        .skip(1)
+        .any(|argument| argument == std::ffi::OsStr::new("--autostart"))
+}
+
+fn schedule_initial_palette(app: tauri::AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(PALETTE_STARTUP_DELAY).await;
+        let main_thread_app = app.clone();
+        let _ = app.run_on_main_thread(move || activate_palette(&main_thread_app));
+    });
+}
+
+fn activate_palette(app: &tauri::AppHandle) {
+    // A user-initiated launch should open the reusable palette without
+    // creating another WebView window or relying on frontend timing.
+    ACTIVATION_FOCUS_PENDING.store(true, Ordering::Release);
+    if !PALETTE_OPEN.load(Ordering::Acquire) {
+        toggle_palette(app);
+    }
+    let _ = present_palette(app.clone());
+}
+
 /* ---------------- window lifecycle ---------------- */
 
-/// Bottom-anchored placement on the monitor the cursor is on (falling back
-/// to the window's monitor), clamped to the work area so small screens and
-/// large taskbars never cut the palette off.
-fn position_palette(window: &tauri::WebviewWindow) {
-    let Ok(hwnd) = window.hwnd() else {
+/// Positions the reusable window against the Start button's taskbar edge and
+/// clamps it to the physical-pixel work area. Keyboard and shortcut fallback
+/// placement remains bottom-centered on the active monitor.
+fn position_palette(window: &tauri::WebviewWindow, anchor: Option<PresentationAnchor>) {
+    let Some((x, y)) = palette_target(window, anchor, taskbar_alignment::current()) else {
         return;
+    };
+    let _ = window.set_position(tauri::PhysicalPosition::new(x, y));
+}
+
+fn reconcile_palette_position(
+    window: &tauri::WebviewWindow,
+    anchor: Option<PresentationAnchor>,
+) -> Result<(), String> {
+    let alignment = taskbar_alignment::current();
+    let (x, y) = palette_target(window, anchor, alignment)
+        .ok_or_else(|| "cannot resolve Prism alignment target".to_string())?;
+    let hwnd = window.hwnd().map_err(|error| error.to_string())?;
+    taskbar_alignment::reapply_with_companion(taskbar_alignment::CompanionMove {
+        window: HWND(hwnd.0),
+        x,
+        y,
+    })
+}
+
+fn palette_target(
+    window: &tauri::WebviewWindow,
+    anchor: Option<PresentationAnchor>,
+    alignment: taskbar_alignment::Alignment,
+) -> Option<(i32, i32)> {
+    let Ok(hwnd) = window.hwnd() else {
+        return None;
     };
     let Ok(size) = window.outer_size() else {
-        return;
+        return None;
     };
-    let mut info: MONITORINFO = unsafe { std::mem::zeroed() };
-    info.cbSize = std::mem::size_of::<MONITORINFO>() as u32;
-    unsafe {
-        // Active-monitor placement: prefer the monitor under the cursor,
-        // like the real Start menu; fall back to the window's monitor.
-        let mut pt = POINT::default();
-        let monitor = if GetCursorPos(&mut pt).is_ok() {
-            MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST)
-        } else {
-            MonitorFromWindow(HWND(hwnd.0), MONITOR_DEFAULTTONEAREST)
-        };
-        if !GetMonitorInfoW(monitor, &mut info).as_bool() {
-            return;
-        }
-    }
-    let work = info.rcWork;
+    let info = anchor
+        .and_then(|value| value.monitor.zip(value.work_area))
+        .or_else(|| monitor_geometry_for_window(HWND(hwnd.0)));
+    let (monitor, work) = info?;
     let mut width = size.width as i32;
     let mut height = size.height as i32;
     // Clamp to the work area (small screens, huge taskbars, 200% DPI).
@@ -187,9 +300,146 @@ fn position_palette(window: &tauri::WebviewWindow) {
         height = work_h;
         let _ = window.set_size(tauri::PhysicalSize::new(width as u32, height as u32));
     }
-    let x = work.left + (work_w - width) / 2;
-    let y = work.bottom - height;
-    let _ = window.set_position(tauri::PhysicalPosition::new(x, y));
+    let edge = anchor
+        .and_then(|value| value.taskbar_edge)
+        .or_else(|| taskbar_edge(monitor, work))
+        .unwrap_or(TaskbarEdge::Bottom);
+    Some(palette_position(work, edge, alignment, width, height))
+}
+
+fn presentation_anchor(
+    start_button: Option<RECT>,
+    click_point: Option<POINT>,
+) -> PresentationAnchor {
+    let start_button = start_button.map(PhysicalRect::from);
+    let click_point = click_point.map(PhysicalPoint::from);
+    let monitor_point = click_point.or_else(|| start_button.map(PhysicalRect::center));
+    let geometry = monitor_point.and_then(monitor_geometry_for_point);
+    PresentationAnchor {
+        start_button,
+        click_point,
+        taskbar_edge: geometry.and_then(|(monitor, work)| taskbar_edge(monitor, work)),
+        monitor: geometry.map(|(monitor, _)| monitor),
+        work_area: geometry.map(|(_, work)| work),
+    }
+}
+
+fn monitor_geometry_for_point(point: PhysicalPoint) -> Option<(PhysicalRect, PhysicalRect)> {
+    let monitor = unsafe {
+        MonitorFromPoint(
+            POINT {
+                x: point.x,
+                y: point.y,
+            },
+            MONITOR_DEFAULTTONEAREST,
+        )
+    };
+    monitor_geometry(monitor)
+}
+
+fn monitor_geometry_for_window(window: HWND) -> Option<(PhysicalRect, PhysicalRect)> {
+    let mut point = POINT::default();
+    let monitor = unsafe {
+        if GetCursorPos(&mut point).is_ok() {
+            MonitorFromPoint(point, MONITOR_DEFAULTTONEAREST)
+        } else {
+            MonitorFromWindow(window, MONITOR_DEFAULTTONEAREST)
+        }
+    };
+    monitor_geometry(monitor)
+}
+
+fn monitor_geometry(
+    monitor: windows::Win32::Graphics::Gdi::HMONITOR,
+) -> Option<(PhysicalRect, PhysicalRect)> {
+    let mut info: MONITORINFO = unsafe { std::mem::zeroed() };
+    info.cbSize = std::mem::size_of::<MONITORINFO>() as u32;
+    unsafe { GetMonitorInfoW(monitor, &mut info).as_bool() }.then(|| {
+        (
+            PhysicalRect::from(info.rcMonitor),
+            PhysicalRect::from(info.rcWork),
+        )
+    })
+}
+
+fn taskbar_edge(monitor: PhysicalRect, work: PhysicalRect) -> Option<TaskbarEdge> {
+    let candidates = [
+        (work.top - monitor.top, TaskbarEdge::Top),
+        (monitor.bottom - work.bottom, TaskbarEdge::Bottom),
+        (work.left - monitor.left, TaskbarEdge::Left),
+        (monitor.right - work.right, TaskbarEdge::Right),
+    ];
+    candidates
+        .into_iter()
+        .filter(|(inset, _)| *inset > 0)
+        .max_by_key(|(inset, _)| *inset)
+        .map(|(_, edge)| edge)
+}
+
+fn palette_position(
+    work: PhysicalRect,
+    edge: TaskbarEdge,
+    alignment: taskbar_alignment::Alignment,
+    width: i32,
+    height: i32,
+) -> (i32, i32) {
+    let aligned_x = match alignment {
+        taskbar_alignment::Alignment::Left => work.left,
+        taskbar_alignment::Alignment::Center => work.left + (work.width() - width) / 2,
+        taskbar_alignment::Alignment::Right => work.right - width,
+    };
+    let aligned_y = match alignment {
+        taskbar_alignment::Alignment::Left => work.top,
+        taskbar_alignment::Alignment::Center => work.top + (work.height() - height) / 2,
+        taskbar_alignment::Alignment::Right => work.bottom - height,
+    };
+    let (x, y) = match edge {
+        TaskbarEdge::Bottom => (aligned_x, work.bottom - height),
+        TaskbarEdge::Top => (aligned_x, work.top),
+        TaskbarEdge::Left => (work.left, aligned_y),
+        TaskbarEdge::Right => (work.right - width, aligned_y),
+    };
+    (
+        x.clamp(work.left, work.right - width),
+        y.clamp(work.top, work.bottom - height),
+    )
+}
+
+impl PhysicalRect {
+    fn width(self) -> i32 {
+        self.right - self.left
+    }
+
+    fn height(self) -> i32 {
+        self.bottom - self.top
+    }
+
+    fn center(self) -> PhysicalPoint {
+        PhysicalPoint {
+            x: self.left + self.width() / 2,
+            y: self.top + self.height() / 2,
+        }
+    }
+}
+
+impl From<RECT> for PhysicalRect {
+    fn from(rect: RECT) -> Self {
+        Self {
+            left: rect.left,
+            top: rect.top,
+            right: rect.right,
+            bottom: rect.bottom,
+        }
+    }
+}
+
+impl From<POINT> for PhysicalPoint {
+    fn from(point: POINT) -> Self {
+        Self {
+            x: point.x,
+            y: point.y,
+        }
+    }
 }
 
 /// Reasserts Prism at the front of the topmost band. `alwaysOnTop` keeps the
@@ -238,7 +488,73 @@ fn schedule_palette_raise_retry(app: &tauri::AppHandle, transition: u64) {
     });
 }
 
+#[cfg(windows)]
+fn set_webview_memory_target(window: &tauri::WebviewWindow, low: bool) {
+    use webview2_com::Microsoft::Web::WebView2::Win32::{
+        ICoreWebView2_19, COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_LOW,
+        COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_NORMAL,
+    };
+    use windows::core::Interface;
+
+    let _ = window.with_webview(move |webview| unsafe {
+        let Ok(core) = webview.controller().CoreWebView2() else {
+            return;
+        };
+        let Ok(core) = core.cast::<ICoreWebView2_19>() else {
+            return;
+        };
+        let level = if low {
+            COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_LOW
+        } else {
+            COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_NORMAL
+        };
+        let _ = core.SetMemoryUsageTargetLevel(level);
+    });
+}
+
+#[cfg(not(windows))]
+fn set_webview_memory_target(_window: &tauri::WebviewWindow, _low: bool) {}
+
+fn schedule_hidden_memory_trim(app: tauri::AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        if PALETTE_OPEN.load(Ordering::Acquire) {
+            return;
+        }
+        let trim_app = app.clone();
+        let _ = app.run_on_main_thread(move || {
+            if !PALETTE_OPEN.load(Ordering::Acquire) {
+                if let Some(window) = trim_app.get_webview_window("main") {
+                    set_webview_memory_target(&window, true);
+                }
+            }
+        });
+    });
+}
+
 pub(crate) fn toggle_palette(app: &tauri::AppHandle) {
+    toggle_palette_with_presentation(app, PresentationSource::ConfiguredShortcut, None);
+}
+
+pub(crate) fn toggle_palette_from_win(app: &tauri::AppHandle, start_button: Option<RECT>) {
+    let anchor = start_button.map(|rect| presentation_anchor(Some(rect), None));
+    toggle_palette_with_presentation(app, PresentationSource::WinKey, anchor);
+}
+
+pub(crate) fn toggle_palette_from_taskbar(
+    app: &tauri::AppHandle,
+    click_point: POINT,
+    start_button: Option<RECT>,
+) {
+    let anchor = Some(presentation_anchor(start_button, Some(click_point)));
+    toggle_palette_with_presentation(app, PresentationSource::TaskbarStartClick, anchor);
+}
+
+fn toggle_palette_with_presentation(
+    app: &tauri::AppHandle,
+    source: PresentationSource,
+    anchor: Option<PresentationAnchor>,
+) {
     let timer = perf::start();
     let Some(window) = app.get_webview_window("main") else {
         return;
@@ -246,6 +562,20 @@ pub(crate) fn toggle_palette(app: &tauri::AppHandle) {
     let opening = toggle_open_state(&PALETTE_OPEN);
     let transition = PALETTE_TRANSITION.fetch_add(1, Ordering::AcqRel) + 1;
     if !opening {
+        ACTIVATION_FOCUS_PENDING.store(false, Ordering::Release);
+    }
+    if opening {
+        set_webview_memory_target(&window, false);
+        PRESENTATION_ANCHOR
+            .lock()
+            .map(|mut value| *value = anchor)
+            .ok();
+    }
+    if !opening {
+        PRESENTATION_ANCHOR
+            .lock()
+            .map(|mut value| *value = None)
+            .ok();
         let close_app = app.clone();
         tauri::async_runtime::spawn(async move {
             tokio::time::sleep(PALETTE_HIDE_DELAY).await;
@@ -261,6 +591,7 @@ pub(crate) fn toggle_palette(app: &tauri::AppHandle) {
                 {
                     if let Some(window) = hide_app.get_webview_window("main") {
                         let _ = window.hide();
+                        set_webview_memory_target(&window, true);
                         taskbar::release();
                     }
                 }
@@ -269,7 +600,15 @@ pub(crate) fn toggle_palette(app: &tauri::AppHandle) {
     }
     // Send the desired state, not an ambiguous toggle, so native and webview
     // state cannot diverge if an event is delayed.
-    let _ = window.emit("prism-toggle", opening);
+    let _ = window.emit(
+        "prism-toggle",
+        PresentationEvent {
+            open: opening,
+            source,
+            anchor,
+            generation: transition,
+        },
+    );
     perf::finish(timer, "palette_toggle", || format!("open={opening}"));
 }
 
@@ -286,8 +625,15 @@ fn present_palette(app: tauri::AppHandle) -> Result<bool, String> {
     let window = app
         .get_webview_window("main")
         .ok_or_else(|| "main window is unavailable".to_string())?;
+    set_webview_memory_target(&window, false);
     taskbar::present();
-    position_palette(&window);
+    let anchor = PRESENTATION_ANCHOR.lock().ok().and_then(|value| *value);
+    // Reconcile the taskbar and Prism together on every presentation. This
+    // also covers webview refreshes and single-instance reopens, where the
+    // frontend is repositioned but Explorer may have relaid out its children.
+    if reconcile_palette_position(&window, anchor).is_err() {
+        position_palette(&window, anchor);
+    }
     window.show().map_err(|error| error.to_string())?;
     raise_palette(&window)?;
     schedule_palette_raise_retry(&app, PALETTE_TRANSITION.load(Ordering::Acquire));
@@ -298,11 +644,17 @@ fn present_palette(app: tauri::AppHandle) -> Result<bool, String> {
 #[tauri::command]
 fn hide_palette(app: tauri::AppHandle) -> Result<(), String> {
     PALETTE_OPEN.store(false, Ordering::Release);
+    ACTIVATION_FOCUS_PENDING.store(false, Ordering::Release);
     PALETTE_TRANSITION.fetch_add(1, Ordering::AcqRel);
+    PRESENTATION_ANCHOR
+        .lock()
+        .map(|mut value| *value = None)
+        .ok();
     let window = app
         .get_webview_window("main")
         .ok_or_else(|| "main window is unavailable".to_string())?;
     window.hide().map_err(|error| error.to_string())?;
+    set_webview_memory_target(&window, true);
     taskbar::release();
     Ok(())
 }
@@ -376,20 +728,26 @@ async fn get_apps(
     state: tauri::State<'_, AppState>,
 ) -> Result<Vec<apps::AppEntry>, String> {
     let timer = perf::start();
-    eprintln!("[get_apps] called");
     // Fast path: already scanned this session.
     if let Some(list) = state.apps_cache.lock().map_err(|e| e.to_string())?.clone() {
-        eprintln!("[get_apps] cache hit: {}", list.len());
         perf::finish(timer, "get_apps_cache", || format!("count={}", list.len()));
+        return Ok(list);
+    }
+    // React StrictMode and fast repeated opens can overlap the initial IPC.
+    // Only one scan should touch the filesystem and icon cache; waiters recheck
+    // the populated in-memory cache after the first scan completes.
+    let _scan_guard = state.apps_scan_lock.lock().await;
+    if let Some(list) = state.apps_cache.lock().map_err(|e| e.to_string())?.clone() {
+        perf::finish(timer, "get_apps_cache_after_wait", || {
+            format!("count={}", list.len())
+        });
         return Ok(list);
     }
     // Off the main thread: scanning spawns PowerShell and does icon work.
     let cache_path = apps_cache_path(&app);
-    eprintln!("[get_apps] scanning, cache={cache_path:?}");
     let list = tauri::async_runtime::spawn_blocking(move || apps::scan(&cache_path))
         .await
         .map_err(|e| format!("app scan task failed: {e}"))??;
-    eprintln!("[get_apps] scan done: {} apps", list.len());
     *state.apps_cache.lock().map_err(|e| e.to_string())? = Some(list.clone());
     perf::finish(timer, "get_apps_scan", || format!("count={}", list.len()));
     Ok(list)
@@ -400,12 +758,11 @@ async fn refresh_apps(
     app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
 ) -> Result<Vec<apps::AppEntry>, String> {
-    eprintln!("[refresh_apps] called");
+    let _scan_guard = state.apps_scan_lock.lock().await;
     let cache_path = apps_cache_path(&app);
     let list = tauri::async_runtime::spawn_blocking(move || apps::scan_force(&cache_path))
         .await
         .map_err(|e| format!("app scan task failed: {e}"))??;
-    eprintln!("[refresh_apps] done: {} apps", list.len());
     *state.apps_cache.lock().map_err(|e| e.to_string())? = Some(list.clone());
     Ok(list)
 }
@@ -496,23 +853,6 @@ async fn perform_power_action(action: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn set_window_effect(
-    app: tauri::AppHandle,
-    state: tauri::State<'_, AppState>,
-    effect: String,
-) -> Result<(), String> {
-    if !matches!(effect.as_str(), "acrylic" | "mica" | "solid") {
-        return Err(format!("unknown effect '{effect}'"));
-    }
-    *state.effect.lock().map_err(|e| e.to_string())? = effect.clone();
-    let theme = state.theme.lock().map_err(|e| e.to_string())?.clone();
-    let window = app
-        .get_webview_window("main")
-        .ok_or_else(|| "main window not found".to_string())?;
-    apply_window_look(&window, &effect, &theme)
-}
-
-#[tauri::command]
 fn set_window_width(app: tauri::AppHandle, width: u32) -> Result<(), String> {
     // Persisted choices remain the three discrete presets. Intermediate
     // values are accepted only inside their bounds so the frontend can
@@ -527,25 +867,46 @@ fn set_window_width(app: tauri::AppHandle, width: u32) -> Result<(), String> {
     window
         .set_size(tauri::PhysicalSize::new(width, height))
         .map_err(|e| e.to_string())?;
-    position_palette(&window);
+    let anchor = PRESENTATION_ANCHOR.lock().ok().and_then(|value| *value);
+    position_palette(&window, anchor);
     Ok(())
+}
+
+#[tauri::command]
+fn set_taskbar_alignment(app: tauri::AppHandle, alignment: String) -> Result<(), String> {
+    let alignment = taskbar_alignment::Alignment::parse(&alignment)?;
+    let window = app
+        .get_webview_window("main")
+        .ok_or_else(|| "main window not found".to_string())?;
+    let anchor = PRESENTATION_ANCHOR.lock().ok().and_then(|value| *value);
+    let (x, y) = palette_target(&window, anchor, alignment)
+        .ok_or_else(|| "cannot resolve Prism alignment target".to_string())?;
+    let hwnd = window.hwnd().map_err(|error| error.to_string())?;
+    taskbar_alignment::set_with_companion(
+        alignment,
+        taskbar_alignment::CompanionMove {
+            window: HWND(hwnd.0),
+            x,
+            y,
+        },
+    )
 }
 
 fn is_animatable_window_width(width: u32) -> bool {
     (560..=720).contains(&width)
 }
 
+/// Applies the two coupled native style settings in one IPC round-trip and
+/// one window-style application. The frontend changes these together during
+/// startup and when the user switches appearance settings.
 #[tauri::command]
-fn set_window_theme(
-    app: tauri::AppHandle,
-    state: tauri::State<'_, AppState>,
-    theme: String,
-) -> Result<(), String> {
+fn set_window_style(app: tauri::AppHandle, theme: String, effect: String) -> Result<(), String> {
     if !matches!(theme.as_str(), "light" | "dark") {
         return Err(format!("unknown theme '{theme}'"));
     }
-    *state.theme.lock().map_err(|e| e.to_string())? = theme.clone();
-    let effect = state.effect.lock().map_err(|e| e.to_string())?.clone();
+    if !matches!(effect.as_str(), "acrylic" | "mica" | "solid") {
+        return Err(format!("unknown effect '{effect}'"));
+    }
     let window = app
         .get_webview_window("main")
         .ok_or_else(|| "main window not found".to_string())?;
@@ -590,6 +951,47 @@ fn startup_shortcut(state: Option<&serde_json::Value>) -> String {
         .filter(|shortcut| validate_shortcut(shortcut).is_ok())
         .unwrap_or(DEFAULT_SHORTCUT)
         .to_string()
+}
+
+fn startup_taskbar_alignment(state: Option<&serde_json::Value>) -> String {
+    state
+        .and_then(|value| value.get("settings"))
+        .and_then(|settings| settings.get("taskbarAlignment"))
+        .and_then(|alignment| alignment.as_str())
+        .filter(|alignment| matches!(*alignment, "left" | "center" | "right"))
+        .unwrap_or("center")
+        .to_string()
+}
+
+fn apply_startup_shortcut(app: &tauri::AppHandle, combo: String) {
+    if apply_shortcut(app, &combo).is_ok() {
+        return;
+    }
+
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        for _ in 0..STARTUP_SHELL_RETRY_ATTEMPTS {
+            tokio::time::sleep(STARTUP_SHELL_RETRY_DELAY).await;
+            let retry_app = app.clone();
+            let retry_combo = combo.clone();
+            let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+            if app
+                .run_on_main_thread(move || {
+                    let _ = result_tx.send(apply_shortcut(&retry_app, &retry_combo));
+                })
+                .is_err()
+            {
+                return;
+            }
+            if matches!(result_rx.await, Ok(Ok(()))) {
+                return;
+            }
+        }
+        let _ = app.emit(
+            win_key::FAILED_EVENT,
+            "Explorer taskbar integration was unavailable during startup",
+        );
+    });
 }
 
 /// Applies a global shortcut. The new binding is activated and proven
@@ -740,6 +1142,14 @@ fn validate_state(state: &serde_json::Value) -> Result<(), String> {
             return Err(format!("unknown theme '{theme}'"));
         }
     }
+    if let Some(alignment) = settings.get("taskbarAlignment") {
+        let alignment = alignment
+            .as_str()
+            .ok_or("state.settings.taskbarAlignment must be a string")?;
+        if !matches!(alignment, "left" | "center" | "right") {
+            return Err(format!("unknown taskbar alignment '{alignment}'"));
+        }
+    }
     if let Some(shortcut) = settings.get("shortcut").and_then(|v| v.as_str()) {
         validate_shortcut(shortcut)?;
     }
@@ -878,6 +1288,25 @@ mod tests {
     }
 
     #[test]
+    fn startup_taskbar_alignment_is_available_before_frontend_state_loads() {
+        assert_eq!(startup_taskbar_alignment(None), "center");
+        for alignment in ["left", "center", "right"] {
+            assert_eq!(
+                startup_taskbar_alignment(Some(&serde_json::json!({
+                    "settings": { "taskbarAlignment": alignment }
+                }))),
+                alignment
+            );
+        }
+        assert_eq!(
+            startup_taskbar_alignment(Some(&serde_json::json!({
+                "settings": { "taskbarAlignment": "edge" }
+            }))),
+            "center"
+        );
+    }
+
+    #[test]
     fn version_two_state_migrates_only_the_shortcut_once() {
         let legacy = serde_json::json!({
             "version": LEGACY_STATE_VERSION,
@@ -914,6 +1343,147 @@ mod tests {
     }
 
     #[test]
+    fn anchor_placement_tracks_every_taskbar_edge() {
+        let bottom_work = PhysicalRect {
+            left: 0,
+            top: 0,
+            right: 1_920,
+            bottom: 1_040,
+        };
+        assert_eq!(
+            palette_position(
+                bottom_work,
+                TaskbarEdge::Bottom,
+                taskbar_alignment::Alignment::Center,
+                720,
+                620,
+            ),
+            (600, 420)
+        );
+
+        let top_work = PhysicalRect {
+            top: 40,
+            ..bottom_work
+        };
+        assert_eq!(
+            palette_position(
+                top_work,
+                TaskbarEdge::Top,
+                taskbar_alignment::Alignment::Center,
+                720,
+                620,
+            ),
+            (600, 40)
+        );
+
+        assert_eq!(
+            palette_position(
+                PhysicalRect {
+                    left: 48,
+                    bottom: 1_080,
+                    ..bottom_work
+                },
+                TaskbarEdge::Left,
+                taskbar_alignment::Alignment::Center,
+                720,
+                620
+            ),
+            (48, 230)
+        );
+        assert_eq!(
+            palette_position(
+                PhysicalRect {
+                    right: 1_872,
+                    bottom: 1_080,
+                    ..bottom_work
+                },
+                TaskbarEdge::Right,
+                taskbar_alignment::Alignment::Center,
+                720,
+                620
+            ),
+            (1_152, 230)
+        );
+    }
+
+    #[test]
+    fn anchor_placement_supports_negative_coordinates_and_clamps() {
+        let work = PhysicalRect {
+            left: -1_920,
+            top: -1_040,
+            right: 0,
+            bottom: 0,
+        };
+        assert_eq!(
+            palette_position(
+                work,
+                TaskbarEdge::Bottom,
+                taskbar_alignment::Alignment::Center,
+                720,
+                620,
+            ),
+            (-1_320, -620)
+        );
+
+        let small_work = PhysicalRect {
+            left: 0,
+            top: 0,
+            right: 500,
+            bottom: 420,
+        };
+        assert_eq!(
+            palette_position(
+                small_work,
+                TaskbarEdge::Bottom,
+                taskbar_alignment::Alignment::Center,
+                480,
+                400,
+            ),
+            (10, 20)
+        );
+    }
+
+    #[test]
+    fn taskbar_alignment_moves_horizontal_menu_with_the_icon_group() {
+        let work = PhysicalRect {
+            left: 0,
+            top: 0,
+            right: 1_920,
+            bottom: 1_032,
+        };
+        assert_eq!(
+            palette_position(
+                work,
+                TaskbarEdge::Bottom,
+                taskbar_alignment::Alignment::Left,
+                560,
+                620,
+            ),
+            (0, 412)
+        );
+        assert_eq!(
+            palette_position(
+                work,
+                TaskbarEdge::Bottom,
+                taskbar_alignment::Alignment::Center,
+                560,
+                620,
+            ),
+            (680, 412)
+        );
+        assert_eq!(
+            palette_position(
+                work,
+                TaskbarEdge::Bottom,
+                taskbar_alignment::Alignment::Right,
+                560,
+                620,
+            ),
+            (1_360, 412)
+        );
+    }
+
+    #[test]
     fn window_width_animation_stays_inside_preset_bounds() {
         for width in [560, 561, 639, 640, 719, 720] {
             assert!(is_animatable_window_width(width));
@@ -933,6 +1503,7 @@ mod tests {
                 "effect": "solid",
                 "shortcut": "Ctrl+Alt+Space",
                 "alwaysOnTop": true,
+                "taskbarAlignment": "left",
                 "theme": "system",
                 "quickAccess": ["home", "desktop", "downloads", "documents", "pictures", "music"],
                 "pinnedApps": ["app-one", "app-two"]
@@ -949,6 +1520,8 @@ mod tests {
             serde_json::json!({"settings": {"width": 999}}),
             serde_json::json!({"settings": {"viewZoom": 135}}),
             serde_json::json!({"settings": {"viewZoom": "large"}}),
+            serde_json::json!({"settings": {"taskbarAlignment": "edge"}}),
+            serde_json::json!({"settings": {"taskbarAlignment": 1}}),
             serde_json::json!({"settings": {"quickAccess": "home"}}),
             serde_json::json!({"settings": {"quickAccess": ["home", "home"]}}),
             serde_json::json!({"settings": {"quickAccess": ["network"]}}),

@@ -6,6 +6,7 @@ import type { PaletteItem } from "../../lib/types";
 import { PINNED_APP_LIMIT, reorderPinnedApps } from "../../lib/types";
 import { useApp } from "../../state/app";
 import { usePalette } from "../../state/palette";
+import { UpdateControl } from "../updater/UpdateControl";
 
 interface PinDragState {
   item: PaletteItem;
@@ -26,6 +27,8 @@ export function Palette() {
   const inputRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
   const pinDragRef = useRef<PinDragState | null>(null);
+  const pendingPinDragRef = useRef<{ pointerId: number; x: number; y: number } | null>(null);
+  const pinDragFrameRef = useRef<number | null>(null);
   const [pinDrag, setPinDrag] = useState<PinDragState | null>(null);
 
   const togglePin = useCallback(
@@ -94,7 +97,7 @@ export function Palette() {
     [updatePinDragState],
   );
 
-  const updatePinDrag = useCallback(
+  const applyPinDrag = useCallback(
     (pointerId: number, x: number, y: number) => {
       const current = pinDragRef.current;
       if (!current || current.pointerId !== pointerId) return;
@@ -110,8 +113,29 @@ export function Palette() {
     [updatePinDragState],
   );
 
+  const updatePinDrag = useCallback(
+    (pointerId: number, x: number, y: number) => {
+      pendingPinDragRef.current = { pointerId, x, y };
+      if (pinDragFrameRef.current !== null) return;
+      pinDragFrameRef.current = requestAnimationFrame(() => {
+        pinDragFrameRef.current = null;
+        const pending = pendingPinDragRef.current;
+        pendingPinDragRef.current = null;
+        if (pending) applyPinDrag(pending.pointerId, pending.x, pending.y);
+      });
+    },
+    [applyPinDrag],
+  );
+
   const finishPinDrag = useCallback(
     (pointerId: number) => {
+      if (pinDragFrameRef.current !== null) {
+        cancelAnimationFrame(pinDragFrameRef.current);
+        pinDragFrameRef.current = null;
+      }
+      const pending = pendingPinDragRef.current;
+      pendingPinDragRef.current = null;
+      if (pending) applyPinDrag(pending.pointerId, pending.x, pending.y);
       const current = pinDragRef.current;
       if (!current || current.pointerId !== pointerId) return;
       if (current.active && current.item.appId && current.targetAppId) {
@@ -119,11 +143,16 @@ export function Palette() {
       }
       updatePinDragState(null);
     },
-    [reorderPin, updatePinDragState],
+    [applyPinDrag, reorderPin, updatePinDragState],
   );
 
   const cancelPinDrag = useCallback(
     (pointerId: number) => {
+      pendingPinDragRef.current = null;
+      if (pinDragFrameRef.current !== null) {
+        cancelAnimationFrame(pinDragFrameRef.current);
+        pinDragFrameRef.current = null;
+      }
       if (pinDragRef.current?.pointerId === pointerId) updatePinDragState(null);
     },
     [updatePinDragState],
@@ -137,6 +166,13 @@ export function Palette() {
     window.addEventListener("keydown", cancelOnEscape);
     return () => window.removeEventListener("keydown", cancelOnEscape);
   }, [pinDrag, updatePinDragState]);
+
+  useEffect(
+    () => () => {
+      if (pinDragFrameRef.current !== null) cancelAnimationFrame(pinDragFrameRef.current);
+    },
+    [],
+  );
 
   /* Keyboard-first navigation. */
   const onKeyDown = useCallback(
@@ -299,6 +335,7 @@ export function Palette() {
           <span className="px-1">dismiss</span>
         </div>
         <div className="flex items-center gap-1.5">
+          <UpdateControl />
           {!palette.appsLoaded && palette.query === "" && (
             <span className="flex items-center gap-1.5 text-[11px] text-fg-quiet">
               <RefreshCw className="h-3 w-3 animate-spin" />

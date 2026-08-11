@@ -30,6 +30,15 @@ describe("view zoom", () => {
   });
 });
 
+describe("taskbar alignment", () => {
+  it("defaults older state to center alignment and preserves valid choices", () => {
+    expect(sanitizeSettings({}).taskbarAlignment).toBe("center");
+    expect(sanitizeSettings({ taskbarAlignment: "center" }).taskbarAlignment).toBe("center");
+    expect(sanitizeSettings({ taskbarAlignment: "right" }).taskbarAlignment).toBe("center");
+    expect(sanitizeSettings({ taskbarAlignment: "invalid" }).taskbarAlignment).toBe("center");
+  });
+});
+
 describe("quick access settings", () => {
   it("keeps the current pins as the default for older state", () => {
     expect(sanitizeSettings({}).quickAccess).toEqual(DEFAULT_QUICK_ACCESS);
