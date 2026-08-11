@@ -54,9 +54,7 @@ The NSIS installer is written to `src-tauri\target\release\bundle\nsis\`.
 
 ## Releases
 
-Every push and pull request is verified by `.github/workflows/ci.yml`. After a merge reaches `main`, the same workflow builds a fresh NSIS installer after all checks pass. Download it from the **Artifacts** section of that run on the repository's Actions page.
-
-A semantic version tag such as `v0.6.3` triggers `.github/workflows/release.yml`, which builds the NSIS installer, creates a permanent GitHub Release, and uploads the installer, its updater signature, and `latest.json`. Updater-enabled Prism builds check that manifest at startup and while the app is running, then offer the signed release from the launcher footer. Use tagged releases for versions intended for general distribution; per-merge workflow artifacts are development builds.
+Release files are built and published locally. Updater-enabled Prism builds check the latest GitHub Release at startup and while the app is running, then offer a signed release from the launcher footer.
 
 Before publishing, keep the version identical in `package.json`, `src-tauri\Cargo.toml`, `src-tauri\tauri.conf.json`, and `src-tauri\Cargo.lock`. Verify it with:
 
@@ -64,16 +62,17 @@ Before publishing, keep the version identical in `package.json`, `src-tauri\Carg
 .\scripts\check-version.ps1 -ExpectedTag v0.6.3
 ```
 
-Publish a release:
+Build the signed installer, place the installer and its `.sig` file in `artifacts`, and add `artifacts\Prism_<version>_release-notes.md`. Push the matching tag, then publish:
 
 ```powershell
-git tag v0.6.3
-git push origin v0.6.3
+git tag 0.6.3
+git push origin 0.6.3
+.\scripts\publish-release.ps1
 ```
 
-The same workflow can be started manually from the repository's Actions page. It publishes the version currently declared by the application.
+`publish-release.ps1` accepts either `0.6.3` or `v0.6.3` tags. It creates or repairs the GitHub Release, uploads the installer, signature, release notes through the release body, and `latest.json`, then verifies the public updater endpoint. Use `-Tag v0.6.3` when publishing a `v`-prefixed tag.
 
-The updater signing private key and password are stored outside this repository under `%USERPROFILE%\.prism\signing\` and in the repository's masked Actions secrets. Back up both files securely: existing installations reject updates signed by a replacement key. Only the public key is committed in `src-tauri/tauri.conf.json`.
+The updater signing private key and password are stored outside this repository under `%USERPROFILE%\.prism\signing\`. Back up both files securely: existing installations reject updates signed by a replacement key. Only the public key is committed in `src-tauri/tauri.conf.json`.
 
 The first release containing the updater still requires a normal installer upgrade for users on older Prism builds. After that one-time transition, newer tagged releases can be installed from the footer update control.
 
@@ -83,7 +82,7 @@ The first release containing the updater still requires a normal installer upgra
 - `src-tauri/src/` - native Windows integration, indexing, and launcher behavior
 - `src-tauri/icons/` - source and Windows bundle icons
 - `src-tauri/nsis/` - installer artwork and lifecycle hooks
-- `scripts/` - version checks, asset generation, and cleanup
+- `scripts/` - version checks, asset generation, release publishing, and cleanup
 
 Generated directories such as `dist/`, `src-tauri/gen/`, and `src-tauri/target/` are disposable. Remove them with:
 
