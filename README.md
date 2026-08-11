@@ -59,18 +59,18 @@ Release files are built and published locally. Updater-enabled Prism builds chec
 Before publishing, keep the version identical in `package.json`, `src-tauri\Cargo.toml`, `src-tauri\tauri.conf.json`, and `src-tauri\Cargo.lock`. Verify it with:
 
 ```powershell
-.\scripts\check-version.ps1 -ExpectedTag v0.6.4
+.\scripts\check-version.ps1 -ExpectedTag v0.6.5
 ```
 
 Build the signed installer, place the installer and its `.sig` file in `artifacts`, and add `artifacts\Prism_<version>_release-notes.md`. Push the matching tag, then publish:
 
 ```powershell
-git tag 0.6.4
-git push origin 0.6.4
+git tag 0.6.5
+git push origin 0.6.5
 .\scripts\publish-release.ps1
 ```
 
-`publish-release.ps1` accepts either `0.6.4` or `v0.6.4` tags. It creates or repairs the GitHub Release, uploads the installer, signature, release notes through the release body, and `latest.json`, then verifies the public updater endpoint. Use `-Tag v0.6.4` when publishing a `v`-prefixed tag.
+`publish-release.ps1` accepts either `0.6.5` or `v0.6.5` tags. It creates or repairs the GitHub Release, uploads the installer, signature, release notes through the release body, and `latest.json`, then verifies the public updater endpoint. Use `-Tag v0.6.5` when publishing a `v`-prefixed tag.
 
 The updater signing private key and password are stored outside this repository under `%USERPROFILE%\.prism\signing\`. Back up both files securely: existing installations reject updates signed by a replacement key. Only the public key is committed in `src-tauri/tauri.conf.json`.
 

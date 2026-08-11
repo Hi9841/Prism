@@ -54,8 +54,12 @@ if ($LASTEXITCODE -ne 0) {
   throw "GitHub CLI is not authenticated. Run 'gh auth login' first."
 }
 
+$previousErrorActionPreference = $ErrorActionPreference
+$ErrorActionPreference = "Continue"
 $releaseJson = & gh release view $Tag --repo $Repository --json publishedAt 2>$null
-$releaseExists = $LASTEXITCODE -eq 0
+$releaseViewExitCode = $LASTEXITCODE
+$ErrorActionPreference = $previousErrorActionPreference
+$releaseExists = $releaseViewExitCode -eq 0
 $publishedAt = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
 if ($releaseExists) {
   $publishedAt = [string](($releaseJson | ConvertFrom-Json).publishedAt)
