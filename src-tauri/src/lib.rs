@@ -5,6 +5,8 @@ mod power;
 mod start_menu;
 mod taskbar;
 mod taskbar_alignment;
+mod taskbar_customization;
+mod taskbar_icon_overlay;
 mod theme;
 mod win_key;
 
@@ -147,6 +149,7 @@ pub fn run() {
             let alignment = startup_taskbar_alignment(persisted.as_ref());
             let _ = taskbar_alignment::set(&alignment);
             win_key::init(app.handle().clone());
+            taskbar_customization::init(app.handle().clone());
             theme::watch(app.handle().clone());
             let file_cache = app
                 .path()
@@ -210,6 +213,16 @@ pub fn run() {
             set_window_style,
             set_window_width,
             set_taskbar_alignment,
+            get_taskbar_settings,
+            set_taskbar_thickness,
+            set_taskbar_auto_hide,
+            set_taskbar_combine_buttons,
+            set_taskbar_task_view,
+            set_taskbar_widgets,
+            set_taskbar_start_icon,
+            set_custom_start_icon,
+            select_custom_start_icon,
+            remove_custom_start_icon,
             get_system_theme,
             set_shortcut,
             load_state,
@@ -699,23 +712,20 @@ fn apply_window_look(
             if attempt(Effect::Acrylic) || attempt(mica) || attempt(Effect::Blur) {
                 Ok(())
             } else {
-                window
-                    .set_effects(EffectsBuilder::new().clear_effects().build())
-                    .map_err(|e| e.to_string())
+                window.set_effects(None).map_err(|e| e.to_string())
             }
         }
         "mica" => {
             if attempt(mica) || attempt(Effect::Acrylic) || attempt(Effect::Blur) {
                 Ok(())
             } else {
-                window
-                    .set_effects(EffectsBuilder::new().clear_effects().build())
-                    .map_err(|e| e.to_string())
+                window.set_effects(None).map_err(|e| e.to_string())
             }
         }
-        "solid" => window
-            .set_effects(EffectsBuilder::new().clear_effects().build())
-            .map_err(|e| e.to_string()),
+        // `EffectsBuilder::clear_effects()` only empties a new config. Tauri
+        // interprets `None` as the instruction to remove the active native
+        // material from the HWND.
+        "solid" => window.set_effects(None).map_err(|e| e.to_string()),
         _ => Err(format!("unknown effect '{effect}'")),
     }
 }
@@ -890,6 +900,62 @@ fn set_taskbar_alignment(app: tauri::AppHandle, alignment: String) -> Result<(),
             y,
         },
     )
+}
+
+#[tauri::command]
+fn get_taskbar_settings(
+    app: tauri::AppHandle,
+) -> Result<taskbar_customization::TaskbarSettings, String> {
+    taskbar_customization::settings(&app)
+}
+
+#[tauri::command]
+fn set_taskbar_thickness(value: String) -> Result<(), String> {
+    taskbar_customization::set_thickness(&value)
+}
+
+#[tauri::command]
+fn set_taskbar_auto_hide(enabled: bool) -> Result<(), String> {
+    taskbar_customization::set_auto_hide(enabled)
+}
+
+#[tauri::command]
+fn set_taskbar_combine_buttons(value: String) -> Result<(), String> {
+    taskbar_customization::set_combine_buttons(&value)
+}
+
+#[tauri::command]
+fn set_taskbar_task_view(visible: bool) -> Result<(), String> {
+    taskbar_customization::set_task_view(visible)
+}
+
+#[tauri::command]
+fn set_taskbar_widgets(visible: bool) -> Result<(), String> {
+    taskbar_customization::set_widgets(visible)
+}
+
+#[tauri::command]
+async fn set_custom_start_icon(app: tauri::AppHandle, png: Vec<u8>) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        taskbar_customization::set_custom_start_icon(&app, &png)
+    })
+    .await
+    .map_err(|error| format!("taskbar icon task failed: {error}"))?
+}
+
+#[tauri::command]
+fn select_custom_start_icon(app: tauri::AppHandle, id: String) -> Result<(), String> {
+    taskbar_customization::select_custom_start_icon(&app, &id)
+}
+
+#[tauri::command]
+fn remove_custom_start_icon(app: tauri::AppHandle, id: String) -> Result<(), String> {
+    taskbar_customization::remove_custom_start_icon(&app, &id)
+}
+
+#[tauri::command]
+fn set_taskbar_start_icon(app: tauri::AppHandle, value: String) -> Result<(), String> {
+    taskbar_customization::set_start_icon(&app, &value)
 }
 
 fn is_animatable_window_width(width: u32) -> bool {

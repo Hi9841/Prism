@@ -578,7 +578,7 @@ fn class_name_eq(actual: &[u16], expected: &str) -> bool {
             .all(|(actual, expected)| (*actual as u8).eq_ignore_ascii_case(&expected))
 }
 
-fn notify_taskbars(setting: &str) {
+pub(crate) fn notify_taskbars(setting: &str) {
     let setting = wide(setting);
     for taskbar in taskbar_windows() {
         let mut result = 0usize;

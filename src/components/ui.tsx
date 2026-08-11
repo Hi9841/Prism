@@ -2,6 +2,28 @@ import { type ReactNode, useRef } from "react";
 import { hueForName, nameToMonogram } from "../lib/emoji";
 import type { PaletteIcon } from "../lib/types";
 
+/* ---------------- Settings row ---------------- */
+
+export function SettingsRow({
+  title,
+  detail,
+  children,
+}: {
+  title: string;
+  detail?: string;
+  children: ReactNode;
+}) {
+  return (
+    <div className="flex flex-wrap items-center justify-between gap-x-6 gap-y-2 py-3">
+      <div className="min-w-0 flex-1 basis-40">
+        <div className="text-[13px] font-medium text-fg">{title}</div>
+        {detail ? <div className="mt-0.5 text-[11.5px] text-fg-tertiary">{detail}</div> : null}
+      </div>
+      <div className="min-w-0 max-w-full shrink-0">{children}</div>
+    </div>
+  );
+}
+
 /* ---------------- Kbd ---------------- */
 
 export function Kbd({ children }: { children: ReactNode }) {
@@ -93,10 +115,12 @@ export function Toggle({
   checked,
   onChange,
   label,
+  disabled = false,
 }: {
   checked: boolean;
   onChange: (v: boolean) => void;
   label?: string;
+  disabled?: boolean;
 }) {
   return (
     <button
@@ -104,8 +128,9 @@ export function Toggle({
       role="switch"
       aria-checked={checked}
       aria-label={label}
+      disabled={disabled}
       onClick={() => onChange(!checked)}
-      className="focus-ring relative h-[24px] w-[40px] cursor-pointer rounded-full transition-colors duration-200"
+      className="focus-ring relative h-[24px] w-[40px] cursor-pointer rounded-full transition-colors duration-200 disabled:cursor-default disabled:opacity-45"
       style={{ background: checked ? "var(--accent)" : "var(--t-track)" }}
     >
       <span

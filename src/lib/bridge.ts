@@ -7,6 +7,25 @@ import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import type { AppEntry, FileSearchResponse, PersistedState, QuickAccessEntry, WindowEffect } from "./types";
 
 export type PowerAction = "lock" | "shutdown" | "restart";
+export type TaskbarThickness = "compact" | "default" | "adaptive";
+export type TaskbarCombineMode = "always" | "whenFull" | "never";
+export type TaskbarStartIcon = "system" | "gem" | "diamond" | "custom";
+
+export interface CustomStartIcon {
+  id: string;
+  preview: number[];
+}
+
+export interface TaskbarSettings {
+  thickness: TaskbarThickness;
+  autoHide: boolean;
+  combineButtons: TaskbarCombineMode;
+  showTaskView: boolean;
+  showWidgets: boolean;
+  startIcon: TaskbarStartIcon;
+  selectedCustomIcon: string | null;
+  customStartIcons: CustomStartIcon[];
+}
 
 export interface PalettePresentation {
   open: boolean;
@@ -191,6 +210,67 @@ export async function setWindowWidth(width: number): Promise<void> {
 export async function setTaskbarAlignment(alignment: "left" | "center" | "right"): Promise<void> {
   if (!inTauri) return;
   await invoke("set_taskbar_alignment", { alignment });
+}
+
+export async function getTaskbarSettings(): Promise<TaskbarSettings> {
+  if (!inTauri) {
+    return {
+      thickness: "default",
+      autoHide: false,
+      combineButtons: "always",
+      showTaskView: true,
+      showWidgets: false,
+      startIcon: "system",
+      selectedCustomIcon: null,
+      customStartIcons: [],
+    };
+  }
+  return invoke<TaskbarSettings>("get_taskbar_settings");
+}
+
+export async function setTaskbarThickness(value: TaskbarThickness): Promise<void> {
+  if (!inTauri) return;
+  await invoke("set_taskbar_thickness", { value });
+}
+
+export async function setTaskbarAutoHide(enabled: boolean): Promise<void> {
+  if (!inTauri) return;
+  await invoke("set_taskbar_auto_hide", { enabled });
+}
+
+export async function setTaskbarCombineButtons(value: TaskbarCombineMode): Promise<void> {
+  if (!inTauri) return;
+  await invoke("set_taskbar_combine_buttons", { value });
+}
+
+export async function setTaskbarTaskView(visible: boolean): Promise<void> {
+  if (!inTauri) return;
+  await invoke("set_taskbar_task_view", { visible });
+}
+
+export async function setTaskbarWidgets(visible: boolean): Promise<void> {
+  if (!inTauri) return;
+  await invoke("set_taskbar_widgets", { visible });
+}
+
+export async function setTaskbarStartIcon(value: TaskbarStartIcon): Promise<void> {
+  if (!inTauri) return;
+  await invoke("set_taskbar_start_icon", { value });
+}
+
+export async function setCustomStartIcon(png: Uint8Array): Promise<void> {
+  if (!inTauri) return;
+  await invoke("set_custom_start_icon", { png: Array.from(png) });
+}
+
+export async function selectCustomStartIcon(id: string): Promise<void> {
+  if (!inTauri) return;
+  await invoke("select_custom_start_icon", { id });
+}
+
+export async function removeCustomStartIcon(id: string): Promise<void> {
+  if (!inTauri) return;
+  await invoke("remove_custom_start_icon", { id });
 }
 
 export async function getSystemTheme(): Promise<"light" | "dark"> {

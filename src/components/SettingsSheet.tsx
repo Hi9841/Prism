@@ -26,7 +26,8 @@ import type {
 } from "../lib/types";
 import { DEFAULT_SETTINGS, QUICK_ACCESS_LIMIT, stepViewZoom, VIEW_ZOOM_LEVELS } from "../lib/types";
 import { SHORTCUT_OPTIONS, THEME_OPTIONS, useApp } from "../state/app";
-import { Segmented, Toggle } from "./ui";
+import { TaskbarCustomization } from "./TaskbarCustomization";
+import { Segmented, SettingsRow, Toggle } from "./ui";
 
 const ACCENTS: { id: AccentId; name: string }[] = [
   { id: "iris", name: "Iris" },
@@ -35,18 +36,6 @@ const ACCENTS: { id: AccentId; name: string }[] = [
   { id: "amber", name: "Amber" },
   { id: "rose", name: "Rose" },
 ];
-
-function Row({ title, detail, children }: { title: string; detail?: string; children: React.ReactNode }) {
-  return (
-    <div className="flex flex-wrap items-center justify-between gap-x-6 gap-y-2 py-3">
-      <div className="min-w-0 flex-1 basis-40">
-        <div className="text-[13px] font-medium text-fg">{title}</div>
-        {detail ? <div className="mt-0.5 text-[11.5px] text-fg-tertiary">{detail}</div> : null}
-      </div>
-      <div className="min-w-0 max-w-full shrink-0">{children}</div>
-    </div>
-  );
-}
 
 /** "Ctrl+Alt+Space" -> "Ctrl + Alt + Space" */
 export function displayShortcut(combo: string): string {
@@ -343,15 +332,15 @@ export function SettingsSheet() {
 
         <div className="scroll-thin flex-1 overflow-y-auto px-5 pb-6">
           <SectionTitle>Appearance</SectionTitle>
-          <Row title="Appearance" detail="Follows Windows light/dark mode">
+          <SettingsRow title="Appearance" detail="Follows Windows light/dark mode">
             <Segmented<ThemeMode>
               label="Appearance"
               value={settings.theme}
               onChange={(theme) => updateSettings({ theme })}
               options={THEME_OPTIONS}
             />
-          </Row>
-          <Row title="Accent color" detail="Used for highlights and focus">
+          </SettingsRow>
+          <SettingsRow title="Accent color" detail="Used for highlights and focus">
             <div className="flex gap-2">
               {ACCENTS.map((a) => {
                 const active = settings.accent === a.id;
@@ -375,8 +364,8 @@ export function SettingsSheet() {
                 );
               })}
             </div>
-          </Row>
-          <Row title="Window width">
+          </SettingsRow>
+          <SettingsRow title="Window width">
             <Segmented<WindowWidth>
               label="Window width"
               value={settings.width}
@@ -387,11 +376,11 @@ export function SettingsSheet() {
                 { value: 720, label: "L" },
               ]}
             />
-          </Row>
-          <Row title="View zoom" detail="Ctrl + Up/Down or Ctrl + wheel">
+          </SettingsRow>
+          <SettingsRow title="View zoom" detail="Ctrl + Up/Down or Ctrl + wheel">
             <ViewZoomControl />
-          </Row>
-          <Row title="Window material" detail="Solid avoids DWM blur issues">
+          </SettingsRow>
+          <SettingsRow title="Window material" detail="Solid avoids DWM blur issues">
             <Segmented<WindowEffect>
               label="Window material"
               value={settings.effect}
@@ -402,26 +391,29 @@ export function SettingsSheet() {
                 { value: "solid", label: "Solid" },
               ]}
             />
-          </Row>
+          </SettingsRow>
+
+          <SectionTitle>Taskbar</SectionTitle>
+          <SettingsRow title="Alignment">
+            <TaskbarAlignmentPicker />
+          </SettingsRow>
+          <TaskbarCustomization />
 
           <SectionTitle>Behavior</SectionTitle>
-          <Row title="Global shortcut" detail="Open Prism from anywhere">
+          <SettingsRow title="Global shortcut" detail="Open Prism from anywhere">
             <KeybindPicker />
-          </Row>
-          <Row title="Taskbar alignment">
-            <TaskbarAlignmentPicker />
-          </Row>
-          <Row title="Keep on top" detail="Prism floats above other windows">
+          </SettingsRow>
+          <SettingsRow title="Keep on top" detail="Prism floats above other windows">
             <Toggle
               checked={settings.alwaysOnTop}
               onChange={(v) => updateSettings({ alwaysOnTop: v })}
               label="Keep window on top"
             />
-          </Row>
-          <Row title="Quick Access" detail="Choose up to 6 pinned folders">
+          </SettingsRow>
+          <SettingsRow title="Quick Access" detail="Choose up to 6 pinned folders">
             <QuickAccessPicker />
-          </Row>
-          <Row title="Recent items" detail="Items are kept in order of use">
+          </SettingsRow>
+          <SettingsRow title="Recent items" detail="Items are kept in order of use">
             <button
               type="button"
               onClick={() => clearHistory()}
@@ -430,7 +422,7 @@ export function SettingsSheet() {
               <History className="h-3.5 w-3.5" />
               Clear
             </button>
-          </Row>
+          </SettingsRow>
 
           <SectionTitle>About</SectionTitle>
           <div className="flex items-center justify-between py-3">
