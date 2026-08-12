@@ -377,16 +377,16 @@ export function PaletteProvider({ children }: { children: ReactNode }) {
     const missing = iconRequestIds.filter((id) => !(id in appIcons) && !iconRequested.current.has(id));
     if (missing.length === 0) return;
     for (const id of missing) iconRequested.current.add(id);
-    let active = true;
+    // No cancellation guard: an effect re-run (new array identity) would
+    // otherwise drop the in-flight result, and the requested set then
+    // prevents a retry, leaving rows on monograms forever. Merging the
+    // response whenever it lands is always safe - ids are stable keys.
     getAppIcons(missing)
       .then((icons) => {
-        if (!active || Object.keys(icons).length === 0) return;
+        if (Object.keys(icons).length === 0) return;
         setAppIcons((previous) => ({ ...previous, ...icons }));
       })
       .catch(() => {});
-    return () => {
-      active = false;
-    };
   }, [iconRequestIds, appIcons]);
 
   const move = useCallback(
