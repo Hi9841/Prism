@@ -217,6 +217,7 @@ extern "system" {
 #[link(name = "kernel32")]
 extern "system" {
     fn GetModuleHandleW(module_name: *const u16) -> *mut c_void;
+    fn Sleep(milliseconds: u32);
 }
 
 unsafe fn observer_window() -> Hwnd {
@@ -285,16 +286,21 @@ unsafe fn ensure_icon_window() -> Hwnd {
     if owner.is_null() {
         return std::ptr::null_mut();
     }
-    // The overlay is a child of the taskbar, so a stale instance from a
-    // crashed Prism must be searched among the taskbar's children - a
-    // top-level search never finds it.
-    let stale = FindWindowExW(
-        owner,
-        std::ptr::null_mut(),
-        STATIC_CLASS.as_ptr(),
-        ICON_WINDOW_TITLE.as_ptr(),
-    );
-    if !stale.is_null() {
+    // The overlay is created as an owned popup (WS_POPUP with a parent), so
+    // it is a TOP-LEVEL window, not a taskbar child. Every bridge install
+    // loads a fresh DLL copy, and each one owns its own overlay; destroy any
+    // stale overlay windows left behind by earlier or crashed instances so
+    // they can never stack on top of the new glyph.
+    loop {
+        let stale = FindWindowExW(
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            STATIC_CLASS.as_ptr(),
+            ICON_WINDOW_TITLE.as_ptr(),
+        );
+        if stale.is_null() {
+            break;
+        }
         let bitmap = SendMessageW(stale, STM_GETIMAGE, IMAGE_BITMAP, 0) as Hbitmap;
         let _ = SendMessageW(stale, STM_SETIMAGE, IMAGE_BITMAP, 0);
         if !bitmap.is_null() {
@@ -524,9 +530,20 @@ unsafe fn refresh_icon_window() -> isize {
             (*cached_width == width && *cached_height == height).then(|| pixels.clone())
         })
     });
-    let background = match cached.or_else(|| capture_background(rect)) {
-        Some(background) => background,
-        None => return -5,
+    let background = match cached {
+        Some(background) => Some(background),
+        None => {
+            // DWM recomposes asynchronously: a capture taken immediately
+            // after the hide can still contain the previous frame with the
+            // old glyph at its old position, which then bleeds into the
+            // composited frame as a ghost. Give composition a frame to
+            // settle before reading the screen.
+            unsafe { Sleep(50) };
+            capture_background(rect)
+        }
+    };
+    let Some(background) = background else {
+        return -5;
     };
     if let Ok(mut cached) = ICON_BACKGROUND.lock() {
         *cached = Some((width, height, background.clone()));
@@ -663,6 +680,14 @@ pub unsafe extern "system" fn PrismShellGetMessageHook(
                         EVENT_START_RECT_CONFIGURED,
                         valid as isize,
                     );
+                    // The Start button moved or resized: re-render the glyph
+                    // at its new position immediately. Waiting for the next
+                    // icon change leaves the overlay stranded at the stale
+                    // rect, and a later capture could include the stranded
+                    // glyph when the old and new rects overlap.
+                    if valid && has_active_icon() {
+                        let _ = refresh_icon_window();
+                    }
                     message.message = WM_NULL;
                 }
                 CONTROL_START_ICON_REFRESH => {
