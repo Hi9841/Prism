@@ -244,6 +244,10 @@ fn set_alignment(alignment: Alignment, companion: Option<CompanionMove>) -> Resu
         // accepted its new alignment, so the companion move remains coupled.
         write_windows_alignment(alignment.windows_value())?;
         notify_taskbars("TraySettings");
+        // Explorer moves the native Start button itself; refresh its rect
+        // immediately so the glyph overlay follows without waiting for the
+        // next interval tick.
+        crate::win_key::request_start_rect_refresh();
     }
     let _ = write_shared_alignment(alignment);
     ACTIVE_ALIGNMENT.store(alignment.code(), Ordering::Release);
@@ -578,6 +582,9 @@ fn apply_window_moves(moves: &[WindowMove]) -> Result<(), String> {
         }
         .map_err(|error| format!("position taskbar alignment window: {error}"))?;
     }
+    // The Start button may have just moved; the glyph overlay must follow it
+    // immediately instead of waiting for the next rect refresh interval.
+    crate::win_key::request_start_rect_refresh();
     // The windows may belong to Explorer or Prism, so the Win32 defer batch
     // cannot reliably include both process-owned HWNDs. Suppress painting
     // while committing every final position, then invalidate the completed

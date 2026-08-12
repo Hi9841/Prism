@@ -240,6 +240,9 @@ static SHELL_TASKBAR_THREAD: AtomicU32 = AtomicU32::new(0);
 static SHELL_ICON_SHUTDOWN_ACK: AtomicU32 = AtomicU32::new(0);
 static LAST_TOGGLE_MS: AtomicU64 = AtomicU64::new(0);
 static TOGGLE_CLOCK: OnceLock<Instant> = OnceLock::new();
+/// Set when taskbar geometry changes (alignment moves, resizes) so the pump
+/// refreshes the Start rect immediately instead of up to 5 seconds later.
+static START_RECT_REFRESH_REQUEST: AtomicBool = AtomicBool::new(false);
 
 enum Action {
     ToggleWin(WinSide),
@@ -273,6 +276,22 @@ pub(crate) fn notify_start_icon_changed() {
                 WPARAM(SHELL_CONTROL_START_ICON_REFRESH),
                 LPARAM(0),
             );
+        }
+    }
+}
+
+/// Asks the observation pump to re-query the Start button rectangle now.
+/// Taskbar moves (alignment repair, density changes) should reposition the
+/// glyph overlay immediately rather than on the next interval tick.
+pub(crate) fn request_start_rect_refresh() {
+    if !ACTIVE.load(Ordering::Acquire) {
+        return;
+    }
+    START_RECT_REFRESH_REQUEST.store(true, Ordering::Release);
+    let thread_id = THREAD_ID.load(Ordering::SeqCst);
+    if thread_id != 0 {
+        unsafe {
+            let _ = PostThreadMessageW(thread_id, ACTION_MESSAGE, WPARAM(0), LPARAM(0));
         }
     }
 }
@@ -809,10 +828,12 @@ impl ShellBridge {
     }
 
     fn refresh_start_rect(&mut self) {
+        let requested = START_RECT_REFRESH_REQUEST.swap(false, Ordering::AcqRel);
         let now = Instant::now();
-        if self
-            .last_rect_refresh
-            .is_some_and(|last| now.duration_since(last) < START_RECT_REFRESH_INTERVAL)
+        if !requested
+            && self
+                .last_rect_refresh
+                .is_some_and(|last| now.duration_since(last) < START_RECT_REFRESH_INTERVAL)
         {
             return;
         }
