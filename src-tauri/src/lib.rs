@@ -13,7 +13,7 @@ mod win_key;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use tauri::{
     window::{Color, Effect, EffectsBuilder},
@@ -631,46 +631,6 @@ fn toggle_open_state(open: &AtomicBool) -> bool {
     !open.fetch_xor(true, Ordering::AcqRel)
 }
 
-/// The shell resizes the revealed taskbar and shrinks the work area slightly
-/// after the appbar state change. Poll briefly (the reveal animation is about
-/// 150 ms) so the palette lands above the taskbar instead of overlapping it.
-fn wait_for_revealed_work_area(mut anchor: PresentationAnchor) -> PresentationAnchor {
-    let point = anchor
-        .click_point
-        .or_else(|| anchor.start_button.map(PhysicalRect::center))
-        .or_else(|| {
-            let mut cursor = POINT::default();
-            if unsafe { GetCursorPos(&mut cursor).is_ok() } {
-                Some(PhysicalPoint::from(cursor))
-            } else {
-                None
-            }
-        });
-    let Some(point) = point else {
-        return anchor;
-    };
-    let Some(previous) = anchor
-        .work_area
-        .or_else(|| monitor_geometry_for_point(point).map(|(_, work)| work))
-    else {
-        return anchor;
-    };
-    let deadline = Instant::now() + Duration::from_millis(150);
-    loop {
-        if let Some((monitor, work)) = monitor_geometry_for_point(point) {
-            if work != previous {
-                anchor.monitor = Some(monitor);
-                anchor.work_area = Some(work);
-                return anchor;
-            }
-        }
-        if Instant::now() >= deadline {
-            return anchor;
-        }
-        std::thread::sleep(Duration::from_millis(8));
-    }
-}
-
 #[tauri::command]
 fn present_palette(app: tauri::AppHandle) -> Result<bool, String> {
     if !PALETTE_OPEN.load(Ordering::Acquire) {
@@ -681,15 +641,8 @@ fn present_palette(app: tauri::AppHandle) -> Result<bool, String> {
         .get_webview_window("main")
         .ok_or_else(|| "main window is unavailable".to_string())?;
     set_webview_memory_target(&window, false);
-    let revealed_taskbar = taskbar::present();
+    taskbar::present();
     let anchor = PRESENTATION_ANCHOR.lock().ok().and_then(|value| *value);
-    // An auto-hide reveal shrinks the work area asynchronously; wait (bounded)
-    // for the new geometry so the palette anchors above the taskbar.
-    let anchor = if revealed_taskbar {
-        anchor.map(wait_for_revealed_work_area)
-    } else {
-        anchor
-    };
     // Reconcile the taskbar and Prism together on every presentation. This
     // also covers webview refreshes and single-instance reopens, where the
     // frontend is repositioned but Explorer may have relaid out its children.
