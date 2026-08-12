@@ -5,6 +5,11 @@ export interface FuzzyHit<T> {
   score: number;
 }
 
+/** Whitespace plus the common name separators (space, tab, -, _, .). */
+function isWordSeparator(code: number): boolean {
+  return code === 32 || code === 9 || code === 10 || code === 13 || code === 45 || code === 95 || code === 46;
+}
+
 /**
  * Launcher-grade fuzzy scorer.
  * Returns a score (higher is better) when `query` is a subsequence of
@@ -39,10 +44,9 @@ export function fuzzyScore(query: string, target: string): number | null {
       s += 12;
     } else {
       const c = target[ti];
-      const pc = target[ti - 1];
       if (c !== c.toLowerCase() && c === c.toUpperCase()) {
         s += 7; // camelCase boundary
-      } else if (/[\s\-_.]/.test(pc)) {
+      } else if (isWordSeparator(target.charCodeAt(ti - 1))) {
         s += 6; // word start
       }
     }

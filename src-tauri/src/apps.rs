@@ -154,13 +154,14 @@ fn cache_fresh(path: &Path) -> Result<bool, String> {
 
 fn load_cache(path: &Path) -> Option<Vec<AppEntry>> {
     let text = std::fs::read_to_string(path).ok()?;
-    let value: serde_json::Value = serde_json::from_str(&text).ok()?;
+    let mut value: serde_json::Value = serde_json::from_str(&text).ok()?;
     if value.get("version").and_then(|v| v.as_u64()) != Some(APPS_CACHE_VERSION as u64) {
         return None;
     }
+    // Take the apps value out instead of cloning the whole payload.
     value
-        .get("apps")
-        .and_then(|v| serde_json::from_value(v.clone()).ok())
+        .get_mut("apps")
+        .and_then(|apps| serde_json::from_value(std::mem::take(apps)).ok())
 }
 
 fn write_cache(path: &Path, apps: &[AppEntry]) {
