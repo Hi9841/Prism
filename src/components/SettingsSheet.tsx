@@ -131,8 +131,12 @@ function TaskbarAlignmentPicker() {
         options={[
           { value: "left", label: "Left" },
           { value: "center", label: "Center" },
+          { value: "right", label: "Right" },
         ]}
       />
+      <p className="mt-1.5 max-w-[250px] text-right text-[11px] leading-relaxed text-fg-tertiary">
+        Right alignment requires the StartAllBack classic taskbar.
+      </p>
     </fieldset>
   );
 }

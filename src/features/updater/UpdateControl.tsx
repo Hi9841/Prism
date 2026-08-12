@@ -36,8 +36,10 @@ export function UpdateControl() {
       return;
     }
     const now = Date.now();
-    // A manual open is an explicit request for current release information.
-    // The request runs asynchronously and never blocks native presentation.
+    // Opens are explicit requests for current release information, but the
+    // policy floor keeps Win-key spam from firing repeated no-cache
+    // requests. The request runs asynchronously and never blocks native
+    // presentation.
     if (!shouldCheckForUpdate(lastCheckAtRef.current, now, force)) return;
     lastCheckAtRef.current = now;
 

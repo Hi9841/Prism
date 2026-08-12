@@ -5,6 +5,7 @@ use std::collections::VecDeque;
 use std::ffi::c_void;
 use std::os::windows::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::Emitter;
@@ -76,9 +77,15 @@ pub struct FileSearchResponse {
     pub path_browse: bool,
 }
 
+/// How often a scan checks whether a newer search has superseded it.
+const SEARCH_ABORT_CHECK_INTERVAL: usize = 4_096;
+
 #[derive(Clone, Default)]
 pub struct FileIndex {
     inner: Arc<RwLock<IndexData>>,
+    /// Latest search generation. A newer keystroke supersedes older scans;
+    /// superseded scans abort early instead of finishing useless work.
+    search_generation: Arc<AtomicU64>,
 }
 
 #[derive(Default)]
@@ -149,9 +156,25 @@ impl FileIndex {
             };
         }
 
+        // Claim this search. A newer search supersedes it, which lets the
+        // scan loop abort early when the user has already typed further.
+        let generation = self.search_generation.fetch_add(1, Ordering::AcqRel) + 1;
+
         let tokens: Vec<&str> = query.split_whitespace().collect();
         let mut best: Vec<(i32, &SearchEntry)> = Vec::with_capacity(limit);
-        for entry in &data.entries {
+        for (index, entry) in data.entries.iter().enumerate() {
+            // Cheap cooperative cancellation: only check on a boundary and
+            // only when another search has started.
+            if index % SEARCH_ABORT_CHECK_INTERVAL == 0
+                && self.search_generation.load(Ordering::Acquire) != generation
+            {
+                return FileSearchResponse {
+                    items: Vec::new(),
+                    ready: data.ready,
+                    indexing: data.indexing,
+                    path_browse: false,
+                };
+            }
             let Some(score) = entry_score(entry, &tokens) else {
                 continue;
             };
@@ -329,6 +352,10 @@ async fn refresh_index(index: &FileIndex, cache_path: &Path, app: &tauri::AppHan
     let index_for_task = index.clone();
     let changed = tauri::async_runtime::spawn_blocking(move || {
         let entries = scan_user_folders();
+        // Every successful scan refreshes the verification timestamp, so a
+        // boot shortly after a periodic refresh skips the startup rescan even
+        // when the unchanged snapshot was not rewritten.
+        let _ = write_verified_at(&scan_path);
         // Identical scans skip the multi-MB cache rewrite entirely.
         if !index_for_task.changed(&entries) {
             return false;
@@ -517,12 +544,37 @@ fn load_cache(path: &Path) -> Result<(Vec<CachedEntry>, bool), String> {
     if cache.version != CACHE_VERSION {
         return Err("stale file index".to_string());
     }
-    let age = SystemTime::now()
+    let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
-        .as_secs()
-        .saturating_sub(cache.generated_at);
-    Ok((cache.entries, age <= CACHE_TTL_SECONDS))
+        .as_secs();
+    let age = now.saturating_sub(cache.generated_at);
+    // A recent verification pass (sidecar timestamp) also counts as fresh,
+    // since it rescanned the same unchanged snapshot.
+    let verified_fresh = read_verified_at(path)
+        .map(|verified| now.saturating_sub(verified) <= CACHE_TTL_SECONDS)
+        .unwrap_or(false);
+    Ok((cache.entries, age <= CACHE_TTL_SECONDS || verified_fresh))
+}
+
+fn verified_path(cache_path: &Path) -> PathBuf {
+    cache_path.with_extension("verified")
+}
+
+fn write_verified_at(cache_path: &Path) -> std::io::Result<()> {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let path = verified_path(cache_path);
+    let temp = path.with_extension("verified.tmp");
+    std::fs::write(&temp, now.to_string())?;
+    crate::files::replace_file(&temp, &path).map_err(std::io::Error::other)
+}
+
+fn read_verified_at(cache_path: &Path) -> Option<u64> {
+    let text = std::fs::read_to_string(verified_path(cache_path)).ok()?;
+    text.trim().parse().ok()
 }
 
 fn save_cache(path: &Path, entries: &[CachedEntry]) -> Result<(), String> {

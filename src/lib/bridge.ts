@@ -13,7 +13,8 @@ export type TaskbarStartIcon = "system" | "gem" | "diamond" | "custom";
 
 export interface CustomStartIcon {
   id: string;
-  preview: number[];
+  /** Base64 PNG preview (96 x 96). */
+  preview: string;
 }
 
 export interface TaskbarSettings {
@@ -117,7 +118,22 @@ export function onWindowFocused(cb: (focused: boolean) => void): () => void {
 
 export async function getApps(): Promise<AppEntry[]> {
   if (!inTauri) return [];
-  return invoke<AppEntry[]>("get_apps");
+  // StrictMode double-mounts fire two overlapping get_apps calls; share one
+  // in-flight request so the payload is only transferred once.
+  if (!appsRequest) {
+    appsRequest = invoke<AppEntry[]>("get_apps").finally(() => {
+      appsRequest = null;
+    });
+  }
+  return appsRequest;
+}
+
+let appsRequest: Promise<AppEntry[]> | null = null;
+
+/** Batched lazy icon payload: only the rows actually rendered request icons. */
+export async function getAppIcons(ids: string[]): Promise<Record<string, string>> {
+  if (!inTauri) return {};
+  return invoke<Record<string, string>>("get_app_icons", { ids });
 }
 
 export async function refreshApps(): Promise<AppEntry[]> {
@@ -270,7 +286,26 @@ export async function setTaskbarStartIcon(value: TaskbarStartIcon): Promise<void
 
 export async function setCustomStartIcon(png: Uint8Array): Promise<void> {
   if (!inTauri) return;
-  await invoke("set_custom_start_icon", { png: Array.from(png) });
+  // Base64 keeps a 2 MB icon at ~2.7 MB instead of the ~8+ MB JSON number
+  // array produced by serializing raw bytes.
+  await invoke("set_custom_start_icon", { base64Png: bytesToBase64(png) });
+}
+
+export function bytesToBase64(bytes: Uint8Array): string {
+  let binary = "";
+  const chunk = 0x8000;
+  for (let offset = 0; offset < bytes.length; offset += chunk) {
+    binary += String.fromCharCode(...bytes.subarray(offset, offset + chunk));
+  }
+  return btoa(binary);
+}
+
+export function base64ToBytes(base64: string): Uint8Array<ArrayBuffer> {
+  const binary = atob(base64);
+  const buffer = new ArrayBuffer(binary.length);
+  const bytes = new Uint8Array(buffer);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return bytes;
 }
 
 export async function selectCustomStartIcon(id: string): Promise<void> {

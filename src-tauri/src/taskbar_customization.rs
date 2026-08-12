@@ -9,6 +9,7 @@ use std::os::windows::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use base64::Engine;
 use image::codecs::png::PngDecoder;
 use image::imageops::{overlay, FilterType};
 use image::{DynamicImage, ImageDecoder, ImageFormat, RgbaImage};
@@ -87,7 +88,9 @@ struct IconSettings {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct CustomStartIcon {
     id: String,
-    preview: Vec<u8>,
+    /// Base64 PNG preview. Serialized as a string so a dozen previews cost
+    /// kilobytes of IPC instead of megabytes of JSON number arrays.
+    preview: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -203,8 +206,11 @@ pub(crate) fn set_start_icon(app: &AppHandle, value: &str) -> Result<(), String>
     crate::taskbar_icon_overlay::set(app, icon)
 }
 
-pub(crate) fn set_custom_start_icon(app: &AppHandle, png: &[u8]) -> Result<(), String> {
-    let (preview, pixels) = prepare_icon(png)?;
+pub(crate) fn set_custom_start_icon(app: &AppHandle, base64_png: &str) -> Result<(), String> {
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(base64_png)
+        .map_err(|_| "The icon data was corrupted in transit".to_string())?;
+    let (preview, pixels) = prepare_icon(&bytes)?;
     let existing = custom_start_icons(app)?;
     if existing.len() >= MAX_CUSTOM_ICONS {
         return Err(format!(
@@ -360,7 +366,7 @@ fn custom_start_icons(app: &AppHandle) -> Result<Vec<CustomStartIcon>, String> {
     if let Ok(preview) = std::fs::read(legacy) {
         icons.push(CustomStartIcon {
             id: "legacy".to_string(),
-            preview,
+            preview: encode_base64(&preview),
         });
     }
     let directory = custom_icon_dir(app)?;
@@ -385,11 +391,15 @@ fn custom_start_icons(app: &AppHandle) -> Result<Vec<CustomStartIcon>, String> {
         if let Ok(preview) = std::fs::read(&path) {
             icons.push(CustomStartIcon {
                 id: id.to_string(),
-                preview,
+                preview: encode_base64(&preview),
             });
         }
     }
     Ok(icons)
+}
+
+fn encode_base64(bytes: &[u8]) -> String {
+    base64::engine::general_purpose::STANDARD.encode(bytes)
 }
 
 fn new_custom_icon_id() -> String {

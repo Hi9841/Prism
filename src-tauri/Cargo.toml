@@ -1,6 +1,6 @@
 [package]
 name = "prism"
-version = "0.7.1"
+version = "0.7.2"
 description = "Prism - a keyboard-first command palette for Windows"
 edition = "2021"
 
@@ -44,6 +44,7 @@ windows = { version = "0.61", features = [
 image = { version = "0.25", default-features = false, features = ["png"] }
 tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
+base64 = "0.22"
 
 [profile.release]
 panic = "abort"

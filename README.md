@@ -84,6 +84,10 @@ bun install --frozen-lockfile
 bun run tauri dev
 ```
 
+In development the webview loads from `http://localhost:1420`, so the
+production CSP's `'self'` source covers the Vite dev server and its HMR
+websocket as well. Production builds never allow the localhost dev endpoints.
+
 Run the complete local validation suite:
 
 ```powershell

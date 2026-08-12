@@ -32,6 +32,11 @@ const ALIGNMENT_WATCH_INTERVAL: Duration = Duration::from_millis(750);
 /// When Explorer keeps reverting a move (layout churn), re-apply at most once
 /// per this window instead of fighting it on every poll.
 const ALIGNMENT_REAPPLY_DEBOUNCE: Duration = Duration::from_secs(3);
+/// On stock Windows 11 there are no classic taskbar HWNDs to move, so full
+/// desktop enumerations are wasted work. Re-check occasionally in case the
+/// shell is replaced (Explorer restart, StartAllBack install), but poll 20x
+/// less often while the last pass found nothing to act on.
+const ALIGNMENT_IDLE_WATCH_INTERVAL: Duration = Duration::from_secs(15);
 
 static ACTIVE_ALIGNMENT: AtomicU8 = AtomicU8::new(ALIGNMENT_UNSET);
 static INITIAL_REPAIR_DONE: AtomicBool = AtomicBool::new(false);
@@ -181,6 +186,12 @@ pub(crate) fn reapply_current() -> Result<(), String> {
 pub(crate) fn reapply_with_companion(companion: CompanionMove) -> Result<(), String> {
     // Presentation must never wait behind a full Explorer enumeration. The
     // watcher owns taskbar repair; opening only needs Prism's companion move.
+    // When the window already sits at the target position there is nothing to
+    // repair: skip the move and the synchronous repaint entirely.
+    if unsafe { window_at(companion.window, companion.x, companion.y) } {
+        start_alignment_watcher();
+        return Ok(());
+    }
     let companion_move = WindowMove {
         window: companion.window,
         x: companion.x,
@@ -189,6 +200,11 @@ pub(crate) fn reapply_with_companion(companion: CompanionMove) -> Result<(), Str
     apply_window_moves(&[companion_move])?;
     start_alignment_watcher();
     Ok(())
+}
+
+unsafe fn window_at(window: HWND, x: i32, y: i32) -> bool {
+    let mut rect = RECT::default();
+    GetWindowRect(window, &mut rect).is_ok() && rect.left == x && rect.top == y
 }
 
 fn set_alignment(alignment: Alignment, companion: Option<CompanionMove>) -> Result<(), String> {
@@ -247,7 +263,15 @@ pub(crate) fn current() -> Alignment {
 fn start_alignment_watcher() {
     ALIGNMENT_WATCHER.get_or_init(|| {
         std::thread::spawn(|| loop {
-            std::thread::sleep(ALIGNMENT_WATCH_INTERVAL);
+            // When the last pass found no classic taskbars (stock Windows 11),
+            // back off to a long interval; the only possible actors that can
+            // change that state are an Explorer restart or a shell provider
+            // install, which are rare.
+            std::thread::sleep(if has_classic_taskbars() {
+                ALIGNMENT_WATCH_INTERVAL
+            } else {
+                ALIGNMENT_IDLE_WATCH_INTERVAL
+            });
             let Ok(_apply_guard) = ALIGNMENT_APPLY_LOCK.lock() else {
                 continue;
             };
@@ -383,6 +407,15 @@ fn taskbar_windows() -> Vec<HWND> {
         );
     }
     windows
+}
+
+/// Cheap probe for the common case: whether any taskbar currently exposes
+/// movable classic Start/task-list children. Used to pace the watcher without
+/// running the full move computation.
+fn has_classic_taskbars() -> bool {
+    taskbar_windows()
+        .iter()
+        .any(|taskbar| classic_children(*taskbar).is_some())
 }
 
 unsafe extern "system" fn collect_taskbar_window(window: HWND, detail: LPARAM) -> BOOL {

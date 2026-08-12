@@ -148,6 +148,9 @@ pub fn run() {
         })
         .setup(move |app| {
             let _ = start_menu::recover_stale(app.handle());
+            // Repair the taskbar band if a previous instance crashed while
+            // the palette was open.
+            tauri::async_runtime::spawn_blocking(taskbar::recover);
             let persisted = load_state_value(app.handle()).ok().flatten();
             let alignment = startup_taskbar_alignment(persisted.as_ref());
             let _ = taskbar_alignment::initialize(&alignment);
@@ -211,6 +214,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             get_apps,
+            get_app_icons,
             refresh_apps,
             search_files,
             get_quick_access,
@@ -787,7 +791,7 @@ async fn get_apps(
     // Fast path: already scanned this session.
     if let Some(list) = state.apps_cache.lock().map_err(|e| e.to_string())?.clone() {
         perf::finish(timer, "get_apps_cache", || format!("count={}", list.len()));
-        return Ok(list);
+        return Ok(strip_icons(list));
     }
     // React StrictMode and fast repeated opens can overlap the initial IPC.
     // Only one scan should touch the filesystem and icon cache; waiters recheck
@@ -797,16 +801,49 @@ async fn get_apps(
         perf::finish(timer, "get_apps_cache_after_wait", || {
             format!("count={}", list.len())
         });
-        return Ok(list);
+        return Ok(strip_icons(list));
     }
-    // Off the main thread: scanning spawns PowerShell and does icon work.
+    // Off the main thread: scanning walks the shell and extracts icons.
     let cache_path = apps_cache_path(&app);
     let list = tauri::async_runtime::spawn_blocking(move || apps::scan(&cache_path))
         .await
         .map_err(|e| format!("app scan task failed: {e}"))??;
     *state.apps_cache.lock().map_err(|e| e.to_string())? = Some(list.clone());
     perf::finish(timer, "get_apps_scan", || format!("count={}", list.len()));
-    Ok(list)
+    Ok(strip_icons(list))
+}
+
+/// The full icon payload is several MB of base64. Results only need icons for
+/// the rows that are actually rendered, so the metadata list stays lean and
+/// `get_app_icons` delivers the pixels lazily in one batched IPC call.
+fn strip_icons(mut list: Vec<apps::AppEntry>) -> Vec<apps::AppEntry> {
+    for entry in &mut list {
+        entry.icon = None;
+    }
+    list
+}
+
+#[tauri::command]
+fn get_app_icons(
+    state: tauri::State<'_, AppState>,
+    ids: Vec<String>,
+) -> std::collections::HashMap<String, String> {
+    let mut icons = std::collections::HashMap::new();
+    let Ok(apps) = state.apps_cache.lock() else {
+        return icons;
+    };
+    let Some(apps) = apps.as_ref() else {
+        return icons;
+    };
+    for id in ids.into_iter().take(512) {
+        let Some(entry) = apps.iter().find(|entry| entry.app_id == id) else {
+            continue;
+        };
+        if let Some(icon) = entry.icon.as_deref() {
+            icons.insert(id, icon.to_string());
+        }
+    }
+    icons
 }
 
 #[tauri::command]
@@ -820,7 +857,7 @@ async fn refresh_apps(
         .await
         .map_err(|e| format!("app scan task failed: {e}"))??;
     *state.apps_cache.lock().map_err(|e| e.to_string())? = Some(list.clone());
-    Ok(list)
+    Ok(strip_icons(list))
 }
 
 fn apps_cache_path(app: &tauri::AppHandle) -> std::path::PathBuf {
@@ -914,8 +951,12 @@ async fn search_files(
 }
 
 #[tauri::command]
-fn get_quick_access() -> Vec<files::QuickAccessEntry> {
-    files::quick_access()
+async fn get_quick_access() -> Vec<files::QuickAccessEntry> {
+    // Known-folder resolution and is_dir checks can block on redirected or
+    // network locations; keep the startup path off the main thread.
+    tauri::async_runtime::spawn_blocking(files::quick_access)
+        .await
+        .unwrap_or_default()
 }
 
 fn filter_existing_paths(paths: Vec<String>) -> Vec<String> {
@@ -1017,9 +1058,9 @@ fn set_taskbar_widgets(visible: bool) -> Result<(), String> {
 }
 
 #[tauri::command]
-async fn set_custom_start_icon(app: tauri::AppHandle, png: Vec<u8>) -> Result<(), String> {
+async fn set_custom_start_icon(app: tauri::AppHandle, base64_png: String) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || {
-        taskbar_customization::set_custom_start_icon(&app, &png)
+        taskbar_customization::set_custom_start_icon(&app, &base64_png)
     })
     .await
     .map_err(|error| format!("taskbar icon task failed: {error}"))?
@@ -1340,6 +1381,11 @@ fn validate_state(state: &serde_json::Value) -> Result<(), String> {
             return Err(format!("unknown theme '{theme}'"));
         }
     }
+    if let Some(always_on_top) = settings.get("alwaysOnTop") {
+        if !always_on_top.is_boolean() {
+            return Err("state.settings.alwaysOnTop must be a boolean".to_string());
+        }
+    }
     if let Some(alignment) = settings.get("taskbarAlignment") {
         let alignment = alignment
             .as_str()
@@ -1434,13 +1480,21 @@ fn validate_state(state: &serde_json::Value) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn quit_app(app: tauri::AppHandle) {
-    // Ensure interception is fully torn down before exiting.
-    taskbar::release();
-    let _ = win_key::set_enabled(false);
-    let _ = start_menu::restore(&app);
-    win_key::set_provider_suppression(false);
+async fn quit_app(app: tauri::AppHandle) -> Result<(), String> {
+    // Ensure interception is fully torn down before exiting. Tearing down the
+    // Win-key bridge can take up to two seconds (pump stop handshake); it runs
+    // off the main thread so quitting never freezes the UI.
+    let teardown_app = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        taskbar::release();
+        let _ = win_key::set_enabled(false);
+        let _ = start_menu::restore(&teardown_app);
+        win_key::set_provider_suppression(false);
+    })
+    .await
+    .map_err(|error| format!("quit teardown task failed: {error}"))?;
     app.exit(0);
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1715,6 +1769,7 @@ mod tests {
             serde_json::json!({"settings": {"effect": "hologram"}}),
             serde_json::json!({"settings": {"theme": "sepia"}}),
             serde_json::json!({"settings": {"shortcut": "X"}}),
+            serde_json::json!({"settings": {"alwaysOnTop": "yes"}}),
             serde_json::json!({"settings": {"width": 999}}),
             serde_json::json!({"settings": {"viewZoom": 135}}),
             serde_json::json!({"settings": {"viewZoom": "large"}}),
