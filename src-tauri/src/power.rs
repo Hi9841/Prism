@@ -39,9 +39,9 @@ pub fn perform(value: &str) -> Result<(), String> {
     }
 
     let executable = shutdown_executable()?;
-    let arguments = action
-        .shutdown_arguments()
-        .expect("shutdown actions always have arguments");
+    let Some(arguments) = action.shutdown_arguments() else {
+        return Err("internal error: shutdown action has no arguments".to_string());
+    };
     let status = Command::new(&executable)
         .args(arguments)
         .creation_flags(CREATE_NO_WINDOW)

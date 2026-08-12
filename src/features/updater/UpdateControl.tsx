@@ -7,6 +7,8 @@ import { useApp } from "../../state/app";
 import { updatePercent } from "./update-progress";
 
 const CHECK_INTERVAL_MS = 60 * 60 * 1000;
+// Between palette-open checks: a manual open should not hammer GitHub.
+const MIN_CHECK_INTERVAL_MS = 5 * 60 * 1000;
 const NETWORK_TIMEOUT_MS = 15 * 1000;
 const DOWNLOAD_TIMEOUT_MS = 10 * 60 * 1000;
 
@@ -25,9 +27,13 @@ export function UpdateControl() {
   const checkInFlightRef = useRef<Promise<void> | null>(null);
   const installInFlightRef = useRef(false);
   const disposedRef = useRef(false);
+  const lastCheckAtRef = useRef(0);
 
   const checkForUpdate = useCallback(() => {
     if (!inTauri || checkInFlightRef.current || installInFlightRef.current) return;
+    const now = Date.now();
+    if (now - lastCheckAtRef.current < MIN_CHECK_INTERVAL_MS) return;
+    lastCheckAtRef.current = now;
 
     const pending = check({ timeout: NETWORK_TIMEOUT_MS })
       .then(async (availableUpdate) => {

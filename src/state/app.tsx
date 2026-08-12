@@ -89,6 +89,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const persistTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const widthFrame = useRef<number | null>(null);
   const renderedWidth = useRef<number | null>(null);
+  const toastTimers = useRef(new Map<number, ReturnType<typeof setTimeout>>());
 
   // Initial load from disk: every value is sanitized against known sets so
   // a corrupt or hand-edited file degrades to defaults, never crashes.
@@ -131,6 +132,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
   useEffect(
     () => () => {
       if (persistTimer.current) clearTimeout(persistTimer.current);
+      for (const timer of toastTimers.current.values()) clearTimeout(timer);
+      toastTimers.current.clear();
     },
     [],
   );
@@ -234,13 +237,19 @@ export function AppProvider({ children }: { children: ReactNode }) {
 
   const dismissToast = useCallback((id: number) => {
     setToasts((prev) => prev.filter((t) => t.id !== id));
+    const timer = toastTimers.current.get(id);
+    if (timer) {
+      clearTimeout(timer);
+      toastTimers.current.delete(id);
+    }
   }, []);
 
   const showToast = useCallback(
     (title: string, detail?: string) => {
       const id = toastSeq++;
       setToasts((prev) => [...prev.slice(-2), { id, title, detail }]);
-      setTimeout(() => dismissToast(id), 1900);
+      const timer = setTimeout(() => dismissToast(id), 1900);
+      toastTimers.current.set(id, timer);
     },
     [dismissToast],
   );

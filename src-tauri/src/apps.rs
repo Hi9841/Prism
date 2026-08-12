@@ -167,7 +167,12 @@ fn write_cache(path: &Path, apps: &[AppEntry]) {
     let value = serde_json::json!({ "version": APPS_CACHE_VERSION, "apps": apps });
     let text = serde_json::to_string(&value).unwrap_or_default();
     let _ = std::fs::create_dir_all(path.parent().unwrap_or(Path::new("")));
-    let _ = std::fs::write(path, text);
+    // Atomic commit (temp file + replace) so a crash mid-write can never
+    // corrupt the cache and force a full rescan.
+    let temp = path.with_extension("json.tmp");
+    if std::fs::write(&temp, text).is_ok() {
+        let _ = crate::files::replace_file(&temp, path);
+    }
 }
 
 /// Always rescans (used by the manual refresh button).
@@ -1453,7 +1458,9 @@ unsafe fn reg_string(hk: HKEY, name: &str) -> Option<String> {
         let end = units.iter().position(|&u| u == 0).unwrap_or(units.len());
         Some(String::from_utf16_lossy(&units[..end]).trim().to_string())
     } else if value_type.0 == REG_DWORD.0 {
-        let value = u32::from_le_bytes(buf[..4].try_into().ok()?);
+        // Registry values are third-party data; guard the slice so a
+        // malformed value length cannot panic the scan.
+        let value = u32::from_le_bytes(buf.get(..4)?.try_into().ok()?);
         Some(value.to_string())
     } else {
         None
@@ -2065,7 +2072,10 @@ mod hang_debug {
     use std::cell::Cell;
     use std::time::Instant;
 
+    /// Manual profiling harness: runs a full machine scan with a cold icon
+    /// cache. Not a unit test - run explicitly with `cargo test -- --ignored`.
     #[test]
+    #[ignore]
     fn hang_debug() {
         let _com = ComGuard::init();
         let tmp = std::env::temp_dir().join(format!("prism-cold-icons-{}", hash("x")));

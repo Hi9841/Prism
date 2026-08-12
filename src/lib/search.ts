@@ -85,7 +85,12 @@ export function fuzzy<T extends { id: string; title: string; keywords?: string[]
   return results.slice(0, opts.limit);
 }
 
-export function fuzzyApps(apps: AppEntry[], query: string, limit = 8): AppEntry[] {
+export function fuzzyApps(
+  apps: AppEntry[],
+  query: string,
+  limit = 8,
+  opts: { preDeduped?: boolean } = {},
+): AppEntry[] {
   const q = query.trim();
   if (q.length === 0) return [];
   const lower = q.toLowerCase();
@@ -93,8 +98,11 @@ export function fuzzyApps(apps: AppEntry[], query: string, limit = 8): AppEntry[
   const significantLength = normalizeText(lower).length;
   const minimumScore = significantLength >= 3 ? Math.min(24, significantLength * 3) : -Infinity;
 
+  // Callers that already deduplicated (memoized) the list skip the map build
+  // on the per-keystroke hot path.
+  const pool = opts.preDeduped ? apps : dedupeApps(apps);
   const results: FuzzyHit<AppEntry>[] = [];
-  for (const app of dedupeApps(apps)) {
+  for (const app of pool) {
     const score = appScore(app, lower, tokens);
     if (score !== null && score >= minimumScore) results.push({ item: app, score });
   }
