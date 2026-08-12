@@ -435,7 +435,15 @@ unsafe fn run_pump(ready: HookReady) {
             }
         }
         shell_bridge.refresh_start_rect();
-        let _ = MsgWaitForMultipleObjectsEx(None, 1_000, QS_ALLINPUT, Default::default());
+        // The pump has no timer work faster than the Start-rect refresh
+        // interval; input already wakes the loop through the message queue.
+        // A long timeout removes a permanent 1 Hz wakeup from the hot path.
+        let _ = MsgWaitForMultipleObjectsEx(
+            None,
+            START_RECT_REFRESH_INTERVAL.as_millis() as u32,
+            QS_ALLINPUT,
+            Default::default(),
+        );
     }
     SHELL_BRIDGE_ACTIVE.store(false, Ordering::Release);
     SHELL_TASKBAR_THREAD.store(0, Ordering::Release);
@@ -514,6 +522,11 @@ struct StartButtonLocator {
 struct AutomationStartButton {
     taskbar: IUIAutomationElement,
     condition: IUIAutomationCondition,
+    /// Resolved Start button element. It stays valid while the taskbar lives,
+    /// so bounding-rectangle refreshes reuse it instead of re-running the
+    /// expensive `FindFirst` descendant traversal every interval. Re-resolved
+    /// automatically when Explorer restarts (stale elements fail gracefully).
+    cached: Option<IUIAutomationElement>,
 }
 
 impl ShellBridge {
@@ -820,9 +833,9 @@ impl ShellBridge {
 }
 
 impl StartButtonLocator {
-    unsafe fn new(taskbar: HWND, process_id: u32) -> Result<(Self, RECT), String> {
-        let automation = create_automation_start_button(taskbar, process_id).ok();
-        let locator = Self {
+    fn new(taskbar: HWND, process_id: u32) -> Result<(Self, RECT), String> {
+        let automation = unsafe { create_automation_start_button(taskbar, process_id).ok() };
+        let mut locator = Self {
             taskbar,
             automation,
         };
@@ -832,15 +845,30 @@ impl StartButtonLocator {
         Ok((locator, rect))
     }
 
-    fn rect(&self) -> Option<RECT> {
-        if let Some(automation) = self.automation.as_ref() {
-            let rect = unsafe {
+    fn rect(&mut self) -> Option<RECT> {
+        if let Some(automation) = self.automation.as_mut() {
+            let rect = if let Some(start) = automation.cached.as_ref() {
+                let rect = unsafe { start.CurrentBoundingRectangle() };
+                if let Ok(rect) = rect {
+                    if valid_rect(rect) {
+                        return Some(rect);
+                    }
+                }
+                // The element went stale (Explorer restarted). Re-resolve it.
+                automation.cached = None;
+                None
+            } else {
+                None
+            };
+            let rect = rect.or_else(|| unsafe {
                 automation
                     .taskbar
                     .FindFirst(TreeScope_Descendants, &automation.condition)
-                    .and_then(|start| start.CurrentBoundingRectangle())
-            };
-            if let Ok(rect) = rect {
+                    .ok()
+                    .inspect(|start| automation.cached = Some(start.clone()))
+                    .and_then(|start| start.CurrentBoundingRectangle().ok())
+            });
+            if let Some(rect) = rect {
                 if valid_rect(rect) {
                     return Some(rect);
                 }
@@ -870,7 +898,11 @@ unsafe fn create_automation_start_button(
     let condition = uia
         .CreateAndCondition(&automation_id_condition, &process_condition)
         .map_err(|error| format!("combine StartButton identity conditions: {error}"))?;
-    Ok(AutomationStartButton { taskbar, condition })
+    Ok(AutomationStartButton {
+        taskbar,
+        condition,
+        cached: None,
+    })
 }
 
 unsafe fn child_start_button_rect(taskbar: HWND) -> Option<RECT> {

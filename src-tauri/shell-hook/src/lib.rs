@@ -82,6 +82,7 @@ const WM_SYSCOMMAND: u32 = 0x0112;
 const WM_LBUTTONDOWN: usize = 0x0201;
 const WM_LBUTTONUP: usize = 0x0202;
 const WM_CLOSE: u32 = 0x0010;
+const WM_SETTINGCHANGE: u32 = 0x001A;
 const STM_SETIMAGE: u32 = 0x0172;
 const STM_GETIMAGE: u32 = 0x0173;
 const IMAGE_BITMAP: usize = 0;
@@ -280,8 +281,15 @@ unsafe fn ensure_icon_window() -> Hwnd {
     if *slot != 0 {
         return *slot as Hwnd;
     }
+    let owner = FindWindowW(TASKBAR_CLASS.as_ptr(), std::ptr::null());
+    if owner.is_null() {
+        return std::ptr::null_mut();
+    }
+    // The overlay is a child of the taskbar, so a stale instance from a
+    // crashed Prism must be searched among the taskbar's children - a
+    // top-level search never finds it.
     let stale = FindWindowExW(
-        std::ptr::null_mut(),
+        owner,
         std::ptr::null_mut(),
         STATIC_CLASS.as_ptr(),
         ICON_WINDOW_TITLE.as_ptr(),
@@ -293,10 +301,6 @@ unsafe fn ensure_icon_window() -> Hwnd {
             let _ = DeleteObject(bitmap);
         }
         let _ = DestroyWindow(stale);
-    }
-    let owner = FindWindowW(TASKBAR_CLASS.as_ptr(), std::ptr::null());
-    if owner.is_null() {
-        return std::ptr::null_mut();
     }
     let window = CreateWindowExW(
         WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE,
@@ -586,6 +590,13 @@ fn point_is_in_start_button(point: &Point) -> bool {
         && point.y < START_RECT_BOTTOM.load(Ordering::Relaxed)
 }
 
+fn has_active_icon() -> bool {
+    ICON_BITMAP
+        .lock()
+        .map(|bitmap| *bitmap != 0)
+        .unwrap_or(false)
+}
+
 unsafe fn notify_start_click(message: u32, point: &Point) -> bool {
     let observer = observer_window();
     !observer.is_null()
@@ -673,6 +684,13 @@ pub unsafe extern "system" fn PrismShellGetMessageHook(
             // Consume the Start command only after Prism accepted the event.
             // If Prism is gone, the command remains untouched and Start opens.
             message.message = WM_NULL;
+        } else if message.message == WM_SETTINGCHANGE
+            && has_active_icon()
+        {
+            // Wallpaper, theme, or layout changes behind the Start button
+            // invalidate the cached capture. Re-render so the glyph never
+            // sits on a stale background. Only when a custom icon is active.
+            let _ = refresh_icon_window();
         }
     }
 

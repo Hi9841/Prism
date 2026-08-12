@@ -3,6 +3,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import diamondIcon from "../assets/taskbar-icons/diamond.svg";
 import gemIcon from "../assets/taskbar-icons/gem.svg";
 import {
+  base64ToBytes,
   getTaskbarSettings,
   removeCustomStartIcon,
   selectCustomStartIcon,
@@ -130,7 +131,7 @@ function StartIconControl({
   useEffect(() => {
     const urls = settings.customStartIcons.map((icon) => ({
       id: icon.id,
-      url: URL.createObjectURL(new Blob([new Uint8Array(icon.preview)], { type: "image/png" })),
+      url: URL.createObjectURL(new Blob([base64ToBytes(icon.preview)], { type: "image/png" })),
     }));
     setCustomUrls(urls);
     return () =>

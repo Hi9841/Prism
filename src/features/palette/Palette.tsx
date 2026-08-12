@@ -1,6 +1,7 @@
 import { GripVertical, Pin, PinOff, RefreshCw, Search, Settings2 } from "lucide-react";
 import { memo, useCallback, useEffect, useRef, useState } from "react";
 import { PowerMenu } from "../../components/PowerMenu";
+import { displayShortcut } from "../../components/SettingsSheet";
 import { IconButton, Kbd, RowIcon, SectionLabel } from "../../components/ui";
 import type { PaletteItem } from "../../lib/types";
 import { PINNED_APP_LIMIT, reorderPinnedApps } from "../../lib/types";
@@ -289,7 +290,7 @@ export function Palette() {
             autoComplete="off"
             className="min-w-0 flex-1 bg-transparent text-[15px] font-medium text-fg outline-none placeholder:text-fg-quiet"
           />
-          <Kbd>{settings.shortcut}</Kbd>
+          <Kbd>{displayShortcut(settings.shortcut)}</Kbd>
           <IconButton
             label="Settings"
             data-settings-trigger

@@ -370,7 +370,11 @@ export function sanitizeSettings(raw: unknown): Settings {
       DEFAULT_SETTINGS.shortcut,
     ),
     alwaysOnTop: typeof src.alwaysOnTop === "boolean" ? src.alwaysOnTop : DEFAULT_SETTINGS.alwaysOnTop,
-    taskbarAlignment: pick(src.taskbarAlignment, ["left", "center"], DEFAULT_SETTINGS.taskbarAlignment),
+    taskbarAlignment: pick(
+      src.taskbarAlignment,
+      ["left", "center", "right"],
+      DEFAULT_SETTINGS.taskbarAlignment,
+    ),
     theme: pick(src.theme, ["system", "dark", "light"], DEFAULT_SETTINGS.theme),
     quickAccess: sanitizeQuickAccess(src.quickAccess),
     pinnedApps: sanitizePinnedApps(src.pinnedApps),

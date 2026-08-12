@@ -40,7 +40,7 @@ describe("taskbar alignment", () => {
   it("defaults older state to center alignment and preserves valid choices", () => {
     expect(sanitizeSettings({}).taskbarAlignment).toBe("center");
     expect(sanitizeSettings({ taskbarAlignment: "center" }).taskbarAlignment).toBe("center");
-    expect(sanitizeSettings({ taskbarAlignment: "right" }).taskbarAlignment).toBe("center");
+    expect(sanitizeSettings({ taskbarAlignment: "right" }).taskbarAlignment).toBe("right");
     expect(sanitizeSettings({ taskbarAlignment: "invalid" }).taskbarAlignment).toBe("center");
   });
 });

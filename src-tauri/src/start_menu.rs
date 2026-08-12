@@ -272,15 +272,20 @@ fn write_journal(path: &Path, journal: &RestoreJournal) -> Result<(), String> {
     std::fs::create_dir_all(parent)
         .map_err(|error| format!("create Start restore directory: {error}"))?;
     let bytes = serde_json::to_vec(journal).map_err(|error| error.to_string())?;
+    // Atomic replace: a crash mid-write can never leave a torn journal that
+    // the crash-recovery path cannot parse.
+    let temp = path.with_extension("json.tmp");
     let mut file = OpenOptions::new()
         .create(true)
         .truncate(true)
         .write(true)
-        .open(path)
+        .open(&temp)
         .map_err(|error| format!("create Start restore journal: {error}"))?;
     file.write_all(&bytes)
         .and_then(|_| file.sync_all())
-        .map_err(|error| format!("persist Start restore journal: {error}"))
+        .map_err(|error| format!("persist Start restore journal: {error}"))?;
+    drop(file);
+    crate::files::replace_file(&temp, path)
 }
 
 fn open_provider_key() -> Result<Option<(HKEY, Option<u32>)>, String> {

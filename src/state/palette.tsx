@@ -18,6 +18,7 @@ import {
   copyText,
   existingPaths,
   refreshApps as forceRefresh,
+  getAppIcons,
   getApps,
   getQuickAccess,
   hidePaletteWindow,
@@ -72,12 +73,12 @@ interface PaletteCtx {
 
 const Ctx = createContext<PaletteCtx | null>(null);
 
-function appPaletteItem(app: AppEntry): PaletteItem {
+function appPaletteItem(app: AppEntry, icons: Readonly<Record<string, string>>): PaletteItem {
   return {
     id: `app::${app.appId}`,
     title: app.name,
     subtitle: "Application",
-    icon: { kind: "app", name: app.name, icon: app.icon },
+    icon: { kind: "app", name: app.name, icon: icons[app.appId] ?? app.icon },
     historyTitle: app.name,
     appId: app.appId,
     run: () => launchApp(app.appId),
@@ -101,6 +102,7 @@ export function PaletteProvider({ children }: { children: ReactNode }) {
   const [filePathBrowse, setFilePathBrowse] = useState(false);
   const [fileIndexTick, setFileIndexTick] = useState(0);
   const [existingHistoryPaths, setExistingHistoryPaths] = useState<ReadonlySet<string>>(() => new Set());
+  const [appIcons, setAppIcons] = useState<Readonly<Record<string, string>>>({});
   const [selected, setSelected] = useState(0);
   const fileRequest = useRef(0);
   const historyPathRequest = useRef(0);
@@ -275,14 +277,14 @@ export function PaletteProvider({ children }: { children: ReactNode }) {
       // Only needed for the idle (empty query) view; sorting every app is
       // wasted work while the user is typing.
       const sortedApps = sortApps(visibleApps);
-      const pinnedItems = pinnedApps.map(appPaletteItem);
+      const pinnedItems = pinnedApps.map((entry) => appPaletteItem(entry, appIcons));
       if (pinnedItems.length > 0) {
         out.push({ id: "pinned", label: "Pinned", items: pinnedItems });
       }
       const pinnedItemIds = new Set(pinnedItems.map((item) => item.id));
       const recentItems: PaletteItem[] = [];
       for (const entry of app.history) {
-        const item = rehydrate(entry, visibleApps, existingHistoryPaths);
+        const item = rehydrate(entry, visibleApps, existingHistoryPaths, appIcons);
         if (item && pinnedItemIds.has(item.id)) continue;
         if (item) recentItems.push(item);
         if (recentItems.length >= 5) break;
@@ -299,7 +301,7 @@ export function PaletteProvider({ children }: { children: ReactNode }) {
         const availableApps = sortedApps
           .filter((entry) => !app.settings.pinnedApps.includes(entry.appId))
           .slice(0, 8)
-          .map(appPaletteItem);
+          .map((entry) => appPaletteItem(entry, appIcons));
         if (availableApps.length > 0) {
           out.push({ id: "apps", label: "Apps", items: availableApps });
         }
@@ -323,7 +325,11 @@ export function PaletteProvider({ children }: { children: ReactNode }) {
         out.push({ id: "files", label: "Folder Contents", items: fileItems });
       }
       if (appHits.length > 0) {
-        out.push({ id: "apps", label: "Apps", items: appHits.map(appPaletteItem) });
+        out.push({
+          id: "apps",
+          label: "Apps",
+          items: appHits.map((entry) => appPaletteItem(entry, appIcons)),
+        });
       }
       if (!filePathBrowse && fileItems.length > 0) {
         out.push({ id: "files", label: "Files & Folders", items: fileItems });
@@ -339,6 +345,7 @@ export function PaletteProvider({ children }: { children: ReactNode }) {
     query,
     app.history,
     existingHistoryPaths,
+    appIcons,
     visibleApps,
     pinnedApps,
     app.settings.pinnedApps,
@@ -349,6 +356,38 @@ export function PaletteProvider({ children }: { children: ReactNode }) {
     filesBusy,
     filesError,
   ]);
+
+  // Lazily fill app icons for the rows that are actually rendered. The app
+  // metadata list stays lean; one small batched IPC covers the visible set.
+  const iconRequestIds = useMemo(() => {
+    const ids = new Set<string>();
+    for (const item of flatItems) {
+      if (item.appId) ids.add(item.appId);
+    }
+    for (const appId of app.settings.pinnedApps) ids.add(appId);
+    return [...ids];
+  }, [flatItems, app.settings.pinnedApps]);
+
+  // Ids already asked for this session. Apps without icons never appear in
+  // the response map; remembering the request prevents a per-keystroke IPC
+  // for every icon-less pinned app.
+  const iconRequested = useRef<Set<string>>(new Set());
+
+  useEffect(() => {
+    const missing = iconRequestIds.filter((id) => !(id in appIcons) && !iconRequested.current.has(id));
+    if (missing.length === 0) return;
+    for (const id of missing) iconRequested.current.add(id);
+    let active = true;
+    getAppIcons(missing)
+      .then((icons) => {
+        if (!active || Object.keys(icons).length === 0) return;
+        setAppIcons((previous) => ({ ...previous, ...icons }));
+      })
+      .catch(() => {});
+    return () => {
+      active = false;
+    };
+  }, [iconRequestIds, appIcons]);
 
   const move = useCallback(
     (delta: number) => {
@@ -562,11 +601,12 @@ function rehydrate(
   history: HistoryEntry,
   apps: AppEntry[],
   existingHistoryPaths: ReadonlySet<string>,
+  icons: Readonly<Record<string, string>>,
 ): PaletteItem | null {
   if (history.id.startsWith("app::")) {
     const appId = history.id.slice(5);
     const entry = apps.find((candidate) => candidate.appId === appId);
-    return entry ? appPaletteItem(entry) : null;
+    return entry ? appPaletteItem(entry, icons) : null;
   }
   const directoryPrefix = "file::d::";
   const filePrefix = "file::f::";
