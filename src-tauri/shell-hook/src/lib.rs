@@ -428,18 +428,29 @@ fn compose_frame(
     icon_height: u32,
     icon: &[u8],
 ) -> Vec<u8> {
-    let target = ICON_TARGET_EDGE
+    if icon_width == 0 || icon_height == 0 {
+        return frame;
+    }
+    // The glyph region is centered and capped, but the source icon may not
+    // be square (custom PNGs are pre-pillarboxed, but older or migrated
+    // icon files can carry any aspect). Scale the source uniformly into the
+    // region and center the result so a non-square source is never
+    // stretched - the icon always keeps its own aspect ratio.
+    let max_edge = ICON_TARGET_EDGE
         .min(frame_width.saturating_sub(8))
         .min(frame_height.saturating_sub(8))
-        .max(1);
-    let left = (frame_width - target) / 2;
-    let top = (frame_height - target) / 2;
-    for y in 0..target {
-        for x in 0..target {
-            let source_x = (x as u32 * icon_width / target as u32).min(icon_width - 1);
-            let source_y = (y as u32 * icon_height / target as u32).min(icon_height - 1);
+        .max(1) as u32;
+    let scale = (max_edge as f32 / icon_width.max(icon_height) as f32).min(1.0);
+    let draw_width = ((icon_width as f32 * scale).round() as u32).max(1);
+    let draw_height = ((icon_height as f32 * scale).round() as u32).max(1);
+    let left = (frame_width as u32 - draw_width) / 2;
+    let top = (frame_height as u32 - draw_height) / 2;
+    for y in 0..draw_height {
+        for x in 0..draw_width {
+            let source_x = (x * icon_width / draw_width).min(icon_width - 1);
+            let source_y = (y * icon_height / draw_height).min(icon_height - 1);
             let source = ((source_y * icon_width + source_x) * 4) as usize;
-            let destination = (((top + y) * frame_width + left + x) * 4) as usize;
+            let destination = (((top + y) * frame_width as u32 + left + x) * 4) as usize;
             let alpha = u32::from(icon[source + 3]);
             for channel in 0..3 {
                 let source_value = u32::from(icon[source + (2 - channel)]);
@@ -523,6 +534,13 @@ unsafe fn refresh_icon_window() -> isize {
     let height = rect.bottom - rect.top;
     if width <= 0 || height <= 0 {
         return -3;
+    }
+    // Guard against degenerate or mid-transition rects (taskbar animations,
+    // stale geometry from a relayout): rendering a square glyph into a
+    // badly-proportioned frame squishes or clips it. Keep the previous
+    // frame until a sane rect arrives.
+    if width < 16 || height < 16 || width * 2 < height || height * 2 < width {
+        return -8;
     }
     let _ = ShowWindow(window, SW_HIDE);
     let cached = ICON_BACKGROUND.lock().ok().and_then(|background| {
