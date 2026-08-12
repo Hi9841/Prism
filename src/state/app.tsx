@@ -7,7 +7,6 @@ import {
   onWinModeFailed,
   saveState,
   setAlwaysOnTop,
-  setShortcut,
   setViewZoom,
   setWindowStyle,
   setWindowWidth,
@@ -304,17 +303,6 @@ export function AppProvider({ children }: { children: ReactNode }) {
     if (!ready) return;
     setViewZoom(settings.viewZoom).catch(() => {});
   }, [ready, settings.viewZoom]);
-
-  useEffect(() => {
-    if (!ready) return;
-    // The persisted shortcut must be applied at startup too, not just on
-    // change. The command validates and registers before committing.
-    setShortcut(settings.shortcut)
-      .then(() => {})
-      .catch((e: unknown) => {
-        showToast("Shortcut unavailable", String(e));
-      });
-  }, [ready, settings.shortcut, showToast]);
 
   // Safe recovery: if Win-key interception self-disables (e.g. an elevated
   // app rejected the replay), drop back to the default shortcut so the UI

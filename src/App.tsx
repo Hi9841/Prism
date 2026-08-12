@@ -1,8 +1,10 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import packageInfo from "../package.json";
 import { SettingsSheet } from "./components/SettingsSheet";
 import { ToastStack } from "./components/Toast";
 import { Palette } from "./features/palette/Palette";
 import {
+  getAppVersion,
   hidePaletteWindow,
   inTauri,
   isWindowVisible,
@@ -14,6 +16,33 @@ import { dismissTransientUi } from "./lib/transientUi";
 import { AppProvider, useApp } from "./state/app";
 import { PaletteProvider, usePalette } from "./state/palette";
 
+const BUNDLE_VERSION_KEY = "prism:last-native-version";
+
+function refreshStaleBundle(nativeVersion: string) {
+  if (!nativeVersion || nativeVersion === packageInfo.version) {
+    try {
+      window.sessionStorage.removeItem(BUNDLE_VERSION_KEY);
+    } catch {
+      // Storage can be unavailable in a restricted WebView context.
+    }
+    return;
+  }
+
+  try {
+    if (window.sessionStorage.getItem(BUNDLE_VERSION_KEY) === nativeVersion) return;
+    window.sessionStorage.setItem(BUNDLE_VERSION_KEY, nativeVersion);
+  } catch {
+    return;
+  }
+
+  // A new native binary can be installed while WebView2 still has the old
+  // entry document cached. A version query makes the next load address the
+  // new bundled document without rebuilding the reusable window.
+  const url = new URL(window.location.href);
+  url.searchParams.set("prism-version", nativeVersion);
+  window.location.replace(url);
+}
+
 function Launcher() {
   const app = useApp();
   const palette = usePalette();
@@ -23,6 +52,13 @@ function Launcher() {
   const visible = phase !== "hidden";
   const visibleRef = useRef(false);
   const blurCheck = useRef<number | null>(null);
+
+  useEffect(() => {
+    if (!inTauri) return;
+    getAppVersion()
+      .then(refreshStaleBundle)
+      .catch(() => {});
+  }, []);
 
   visibleRef.current = visible;
 

@@ -6,7 +6,7 @@
 
 use std::os::windows::ffi::OsStrExt;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
@@ -34,6 +34,7 @@ const ALIGNMENT_WATCH_INTERVAL: Duration = Duration::from_millis(750);
 const ALIGNMENT_REAPPLY_DEBOUNCE: Duration = Duration::from_secs(3);
 
 static ACTIVE_ALIGNMENT: AtomicU8 = AtomicU8::new(ALIGNMENT_UNSET);
+static INITIAL_REPAIR_DONE: AtomicBool = AtomicBool::new(false);
 static ALIGNMENT_WATCHER: OnceLock<()> = OnceLock::new();
 static ALIGNMENT_APPLY_LOCK: Mutex<()> = Mutex::new(());
 /// Signature of the last moves the watcher applied, with the time it applied
@@ -148,6 +149,16 @@ pub fn set(value: &str) -> Result<(), String> {
     set_alignment(Alignment::parse(value)?, None)
 }
 
+/// Seeds the active alignment without enumerating Explorer windows. Startup
+/// can then return immediately while the deferred repair applies geometry.
+pub(crate) fn initialize(value: &str) -> Result<(), String> {
+    let alignment = Alignment::parse(value)?;
+    let _ = write_shared_alignment(alignment);
+    INITIAL_REPAIR_DONE.store(false, Ordering::Release);
+    ACTIVE_ALIGNMENT.store(alignment.code(), Ordering::Release);
+    Ok(())
+}
+
 pub(crate) fn set_with_companion(
     alignment: Alignment,
     companion: CompanionMove,
@@ -155,32 +166,27 @@ pub(crate) fn set_with_companion(
     set_alignment(alignment, Some(companion))
 }
 
+pub(crate) fn reapply_current() -> Result<(), String> {
+    // A settings change may already have completed the full pass; avoid
+    // enumerating Explorer a second time in that case.
+    if INITIAL_REPAIR_DONE.load(Ordering::Acquire) {
+        return Ok(());
+    }
+    set(current().marker())
+}
+
 /// Reasserts the active alignment while reopening the palette. This path does
 /// not rewrite Explorer settings; it only repairs the live HWND geometry when
 /// Explorer/StartAllBack has relaid out the taskbar since the last selection.
 pub(crate) fn reapply_with_companion(companion: CompanionMove) -> Result<(), String> {
-    let _apply_guard = ALIGNMENT_APPLY_LOCK
-        .lock()
-        .map_err(|error| format!("lock taskbar alignment: {error}"))?;
+    // Presentation must never wait behind a full Explorer enumeration. The
+    // watcher owns taskbar repair; opening only needs Prism's companion move.
     let companion_move = WindowMove {
         window: companion.window,
         x: companion.x,
         y: companion.y,
     };
-    if ALIGNMENT_WATCHER.get().is_some() {
-        // The watcher repairs classic taskbar geometry continuously, so a
-        // presentation only needs Prism's own companion move. Re-enumerating
-        // the whole desktop here runs on the main thread for every open.
-        apply_window_moves(&[companion_move])?;
-    } else {
-        // First presentation before the watcher started: do one full pass.
-        let alignment = shared_alignment().unwrap_or_else(current);
-        if classic_taskbar_count() > 0 {
-            apply_classic_taskbars(alignment, Some(companion))?;
-        } else {
-            apply_window_moves(&[companion_move])?;
-        }
-    }
+    apply_window_moves(&[companion_move])?;
     start_alignment_watcher();
     Ok(())
 }
@@ -229,6 +235,7 @@ fn set_alignment(alignment: Alignment, companion: Option<CompanionMove>) -> Resu
     if let Ok(mut last) = LAST_ALIGNMENT_APPLY.lock() {
         *last = None;
     }
+    INITIAL_REPAIR_DONE.store(true, Ordering::Release);
     start_alignment_watcher();
     Ok(())
 }
@@ -337,13 +344,6 @@ fn write_windows_alignment(value: u32) -> Result<(), String> {
             written.0
         ))
     }
-}
-
-fn classic_taskbar_count() -> usize {
-    taskbar_windows()
-        .into_iter()
-        .filter(|taskbar| classic_children(*taskbar).is_some())
-        .count()
 }
 
 fn collect_classic_taskbar_moves(alignment: Alignment) -> Vec<WindowMove> {

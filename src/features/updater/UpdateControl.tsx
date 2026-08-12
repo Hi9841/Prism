@@ -4,11 +4,10 @@ import { AlertCircle, ArrowDownToLine, LoaderCircle } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { inTauri, onToggleRequest } from "../../lib/bridge";
 import { useApp } from "../../state/app";
+import { shouldCheckForUpdate } from "./update-policy";
 import { updatePercent } from "./update-progress";
 
 const CHECK_INTERVAL_MS = 60 * 60 * 1000;
-// Between palette-open checks: a manual open should not hammer GitHub.
-const MIN_CHECK_INTERVAL_MS = 5 * 60 * 1000;
 const NETWORK_TIMEOUT_MS = 15 * 1000;
 const DOWNLOAD_TIMEOUT_MS = 10 * 60 * 1000;
 
@@ -28,14 +27,24 @@ export function UpdateControl() {
   const installInFlightRef = useRef(false);
   const disposedRef = useRef(false);
   const lastCheckAtRef = useRef(0);
+  const forceCheckPendingRef = useRef(false);
 
-  const checkForUpdate = useCallback(() => {
-    if (!inTauri || checkInFlightRef.current || installInFlightRef.current) return;
+  const checkForUpdate = useCallback((force = false) => {
+    if (!inTauri || installInFlightRef.current) return;
+    if (checkInFlightRef.current) {
+      if (force) forceCheckPendingRef.current = true;
+      return;
+    }
     const now = Date.now();
-    if (now - lastCheckAtRef.current < MIN_CHECK_INTERVAL_MS) return;
+    // A manual open is an explicit request for current release information.
+    // The request runs asynchronously and never blocks native presentation.
+    if (!shouldCheckForUpdate(lastCheckAtRef.current, now, force)) return;
     lastCheckAtRef.current = now;
 
-    const pending = check({ timeout: NETWORK_TIMEOUT_MS })
+    const pending = check({
+      timeout: NETWORK_TIMEOUT_MS,
+      headers: force ? { "Cache-Control": "no-cache", Pragma: "no-cache" } : undefined,
+    })
       .then(async (availableUpdate) => {
         if (disposedRef.current) {
           await availableUpdate?.close();
@@ -59,6 +68,10 @@ export function UpdateControl() {
       })
       .finally(() => {
         checkInFlightRef.current = null;
+        if (forceCheckPendingRef.current && !disposedRef.current && !installInFlightRef.current) {
+          forceCheckPendingRef.current = false;
+          checkForUpdate(true);
+        }
       });
     checkInFlightRef.current = pending;
   }, []);
@@ -68,10 +81,11 @@ export function UpdateControl() {
     checkForUpdate();
     const interval = window.setInterval(checkForUpdate, CHECK_INTERVAL_MS);
     const offToggle = onToggleRequest((request) => {
-      if (request.open) checkForUpdate();
+      if (request.open) checkForUpdate(true);
     });
     return () => {
       disposedRef.current = true;
+      forceCheckPendingRef.current = false;
       window.clearInterval(interval);
       offToggle();
       const update = updateRef.current;
