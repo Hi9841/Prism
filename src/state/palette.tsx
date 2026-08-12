@@ -250,7 +250,6 @@ export function PaletteProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const visibleApps = useMemo(() => dedupeApps(apps), [apps]);
-  const sortedApps = useMemo(() => sortApps(visibleApps), [visibleApps]);
   const pinnedApps = useMemo(() => {
     const appsById = new Map(visibleApps.map((entry) => [entry.appId, entry]));
     return app.settings.pinnedApps.flatMap((appId) => {
@@ -273,6 +272,9 @@ export function PaletteProvider({ children }: { children: ReactNode }) {
     const out: Section[] = [];
 
     if (normalized.length === 0) {
+      // Only needed for the idle (empty query) view; sorting every app is
+      // wasted work while the user is typing.
+      const sortedApps = sortApps(visibleApps);
       const pinnedItems = pinnedApps.map(appPaletteItem);
       if (pinnedItems.length > 0) {
         out.push({ id: "pinned", label: "Pinned", items: pinnedItems });
@@ -338,7 +340,6 @@ export function PaletteProvider({ children }: { children: ReactNode }) {
     app.history,
     existingHistoryPaths,
     visibleApps,
-    sortedApps,
     pinnedApps,
     app.settings.pinnedApps,
     quickItems,

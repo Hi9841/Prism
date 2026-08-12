@@ -1,5 +1,5 @@
 import { GripVertical, Pin, PinOff, RefreshCw, Search, Settings2 } from "lucide-react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useRef, useState } from "react";
 import { PowerMenu } from "../../components/PowerMenu";
 import { IconButton, Kbd, RowIcon, SectionLabel } from "../../components/ui";
 import type { PaletteItem } from "../../lib/types";
@@ -505,7 +505,7 @@ function EmptyState({
   );
 }
 
-function ResultRow({
+const ResultRow = memo(function ResultRow({
   item,
   index,
   selected,
@@ -644,4 +644,4 @@ function ResultRow({
       </div>
     </li>
   );
-}
+});

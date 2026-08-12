@@ -188,6 +188,14 @@ impl FileIndex {
         }
     }
 
+    /// Returns true when a fresh scan differs from the in-memory snapshot.
+    fn changed(&self, next: &[CachedEntry]) -> bool {
+        self.inner
+            .read()
+            .map(|data| !same_entries(&data.entries, next))
+            .unwrap_or(false)
+    }
+
     fn set_indexing(&self, indexing: bool) {
         if let Ok(mut data) = self.inner.write() {
             data.indexing = indexing;
@@ -226,17 +234,30 @@ fn list_directory(directory: &Path, needle: Option<&str>, limit: usize) -> Vec<F
     let Ok(children) = std::fs::read_dir(directory) else {
         return Vec::new();
     };
+    let parent = directory.to_string_lossy().into_owned();
     let mut entries: Vec<(i32, FileEntry)> = children
         .flatten()
         .filter_map(|child| {
-            let entry = path_entry(&child.path())?;
+            let name = child.file_name().to_string_lossy().trim().to_string();
+            if name.is_empty() {
+                return None;
+            }
+            // DirEntry::file_type() comes free from the enumeration; a fresh
+            // stat per child would cost thousands of syscalls in big folders.
+            let is_directory = child.file_type().map(|kind| kind.is_dir()).unwrap_or(false);
             let score = match needle {
-                Some(value) if !value.is_empty() => {
-                    target_score(value, &entry.name.to_lowercase())?
-                }
+                Some(value) if !value.is_empty() => target_score(value, &name.to_lowercase())?,
                 _ => 0,
             };
-            Some((score, entry))
+            Some((
+                score,
+                FileEntry {
+                    name,
+                    path: child.path().to_string_lossy().into_owned(),
+                    parent: parent.clone(),
+                    is_directory,
+                },
+            ))
         })
         .collect();
 
@@ -295,22 +316,36 @@ pub fn warm(index: FileIndex, cache_path: PathBuf, app: tauri::AppHandle) {
     });
 }
 
+fn same_entries(current: &[SearchEntry], next: &[CachedEntry]) -> bool {
+    current.len() == next.len()
+        && current.iter().zip(next).all(|(current, next)| {
+            current.path.as_ref() == next.path && current.is_directory == next.is_directory
+        })
+}
+
 async fn refresh_index(index: &FileIndex, cache_path: &Path, app: &tauri::AppHandle) {
     index.set_indexing(true);
     let scan_path = cache_path.to_path_buf();
-    let result = tauri::async_runtime::spawn_blocking(move || {
+    let index_for_task = index.clone();
+    let changed = tauri::async_runtime::spawn_blocking(move || {
         let entries = scan_user_folders();
+        // Identical scans skip the multi-MB cache rewrite entirely.
+        if !index_for_task.changed(&entries) {
+            return false;
+        }
         // A cache write failure must not discard a valid in-memory scan.
         let _ = save_cache(&scan_path, &entries);
-        entries
+        index_for_task.replace(entries, false);
+        true
     })
-    .await;
+    .await
+    .unwrap_or(false);
 
-    match result {
-        Ok(entries) => index.replace(entries, false),
-        Err(_) => index.set_indexing(false),
+    if changed {
+        let _ = app.emit("file-index-updated", ());
+    } else {
+        index.set_indexing(false);
     }
-    let _ = app.emit("file-index-updated", ());
 }
 
 pub fn quick_access() -> Vec<QuickAccessEntry> {
@@ -449,15 +484,19 @@ fn target_score(query: &str, target: &str) -> Option<i32> {
         return Some(620 - position.min(100) as i32 * 2 + if boundary { 80 } else { 0 });
     }
 
-    let query_length = query.chars().count() as i32;
-    let mut query_chars = query.chars();
-    let mut current = query_chars.next()?;
+    // Byte-level subsequence matching: in UTF-8 a byte subsequence matches
+    // exactly the same strings as the char subsequence (each char's bytes are
+    // contiguous), which keeps the hottest loop allocation- and decode-free.
+    let query_bytes = query.as_bytes();
+    let target_bytes = target.as_bytes();
+    let query_length = query_bytes.len() as i32;
+    let mut current = *query_bytes.first()?;
     let mut matched = 0i32;
     let mut gaps = 0i32;
-    for char in target.chars() {
-        if char == current {
+    for &byte in target_bytes {
+        if byte == current {
             matched += 1;
-            if let Some(next) = query_chars.next() {
+            if let Some(&next) = query_bytes.get(matched as usize) {
                 current = next;
             } else {
                 if query_length >= 3 && gaps > (query_length * 2).max(6) {
@@ -692,5 +731,39 @@ mod tests {
             assert!(should_skip_dir(name), "should skip {name}");
         }
         assert!(!should_skip_dir("Projects"));
+    }
+
+    /// Manual hot-path benchmark: per-search cost against a full 100k index.
+    #[test]
+    #[ignore]
+    fn search_bench() {
+        use std::time::Instant;
+
+        let entries = (0..100_000)
+            .map(|number| CachedEntry {
+                path: format!(
+                    r"C:\Users\bench\Documents\folder-{}\file-{}-report-{}.txt",
+                    number % 200,
+                    number,
+                    number % 50
+                ),
+                is_directory: number % 10 == 0,
+            })
+            .collect();
+        let index = FileIndex::default();
+        index.replace(entries, false);
+
+        for query in ["report", "rep", "report 7", "zzz", "folder-19 file"] {
+            let started = Instant::now();
+            let mut hits = 0;
+            for _ in 0..50 {
+                hits = index.search(query, Some(8)).items.len();
+            }
+            eprintln!(
+                "search {query:?}: {:.2} ms/search ({} hits)",
+                started.elapsed().as_secs_f64() * 1000.0 / 50.0,
+                hits
+            );
+        }
     }
 }
