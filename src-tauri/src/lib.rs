@@ -189,10 +189,21 @@ pub fn run() {
             Ok(())
         })
         .on_window_event(|window, event| {
+            if window.label() != "main" {
+                return;
+            }
+            // The activation guard exists because Windows may report the
+            // palette as unfocused once before granting foreground
+            // activation to an existing process. Once the palette actually
+            // receives focus the pending state is stale: clear it so a real
+            // later unfocus (alt-tab back into a game) is never swallowed,
+            // which would leave the palette open and the taskbar topmost.
+            if matches!(event, WindowEvent::Focused(true)) {
+                ACTIVATION_FOCUS_PENDING.store(false, Ordering::Release);
+                return;
+            }
             // Clicking away dismisses the launcher, like Raycast.
-            if window.label() == "main"
-                && matches!(event, WindowEvent::Focused(false))
-                && window.is_visible().unwrap_or(false)
+            if matches!(event, WindowEvent::Focused(false)) && window.is_visible().unwrap_or(false)
             {
                 // Windows may report the palette as unfocused once before
                 // granting foreground activation to the existing process.

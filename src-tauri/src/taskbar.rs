@@ -5,12 +5,15 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use windows::core::PCWSTR;
-use windows::Win32::Foundation::LPARAM;
+use windows::Win32::Foundation::{LPARAM, RECT};
+use windows::Win32::Graphics::Gdi::{
+    GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST,
+};
 use windows::Win32::UI::Shell::{SHAppBarMessage, ABM_ACTIVATE, APPBARDATA};
 use windows::Win32::UI::WindowsAndMessaging::{
-    FindWindowW, GetWindowLongPtrW, SetWindowPos, ShowWindow, GWL_EXSTYLE, HWND_NOTOPMOST,
-    HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW, SW_SHOWNOACTIVATE,
-    WS_EX_TOPMOST,
+    FindWindowW, GetForegroundWindow, GetWindowLongPtrW, GetWindowRect, SetWindowPos, ShowWindow,
+    GWL_EXSTYLE, HWND_NOTOPMOST, HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+    SWP_SHOWWINDOW, SW_SHOWNOACTIVATE, WS_EX_TOPMOST,
 };
 
 /// Persistent marker proving Prism made the taskbar topmost. If Prism dies
@@ -20,10 +23,22 @@ const TOPMOST_MARKER: &str = "taskbar-topmost";
 
 static MADE_TOPMOST: AtomicBool = AtomicBool::new(false);
 
+/// Fullscreen windows must not be covered by the taskbar; a few pixels of
+/// slack avoid classifying maximized windows as fullscreen.
+const FULLSCREEN_TOLERANCE: i32 = 4;
+
 pub fn present() {
     let Some(taskbar) = taskbar_window() else {
         return;
     };
+    // Only assert the topmost band when the foreground app actually covers
+    // the taskbar (fullscreen games and video). In normal desktop use the
+    // taskbar is already visible; forcing topmost then leaves the taskbar
+    // stuck above a fullscreen game later, when the palette closes and the
+    // game cannot hide a topmost taskbar.
+    if !foreground_is_fullscreen() {
+        return;
+    }
     unsafe {
         let was_topmost = GetWindowLongPtrW(taskbar, GWL_EXSTYLE) as u32 & WS_EX_TOPMOST.0 != 0;
         // Preserve ownership across duplicate presentation requests. Otherwise
@@ -52,6 +67,32 @@ pub fn present() {
         if MADE_TOPMOST.load(Ordering::Acquire) {
             write_marker(true);
         }
+    }
+}
+
+/// True when the foreground window covers its entire monitor - a fullscreen
+/// game or video player. Called while the palette is still hidden, so the
+/// foreground window is the app the user came from.
+fn foreground_is_fullscreen() -> bool {
+    unsafe {
+        let foreground = GetForegroundWindow();
+        if foreground.is_invalid() {
+            return false;
+        }
+        let mut rect = RECT::default();
+        if GetWindowRect(foreground, &mut rect).is_err() {
+            return false;
+        }
+        let monitor = MonitorFromWindow(foreground, MONITOR_DEFAULTTONEAREST);
+        let mut info: MONITORINFO = std::mem::zeroed();
+        info.cbSize = std::mem::size_of::<MONITORINFO>() as u32;
+        if !GetMonitorInfoW(monitor, &mut info).as_bool() {
+            return false;
+        }
+        rect.left <= info.rcMonitor.left + FULLSCREEN_TOLERANCE
+            && rect.top <= info.rcMonitor.top + FULLSCREEN_TOLERANCE
+            && rect.right >= info.rcMonitor.right - FULLSCREEN_TOLERANCE
+            && rect.bottom >= info.rcMonitor.bottom - FULLSCREEN_TOLERANCE
     }
 }
 
