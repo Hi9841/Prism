@@ -104,6 +104,10 @@ export function PaletteProvider({ children }: { children: ReactNode }) {
   const [selected, setSelected] = useState(0);
   const fileRequest = useRef(0);
   const historyPathRequest = useRef(0);
+  const fileStatusKnown = useRef(false);
+  // Mirror of the index status for effects that must not re-run when the
+  // state flips (adding the state to deps would double-fire searches).
+  const indexStatusRef = useRef({ ready: false, indexing: true });
 
   const setQuery = useCallback((next: string) => {
     setQueryState(next);
@@ -141,9 +145,13 @@ export function PaletteProvider({ children }: { children: ReactNode }) {
       return path ? [path] : [];
     });
 
-    // Never render a cached file row while its existence is unverified.
-    setExistingHistoryPaths(new Set());
-    if (paths.length === 0) return;
+    // Keep the previous rows mounted while re-validating so the Recent
+    // section doesn't blink out on every window focus; the fresh set replaces
+    // them as soon as the existence check returns.
+    if (paths.length === 0) {
+      setExistingHistoryPaths(new Set());
+      return;
+    }
     existingPaths(paths)
       .then((existing) => {
         if (request === historyPathRequest.current) {
@@ -161,6 +169,8 @@ export function PaletteProvider({ children }: { children: ReactNode }) {
     () =>
       onFileIndexUpdated(() => {
         setFileIndexTick((tick) => tick + 1);
+        // A refresh may have flipped ready/indexing; re-query the status.
+        fileStatusKnown.current = false;
         validateHistoryPaths();
       }),
     [validateHistoryPaths],
@@ -179,9 +189,15 @@ export function PaletteProvider({ children }: { children: ReactNode }) {
       setFilesSearching(false);
       setFilesError(false);
       setFilePathBrowse(false);
+      // Status is already known and no index refresh happened since - skip
+      // the IPC round trip on every backspace/reset.
+      const status = indexStatusRef.current;
+      if (fileStatusKnown.current && status.ready && !status.indexing) return;
       searchFiles("", 1)
         .then((response) => {
           if (request !== fileRequest.current) return;
+          fileStatusKnown.current = true;
+          indexStatusRef.current = { ready: response.ready, indexing: response.indexing };
           setFileIndexReady(response.ready);
           setFileIndexing(response.indexing);
         })
@@ -195,6 +211,8 @@ export function PaletteProvider({ children }: { children: ReactNode }) {
       searchFiles(searchText, 8)
         .then((response) => {
           if (request !== fileRequest.current) return;
+          fileStatusKnown.current = true;
+          indexStatusRef.current = { ready: response.ready, indexing: response.indexing };
           setFileResults(response.items);
           setFileResultQuery(normalized);
           setFileIndexReady(response.ready);
@@ -204,6 +222,8 @@ export function PaletteProvider({ children }: { children: ReactNode }) {
         })
         .catch(() => {
           if (request !== fileRequest.current) return;
+          fileStatusKnown.current = true;
+          indexStatusRef.current = { ready: false, indexing: false };
           setFileResults([]);
           setFileResultQuery(normalized);
           setFileIndexReady(false);
@@ -293,7 +313,7 @@ export function PaletteProvider({ children }: { children: ReactNode }) {
         out.push({ id: "quick", label: "Quick Access", items: quickHits.map((hit) => hit.item) });
       }
 
-      const appHits = fuzzyApps(visibleApps, normalized, 6);
+      const appHits = fuzzyApps(visibleApps, normalized, 6, { preDeduped: true });
       const fileItems =
         fileResultQuery === searchQuery && fileResults.length > 0 ? fileResults.map(filePaletteItem) : [];
 

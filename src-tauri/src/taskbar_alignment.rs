@@ -28,11 +28,18 @@ const EXPLORER_ADVANCED_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\
 const TASKBAR_ALIGNMENT_VALUE: &str = "TaskbarAl";
 const ALIGNMENT_MARKER_FILE: &str = "taskbar-alignment";
 const ALIGNMENT_UNSET: u8 = u8::MAX;
-const ALIGNMENT_WATCH_INTERVAL: Duration = Duration::from_millis(50);
+const ALIGNMENT_WATCH_INTERVAL: Duration = Duration::from_millis(750);
+/// When Explorer keeps reverting a move (layout churn), re-apply at most once
+/// per this window instead of fighting it on every poll.
+const ALIGNMENT_REAPPLY_DEBOUNCE: Duration = Duration::from_secs(3);
 
 static ACTIVE_ALIGNMENT: AtomicU8 = AtomicU8::new(ALIGNMENT_UNSET);
 static ALIGNMENT_WATCHER: OnceLock<()> = OnceLock::new();
 static ALIGNMENT_APPLY_LOCK: Mutex<()> = Mutex::new(());
+/// Signature of the last moves the watcher applied, with the time it applied
+/// them, so identical geometry is not reapplied in a tight loop.
+type AppliedMoves = (Vec<(usize, i32, i32)>, std::time::Instant);
+static LAST_ALIGNMENT_APPLY: Mutex<Option<AppliedMoves>> = Mutex::new(None);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Alignment {
@@ -155,17 +162,24 @@ pub(crate) fn reapply_with_companion(companion: CompanionMove) -> Result<(), Str
     let _apply_guard = ALIGNMENT_APPLY_LOCK
         .lock()
         .map_err(|error| format!("lock taskbar alignment: {error}"))?;
-    let alignment = shared_alignment().unwrap_or_else(current);
-    if classic_taskbar_count() > 0 {
-        apply_classic_taskbars(alignment, Some(companion))?;
+    let companion_move = WindowMove {
+        window: companion.window,
+        x: companion.x,
+        y: companion.y,
+    };
+    if ALIGNMENT_WATCHER.get().is_some() {
+        // The watcher repairs classic taskbar geometry continuously, so a
+        // presentation only needs Prism's own companion move. Re-enumerating
+        // the whole desktop here runs on the main thread for every open.
+        apply_window_moves(&[companion_move])?;
     } else {
-        // Native Windows does not expose movable task-list HWNDs, but Prism's
-        // companion window still belongs in this same position transaction.
-        apply_window_moves(&[WindowMove {
-            window: companion.window,
-            x: companion.x,
-            y: companion.y,
-        }])?;
+        // First presentation before the watcher started: do one full pass.
+        let alignment = shared_alignment().unwrap_or_else(current);
+        if classic_taskbar_count() > 0 {
+            apply_classic_taskbars(alignment, Some(companion))?;
+        } else {
+            apply_window_moves(&[companion_move])?;
+        }
     }
     start_alignment_watcher();
     Ok(())
@@ -211,6 +225,10 @@ fn set_alignment(alignment: Alignment, companion: Option<CompanionMove>) -> Resu
     }
     let _ = write_shared_alignment(alignment);
     ACTIVE_ALIGNMENT.store(alignment.code(), Ordering::Release);
+    // The user changed the alignment; let the watcher re-evaluate immediately.
+    if let Ok(mut last) = LAST_ALIGNMENT_APPLY.lock() {
+        *last = None;
+    }
     start_alignment_watcher();
     Ok(())
 }
@@ -232,7 +250,28 @@ fn start_alignment_watcher() {
             if alignment.code() != ACTIVE_ALIGNMENT.load(Ordering::Acquire) {
                 ACTIVE_ALIGNMENT.store(alignment.code(), Ordering::Release);
             }
-            let _ = apply_classic_taskbars(alignment, None);
+            let moves = collect_classic_taskbar_moves(alignment);
+            let signature: Vec<(usize, i32, i32)> = moves
+                .iter()
+                .map(|movement| (movement.window.0 as usize, movement.x, movement.y))
+                .collect();
+            let should_apply = match LAST_ALIGNMENT_APPLY.lock() {
+                Ok(last) => match last.as_ref() {
+                    None => true,
+                    Some((previous, applied_at)) => {
+                        *previous != signature || applied_at.elapsed() >= ALIGNMENT_REAPPLY_DEBOUNCE
+                    }
+                },
+                // Poisoned lock: apply rather than stall alignment.
+                Err(_) => true,
+            };
+            if !should_apply {
+                continue;
+            }
+            let _ = apply_window_moves(&moves);
+            if let Ok(mut last) = LAST_ALIGNMENT_APPLY.lock() {
+                *last = Some((signature, std::time::Instant::now()));
+            }
         });
     });
 }
@@ -307,10 +346,7 @@ fn classic_taskbar_count() -> usize {
         .count()
 }
 
-fn apply_classic_taskbars(
-    alignment: Alignment,
-    companion: Option<CompanionMove>,
-) -> Result<(), String> {
+fn collect_classic_taskbar_moves(alignment: Alignment) -> Vec<WindowMove> {
     let mut moves = Vec::new();
     for taskbar in taskbar_windows() {
         let Some(children) = classic_children(taskbar) else {
@@ -320,6 +356,14 @@ fn apply_classic_taskbars(
             moves.extend(classic_taskbar_moves(taskbar, children, alignment));
         }
     }
+    moves
+}
+
+fn apply_classic_taskbars(
+    alignment: Alignment,
+    companion: Option<CompanionMove>,
+) -> Result<(), String> {
+    let mut moves = collect_classic_taskbar_moves(alignment);
     if let Some(companion) = companion {
         moves.push(WindowMove {
             window: companion.window,

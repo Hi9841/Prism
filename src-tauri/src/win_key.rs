@@ -58,6 +58,9 @@ use windows::Win32::UI::WindowsAndMessaging::{
 
 const ACTION_MESSAGE: u32 = WM_APP + 1;
 const TOGGLE_DEBOUNCE_MS: u64 = 50;
+/// The Start button rect only needs refreshing occasionally; the UIA query is
+/// expensive and runs on Explorer's side.
+const START_RECT_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
 const SHELL_BRIDGE_MESSAGE_NAME: &str = "Prism.ShellBridge.v1";
 const SHELL_CONTROL_DISABLE_WIN_HOTKEY: usize = 1;
 const SHELL_EVENT_HOTKEY_DISABLED: usize = 2;
@@ -227,6 +230,9 @@ type StopReady = mpsc::SyncSender<()>;
 static START_TX: OnceLock<mpsc::Sender<HookReady>> = OnceLock::new();
 static RAW_MACHINE: Mutex<WinKeyMachine> = Mutex::new(WinKeyMachine::EMPTY);
 static SHELL_BRIDGE_ACTIVE: AtomicBool = AtomicBool::new(false);
+/// Registered once; calling RegisterWindowMessageW on every raw-input message
+/// (the window proc path) is wasteful.
+static BRIDGE_MESSAGE_ID: OnceLock<Result<u32, String>> = OnceLock::new();
 static SHELL_BRIDGE_ACK: AtomicU32 = AtomicU32::new(0);
 static SHELL_START_RECT_ACK: AtomicU32 = AtomicU32::new(0);
 static SHELL_START_CLICK_X: AtomicI32 = AtomicI32::new(0);
@@ -496,6 +502,7 @@ struct ShellBridge {
     taskbar_thread: u32,
     start_button_locator: StartButtonLocator,
     start_rect: RECT,
+    last_rect_refresh: Option<Instant>,
     library_path: PathBuf,
 }
 
@@ -670,6 +677,7 @@ impl ShellBridge {
                 taskbar_thread,
                 start_button_locator,
                 start_rect,
+                last_rect_refresh: None,
                 library_path,
             });
         }
@@ -778,6 +786,7 @@ impl ShellBridge {
             taskbar_thread,
             start_button_locator,
             start_rect,
+            last_rect_refresh: None,
             library_path,
         })
     }
@@ -787,6 +796,14 @@ impl ShellBridge {
     }
 
     fn refresh_start_rect(&mut self) {
+        let now = Instant::now();
+        if self
+            .last_rect_refresh
+            .is_some_and(|last| now.duration_since(last) < START_RECT_REFRESH_INTERVAL)
+        {
+            return;
+        }
+        self.last_rect_refresh = Some(now);
         let Some(rect) = self.start_button_locator.rect() else {
             return;
         };
@@ -963,13 +980,17 @@ unsafe fn cleanup_shell_hook(hook: HHOOK, module: HMODULE, library_path: &PathBu
 }
 
 fn shell_bridge_message() -> Result<u32, String> {
-    let name = wide(SHELL_BRIDGE_MESSAGE_NAME);
-    let message = unsafe { RegisterWindowMessageW(PCWSTR(name.as_ptr())) };
-    if message == 0 {
-        Err("register Explorer bridge message failed".to_string())
-    } else {
-        Ok(message)
-    }
+    BRIDGE_MESSAGE_ID
+        .get_or_init(|| {
+            let name = wide(SHELL_BRIDGE_MESSAGE_NAME);
+            let message = unsafe { RegisterWindowMessageW(PCWSTR(name.as_ptr())) };
+            if message == 0 {
+                Err("register Explorer bridge message failed".to_string())
+            } else {
+                Ok(message)
+            }
+        })
+        .clone()
 }
 
 unsafe fn find_shell_window(class_name: &str) -> Result<HWND, String> {

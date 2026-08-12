@@ -787,23 +787,27 @@ fn apps_cache_path(app: &tauri::AppHandle) -> std::path::PathBuf {
 }
 
 #[tauri::command]
-fn launch_app(id: String, state: tauri::State<'_, AppState>) -> Result<(), String> {
+async fn launch_app(id: String, state: tauri::State<'_, AppState>) -> Result<(), String> {
     let timer = perf::start();
-    // Only launch apps that came from our own scan.
-    let apps = state.apps_cache.lock().map_err(|e| e.to_string())?;
-    let entry = apps
-        .as_ref()
-        .and_then(|list| list.iter().find(|a| a.app_id == id))
-        .ok_or_else(|| "unknown app id".to_string())?;
-    let result = apps::launch(entry);
-    perf::finish(timer, "launch_app", || {
-        format!("name={};source={}", entry.name, entry.source)
-    });
+    // Only launch apps that came from our own scan. The entry is cloned so
+    // the cache lock is released before ShellExecuteW, which can block.
+    let entry = {
+        let apps = state.apps_cache.lock().map_err(|e| e.to_string())?;
+        apps.as_ref()
+            .and_then(|list| list.iter().find(|a| a.app_id == id))
+            .cloned()
+            .ok_or_else(|| "unknown app id".to_string())?
+    };
+    let detail = format!("name={};source={}", entry.name, entry.source);
+    let result = tauri::async_runtime::spawn_blocking(move || apps::launch(&entry))
+        .await
+        .map_err(|e| format!("launch task failed: {e}"))?;
+    perf::finish(timer, "launch_app", move || detail.clone());
     result
 }
 
 #[tauri::command]
-fn launch_app_as_admin(id: String, state: tauri::State<'_, AppState>) -> Result<(), String> {
+async fn launch_app_as_admin(id: String, state: tauri::State<'_, AppState>) -> Result<(), String> {
     let entry = {
         let apps = state.apps_cache.lock().map_err(|e| e.to_string())?;
         apps.as_ref()
@@ -811,30 +815,35 @@ fn launch_app_as_admin(id: String, state: tauri::State<'_, AppState>) -> Result<
             .cloned()
             .ok_or_else(|| "unknown app id".to_string())?
     };
-    apps::launch_elevated(&entry)
+    tauri::async_runtime::spawn_blocking(move || apps::launch_elevated(&entry))
+        .await
+        .map_err(|e| format!("elevated launch task failed: {e}"))?
 }
 
 #[tauri::command]
-fn open_path(path: String) -> Result<(), String> {
+async fn open_path(path: String) -> Result<(), String> {
     let timer = perf::start();
     let path = PathBuf::from(path);
     if !path.is_absolute() || !path.exists() {
         return Err("path must be an existing absolute file or folder".to_string());
     }
-    let result = apps::open_path(&path);
-    perf::finish(timer, "open_path", || {
-        format!("kind={}", if path.is_dir() { "directory" } else { "file" })
-    });
+    let kind = if path.is_dir() { "directory" } else { "file" };
+    let result = tauri::async_runtime::spawn_blocking(move || apps::open_path(&path))
+        .await
+        .map_err(|e| format!("open path task failed: {e}"))?;
+    perf::finish(timer, "open_path", move || format!("kind={kind}"));
     result
 }
 
 #[tauri::command]
-fn run_path_as_admin(path: String) -> Result<(), String> {
+async fn run_path_as_admin(path: String) -> Result<(), String> {
     let path = PathBuf::from(path);
     if !path.is_absolute() || !path.is_file() {
         return Err("path must be an existing absolute file".to_string());
     }
-    apps::launch_path_elevated(&path, None, None)
+    tauri::async_runtime::spawn_blocking(move || apps::launch_path_elevated(&path, None, None))
+        .await
+        .map_err(|e| format!("run as administrator task failed: {e}"))?
 }
 
 #[tauri::command]
@@ -865,8 +874,7 @@ fn get_quick_access() -> Vec<files::QuickAccessEntry> {
     files::quick_access()
 }
 
-#[tauri::command]
-fn existing_paths(paths: Vec<String>) -> Vec<String> {
+fn filter_existing_paths(paths: Vec<String>) -> Vec<String> {
     paths
         .into_iter()
         .take(64)
@@ -876,6 +884,13 @@ fn existing_paths(paths: Vec<String>) -> Vec<String> {
             path.is_absolute() && path.exists()
         })
         .collect()
+}
+
+#[tauri::command]
+async fn existing_paths(paths: Vec<String>) -> Vec<String> {
+    tauri::async_runtime::spawn_blocking(move || filter_existing_paths(paths))
+        .await
+        .unwrap_or_default()
 }
 
 #[tauri::command]
@@ -1641,10 +1656,10 @@ mod tests {
         std::fs::write(&path, "test").expect("create test file");
         let path_text = path.to_string_lossy().into_owned();
         assert_eq!(
-            existing_paths(vec![path_text.clone(), "relative.txt".to_string()]),
+            filter_existing_paths(vec![path_text.clone(), "relative.txt".to_string()]),
             vec![path_text.clone()]
         );
         std::fs::remove_file(&path).expect("remove test file");
-        assert!(existing_paths(vec![path_text]).is_empty());
+        assert!(filter_existing_paths(vec![path_text]).is_empty());
     }
 }
