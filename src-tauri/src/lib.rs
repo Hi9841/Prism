@@ -50,6 +50,7 @@ const PALETTE_RAISE_RETRY_DELAY: Duration = Duration::from_millis(40);
 const PALETTE_STARTUP_DELAY: Duration = Duration::from_millis(100);
 const STARTUP_SHELL_RETRY_DELAY: Duration = Duration::from_millis(250);
 const STARTUP_SHELL_RETRY_ATTEMPTS: usize = 120;
+const STARTUP_ALIGNMENT_DELAY: Duration = Duration::from_secs(1);
 
 static PALETTE_OPEN: AtomicBool = AtomicBool::new(false);
 static PALETTE_TRANSITION: AtomicU64 = AtomicU64::new(0);
@@ -113,6 +114,7 @@ pub struct AppState {
     apps_scan_lock: tokio::sync::Mutex<()>,
     file_index: files::FileIndex,
     shortcut: Mutex<String>,
+    shortcut_generation: AtomicU64,
 }
 
 /// Handles the internal crash-recovery mode before Tauri or the single-instance
@@ -142,14 +144,19 @@ pub fn run() {
             apps_scan_lock: tokio::sync::Mutex::new(()),
             file_index: files::FileIndex::default(),
             shortcut: Mutex::new(String::new()),
+            shortcut_generation: AtomicU64::new(0),
         })
         .setup(move |app| {
             let _ = start_menu::recover_stale(app.handle());
             let persisted = load_state_value(app.handle()).ok().flatten();
             let alignment = startup_taskbar_alignment(persisted.as_ref());
-            let _ = taskbar_alignment::set(&alignment);
+            let _ = taskbar_alignment::initialize(&alignment);
+            schedule_startup_taskbar_alignment();
             win_key::init(app.handle().clone());
-            taskbar_customization::init(app.handle().clone());
+            let customization_app = app.handle().clone();
+            tauri::async_runtime::spawn_blocking(move || {
+                taskbar_customization::init(customization_app);
+            });
             theme::watch(app.handle().clone());
             let file_cache = app
                 .path()
@@ -165,9 +172,11 @@ pub fn run() {
                 let _ = apply_window_look(&window, "solid", "dark");
                 schedule_hidden_memory_trim(app.handle().clone());
             }
-            // Install the persisted shortcut before the webview loads. A
+            warm_apps(app.handle().clone());
+            // Start installing the persisted shortcut during native setup. A
             // fresh, corrupt, or incomplete state defaults natively to Win,
-            // so first-run activation never waits on frontend startup.
+            // so first-run activation never waits on frontend startup. The
+            // Explorer bridge is initialized off the Tauri main thread.
             let combo = startup_shortcut(persisted.as_ref());
             apply_startup_shortcut(app.handle(), combo);
             if show_on_start {
@@ -240,6 +249,41 @@ fn launched_for_autostart() -> bool {
     std::env::args_os()
         .skip(1)
         .any(|argument| argument == std::ffi::OsStr::new("--autostart"))
+}
+
+fn schedule_startup_taskbar_alignment() {
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(STARTUP_ALIGNMENT_DELAY).await;
+        let _ = tauri::async_runtime::spawn_blocking(move || {
+            let _ = taskbar_alignment::reapply_current();
+        })
+        .await;
+    });
+}
+
+fn warm_apps(app: tauri::AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        let state = app.state::<AppState>();
+        let _scan_guard = state.apps_scan_lock.lock().await;
+        if state
+            .apps_cache
+            .lock()
+            .ok()
+            .and_then(|cache| cache.as_ref().map(|_| ()))
+            .is_some()
+        {
+            return;
+        }
+        let cache_path = apps_cache_path(&app);
+        let result = tauri::async_runtime::spawn_blocking(move || apps::scan(&cache_path)).await;
+        let Ok(Ok(list)) = result else {
+            return;
+        };
+        let cache_result = state.apps_cache.lock();
+        if let Ok(mut cache) = cache_result {
+            *cache = Some(list);
+        }
+    });
 }
 
 fn schedule_initial_palette(app: tauri::AppHandle) {
@@ -1068,26 +1112,49 @@ fn startup_taskbar_alignment(state: Option<&serde_json::Value>) -> String {
 }
 
 fn apply_startup_shortcut(app: &tauri::AppHandle, combo: String) {
-    if apply_shortcut(app, &combo).is_ok() {
-        return;
-    }
-
+    let generation = app
+        .state::<AppState>()
+        .shortcut_generation
+        .load(Ordering::Acquire);
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
+        if app
+            .state::<AppState>()
+            .shortcut_generation
+            .load(Ordering::Acquire)
+            != generation
+        {
+            return;
+        }
+        let first_attempt = {
+            let attempt_app = app.clone();
+            let attempt_combo = combo.clone();
+            tauri::async_runtime::spawn_blocking(move || {
+                apply_shortcut_if_current(&attempt_app, &attempt_combo, generation)
+            })
+            .await
+        };
+        if matches!(first_attempt, Ok(Ok(()))) {
+            return;
+        }
+
         for _ in 0..STARTUP_SHELL_RETRY_ATTEMPTS {
             tokio::time::sleep(STARTUP_SHELL_RETRY_DELAY).await;
-            let retry_app = app.clone();
-            let retry_combo = combo.clone();
-            let (result_tx, result_rx) = tokio::sync::oneshot::channel();
             if app
-                .run_on_main_thread(move || {
-                    let _ = result_tx.send(apply_shortcut(&retry_app, &retry_combo));
-                })
-                .is_err()
+                .state::<AppState>()
+                .shortcut_generation
+                .load(Ordering::Acquire)
+                != generation
             {
                 return;
             }
-            if matches!(result_rx.await, Ok(Ok(()))) {
+            let retry_app = app.clone();
+            let retry_combo = combo.clone();
+            let result = tauri::async_runtime::spawn_blocking(move || {
+                apply_shortcut_if_current(&retry_app, &retry_combo, generation)
+            })
+            .await;
+            if matches!(result, Ok(Ok(()))) {
                 return;
             }
         }
@@ -1101,10 +1168,27 @@ fn apply_startup_shortcut(app: &tauri::AppHandle, combo: String) {
 /// Applies a global shortcut. The new binding is activated and proven
 /// BEFORE the old one is released; on any failure the previous shortcut
 /// stays active and an error is returned. State is only updated on success.
-fn apply_shortcut(app: &tauri::AppHandle, combo: &str) -> Result<(), String> {
+fn apply_shortcut_if_current(
+    app: &tauri::AppHandle,
+    combo: &str,
+    generation: u64,
+) -> Result<(), String> {
+    apply_shortcut_with_generation(app, combo, Some(generation))
+}
+
+fn apply_shortcut_with_generation(
+    app: &tauri::AppHandle,
+    combo: &str,
+    expected_generation: Option<u64>,
+) -> Result<(), String> {
     validate_shortcut(combo)?;
     let state = app.state::<AppState>();
     let mut prev = state.shortcut.lock().map_err(|e| e.to_string())?;
+    if expected_generation
+        .is_some_and(|generation| state.shortcut_generation.load(Ordering::Acquire) != generation)
+    {
+        return Err("shortcut request was superseded".to_string());
+    }
     if *prev == combo {
         // Idempotent: already active.
         return Ok(());
@@ -1154,8 +1238,18 @@ fn apply_shortcut(app: &tauri::AppHandle, combo: &str) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn set_shortcut(app: tauri::AppHandle, combo: String) -> Result<(), String> {
-    apply_shortcut(&app, &combo)
+async fn set_shortcut(app: tauri::AppHandle, combo: String) -> Result<(), String> {
+    validate_shortcut(&combo)?;
+    let generation = app
+        .state::<AppState>()
+        .shortcut_generation
+        .fetch_add(1, Ordering::AcqRel)
+        + 1;
+    tauri::async_runtime::spawn_blocking(move || {
+        apply_shortcut_if_current(&app, &combo, generation)
+    })
+    .await
+    .map_err(|error| format!("shortcut task failed: {error}"))?
 }
 
 /// Reads persisted state and performs the one-time 0.3.3 shortcut migration.
