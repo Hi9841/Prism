@@ -1,4 +1,3 @@
-import { relaunch } from "@tauri-apps/plugin-process";
 import { check, type Update } from "@tauri-apps/plugin-updater";
 import { AlertCircle, ArrowDownToLine, LoaderCircle } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -16,7 +15,6 @@ type UpdateViewState =
   | { phase: "available"; version: string }
   | { phase: "downloading"; version: string; downloadedBytes: number; totalBytes?: number }
   | { phase: "installing"; version: string }
-  | { phase: "restarting"; version: string }
   | { phase: "failed"; version: string };
 
 export function UpdateControl() {
@@ -132,9 +130,11 @@ export function UpdateControl() {
         },
         { timeout: DOWNLOAD_TIMEOUT_MS },
       );
-      if (disposedRef.current) return;
-      setViewState({ phase: "restarting", version: update.version });
-      await relaunch();
+      // On Windows, Tauri's native updater launches the NSIS installer with
+      // restart enabled and exits Prism from Rust. This line is only reached
+      // by platforms whose updater returns normally; the process must not
+      // call relaunch again because that races the installer and can start
+      // the old executable while it is being replaced.
     } catch (error) {
       console.error("Prism update failed", error);
       if (disposedRef.current) return;
@@ -148,8 +148,7 @@ export function UpdateControl() {
   if (viewState.phase === "hidden") return null;
 
   const version = viewState.version.replace(/^v/i, "");
-  const busy =
-    viewState.phase === "downloading" || viewState.phase === "installing" || viewState.phase === "restarting";
+  const busy = viewState.phase === "downloading" || viewState.phase === "installing";
   const percent =
     viewState.phase === "downloading" ? updatePercent(viewState.downloadedBytes, viewState.totalBytes) : null;
   const label =
@@ -161,9 +160,7 @@ export function UpdateControl() {
           : `Update ${percent}%`
         : viewState.phase === "installing"
           ? "Installing"
-          : viewState.phase === "restarting"
-            ? "Restarting"
-            : "Retry update";
+          : "Retry update";
   const title =
     viewState.phase === "failed"
       ? `Retry Prism v${version} update`
