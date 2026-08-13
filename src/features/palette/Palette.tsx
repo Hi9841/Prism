@@ -82,6 +82,17 @@ export function Palette() {
     [app, settings.pinnedApps],
   );
 
+  const toggleAppGroup = useCallback(
+    (groupId: string) => {
+      app.updateSettings({
+        appGroups: settings.appGroups.map((group) =>
+          group.id === groupId ? { ...group, collapsed: !group.collapsed } : group,
+        ),
+      });
+    },
+    [app, settings.appGroups],
+  );
+
   const reorderItem = useCallback(
     (source: PaletteItem, targetItemId: string) => {
       if (source.appId && targetItemId.startsWith("app:")) {
@@ -387,6 +398,34 @@ export function Palette() {
                 ) : (
                   <SectionLabel>{section.label}</SectionLabel>
                 )}
+                {section.groups?.map((group) => (
+                  <div key={group.id}>
+                    <button
+                      type="button"
+                      aria-expanded={!group.collapsed}
+                      aria-controls={`prism-section-${group.id}`}
+                      onClick={() => toggleAppGroup(group.groupId)}
+                      className="focus-ring group/section flex w-full cursor-pointer items-center gap-1 rounded-[6px] px-3.5 pb-1.5 pt-2 text-left text-[11px] font-semibold text-fg-secondary hover:text-fg"
+                    >
+                      <ChevronDown
+                        className={`h-3.5 w-3.5 transition-transform duration-150 ${
+                          group.collapsed ? "-rotate-90" : "rotate-0"
+                        }`}
+                      />
+                      <span className="truncate">{group.label}</span>
+                    </button>
+                    <ul
+                      id={`prism-section-${group.id}`}
+                      aria-label={group.label}
+                      className="m-0 flex list-none flex-col gap-[2px] p-0"
+                    >
+                      {group.items.map((item) => {
+                        const index = flat++;
+                        return renderResultRow(item, index, false);
+                      })}
+                    </ul>
+                  </div>
+                ))}
                 <ul
                   id={`prism-section-${section.id}`}
                   aria-label={section.label}
@@ -395,31 +434,35 @@ export function Palette() {
                   {section.items.map((item) => {
                     const index = flat++;
                     const reorderable = section.id === "pinned" || section.id === "quick";
-                    return (
-                      <ResultRow
-                        key={item.id}
-                        item={item}
-                        index={index}
-                        selected={palette.selected === index}
-                        pinned={item.appId ? settings.pinnedApps.includes(item.appId) : false}
-                        reorderable={reorderable}
-                        draggedItem={reorderDrag?.active ? reorderItemId(reorderDrag.item) : null}
-                        dropTargetItem={reorderDrag?.active ? reorderDrag.targetItemId : null}
-                        onSelect={palette.select}
-                        onRun={palette.runItem}
-                        onOpenContextMenu={openResultMenu}
-                        onTogglePin={togglePin}
-                        onMoveItem={moveItem}
-                        onStartReorderDrag={startReorderDrag}
-                        onUpdateReorderDrag={updateReorderDrag}
-                        onFinishReorderDrag={finishReorderDrag}
-                        onCancelReorderDrag={cancelReorderDrag}
-                      />
-                    );
+                    return renderResultRow(item, index, reorderable);
                   })}
                 </ul>
               </div>
             ));
+
+            function renderResultRow(item: PaletteItem, index: number, reorderable: boolean) {
+              return (
+                <ResultRow
+                  key={item.id}
+                  item={item}
+                  index={index}
+                  selected={palette.selected === index}
+                  pinned={item.appId ? settings.pinnedApps.includes(item.appId) : false}
+                  reorderable={reorderable}
+                  draggedItem={reorderDrag?.active ? reorderItemId(reorderDrag.item) : null}
+                  dropTargetItem={reorderDrag?.active ? reorderDrag.targetItemId : null}
+                  onSelect={palette.select}
+                  onRun={palette.runItem}
+                  onOpenContextMenu={openResultMenu}
+                  onTogglePin={togglePin}
+                  onMoveItem={moveItem}
+                  onStartReorderDrag={startReorderDrag}
+                  onUpdateReorderDrag={updateReorderDrag}
+                  onFinishReorderDrag={finishReorderDrag}
+                  onCancelReorderDrag={cancelReorderDrag}
+                />
+              );
+            }
           })()
         )}
       </div>

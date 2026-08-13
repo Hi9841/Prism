@@ -26,6 +26,7 @@ import { formatNumber, isMathLike, tryEvaluate } from "../../lib/math";
 import { fuzzy, fuzzyApps } from "../../lib/search";
 import type {
   AppEntry,
+  AppGroup,
   FileEntry,
   HistoryEntry,
   PaletteItem,
@@ -40,6 +41,16 @@ export interface Section {
   items: PaletteItem[];
   collapsible?: boolean;
   collapsed?: boolean;
+  groups?: AppGroupSection[];
+}
+
+export interface AppGroupSection {
+  groupId: string;
+  id: string;
+  label: string;
+  items: PaletteItem[];
+  collapsible: true;
+  collapsed: boolean;
 }
 
 /** Everything the section policy may read, in one place. */
@@ -52,6 +63,7 @@ export interface PaletteSources {
   /** Resolved quick-access items, in user order. */
   quickItems: PaletteItem[];
   quickAccessCollapsed: boolean;
+  appGroups?: readonly AppGroup[];
   /** `settings.pinnedApps` - ids that must not repeat in the Apps section. */
   pinnedAppIds: readonly string[];
   history: HistoryEntry[];
@@ -81,6 +93,7 @@ export function buildSections(sources: PaletteSources): {
     pinnedApps,
     quickItems,
     quickAccessCollapsed,
+    appGroups = [],
     pinnedAppIds,
     history,
     existingHistoryPaths,
@@ -126,14 +139,14 @@ export function buildSections(sources: PaletteSources): {
       });
     }
 
-    if (sortedApps.length > 0) {
-      const availableApps = sortedApps
-        .filter((entry) => !pinnedAppIds.includes(entry.appId))
-        .slice(0, IDLE_APPS_LIMIT)
-        .map((entry) => appPaletteItem(entry, appIcons));
-      if (availableApps.length > 0) {
-        out.push({ id: "apps", label: "Apps", items: availableApps });
-      }
+    const appsSection = buildAppsSection(
+      sortedApps.filter((entry) => !pinnedAppIds.includes(entry.appId)),
+      appIcons,
+      appGroups,
+      IDLE_APPS_LIMIT,
+    );
+    if (appsSection) {
+      out.push(appsSection);
     }
   } else {
     const math = isMathLike(normalized) ? tryEvaluate(normalized) : null;
@@ -153,12 +166,9 @@ export function buildSections(sources: PaletteSources): {
     if (filePathBrowse && fileItems.length > 0) {
       out.push({ id: "files", label: "Folder Contents", items: fileItems });
     }
-    if (appHits.length > 0) {
-      out.push({
-        id: "apps",
-        label: "Apps",
-        items: appHits.map((entry) => appPaletteItem(entry, appIcons)),
-      });
+    const appsSection = buildAppsSection(appHits, appIcons, appGroups, SEARCH_APPS_LIMIT);
+    if (appsSection) {
+      out.push(appsSection);
     }
     if (!filePathBrowse && fileItems.length > 0) {
       out.push({ id: "files", label: "Files & Folders", items: fileItems });
@@ -169,7 +179,53 @@ export function buildSections(sources: PaletteSources): {
     }
   }
 
-  return { sections: out, flatItems: out.flatMap((section) => section.items) };
+  return {
+    sections: out,
+    flatItems: out.flatMap((section) => [
+      ...(section.groups?.flatMap((group) => group.items) ?? []),
+      ...section.items,
+    ]),
+  };
+}
+
+function buildAppsSection(
+  entries: AppEntry[],
+  icons: Readonly<Record<string, string>>,
+  groups: readonly AppGroup[],
+  limit: number,
+): Section | null {
+  if (entries.length === 0) return null;
+  const entryById = new Map(entries.map((entry) => [entry.appId, entry]));
+  const groupedIds = new Set<string>();
+  const groupSections: AppGroupSection[] = [];
+
+  for (const group of groups) {
+    const items = group.appIds
+      .filter((appId) => !groupedIds.has(appId))
+      .map((appId) => entryById.get(appId))
+      .filter((entry): entry is AppEntry => Boolean(entry))
+      .slice(0, limit)
+      .map((entry) => appPaletteItem(entry, icons));
+    if (items.length === 0) continue;
+    for (const item of items) {
+      if (item.appId) groupedIds.add(item.appId);
+    }
+    groupSections.push({
+      groupId: group.id,
+      id: `apps-group-${group.id}`,
+      label: group.name,
+      items: group.collapsed ? [] : items,
+      collapsible: true,
+      collapsed: group.collapsed,
+    });
+  }
+
+  const ungrouped = entries
+    .filter((entry) => !groupedIds.has(entry.appId))
+    .slice(0, limit)
+    .map((entry) => appPaletteItem(entry, icons));
+  if (ungrouped.length === 0 && groupSections.length === 0) return null;
+  return { id: "apps", label: "Apps", items: ungrouped, groups: groupSections };
 }
 
 /** Runs the selected result (clipboard-style ids must not hide the window). */
@@ -252,7 +308,9 @@ function filePaletteItem(entry: FileEntry): PaletteItem {
     title: entry.name,
     subtitle: entry.parent,
     keywords: [entry.path, entry.parent],
-    icon: { kind: "tile", icon, tint },
+    icon: entry.thumbnail
+      ? { kind: "image", src: entry.thumbnail, name: entry.name }
+      : { kind: "tile", icon, tint },
     historyTitle: entry.name,
     run: () => openPath(entry.path),
     runAsAdmin:

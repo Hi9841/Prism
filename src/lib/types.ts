@@ -5,6 +5,7 @@ export type TileTint = "iris" | "azure" | "mint" | "amber" | "rose" | "slate";
 export type PaletteIcon =
   | { kind: "tile"; icon: LucideIcon; tint: TileTint }
   | { kind: "emoji"; char: string }
+  | { kind: "image"; src: string; name: string }
   | { kind: "app"; name: string; icon?: string };
 
 export interface PaletteItem {
@@ -57,11 +58,20 @@ export interface AppEntry {
   keywords?: string[];
 }
 
+export interface AppGroup {
+  id: string;
+  name: string;
+  appIds: string[];
+  collapsed: boolean;
+}
+
 export interface FileEntry {
   name: string;
   path: string;
   parent: string;
   isDirectory: boolean;
+  /** Small data URL preview for supported image files. */
+  thumbnail?: string;
 }
 
 export const QUICK_ACCESS_KINDS = [
@@ -84,6 +94,8 @@ export const DEFAULT_QUICK_ACCESS: QuickAccessKind[] = [
 ];
 export const QUICK_ACCESS_LIMIT = 6;
 export const PINNED_APP_LIMIT = 64;
+export const APP_GROUP_LIMIT = 16;
+export const APP_GROUP_APP_LIMIT = 64;
 
 const ELEVATABLE_EXTENSIONS = new Set(["exe", "com", "bat", "cmd", "ps1", "vbs", "js", "wsf"]);
 
@@ -167,6 +179,7 @@ export interface Settings {
   quickAccess: QuickAccessKind[];
   quickAccessCollapsed: boolean;
   pinnedApps: string[];
+  appGroups: AppGroup[];
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -181,6 +194,7 @@ export const DEFAULT_SETTINGS: Settings = {
   quickAccess: [...DEFAULT_QUICK_ACCESS],
   quickAccessCollapsed: false,
   pinnedApps: [],
+  appGroups: [],
 };
 
 export interface PersistedState {

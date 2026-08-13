@@ -126,6 +126,48 @@ describe("buildSections - idle layout (empty query)", () => {
     expect(result.sections[0].items.map((i) => i.title)).toEqual(["Zebra", "Alpha"]);
   });
 
+  it("renders configured app collections before remaining apps", () => {
+    const result = buildSections(
+      sources({
+        apps: [app("Premiere Pro"), app("After Effects"), app("PowerShell")],
+        appGroups: [
+          {
+            id: "creative",
+            name: "Creative",
+            appIds: ["app-id-Premiere Pro", "app-id-After Effects"],
+            collapsed: false,
+          },
+        ],
+      }),
+    );
+    expect(result.sections[0].groups?.[0]).toMatchObject({
+      groupId: "creative",
+      label: "Creative",
+      collapsed: false,
+    });
+    expect(result.sections[0].groups?.[0].items.map((item) => item.title)).toEqual([
+      "Premiere Pro",
+      "After Effects",
+    ]);
+    expect(result.sections[0].items.map((item) => item.title)).toEqual(["PowerShell"]);
+    expect(result.flatItems.map((item) => item.title)).toEqual([
+      "Premiere Pro",
+      "After Effects",
+      "PowerShell",
+    ]);
+  });
+
+  it("keeps collapsed collection apps out of keyboard results", () => {
+    const result = buildSections(
+      sources({
+        apps: [app("Photoshop"), app("PowerShell")],
+        appGroups: [{ id: "creative", name: "Creative", appIds: ["app-id-Photoshop"], collapsed: true }],
+      }),
+    );
+    expect(result.sections[0].groups?.[0].items).toEqual([]);
+    expect(result.flatItems.map((item) => item.title)).toEqual(["PowerShell"]);
+  });
+
   it("rehydrates app and file history, skipping pinned and dead paths", () => {
     const vsc = app("Visual Studio Code");
     const result = buildSections(
@@ -248,6 +290,26 @@ describe("buildSections - search layout", () => {
     );
     expect(ids(result.sections)).toEqual(["apps", "files"]);
     expect(result.sections[1].label).toBe("Files & Folders");
+  });
+
+  it("uses an image thumbnail when a file result provides one", () => {
+    const result = buildSections(
+      sources({
+        query: "darth",
+        fileResults: [
+          {
+            ...file("darth_vader.png", "E:\\STAR WARS\\IMG assets\\darth_vader.png"),
+            thumbnail: "data:image/png;base64,preview",
+          },
+        ],
+        fileResultQuery: "darth",
+      }),
+    );
+    expect(result.sections[0].items[0].icon).toEqual({
+      kind: "image",
+      src: "data:image/png;base64,preview",
+      name: "darth_vader.png",
+    });
   });
 
   it("offers the copy fallback only when nothing else matches and nothing is loading", () => {

@@ -95,6 +95,23 @@ describe("pinned app settings", () => {
   });
 });
 
+describe("app collections", () => {
+  it("sanitizes, deduplicates, and caps persisted collections", () => {
+    expect(
+      sanitizeSettings({
+        appGroups: [
+          { id: "creative", name: " Creative ", appIds: ["premiere", "premiere", "after-effects"] },
+          { id: "creative", name: "Duplicate", appIds: ["ignored"] },
+          { id: "", name: "No id", appIds: [] },
+        ],
+      }).appGroups,
+    ).toEqual([
+      { id: "creative", name: "Creative", appIds: ["premiere", "after-effects"], collapsed: false },
+    ]);
+    expect(sanitizeSettings({}).appGroups).toEqual([]);
+  });
+});
+
 describe("pinned app ordering", () => {
   it("moves an app up or down to the target position", () => {
     expect(reorderPinnedApps(["app-a", "app-b", "app-c"], "app-a", "app-b")).toEqual([

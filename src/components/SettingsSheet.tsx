@@ -12,20 +12,30 @@ import {
   Music,
   Plus,
   RotateCcw,
+  Trash2,
   X,
 } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { getAppVersion, quitApp, setShortcut, setTaskbarAlignment } from "../lib/bridge";
 import type {
   AccentId,
+  AppGroup,
   QuickAccessKind,
   TaskbarAlignment,
   ThemeMode,
   WindowEffect,
   WindowWidth,
 } from "../lib/types";
-import { DEFAULT_SETTINGS, QUICK_ACCESS_LIMIT, stepViewZoom, VIEW_ZOOM_LEVELS } from "../lib/types";
+import {
+  APP_GROUP_APP_LIMIT,
+  APP_GROUP_LIMIT,
+  DEFAULT_SETTINGS,
+  QUICK_ACCESS_LIMIT,
+  stepViewZoom,
+  VIEW_ZOOM_LEVELS,
+} from "../lib/types";
 import { SHORTCUT_OPTIONS, THEME_OPTIONS, useApp } from "../state/app";
+import { usePalette } from "../state/palette";
 import { TaskbarCustomization } from "./TaskbarCustomization";
 import { Segmented, SettingsRow, Toggle } from "./ui";
 
@@ -247,13 +257,159 @@ function QuickAccessPicker() {
   );
 }
 
+function AppGroupsPicker() {
+  const { settings, updateSettings, showToast } = useApp();
+  const { apps } = usePalette();
+  const [newName, setNewName] = useState("");
+  const [selectedAppByGroup, setSelectedAppByGroup] = useState<Record<string, string>>({});
+  const availableApps = [...apps].sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
+
+  const createGroup = () => {
+    const name = newName.trim();
+    if (!name) return;
+    if (settings.appGroups.length >= APP_GROUP_LIMIT) {
+      showToast("Collection limit reached", `Prism supports up to ${APP_GROUP_LIMIT} collections`);
+      return;
+    }
+    const id = `group-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
+    updateSettings({ appGroups: [...settings.appGroups, { id, name, appIds: [], collapsed: false }] });
+    setNewName("");
+  };
+
+  const updateGroup = (id: string, patch: Partial<AppGroup>) => {
+    updateSettings({
+      appGroups: settings.appGroups.map((group) => (group.id === id ? { ...group, ...patch } : group)),
+    });
+  };
+
+  const removeGroup = (id: string) => {
+    updateSettings({ appGroups: settings.appGroups.filter((group) => group.id !== id) });
+  };
+
+  const assignApp = (groupId: string, appId: string) => {
+    if (!appId) return;
+    const target = settings.appGroups.find((group) => group.id === groupId);
+    if (!target || target.appIds.includes(appId)) return;
+    if (target.appIds.length >= APP_GROUP_APP_LIMIT) {
+      showToast("Collection is full", `Each collection supports up to ${APP_GROUP_APP_LIMIT} apps`);
+      return;
+    }
+    updateSettings({
+      appGroups: settings.appGroups.map((group) => ({
+        ...group,
+        appIds:
+          group.id === groupId
+            ? [...group.appIds, appId]
+            : group.appIds.filter((candidate) => candidate !== appId),
+      })),
+    });
+    setSelectedAppByGroup((previous) => ({ ...previous, [groupId]: "" }));
+  };
+
+  const removeApp = (groupId: string, appId: string) => {
+    updateGroup(groupId, {
+      appIds:
+        settings.appGroups.find((group) => group.id === groupId)?.appIds.filter((id) => id !== appId) ?? [],
+    });
+  };
+
+  return (
+    <div className="w-[250px] min-w-0 space-y-2">
+      <div className="flex gap-1.5">
+        <input
+          value={newName}
+          onChange={(event) => setNewName(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === "Enter") createGroup();
+          }}
+          maxLength={64}
+          placeholder="New collection"
+          aria-label="New app collection name"
+          className="focus-ring min-w-0 flex-1 rounded-[8px] bg-surface px-2.5 py-1.5 text-[12px] text-fg outline-none placeholder:text-fg-quiet"
+        />
+        <button
+          type="button"
+          aria-label="Create app collection"
+          title="Create app collection"
+          onClick={createGroup}
+          className="focus-ring press grid h-8 w-8 shrink-0 cursor-pointer place-items-center rounded-[8px] bg-accent-soft text-accent hover:bg-surface-hover"
+        >
+          <Plus className="h-4 w-4" />
+        </button>
+      </div>
+      {settings.appGroups.map((group) => {
+        const assigned = group.appIds
+          .map((appId) => apps.find((entry) => entry.appId === appId))
+          .filter((entry): entry is (typeof apps)[number] => Boolean(entry));
+        const assignedIds = new Set(group.appIds);
+        return (
+          <div key={group.id} className="border-t border-line pt-2">
+            <div className="flex items-center gap-1.5">
+              <input
+                value={group.name}
+                maxLength={64}
+                aria-label={`${group.name} collection name`}
+                onChange={(event) => updateGroup(group.id, { name: event.target.value })}
+                className="focus-ring min-w-0 flex-1 bg-transparent text-[12px] font-semibold text-fg outline-none"
+              />
+              <button
+                type="button"
+                aria-label={`Delete ${group.name} collection`}
+                title="Delete collection"
+                onClick={() => removeGroup(group.id)}
+                className="focus-ring press grid h-7 w-7 shrink-0 cursor-pointer place-items-center rounded-[7px] text-fg-quiet hover:bg-danger-soft hover:text-danger"
+              >
+                <Trash2 className="h-3.5 w-3.5" />
+              </button>
+            </div>
+            <select
+              value={selectedAppByGroup[group.id] ?? ""}
+              aria-label={`Add app to ${group.name}`}
+              onChange={(event) => assignApp(group.id, event.target.value)}
+              className="focus-ring mt-1.5 w-full rounded-[8px] bg-surface px-2 py-1.5 text-[11.5px] text-fg-secondary outline-none"
+            >
+              <option value="">Add an app...</option>
+              {availableApps
+                .filter((entry) => !assignedIds.has(entry.appId))
+                .map((entry) => (
+                  <option key={entry.appId} value={entry.appId}>
+                    {entry.name}
+                  </option>
+                ))}
+            </select>
+            {assigned.length > 0 ? (
+              <div className="mt-1.5 flex flex-wrap gap-1">
+                {assigned.map((entry) => (
+                  <button
+                    key={entry.appId}
+                    type="button"
+                    aria-label={`Remove ${entry.name} from ${group.name}`}
+                    title={`Remove ${entry.name}`}
+                    onClick={() => removeApp(group.id, entry.appId)}
+                    className="focus-ring press max-w-full truncate rounded-[6px] bg-accent-soft px-2 py-1 text-[10.5px] font-medium text-fg hover:bg-surface-hover"
+                  >
+                    {entry.name}
+                  </button>
+                ))}
+              </div>
+            ) : null}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 export function SettingsSheet() {
-  const { settings, updateSettings, openSettings, setOpenSettings, clearHistory } = useApp();
+  const { settings, updateSettings, resetSettings, openSettings, setOpenSettings, clearHistory, showToast } =
+    useApp();
   const panelRef = useRef<HTMLDivElement>(null);
   const closeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [closing, setClosing] = useState(false);
   const [titleId] = useState(() => `prism-settings-title-${Math.random().toString(36).slice(2, 8)}`);
   const [version, setVersion] = useState("");
+  const [resetConfirming, setResetConfirming] = useState(false);
+  const [resetBusy, setResetBusy] = useState(false);
 
   useEffect(() => {
     void getAppVersion()
@@ -280,6 +436,28 @@ export function SettingsSheet() {
     }
     setClosing(false);
   }, [openSettings]);
+
+  useEffect(() => {
+    if (!openSettings) setResetConfirming(false);
+  }, [openSettings]);
+
+  const confirmReset = useCallback(async () => {
+    if (resetBusy) return;
+    if (!resetConfirming) {
+      setResetConfirming(true);
+      return;
+    }
+    setResetBusy(true);
+    try {
+      await resetSettings();
+      setResetConfirming(false);
+      showToast("Settings reset", "Prism is back to its defaults");
+    } catch (error) {
+      showToast("Settings not reset", String(error));
+    } finally {
+      setResetBusy(false);
+    }
+  }, [resetBusy, resetConfirming, resetSettings, showToast]);
 
   useEffect(
     () => () => {
@@ -365,6 +543,42 @@ export function SettingsSheet() {
           </button>
         </div>
 
+        <div className="mx-5 mb-1 border-b border-line pb-3">
+          <div className="flex items-center justify-between gap-3">
+            <div className="min-w-0">
+              <div className="text-[13px] font-semibold text-fg">Reset all settings</div>
+              <div className="mt-0.5 text-[11.5px] leading-relaxed text-fg-tertiary">
+                Restore Prism&apos;s appearance, behavior, pins, and collections.
+              </div>
+            </div>
+            <button
+              type="button"
+              disabled={resetBusy}
+              onClick={() => void confirmReset()}
+              className={`focus-ring press flex shrink-0 cursor-pointer items-center gap-1.5 rounded-[9px] px-3 py-2 text-[12px] font-semibold disabled:cursor-default disabled:opacity-50 ${
+                resetConfirming
+                  ? "bg-danger text-white hover:opacity-90"
+                  : "bg-danger-soft text-danger hover:bg-danger hover:text-white"
+              }`}
+            >
+              <RotateCcw className="h-3.5 w-3.5" />
+              {resetConfirming ? "Reset now" : "Reset"}
+            </button>
+          </div>
+          {resetConfirming ? (
+            <div className="mt-2 flex items-center justify-between gap-2 rounded-[8px] bg-danger-soft px-2.5 py-2 text-[11px] text-danger">
+              <span>This cannot be undone.</span>
+              <button
+                type="button"
+                onClick={() => setResetConfirming(false)}
+                className="focus-ring press shrink-0 rounded-[6px] px-2 py-1 font-semibold hover:bg-surface-hover"
+              >
+                Cancel
+              </button>
+            </div>
+          ) : null}
+        </div>
+
         <div className="scroll-thin flex-1 overflow-y-auto px-5 pb-6">
           <SectionTitle>Appearance</SectionTitle>
           <SettingsRow title="Appearance" detail="Follows Windows light/dark mode">
@@ -447,6 +661,9 @@ export function SettingsSheet() {
           </SettingsRow>
           <SettingsRow title="Quick Access" detail="Choose up to 6 pinned folders">
             <QuickAccessPicker />
+          </SettingsRow>
+          <SettingsRow title="App collections" detail="Group apps like Creative, Developer, or Games">
+            <AppGroupsPicker />
           </SettingsRow>
           <SettingsRow title="Recent items" detail="Items are kept in order of use">
             <button

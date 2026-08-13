@@ -49,6 +49,17 @@ export function RowIcon({ icon, size = 40 }: { icon: PaletteIcon; size?: number 
           <span className="text-[22px] leading-none">{icon.char}</span>
         </div>
       );
+    case "image":
+      return (
+        <div
+          className="grid shrink-0 place-items-center overflow-hidden rounded-[10px] bg-surface"
+          style={style}
+          role="img"
+          aria-label={icon.name}
+        >
+          <img src={icon.src} alt="" draggable={false} className="h-full w-full select-none object-cover" />
+        </div>
+      );
     case "app":
       return icon.icon ? (
         <AppLogo src={icon.icon} name={icon.name} size={size} />
