@@ -18,6 +18,7 @@ import {
   onWindowFocused,
   searchFiles,
 } from "../lib/bridge";
+import { appIconRetryDelay, selectAppIconRequestIds } from "../lib/iconLoading";
 import { dedupeApps } from "../lib/search";
 import type { AppEntry, FileEntry, PaletteItem, QuickAccessEntry } from "../lib/types";
 import { useApp } from "./app";
@@ -29,6 +30,7 @@ interface PaletteCtx {
   setQuery: (q: string) => void;
   sections: Section[];
   flatItems: PaletteItem[];
+  apps: AppEntry[];
   selected: number;
   move: (delta: number) => void;
   select: (index: number) => void;
@@ -68,6 +70,11 @@ export function PaletteProvider({ children }: { children: ReactNode }) {
   const fileRequest = useRef(0);
   const historyPathRequest = useRef(0);
   const fileStatusKnown = useRef(false);
+  const iconSettled = useRef<Set<string>>(new Set());
+  const iconInFlight = useRef<Set<string>>(new Set());
+  const iconAttempts = useRef<Map<string, number>>(new Map());
+  const iconRetryTimer = useRef<number | null>(null);
+  const [iconRetryTick, setIconRetryTick] = useState(0);
   // Mirror of the index status for effects that must not re-run when the
   // state flips (adding the state to deps would double-fire searches).
   const indexStatusRef = useRef({ ready: false, indexing: true });
@@ -205,8 +212,15 @@ export function PaletteProvider({ children }: { children: ReactNode }) {
     setAppsLoaded(false);
     forceRefresh()
       .then((list) => {
+        if (iconRetryTimer.current !== null) {
+          window.clearTimeout(iconRetryTimer.current);
+          iconRetryTimer.current = null;
+        }
+        iconSettled.current.clear();
+        iconAttempts.current.clear();
         setApps(list);
         setAppsError(false);
+        setIconRetryTick((tick) => tick + 1);
       })
       .catch(() => setAppsError(true))
       .finally(() => setAppsLoaded(true));
@@ -237,6 +251,7 @@ export function PaletteProvider({ children }: { children: ReactNode }) {
         pinnedApps,
         quickItems,
         quickAccessCollapsed: app.settings.quickAccessCollapsed,
+        appGroups: app.settings.appGroups,
         pinnedAppIds: app.settings.pinnedApps,
         history: app.history,
         existingHistoryPaths,
@@ -253,6 +268,7 @@ export function PaletteProvider({ children }: { children: ReactNode }) {
       pinnedApps,
       quickItems,
       app.settings.quickAccessCollapsed,
+      app.settings.appGroups,
       app.settings.pinnedApps,
       app.history,
       existingHistoryPaths,
@@ -276,26 +292,51 @@ export function PaletteProvider({ children }: { children: ReactNode }) {
     return [...ids];
   }, [flatItems, app.settings.pinnedApps]);
 
-  // Ids already asked for this session. Apps without icons never appear in
-  // the response map; remembering the request prevents a per-keystroke IPC
-  // for every icon-less pinned app.
-  const iconRequested = useRef<Set<string>>(new Set());
-
   useEffect(() => {
-    const missing = iconRequestIds.filter((id) => !(id in appIcons) && !iconRequested.current.has(id));
+    void iconRetryTick;
+    const missing = selectAppIconRequestIds(iconRequestIds, {
+      appsLoaded,
+      icons: appIcons,
+      settled: iconSettled.current,
+      inFlight: iconInFlight.current,
+      attempts: iconAttempts.current,
+    });
     if (missing.length === 0) return;
-    for (const id of missing) iconRequested.current.add(id);
-    // No cancellation guard: an effect re-run (new array identity) would
-    // otherwise drop the in-flight result, and the requested set then
-    // prevents a retry, leaving rows on monograms forever. Merging the
-    // response whenever it lands is always safe - ids are stable keys.
+    for (const id of missing) {
+      iconInFlight.current.add(id);
+      iconAttempts.current.set(id, (iconAttempts.current.get(id) ?? 0) + 1);
+    }
+
     getAppIcons(missing)
       .then((icons) => {
-        if (Object.keys(icons).length === 0) return;
-        setAppIcons((previous) => ({ ...previous, ...icons }));
+        // The app cache is ready at this point, so omitted ids are genuinely
+        // iconless and should not issue another request on every keystroke.
+        for (const id of missing) iconSettled.current.add(id);
+        if (Object.keys(icons).length > 0) {
+          setAppIcons((previous) => ({ ...previous, ...icons }));
+        }
       })
-      .catch(() => {});
-  }, [iconRequestIds, appIcons]);
+      .catch(() => {
+        const attempt = Math.max(...missing.map((id) => iconAttempts.current.get(id) ?? 1));
+        const delay = appIconRetryDelay(attempt);
+        if (delay !== null && iconRetryTimer.current === null) {
+          iconRetryTimer.current = window.setTimeout(() => {
+            iconRetryTimer.current = null;
+            setIconRetryTick((tick) => tick + 1);
+          }, delay);
+        }
+      })
+      .finally(() => {
+        for (const id of missing) iconInFlight.current.delete(id);
+      });
+  }, [iconRequestIds, appIcons, appsLoaded, iconRetryTick]);
+
+  useEffect(
+    () => () => {
+      if (iconRetryTimer.current !== null) window.clearTimeout(iconRetryTimer.current);
+    },
+    [],
+  );
 
   const move = useCallback(
     (delta: number) => {
@@ -361,6 +402,7 @@ export function PaletteProvider({ children }: { children: ReactNode }) {
       setQuery,
       sections,
       flatItems,
+      apps: visibleApps,
       selected,
       move,
       select: setSelected,
@@ -381,6 +423,7 @@ export function PaletteProvider({ children }: { children: ReactNode }) {
       setQuery,
       sections,
       flatItems,
+      visibleApps,
       selected,
       move,
       runSelected,

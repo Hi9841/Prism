@@ -838,14 +838,12 @@ fn strip_icons(mut list: Vec<apps::AppEntry>) -> Vec<apps::AppEntry> {
 fn get_app_icons(
     state: tauri::State<'_, AppState>,
     ids: Vec<String>,
-) -> std::collections::HashMap<String, String> {
+) -> Result<std::collections::HashMap<String, String>, String> {
     let mut icons = std::collections::HashMap::new();
-    let Ok(apps) = state.apps_cache.lock() else {
-        return icons;
-    };
-    let Some(apps) = apps.as_ref() else {
-        return icons;
-    };
+    let apps = state.apps_cache.lock().map_err(|error| error.to_string())?;
+    let apps = apps
+        .as_ref()
+        .ok_or_else(|| "application index is not ready".to_string())?;
     for id in ids.into_iter().take(512) {
         let Some(entry) = apps.iter().find(|entry| entry.app_id == id) else {
             continue;
@@ -854,7 +852,7 @@ fn get_app_icons(
             icons.insert(id, icon.to_string());
         }
     }
-    icons
+    Ok(icons)
 }
 
 #[tauri::command]
@@ -1464,6 +1462,56 @@ fn validate_state(state: &serde_json::Value) -> Result<(), String> {
                 .ok_or("pinned app ids must be non-empty strings")?;
             if !seen.insert(app_id) {
                 return Err("state.settings.pinnedApps contains duplicates".to_string());
+            }
+        }
+    }
+    if let Some(app_groups) = settings.get("appGroups") {
+        let groups = app_groups
+            .as_array()
+            .ok_or("state.settings.appGroups must be an array")?;
+        if groups.len() > 16 {
+            return Err("state.settings.appGroups has too many entries".to_string());
+        }
+        let mut group_ids = std::collections::HashSet::new();
+        for group in groups {
+            let group = group
+                .as_object()
+                .ok_or("app group entries must be objects")?;
+            let id = group
+                .get("id")
+                .and_then(|value| value.as_str())
+                .filter(|value| !value.is_empty() && value.len() <= 96)
+                .ok_or("app group ids must be non-empty strings")?;
+            let name = group
+                .get("name")
+                .and_then(|value| value.as_str())
+                .filter(|value| !value.trim().is_empty() && value.len() <= 64)
+                .ok_or("app group names must be non-empty strings")?;
+            if !group_ids.insert(id) {
+                return Err("state.settings.appGroups contains duplicate ids".to_string());
+            }
+            if !group
+                .get("collapsed")
+                .is_some_and(serde_json::Value::is_boolean)
+            {
+                return Err("app group collapsed must be a boolean".to_string());
+            }
+            let app_ids = group
+                .get("appIds")
+                .and_then(|value| value.as_array())
+                .ok_or("app group appIds must be an array")?;
+            if app_ids.len() > 64 {
+                return Err(format!("app group '{name}' has too many apps"));
+            }
+            let mut seen = std::collections::HashSet::new();
+            for app_id in app_ids {
+                let app_id = app_id
+                    .as_str()
+                    .filter(|value| !value.is_empty() && value.len() <= 4096)
+                    .ok_or("app group app ids must be non-empty strings")?;
+                if !seen.insert(app_id) {
+                    return Err(format!("app group '{name}' contains duplicate apps"));
+                }
             }
         }
     }

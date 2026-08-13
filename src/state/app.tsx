@@ -7,12 +7,15 @@ import {
   onWinModeFailed,
   saveState,
   setAlwaysOnTop,
+  setShortcut,
+  setTaskbarAlignment,
   setViewZoom,
   setWindowStyle,
   setWindowWidth,
 } from "../lib/bridge";
 import type {
   AccentId,
+  AppGroup,
   HistoryEntry,
   QuickAccessKind,
   Settings,
@@ -21,6 +24,8 @@ import type {
   WindowWidth,
 } from "../lib/types";
 import {
+  APP_GROUP_APP_LIMIT,
+  APP_GROUP_LIMIT,
   DEFAULT_QUICK_ACCESS,
   DEFAULT_SETTINGS,
   PINNED_APP_LIMIT,
@@ -42,6 +47,7 @@ interface AppCtx {
   ready: boolean;
   settings: Settings;
   updateSettings: (patch: Partial<Settings>) => void;
+  resetSettings: () => Promise<void>;
   openSettings: boolean;
   setOpenSettings: (open: boolean) => void;
   history: HistoryEntry[];
@@ -238,6 +244,22 @@ export function AppProvider({ children }: { children: ReactNode }) {
     schedulePersist();
   }, [schedulePersist]);
 
+  const resetSettings = useCallback(async () => {
+    // Apply native registrations first so a failed shortcut or taskbar
+    // transition cannot leave the UI claiming that defaults are active.
+    await setShortcut(DEFAULT_SETTINGS.shortcut);
+    await setTaskbarAlignment(DEFAULT_SETTINGS.taskbarAlignment);
+    const next: Settings = {
+      ...DEFAULT_SETTINGS,
+      quickAccess: [...DEFAULT_SETTINGS.quickAccess],
+      pinnedApps: [],
+      appGroups: [],
+    };
+    settingsRef.current = next;
+    setSettings(next);
+    schedulePersist();
+  }, [schedulePersist]);
+
   const dismissToast = useCallback((id: number) => {
     const timer = toastTimers.current.get(id);
     if (timer) {
@@ -338,6 +360,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       ready,
       settings,
       updateSettings,
+      resetSettings,
       openSettings,
       setOpenSettings,
       history,
@@ -351,6 +374,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       ready,
       settings,
       updateSettings,
+      resetSettings,
       openSettings,
       history,
       pushHistory,
@@ -399,7 +423,43 @@ export function sanitizeSettings(raw: unknown): Settings {
         ? src.quickAccessCollapsed
         : DEFAULT_SETTINGS.quickAccessCollapsed,
     pinnedApps: sanitizePinnedApps(src.pinnedApps),
+    appGroups: sanitizeAppGroups(src.appGroups),
   };
+}
+
+function sanitizeAppGroups(raw: unknown): AppGroup[] {
+  if (!Array.isArray(raw)) return [];
+  const seen = new Set<string>();
+  const result: AppGroup[] = [];
+  for (const value of raw) {
+    if (!value || typeof value !== "object") continue;
+    const src = value as Record<string, unknown>;
+    const id = typeof src.id === "string" ? src.id.trim() : "";
+    const name = typeof src.name === "string" ? src.name.trim() : "";
+    if (!id || id.length > 96 || seen.has(id) || !name || name.length > 64) continue;
+    const appIds = Array.isArray(src.appIds) ? sanitizeGroupAppIds(src.appIds) : [];
+    result.push({
+      id,
+      name,
+      appIds,
+      collapsed: typeof src.collapsed === "boolean" ? src.collapsed : false,
+    });
+    seen.add(id);
+    if (result.length >= APP_GROUP_LIMIT) break;
+  }
+  return result;
+}
+
+function sanitizeGroupAppIds(raw: unknown[]): string[] {
+  const seen = new Set<string>();
+  const result: string[] = [];
+  for (const value of raw) {
+    if (typeof value !== "string" || !value || value.length > 4096 || seen.has(value)) continue;
+    seen.add(value);
+    result.push(value);
+    if (result.length >= APP_GROUP_APP_LIMIT) break;
+  }
+  return result;
 }
 
 function sanitizePinnedApps(raw: unknown): string[] {

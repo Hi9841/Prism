@@ -1,8 +1,10 @@
 //! Fast local file search backed by a compact, persistent fixed-drive index.
 
+use base64::Engine;
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::ffi::c_void;
+use std::io::Cursor;
 use std::os::windows::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -69,6 +71,8 @@ pub struct FileEntry {
     pub path: String,
     pub parent: String,
     pub is_directory: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thumbnail: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -290,6 +294,9 @@ fn list_directory(directory: &Path, needle: Option<&str>, limit: usize) -> Vec<F
                     path: child.path().to_string_lossy().into_owned(),
                     parent: parent.clone(),
                     is_directory,
+                    thumbnail: (!is_directory)
+                        .then(|| image_thumbnail(&child.path()))
+                        .flatten(),
                 },
             ))
         })
@@ -321,6 +328,7 @@ fn path_entry(path: &Path) -> Option<FileEntry> {
             .map(|value| value.to_string_lossy().into_owned())
             .unwrap_or_default(),
         is_directory: path.is_dir(),
+        thumbnail: (!path.is_dir()).then(|| image_thumbnail(path)).flatten(),
     })
 }
 
@@ -524,7 +532,39 @@ fn indexed_file_entry(entry: &SearchEntry) -> Option<FileEntry> {
             .map(|value| value.to_string_lossy().into_owned())
             .unwrap_or_default(),
         is_directory: metadata.is_dir(),
+        thumbnail: (!metadata.is_dir())
+            .then(|| image_thumbnail(path))
+            .flatten(),
     })
+}
+
+const THUMBNAIL_MAX_BYTES: u64 = 32 * 1024 * 1024;
+const THUMBNAIL_SIZE: u32 = 64;
+
+fn image_thumbnail(path: &Path) -> Option<String> {
+    let extension = path.extension()?.to_string_lossy().to_lowercase();
+    if !matches!(
+        extension.as_str(),
+        "png" | "jpg" | "jpeg" | "gif" | "bmp" | "webp"
+    ) {
+        return None;
+    }
+    if std::fs::metadata(path).ok()?.len() > THUMBNAIL_MAX_BYTES {
+        return None;
+    }
+    let image = image::ImageReader::open(path)
+        .ok()?
+        .with_guessed_format()
+        .ok()?
+        .decode()
+        .ok()?;
+    let preview = image.thumbnail(THUMBNAIL_SIZE, THUMBNAIL_SIZE);
+    let mut bytes = Cursor::new(Vec::new());
+    preview.write_to(&mut bytes, image::ImageFormat::Png).ok()?;
+    Some(format!(
+        "data:image/png;base64,{}",
+        base64::engine::general_purpose::STANDARD.encode(bytes.into_inner())
+    ))
 }
 
 fn is_false(value: &bool) -> bool {
