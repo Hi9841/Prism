@@ -35,6 +35,7 @@ interface ResultMenuState {
 interface CategoryDragState {
   kind: "section" | "group";
   id: string;
+  label: string;
   pointerId: number;
   startX: number;
   startY: number;
@@ -189,10 +190,11 @@ export function Palette() {
   );
 
   const startCategoryDrag = useCallback(
-    (kind: CategoryDragState["kind"], id: string, pointerId: number, x: number, y: number) => {
+    (kind: CategoryDragState["kind"], id: string, label: string, pointerId: number, x: number, y: number) => {
       updateCategoryDragState({
         kind,
         id,
+        label,
         pointerId,
         startX: x,
         startY: y,
@@ -206,12 +208,12 @@ export function Palette() {
   );
 
   const categoryDragHandlers = useCallback(
-    (kind: CategoryDragState["kind"], id: string) => ({
+    (kind: CategoryDragState["kind"], id: string, label: string) => ({
       onPointerDown: (event: React.PointerEvent) => {
         if (event.button !== 0 || palette.query.trim() !== "") return;
         event.preventDefault();
         event.currentTarget.setPointerCapture(event.pointerId);
-        startCategoryDrag(kind, id, event.pointerId, event.clientX, event.clientY);
+        startCategoryDrag(kind, id, label, event.pointerId, event.clientX, event.clientY);
       },
       onPointerMove: (event: React.PointerEvent) => {
         if (event.currentTarget.hasPointerCapture(event.pointerId)) {
@@ -557,7 +559,7 @@ export function Palette() {
                           aria-label={`Reorder ${section.label} section`}
                           title={`Reorder ${section.label}`}
                           className="focus-ring grid h-7 w-7 shrink-0 touch-none cursor-grab place-items-center rounded-[7px] text-fg-quiet hover:bg-surface-hover hover:text-fg active:cursor-grabbing"
-                          {...categoryDragHandlers("section", section.id)}
+                          {...categoryDragHandlers("section", section.id, section.label)}
                         >
                           <GripVertical className="h-3.5 w-3.5" />
                         </button>
@@ -574,7 +576,7 @@ export function Palette() {
                           aria-label={`Reorder ${section.label} section`}
                           title={`Reorder ${section.label}`}
                           className="focus-ring mr-3.5 grid h-7 w-7 shrink-0 touch-none cursor-grab place-items-center rounded-[7px] text-fg-quiet hover:bg-surface-hover hover:text-fg active:cursor-grabbing"
-                          {...categoryDragHandlers("section", section.id)}
+                          {...categoryDragHandlers("section", section.id, section.label)}
                         >
                           <GripVertical className="h-3.5 w-3.5" />
                         </button>
@@ -620,7 +622,7 @@ export function Palette() {
                             aria-label={`Reorder ${group.label} group`}
                             title={`Reorder ${group.label}`}
                             className="focus-ring grid h-7 w-7 shrink-0 touch-none cursor-grab place-items-center rounded-[7px] text-fg-quiet hover:bg-surface-hover hover:text-fg active:cursor-grabbing"
-                            {...categoryDragHandlers("group", group.groupId)}
+                            {...categoryDragHandlers("group", group.groupId, group.label)}
                           >
                             <GripVertical className="h-3.5 w-3.5" />
                           </button>
@@ -713,6 +715,8 @@ export function Palette() {
         <ReorderDragPreview drag={leavingDragRef.current} leaving />
       ) : null}
 
+      {categoryDrag?.active ? <CategoryDragPreview drag={categoryDrag} /> : null}
+
       {/* ------- footer ------- */}
       <div className="footer-bar flex min-h-12 items-center justify-between px-5 py-2.5">
         <div className="flex items-center gap-1.5 text-[11px] text-fg-quiet">
@@ -784,6 +788,33 @@ function ReorderDragPreview({ drag, leaving }: { drag: ReorderDragState; leaving
           </div>
         </div>
         <GripVertical className="h-4 w-4 shrink-0 text-accent" />
+      </div>
+    </div>
+  );
+}
+
+function CategoryDragPreview({ drag }: { drag: CategoryDragState }) {
+  const previewWidth = 208;
+  const previewHeight = 48;
+  const x = Math.min(Math.max(8, drag.x + 14), window.innerWidth - previewWidth - 8);
+  const y = Math.min(Math.max(8, drag.y - previewHeight / 2), window.innerHeight - previewHeight - 8);
+
+  return (
+    <div
+      aria-hidden="true"
+      className="pointer-events-none fixed top-0 left-0 z-50 will-change-transform"
+      style={{ transform: `translate3d(${x}px, ${y}px, 0)` }}
+    >
+      <div className="category-drag-preview">
+        <span className="grid h-8 w-8 shrink-0 place-items-center rounded-[8px] bg-accent-soft text-accent">
+          <GripVertical className="h-4 w-4" />
+        </span>
+        <span className="min-w-0">
+          <span className="block truncate text-[12px] font-semibold text-fg">{drag.label}</span>
+          <span className="mt-0.5 block text-[10.5px] text-fg-tertiary">
+            {drag.kind === "section" ? "Section" : "App collection"}
+          </span>
+        </span>
       </div>
     </div>
   );

@@ -19,8 +19,8 @@ import {
   Trash2,
   X,
 } from "lucide-react";
-import { useCallback, useEffect, useRef, useState } from "react";
-import { getAppVersion, quitApp, setShortcut, setTaskbarAlignment } from "../lib/bridge";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { getAppIcons, getAppVersion, quitApp, setShortcut, setTaskbarAlignment } from "../lib/bridge";
 import type {
   AccentId,
   AppGroup,
@@ -41,7 +41,7 @@ import {
 import { SHORTCUT_OPTIONS, THEME_OPTIONS, useApp } from "../state/app";
 import { usePalette } from "../state/palette";
 import { TaskbarCustomization } from "./TaskbarCustomization";
-import { Segmented, SettingsRow, Toggle } from "./ui";
+import { RowIcon, Segmented, SettingsRow, Toggle } from "./ui";
 
 const ACCENTS: { id: AccentId; name: string }[] = [
   { id: "iris", name: "Iris" },
@@ -263,13 +263,24 @@ function QuickAccessPicker() {
 
 function AppGroupsPicker() {
   const { settings, updateSettings, showToast } = useApp();
-  const { apps } = usePalette();
+  const { apps, appsLoaded } = usePalette();
   const [newName, setNewName] = useState("");
   const [openGroupId, setOpenGroupId] = useState<string | null>(null);
   const [appQuery, setAppQuery] = useState("");
+  const [pickerIcons, setPickerIcons] = useState<Record<string, string>>({});
   const appSearchRef = useRef<HTMLInputElement>(null);
   const appPickerRef = useRef<HTMLDivElement>(null);
-  const availableApps = [...apps].sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
+  const requestedPickerIconsRef = useRef(new Set<string>());
+  const availableApps = useMemo(
+    () => [...apps].sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true })),
+    [apps],
+  );
+  const filteredApps = useMemo(() => {
+    const normalized = appQuery.trim().toLowerCase();
+    return normalized
+      ? availableApps.filter((entry) => entry.name.toLowerCase().includes(normalized))
+      : availableApps;
+  }, [appQuery, availableApps]);
 
   useEffect(() => {
     if (!openGroupId) return;
@@ -280,6 +291,26 @@ function AppGroupsPicker() {
     document.addEventListener("pointerdown", closeOnOutside);
     return () => document.removeEventListener("pointerdown", closeOnOutside);
   }, [openGroupId]);
+
+  useEffect(() => {
+    if (!openGroupId) return;
+    const missingIds = filteredApps
+      .slice(0, 512)
+      .map((entry) => entry.appId)
+      .filter((appId) => !pickerIcons[appId] && !requestedPickerIconsRef.current.has(appId));
+    if (missingIds.length === 0) return;
+
+    for (const appId of missingIds) requestedPickerIconsRef.current.add(appId);
+    void getAppIcons(missingIds)
+      .then((icons) => {
+        if (Object.keys(icons).length > 0) {
+          setPickerIcons((current) => ({ ...current, ...icons }));
+        }
+      })
+      .catch(() => {
+        for (const appId of missingIds) requestedPickerIconsRef.current.delete(appId);
+      });
+  }, [filteredApps, openGroupId, pickerIcons]);
 
   const toggleAppPicker = (groupId: string) => {
     setOpenGroupId((current) => (current === groupId ? null : groupId));
@@ -335,8 +366,6 @@ function AppGroupsPicker() {
             : group.appIds.filter((candidate) => candidate !== appId),
       })),
     });
-    setOpenGroupId(null);
-    setAppQuery("");
   };
 
   const removeApp = (groupId: string, appId: string) => {
@@ -347,7 +376,7 @@ function AppGroupsPicker() {
   };
 
   return (
-    <div className="w-[250px] min-w-0 space-y-2">
+    <div className="w-[258px] min-w-0 space-y-2">
       <div className="flex gap-1.5">
         <input
           value={newName}
@@ -417,16 +446,29 @@ function AppGroupsPicker() {
                 </button>
               </div>
             </div>
-            <div ref={openGroupId === group.id ? appPickerRef : undefined} className="relative mt-1.5">
+            <div ref={openGroupId === group.id ? appPickerRef : undefined} className="mt-1.5">
               <button
                 type="button"
                 aria-label={`Add app to ${group.name}`}
                 aria-haspopup="listbox"
                 aria-expanded={openGroupId === group.id}
+                aria-controls={`app-picker-${group.id}`}
                 onClick={() => toggleAppPicker(group.id)}
-                className="focus-ring flex h-8 w-full cursor-pointer items-center justify-between gap-2 rounded-[8px] bg-surface px-2.5 text-left text-[11.5px] font-medium text-fg-secondary hover:bg-surface-hover hover:text-fg"
+                className={`focus-ring flex h-9 w-full cursor-pointer items-center gap-2 rounded-[8px] px-2.5 text-left text-[11.5px] font-medium transition-colors duration-150 ${
+                  openGroupId === group.id
+                    ? "bg-surface-active text-fg shadow-[inset_0_0_0_1px_var(--accent-ring)]"
+                    : "bg-surface text-fg-secondary hover:bg-surface-hover hover:text-fg"
+                }`}
               >
-                <span>{openGroupId === group.id ? "Search installed apps" : "Add an app"}</span>
+                <Plus className="h-3.5 w-3.5 shrink-0 text-accent" />
+                <span className="min-w-0 flex-1 truncate">
+                  {openGroupId === group.id ? "Choose apps" : "Add apps"}
+                </span>
+                {group.appIds.length > 0 ? (
+                  <span className="shrink-0 text-[10.5px] font-semibold text-fg-tertiary tabular-nums">
+                    {group.appIds.length}
+                  </span>
+                ) : null}
                 <ChevronDown
                   className={`h-3.5 w-3.5 shrink-0 text-fg-quiet transition-transform duration-150 ${
                     openGroupId === group.id ? "rotate-180" : ""
@@ -434,8 +476,11 @@ function AppGroupsPicker() {
                 />
               </button>
               {openGroupId === group.id ? (
-                <div className="absolute right-0 top-full z-20 mt-1 w-full overflow-hidden rounded-[9px] border border-line bg-bg-raised shadow-pop">
-                  <div className="flex items-center gap-2 border-b border-line px-2.5 py-2">
+                <div
+                  id={`app-picker-${group.id}`}
+                  className="mt-1.5 overflow-hidden rounded-[9px] bg-surface shadow-[inset_0_0_0_1px_var(--t-line)]"
+                >
+                  <div className="m-1.5 flex h-8 items-center gap-2 rounded-[7px] bg-[var(--t-field-bg)] px-2.5 shadow-[inset_0_0_0_1px_var(--t-field-line)] focus-within:shadow-[inset_0_0_0_1px_var(--accent-ring)]">
                     <Search className="h-3.5 w-3.5 shrink-0 text-fg-quiet" />
                     <input
                       ref={appSearchRef}
@@ -452,43 +497,102 @@ function AppGroupsPicker() {
                       aria-label={`Filter apps for ${group.name}`}
                       className="min-w-0 flex-1 bg-transparent text-[11.5px] text-fg outline-none placeholder:text-fg-quiet"
                     />
+                    {appQuery ? (
+                      <button
+                        type="button"
+                        aria-label="Clear app filter"
+                        title="Clear filter"
+                        onClick={() => {
+                          setAppQuery("");
+                          appSearchRef.current?.focus();
+                        }}
+                        className="focus-ring grid h-6 w-6 shrink-0 cursor-pointer place-items-center rounded-[6px] text-fg-quiet hover:bg-surface-hover hover:text-fg"
+                      >
+                        <X className="h-3.5 w-3.5" />
+                      </button>
+                    ) : null}
                   </div>
                   <div
                     role="listbox"
+                    aria-multiselectable="true"
                     aria-label={`Apps available for ${group.name}`}
-                    className="scroll-thin max-h-44 overflow-y-auto p-1"
+                    className="scroll-thin max-h-56 overflow-y-auto px-1.5 pb-1.5"
                   >
-                    {availableApps
-                      .filter((entry) => !assignedIds.has(entry.appId))
-                      .filter((entry) => entry.name.toLowerCase().includes(appQuery.trim().toLowerCase()))
-                      .map((entry) => (
-                        <button
-                          key={entry.appId}
-                          type="button"
-                          role="option"
-                          aria-selected={false}
-                          onClick={() => assignApp(group.id, entry.appId)}
-                          className="focus-ring flex min-h-8 w-full cursor-pointer items-center gap-2 rounded-[6px] px-2 text-left text-[11.5px] text-fg-secondary hover:bg-surface-hover hover:text-fg"
-                        >
-                          <span
-                            className="h-1.5 w-1.5 shrink-0 rounded-full bg-accent/70"
-                            aria-hidden="true"
-                          />
-                          <span className="min-w-0 flex-1 truncate">{entry.name}</span>
-                          <Check className="h-3.5 w-3.5 shrink-0 text-accent opacity-0" aria-hidden="true" />
-                        </button>
-                      ))}
-                    {availableApps
-                      .filter((entry) => !assignedIds.has(entry.appId))
-                      .filter((entry) => entry.name.toLowerCase().includes(appQuery.trim().toLowerCase()))
-                      .length === 0 ? (
-                      <div className="px-2 py-3 text-center text-[11px] text-fg-quiet">No matching apps</div>
-                    ) : null}
+                    {!appsLoaded ? (
+                      <div className="px-2 py-5 text-center text-[11px] text-fg-quiet">
+                        Loading installed apps...
+                      </div>
+                    ) : filteredApps.length === 0 ? (
+                      <div className="px-2 py-5 text-center text-[11px] text-fg-quiet">No matching apps</div>
+                    ) : (
+                      filteredApps.map((entry) => {
+                        const owner = settings.appGroups.find((candidate) =>
+                          candidate.appIds.includes(entry.appId),
+                        );
+                        const selected = assignedIds.has(entry.appId);
+                        const disabled = !selected && group.appIds.length >= APP_GROUP_APP_LIMIT;
+                        return (
+                          <button
+                            key={entry.appId}
+                            type="button"
+                            role="option"
+                            aria-selected={selected}
+                            disabled={disabled}
+                            title={disabled ? `${group.name} is full` : undefined}
+                            onClick={() =>
+                              selected ? removeApp(group.id, entry.appId) : assignApp(group.id, entry.appId)
+                            }
+                            className={`focus-ring flex min-h-10 w-full cursor-pointer items-center gap-2 rounded-[7px] px-2 py-1 text-left transition-colors duration-100 disabled:cursor-default disabled:opacity-35 ${
+                              selected
+                                ? "bg-accent-soft text-fg"
+                                : "text-fg-secondary hover:bg-surface-hover hover:text-fg"
+                            }`}
+                          >
+                            <RowIcon
+                              icon={{
+                                kind: "app",
+                                name: entry.name,
+                                icon: pickerIcons[entry.appId],
+                              }}
+                              size={26}
+                            />
+                            <span className="min-w-0 flex-1">
+                              <span className="block truncate text-[11.5px] font-medium">{entry.name}</span>
+                              {owner && !selected ? (
+                                <span className="mt-0.5 block truncate text-[10px] text-fg-quiet">
+                                  In {owner.name}
+                                </span>
+                              ) : null}
+                            </span>
+                            <span
+                              className={`grid h-5 w-5 shrink-0 place-items-center rounded-[6px] ${
+                                selected ? "bg-accent text-accent-fg" : "bg-surface text-transparent"
+                              }`}
+                              aria-hidden="true"
+                            >
+                              <Check className="h-3.5 w-3.5" strokeWidth={2.5} />
+                            </span>
+                          </button>
+                        );
+                      })
+                    )}
+                  </div>
+                  <div className="flex items-center justify-between border-t border-line px-2.5 py-2">
+                    <span className="text-[10.5px] text-fg-quiet tabular-nums">
+                      {group.appIds.length} of {APP_GROUP_APP_LIMIT} selected
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => setOpenGroupId(null)}
+                      className="focus-ring press cursor-pointer rounded-[7px] bg-accent-soft px-2.5 py-1 text-[11px] font-semibold text-fg hover:bg-surface-hover"
+                    >
+                      Done
+                    </button>
                   </div>
                 </div>
               ) : null}
             </div>
-            {assigned.length > 0 ? (
+            {assigned.length > 0 && openGroupId !== group.id ? (
               <div className="mt-1.5 flex flex-wrap gap-1">
                 {assigned.map((entry) => (
                   <button
@@ -497,9 +601,10 @@ function AppGroupsPicker() {
                     aria-label={`Remove ${entry.name} from ${group.name}`}
                     title={`Remove ${entry.name}`}
                     onClick={() => removeApp(group.id, entry.appId)}
-                    className="focus-ring press max-w-full truncate rounded-[6px] bg-accent-soft px-2 py-1 text-[10.5px] font-medium text-fg hover:bg-surface-hover"
+                    className="focus-ring press flex max-w-full cursor-pointer items-center gap-1 rounded-[6px] bg-accent-soft px-2 py-1 text-[10.5px] font-medium text-fg hover:bg-surface-hover"
                   >
-                    {entry.name}
+                    <span className="truncate">{entry.name}</span>
+                    <X className="h-3 w-3 shrink-0 text-fg-quiet" aria-hidden="true" />
                   </button>
                 ))}
               </div>
