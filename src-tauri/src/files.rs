@@ -1,4 +1,4 @@
-//! Fast local file search backed by a compact, persistent user-folder index.
+//! Fast local file search backed by a compact, persistent fixed-drive index.
 
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
@@ -11,15 +11,17 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::Emitter;
 use windows::core::{GUID, PCWSTR};
 use windows::Win32::Storage::FileSystem::{
-    MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
+    GetDriveTypeW, GetLogicalDriveStringsW, MoveFileExW, MOVEFILE_REPLACE_EXISTING,
+    MOVEFILE_WRITE_THROUGH,
 };
 use windows::Win32::System::Com::CoTaskMemFree;
+use windows::Win32::System::WindowsProgramming::DRIVE_FIXED;
 use windows::Win32::UI::Shell::{
     FOLDERID_Desktop, FOLDERID_Documents, FOLDERID_Downloads, FOLDERID_Music, FOLDERID_Pictures,
     FOLDERID_Profile, FOLDERID_Videos, SHGetKnownFolderPath,
 };
 
-const CACHE_VERSION: u32 = 2;
+const CACHE_VERSION: u32 = 3;
 const CACHE_TTL_SECONDS: u64 = 6 * 60 * 60;
 // The index is a bounded snapshot, not a filesystem watcher. Refreshing it
 // every minute causes a full recursive scan and an atomic cache write while
@@ -39,6 +41,7 @@ const SKIP_DIRS: &[&str] = &[
     ".idea",
     ".venv",
     ".vscode",
+    "appdata",
     "__pycache__",
     "build",
     "dist",
@@ -49,6 +52,14 @@ const SKIP_DIRS: &[&str] = &[
     "$recycle.bin",
     "system volume information",
     "windowsapps",
+    "windows",
+    "program files",
+    "program files (x86)",
+    "programdata",
+    "users",
+    "recovery",
+    "perflogs",
+    "msocache",
 ];
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -388,12 +399,14 @@ pub fn quick_access() -> Vec<QuickAccessEntry> {
 }
 
 fn scan_user_folders() -> Vec<CachedEntry> {
-    let mut roots: Vec<PathBuf> = known_locations()
-        .into_iter()
-        .filter(|(_, _, kind)| *kind != "home")
-        .map(|(_, path, _)| path)
-        .filter(|path| path.is_dir())
-        .collect();
+    let mut roots = fixed_drive_roots();
+    roots.extend(
+        known_locations()
+            .into_iter()
+            .filter(|(_, _, kind)| *kind != "home")
+            .map(|(_, path, _)| path)
+            .filter(|path| path.is_dir()),
+    );
     roots.sort();
     roots.dedup();
 
@@ -440,6 +453,29 @@ fn scan_user_folders() -> Vec<CachedEntry> {
         }
     }
     entries
+}
+
+fn fixed_drive_roots() -> Vec<PathBuf> {
+    let required = unsafe { GetLogicalDriveStringsW(None) };
+    if required == 0 {
+        return Vec::new();
+    }
+    let mut buffer = vec![0u16; required as usize + 1];
+    let written = unsafe { GetLogicalDriveStringsW(Some(&mut buffer)) } as usize;
+    if written == 0 || written > buffer.len() {
+        return Vec::new();
+    }
+
+    buffer[..written]
+        .split(|unit| *unit == 0)
+        .filter(|slice| !slice.is_empty())
+        .filter_map(|slice| {
+            let mut root = slice.to_vec();
+            root.push(0);
+            (unsafe { GetDriveTypeW(PCWSTR(root.as_ptr())) } == DRIVE_FIXED)
+                .then(|| PathBuf::from(String::from_utf16_lossy(slice)))
+        })
+        .collect()
 }
 
 fn should_skip_dir(name: &str) -> bool {
@@ -779,7 +815,17 @@ mod tests {
 
     #[test]
     fn generated_directories_are_excluded() {
-        for name in ["build", "dist", "out", ".venv", "__pycache__"] {
+        for name in [
+            "build",
+            "dist",
+            "out",
+            ".venv",
+            "__pycache__",
+            "Windows",
+            "Program Files",
+            "ProgramData",
+            "Users",
+        ] {
             assert!(should_skip_dir(name), "should skip {name}");
         }
         assert!(!should_skip_dir("Projects"));

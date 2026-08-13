@@ -24,6 +24,8 @@ export interface PaletteItem {
   toastDetail?: string;
   /** Stable app id when this result can be pinned. */
   appId?: string;
+  /** Stable Quick Access key when this row can be reordered. */
+  quickAccessKind?: QuickAccessKind;
 }
 
 export interface HistoryEntry {
@@ -109,6 +111,23 @@ export function reorderPinnedApps(
   return reordered;
 }
 
+export function reorderQuickAccess(
+  quickAccess: readonly QuickAccessKind[],
+  sourceKind: QuickAccessKind,
+  targetKind: QuickAccessKind,
+): QuickAccessKind[] {
+  const sourceIndex = quickAccess.indexOf(sourceKind);
+  const targetIndex = quickAccess.indexOf(targetKind);
+  if (sourceIndex < 0 || targetIndex < 0 || sourceIndex === targetIndex) {
+    return [...quickAccess];
+  }
+
+  const reordered = [...quickAccess];
+  const [movedKind] = reordered.splice(sourceIndex, 1);
+  reordered.splice(targetIndex, 0, movedKind);
+  return reordered;
+}
+
 export interface QuickAccessEntry {
   name: string;
   path: string;
@@ -146,6 +165,7 @@ export interface Settings {
   taskbarAlignment: TaskbarAlignment;
   theme: ThemeMode;
   quickAccess: QuickAccessKind[];
+  quickAccessCollapsed: boolean;
   pinnedApps: string[];
 }
 
@@ -159,6 +179,7 @@ export const DEFAULT_SETTINGS: Settings = {
   taskbarAlignment: "center",
   theme: "system",
   quickAccess: [...DEFAULT_QUICK_ACCESS],
+  quickAccessCollapsed: false,
   pinnedApps: [],
 };
 

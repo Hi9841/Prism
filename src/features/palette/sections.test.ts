@@ -48,6 +48,7 @@ function sources(overrides: Partial<PaletteSources> = {}): PaletteSources {
     apps: [],
     pinnedApps: [],
     quickItems: [],
+    quickAccessCollapsed: false,
     pinnedAppIds: [],
     history: [],
     existingHistoryPaths: new Set(),
@@ -142,15 +143,21 @@ describe("buildSections - idle layout (empty query)", () => {
       }),
     );
 
-    // Pinned history entry is deduped out of Recent; dead path is dropped;
-    // the live Downloads entry stays and pushes the same-named quick item out.
+    // Pinned history entry is deduped out of Recent and dead paths are dropped.
+    // Quick Access remains stable so its complete ordered list can be managed.
     expect(ids(result.sections)).toEqual(["pinned", "recent", "quick"]);
     expect(result.sections[1].items.map((i) => i.title)).toEqual(["Downloads"]);
-    expect(result.sections[2].items.map((i) => i.title)).toEqual(["Documents", "Music"]);
+    expect(result.sections[2].items.map((i) => i.title)).toEqual(["Downloads", "Documents", "Music"]);
   });
 
   it("omits empty sections", () => {
     expect(buildSections(sources()).sections).toEqual([]);
+  });
+
+  it("keeps Quick Access available as a collapsed section without selectable rows", () => {
+    const result = buildSections(sources({ quickItems: quickItems(), quickAccessCollapsed: true }));
+    expect(result.sections).toMatchObject([{ id: "quick", collapsible: true, collapsed: true, items: [] }]);
+    expect(result.flatItems).toEqual([]);
   });
 
   it("concatenates flatItems in section order", () => {
@@ -165,6 +172,7 @@ describe("buildSections - idle layout (empty query)", () => {
     );
     expect(result.flatItems.map((i) => i.title)).toEqual([
       "Zebra",
+      "Downloads",
       "Downloads",
       "Documents",
       "Music",
