@@ -179,7 +179,7 @@ export function UpdateControl() {
       aria-busy={busy}
       disabled={busy}
       onClick={installUpdate}
-      className={`focus-ring inline-flex h-8 w-28 min-w-0 items-center justify-center gap-1.5 rounded-[7px] px-2.5 text-[11px] font-semibold transition-colors duration-150 ${
+      className={`focus-ring press inline-flex h-8 w-28 min-w-0 items-center justify-center gap-1.5 rounded-[7px] px-2.5 text-[11px] font-semibold ${
         viewState.phase === "failed"
           ? "bg-danger-soft text-danger hover:opacity-90"
           : busy
@@ -187,14 +187,28 @@ export function UpdateControl() {
             : "cursor-pointer bg-accent-soft text-accent hover:bg-surface-active hover:text-fg"
       }`}
     >
-      {viewState.phase === "failed" ? (
-        <AlertCircle className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
-      ) : busy ? (
-        <LoaderCircle className="h-3.5 w-3.5 shrink-0 animate-spin" aria-hidden="true" />
-      ) : (
-        <ArrowDownToLine className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
-      )}
-      <span className="truncate" aria-live="polite">
+      <span className="relative grid h-3.5 w-3.5 shrink-0 place-items-center" aria-hidden="true">
+        <LoaderCircle
+          className={`icon-swap absolute inset-0 h-3.5 w-3.5 ${
+            busy ? "scale-100 opacity-100 blur-[0px]" : "scale-[0.25] opacity-0 blur-[4px]"
+          } ${busy ? "animate-spin" : ""}`}
+        />
+        <AlertCircle
+          className={`icon-swap absolute inset-0 h-3.5 w-3.5 ${
+            viewState.phase === "failed"
+              ? "scale-100 opacity-100 blur-[0px]"
+              : "scale-[0.25] opacity-0 blur-[4px]"
+          }`}
+        />
+        <ArrowDownToLine
+          className={`icon-swap h-3.5 w-3.5 ${
+            !busy && viewState.phase !== "failed"
+              ? "scale-100 opacity-100 blur-[0px]"
+              : "scale-[0.25] opacity-0 blur-[4px]"
+          }`}
+        />
+      </span>
+      <span className="truncate tabular-nums" aria-live="polite">
         {label}
       </span>
     </button>

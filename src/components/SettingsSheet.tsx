@@ -81,7 +81,7 @@ function KeybindPicker() {
               aria-pressed={active}
               disabled={busy}
               onClick={() => applyShortcut(o.value)}
-              className={`focus-ring cursor-pointer rounded-[9px] px-2 py-[4px] text-[11px] font-medium transition-colors duration-150 ${
+              className={`focus-ring press cursor-pointer rounded-[9px] px-2 py-[4px] text-[11px] font-medium ${
                 active
                   ? "bg-accent-soft text-fg"
                   : "bg-surface text-fg-tertiary hover:bg-surface-hover hover:text-fg-secondary"
@@ -161,7 +161,7 @@ function ViewZoomControl() {
         title="Zoom out"
         disabled={atMinimum}
         onClick={() => adjust(-1)}
-        className="focus-ring grid h-7 w-7 cursor-pointer place-items-center rounded-[7px] text-fg-tertiary transition-colors hover:bg-surface-hover hover:text-fg disabled:cursor-default disabled:opacity-35"
+        className="focus-ring press grid h-7 w-7 cursor-pointer place-items-center rounded-[7px] text-fg-tertiary hover:bg-surface-hover hover:text-fg disabled:cursor-default disabled:opacity-35"
       >
         <Minus className="h-3.5 w-3.5" />
       </button>
@@ -174,7 +174,7 @@ function ViewZoomControl() {
         title="Zoom in"
         disabled={atMaximum}
         onClick={() => adjust(1)}
-        className="focus-ring grid h-7 w-7 cursor-pointer place-items-center rounded-[7px] text-fg-tertiary transition-colors hover:bg-surface-hover hover:text-fg disabled:cursor-default disabled:opacity-35"
+        className="focus-ring press grid h-7 w-7 cursor-pointer place-items-center rounded-[7px] text-fg-tertiary hover:bg-surface-hover hover:text-fg disabled:cursor-default disabled:opacity-35"
       >
         <Plus className="h-3.5 w-3.5" />
       </button>
@@ -184,7 +184,7 @@ function ViewZoomControl() {
         title="Reset zoom"
         disabled={settings.viewZoom === DEFAULT_SETTINGS.viewZoom}
         onClick={() => updateSettings({ viewZoom: DEFAULT_SETTINGS.viewZoom })}
-        className="focus-ring grid h-7 w-7 cursor-pointer place-items-center rounded-[7px] text-fg-tertiary transition-colors hover:bg-surface-hover hover:text-fg disabled:cursor-default disabled:opacity-35"
+        className="focus-ring press grid h-7 w-7 cursor-pointer place-items-center rounded-[7px] text-fg-tertiary hover:bg-surface-hover hover:text-fg disabled:cursor-default disabled:opacity-35"
       >
         <RotateCcw className="h-3.5 w-3.5" />
       </button>
@@ -232,7 +232,7 @@ function QuickAccessPicker() {
             aria-pressed={active}
             disabled={disabled}
             onClick={() => toggle(kind)}
-            className={`focus-ring flex h-8 min-w-0 cursor-pointer items-center gap-1.5 rounded-[8px] px-2 text-[11px] font-medium transition-colors duration-150 disabled:cursor-default disabled:opacity-35 ${
+            className={`focus-ring press flex h-8 min-w-0 cursor-pointer items-center gap-1.5 rounded-[8px] px-2 text-[11px] font-medium disabled:cursor-default disabled:opacity-35 ${
               active
                 ? "bg-accent-soft text-fg"
                 : "bg-surface text-fg-tertiary hover:bg-surface-hover hover:text-fg-secondary"
@@ -268,7 +268,7 @@ export function SettingsSheet() {
     closeTimerRef.current = setTimeout(() => {
       closeTimerRef.current = null;
       setOpenSettings(false);
-    }, 190);
+    }, 150);
   }, [closing, setOpenSettings]);
 
   // A fresh open resets the exit state and cancels any pending close.
@@ -339,7 +339,7 @@ export function SettingsSheet() {
       <button
         type="button"
         aria-label="Close settings"
-        className="absolute inset-0 cursor-default rounded-[26px_26px_8px_8px] bg-backdrop backdrop-blur-[2px]"
+        className="absolute inset-0 cursor-default rounded-[24px_24px_8px_8px] bg-backdrop backdrop-blur-[2px]"
         onClick={() => requestClose()}
       />
       <div
@@ -348,18 +348,18 @@ export function SettingsSheet() {
         aria-modal="true"
         aria-labelledby={titleId}
         onKeyDown={onPanelKeyDown}
-        className={`settings-panel ${closing ? "settings-panel-exit" : ""} relative ml-auto flex w-[min(340px,88%)] flex-col overflow-hidden rounded-tr-[26px] rounded-br-[8px] border-l border-line bg-bg-raised backdrop-blur-2xl`}
+        className={`settings-panel ${closing ? "settings-panel-exit" : ""} relative ml-auto flex w-[min(340px,88%)] flex-col overflow-hidden rounded-tr-[24px] rounded-br-[8px] border-l border-line bg-bg-raised backdrop-blur-2xl`}
         style={{ boxShadow: "-24px 0 64px rgb(0 0 0 / 0.35)" }}
       >
         <div className="flex items-center justify-between px-5 pb-2 pt-5">
-          <h2 id={titleId} className="text-[15px] font-semibold text-fg">
+          <h2 id={titleId} className="text-balance text-[15px] font-semibold text-fg">
             Settings
           </h2>
           <button
             type="button"
             aria-label="Close settings"
             onClick={() => requestClose()}
-            className="focus-ring grid h-7 w-7 cursor-pointer place-items-center rounded-lg text-fg-tertiary transition-colors hover:bg-surface-hover hover:text-fg-secondary"
+            className="focus-ring press grid h-7 w-7 cursor-pointer place-items-center rounded-[6px] text-fg-tertiary hover:bg-surface-hover hover:text-fg-secondary"
           >
             <X className="h-4 w-4" />
           </button>
@@ -386,7 +386,7 @@ export function SettingsSheet() {
                     aria-label={`Accent ${a.name}`}
                     aria-pressed={active}
                     onClick={() => updateSettings({ accent: a.id })}
-                    className={`focus-ring h-6 w-6 cursor-pointer rounded-full transition-transform duration-150 ${
+                    className={`focus-ring relative h-6 w-6 cursor-pointer rounded-full transition-transform duration-150 after:absolute after:-inset-1 after:rounded-full after:content-[''] ${
                       active ? "scale-110" : "hover:scale-105"
                     }`}
                     style={{
@@ -452,7 +452,7 @@ export function SettingsSheet() {
             <button
               type="button"
               onClick={() => clearHistory()}
-              className="focus-ring flex cursor-pointer items-center gap-1.5 rounded-[10px] bg-surface px-3 py-1.5 text-[12px] font-medium text-fg-secondary transition-colors hover:bg-surface-hover hover:text-fg"
+              className="focus-ring press flex cursor-pointer items-center gap-1.5 rounded-[10px] bg-surface px-3 py-1.5 text-[12px] font-medium text-fg-secondary hover:bg-surface-hover hover:text-fg"
             >
               <History className="h-3.5 w-3.5" />
               Clear
@@ -470,7 +470,7 @@ export function SettingsSheet() {
             <button
               type="button"
               onClick={() => quitApp()}
-              className="focus-ring flex cursor-pointer items-center gap-1.5 rounded-[10px] bg-danger-soft px-3 py-1.5 text-[12px] font-medium text-danger transition-colors hover:opacity-90"
+              className="focus-ring press flex cursor-pointer items-center gap-1.5 rounded-[10px] bg-danger-soft px-3 py-1.5 text-[12px] font-medium text-danger hover:opacity-90"
             >
               <LogOut className="h-3.5 w-3.5" />
               Quit

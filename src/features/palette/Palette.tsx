@@ -38,6 +38,9 @@ export function Palette() {
   const pinDragFrameRef = useRef<number | null>(null);
   const [pinDrag, setPinDrag] = useState<PinDragState | null>(null);
   const [resultMenu, setResultMenu] = useState<ResultMenuState | null>(null);
+  const [previewLeaving, setPreviewLeaving] = useState(false);
+  const previewLeaveTimerRef = useRef<number | null>(null);
+  const leavingDragRef = useRef<PinDragState | null>(null);
 
   const closeResultMenu = useCallback((restoreFocus: boolean) => {
     setResultMenu(null);
@@ -149,6 +152,19 @@ export function Palette() {
     [applyPinDrag],
   );
 
+  const animatePreviewOut = useCallback(() => {
+    const current = pinDragRef.current;
+    if (!current?.active) return;
+    leavingDragRef.current = current;
+    setPreviewLeaving(true);
+    if (previewLeaveTimerRef.current !== null) window.clearTimeout(previewLeaveTimerRef.current);
+    previewLeaveTimerRef.current = window.setTimeout(() => {
+      previewLeaveTimerRef.current = null;
+      leavingDragRef.current = null;
+      setPreviewLeaving(false);
+    }, 110);
+  }, []);
+
   const finishPinDrag = useCallback(
     (pointerId: number) => {
       if (pinDragFrameRef.current !== null) {
@@ -163,9 +179,10 @@ export function Palette() {
       if (current.active && current.item.appId && current.targetAppId) {
         reorderPin(current.item.appId, current.targetAppId);
       }
+      if (current.active) animatePreviewOut();
       updatePinDragState(null);
     },
-    [applyPinDrag, reorderPin, updatePinDragState],
+    [applyPinDrag, animatePreviewOut, reorderPin, updatePinDragState],
   );
 
   const cancelPinDrag = useCallback(
@@ -175,9 +192,12 @@ export function Palette() {
         cancelAnimationFrame(pinDragFrameRef.current);
         pinDragFrameRef.current = null;
       }
-      if (pinDragRef.current?.pointerId === pointerId) updatePinDragState(null);
+      if (pinDragRef.current?.pointerId === pointerId) {
+        if (pinDragRef.current.active) animatePreviewOut();
+        updatePinDragState(null);
+      }
     },
-    [updatePinDragState],
+    [animatePreviewOut, updatePinDragState],
   );
 
   useEffect(() => {
@@ -192,6 +212,7 @@ export function Palette() {
   useEffect(
     () => () => {
       if (pinDragFrameRef.current !== null) cancelAnimationFrame(pinDragFrameRef.current);
+      if (previewLeaveTimerRef.current !== null) window.clearTimeout(previewLeaveTimerRef.current);
     },
     [],
   );
@@ -369,7 +390,11 @@ export function Palette() {
         />
       ) : null}
 
-      {pinDrag?.active ? <PinDragPreview drag={pinDrag} /> : null}
+      {pinDrag?.active ? (
+        <PinDragPreview drag={pinDrag} />
+      ) : previewLeaving && leavingDragRef.current ? (
+        <PinDragPreview drag={leavingDragRef.current} leaving />
+      ) : null}
 
       {/* ------- footer ------- */}
       <div className="footer-bar flex min-h-12 items-center justify-between px-5 py-2.5">
@@ -415,7 +440,7 @@ export function Palette() {
   );
 }
 
-function PinDragPreview({ drag }: { drag: PinDragState }) {
+function PinDragPreview({ drag, leaving }: { drag: PinDragState; leaving?: boolean }) {
   const previewWidth = 232;
   const previewHeight = 54;
   const x = Math.min(Math.max(8, drag.x - previewWidth - 14), window.innerWidth - previewWidth - 8);
@@ -427,7 +452,7 @@ function PinDragPreview({ drag }: { drag: PinDragState }) {
       className="pointer-events-none fixed top-0 left-0 z-50 will-change-transform"
       style={{ transform: `translate3d(${x}px, ${y}px, 0)` }}
     >
-      <div className="pin-drag-preview">
+      <div className={`pin-drag-preview${leaving ? " pin-drag-preview-exit" : ""}`}>
         <RowIcon icon={drag.item.icon} />
         <div className="min-w-0">
           <div className="truncate text-[13.5px] leading-tight font-semibold text-fg">{drag.item.title}</div>
@@ -461,7 +486,7 @@ function EmptyState({
       </div>
       {error ? (
         <>
-          <div className="text-[13.5px] font-medium text-fg-secondary">
+          <div className="text-balance text-[13.5px] font-medium text-fg-secondary">
             {query ? "File search is unavailable" : "Apps couldn't be loaded"}
           </div>
           <div className="max-w-[260px] text-[12px] leading-relaxed text-fg-tertiary">
@@ -473,7 +498,7 @@ function EmptyState({
             <button
               type="button"
               onClick={onRetry}
-              className="focus-ring mt-1 flex cursor-pointer items-center gap-1.5 rounded-[10px] bg-surface px-3 py-1.5 text-[12px] font-medium text-fg-secondary transition-colors hover:bg-surface-hover hover:text-fg"
+              className="focus-ring press mt-1 flex cursor-pointer items-center gap-1.5 rounded-[10px] bg-surface px-3 py-1.5 text-[12px] font-medium text-fg-secondary hover:bg-surface-hover hover:text-fg"
             >
               <RefreshCw className="h-3.5 w-3.5" />
               Retry
@@ -482,7 +507,7 @@ function EmptyState({
         </>
       ) : (
         <>
-          <div className="text-[13.5px] font-medium text-fg-secondary">
+          <div className="text-balance text-[13.5px] font-medium text-fg-secondary">
             {loading
               ? query
                 ? "Searching local files…"
@@ -565,7 +590,7 @@ const ResultRow = memo(function ResultRow({
         tabIndex={-1}
         aria-label={`Open ${item.title}`}
         onClick={() => onRun(item)}
-        className="focus-ring absolute inset-0 z-0 cursor-pointer rounded-[10px]"
+        className="focus-ring absolute inset-0 z-0 cursor-pointer rounded-[14px]"
       />
       <div className="pointer-events-none relative z-[1]">
         <RowIcon icon={item.icon} />
@@ -616,11 +641,11 @@ const ResultRow = memo(function ResultRow({
               event.stopPropagation();
               onMovePin(appId, event.key === "ArrowUp" ? -1 : 1);
             }}
-            className={`focus-ring grid h-7 w-7 touch-none place-items-center rounded-[7px] text-fg-quiet transition-[color,background-color] duration-100 hover:bg-surface-hover hover:text-fg ${
+            className={`focus-ring grid h-8 w-8 touch-none place-items-center rounded-[8px] text-fg-quiet transition-[color,background-color] duration-100 hover:bg-surface-hover hover:text-fg ${
               draggedPin === appId ? "cursor-grabbing bg-accent-soft text-accent" : "cursor-grab"
             }`}
           >
-            <GripVertical className="h-3.5 w-3.5" />
+            <GripVertical className="h-4 w-4" />
           </button>
         ) : null}
         {item.appId ? (
@@ -631,11 +656,22 @@ const ResultRow = memo(function ResultRow({
             title={`${pinned ? "Unpin" : "Pin"} ${item.title}`}
             tabIndex={selected ? 0 : -1}
             onClick={() => onTogglePin(item)}
-            className={`focus-ring grid h-7 w-7 cursor-pointer place-items-center rounded-[7px] opacity-0 transition-[opacity,color,background-color] duration-100 group-hover:opacity-100 focus:opacity-100 ${
+            className={`focus-ring press grid h-8 w-8 cursor-pointer place-items-center rounded-[8px] opacity-0 group-hover:opacity-100 focus:opacity-100 ${
               pinned ? "bg-accent-soft text-accent" : "text-fg-tertiary hover:bg-surface-hover hover:text-fg"
             }`}
           >
-            {pinned ? <PinOff className="h-3.5 w-3.5" /> : <Pin className="h-3.5 w-3.5" />}
+            <span className="relative grid h-4 w-4 place-items-center" aria-hidden="true">
+              <PinOff
+                className={`icon-swap absolute inset-0 h-4 w-4 ${
+                  pinned ? "scale-100 opacity-100 blur-[0px]" : "scale-[0.25] opacity-0 blur-[4px]"
+                }`}
+              />
+              <Pin
+                className={`icon-swap h-4 w-4 ${
+                  pinned ? "scale-[0.25] opacity-0 blur-[4px]" : "scale-100 opacity-100 blur-[0px]"
+                }`}
+              />
+            </span>
           </button>
         ) : selected && item.id.startsWith("calc::") ? (
           <span className="text-[12px] font-semibold text-accent tabular-nums">Enter to copy</span>

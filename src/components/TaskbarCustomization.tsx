@@ -172,7 +172,7 @@ function StartIconControl({
               aria-label={`${option.label} Start button icon`}
               aria-pressed={settings.startIcon === option.value}
               onClick={() => void apply(() => setTaskbarStartIcon(option.value))}
-              className={`focus-ring grid h-12 min-w-[46px] cursor-pointer place-items-center gap-0.5 rounded-[8px] border px-2 py-1 text-[10px] font-medium transition-colors ${
+              className={`focus-ring press grid h-12 min-w-[46px] cursor-pointer place-items-center gap-0.5 rounded-[8px] border px-2 py-1 text-[10px] font-medium ${
                 settings.startIcon === option.value
                   ? "border-accent/70 bg-accent/12 text-fg"
                   : "border-transparent bg-surface text-fg-tertiary hover:bg-surface-hover hover:text-fg"
@@ -189,7 +189,7 @@ function StartIconControl({
             title="Add custom PNG"
             aria-label="Add custom Start button PNG"
             onClick={() => inputRef.current?.click()}
-            className="focus-ring grid h-12 min-w-[46px] cursor-pointer place-items-center gap-0.5 rounded-[8px] border border-transparent bg-surface px-2 py-1 text-[10px] font-medium text-fg-tertiary transition-colors hover:bg-surface-hover hover:text-fg"
+            className="focus-ring press grid h-12 min-w-[46px] cursor-pointer place-items-center gap-0.5 rounded-[8px] border border-transparent bg-surface px-2 py-1 text-[10px] font-medium text-fg-tertiary hover:bg-surface-hover hover:text-fg"
           >
             <span className="grid h-6 w-6 place-items-center" aria-hidden="true">
               <ImageUp className="h-4 w-4" />
@@ -206,7 +206,7 @@ function StartIconControl({
                   aria-label={`Use custom Start button icon ${index + 1}`}
                   aria-pressed={selected}
                   onClick={() => void apply(() => selectCustomStartIcon(custom.id))}
-                  className={`focus-ring grid h-12 min-w-[46px] cursor-pointer place-items-center gap-0.5 rounded-[8px] border px-2 py-1 text-[10px] font-medium transition-colors ${
+                  className={`focus-ring press grid h-12 min-w-[46px] cursor-pointer place-items-center gap-0.5 rounded-[8px] border px-2 py-1 text-[10px] font-medium ${
                     selected
                       ? "border-accent/70 bg-accent/12 text-fg"
                       : "border-transparent bg-surface text-fg-tertiary hover:bg-surface-hover hover:text-fg"
@@ -222,9 +222,9 @@ function StartIconControl({
                   title={`Remove custom icon ${index + 1}`}
                   aria-label={`Remove custom Start button icon ${index + 1}`}
                   onClick={() => void apply(() => removeCustomStartIcon(custom.id))}
-                  className="focus-ring absolute -right-1 -top-1 grid h-4 w-4 cursor-pointer place-items-center rounded-full border border-border bg-elevated text-fg-tertiary shadow-sm hover:text-danger"
+                  className="focus-ring press absolute -right-1 -top-1 grid h-5 w-5 cursor-pointer place-items-center rounded-full border border-line bg-bg-raised text-fg-tertiary shadow-sm hover:text-danger"
                 >
-                  <X className="h-2.5 w-2.5" aria-hidden="true" />
+                  <X className="h-3 w-3" aria-hidden="true" />
                 </button>
               </div>
             );
