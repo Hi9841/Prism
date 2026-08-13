@@ -246,7 +246,7 @@ export function IconButton({
       data-settings-trigger={settingsTrigger || undefined}
       onClick={onClick}
       disabled={disabled}
-      className={`focus-ring grid h-8 w-8 cursor-pointer place-items-center rounded-[10px] transition-colors duration-150 ${
+      className={`focus-ring press grid h-8 w-8 cursor-pointer place-items-center rounded-[10px] ${
         disabled
           ? "cursor-default opacity-40"
           : active

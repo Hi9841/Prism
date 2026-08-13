@@ -14,9 +14,12 @@ const ACTIONS: { action: PowerAction; label: string; icon: typeof Power }[] = [
 export function PowerMenu() {
   const { openSettings, showToast } = useApp();
   const [open, setOpen] = useState(false);
+  const [closing, setClosing] = useState(false);
   const [busy, setBusy] = useState<PowerAction | null>(null);
   const rootRef = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLDivElement>(null);
+  const closingRef = useRef(false);
+  const closeTimerRef = useRef<number | null>(null);
   const menuId = useId();
 
   const focusItem = useCallback((index: number) => {
@@ -27,18 +30,44 @@ export function PowerMenu() {
 
   const openMenu = useCallback(
     (focusIndex = 0) => {
+      if (closingRef.current) return;
       setOpen(true);
       requestAnimationFrame(() => focusItem(focusIndex));
     },
     [focusItem],
   );
 
+  // Deliberate closes animate out first; closes triggered by the palette
+  // hiding (prism:close, transient dismiss) snap since the window is gone.
+  const closeMenu = useCallback((animate: boolean) => {
+    if (closingRef.current) return;
+    if (!animate) {
+      setOpen(false);
+      return;
+    }
+    closingRef.current = true;
+    setClosing(true);
+    closeTimerRef.current = window.setTimeout(() => {
+      closeTimerRef.current = null;
+      closingRef.current = false;
+      setClosing(false);
+      setOpen(false);
+    }, 110);
+  }, []);
+
+  useEffect(
+    () => () => {
+      if (closeTimerRef.current !== null) window.clearTimeout(closeTimerRef.current);
+    },
+    [],
+  );
+
   useEffect(() => {
     if (!open) return;
     const closeOnOutsidePress = (event: PointerEvent) => {
-      if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
+      if (!rootRef.current?.contains(event.target as Node)) closeMenu(true);
     };
-    const closeWithPalette = () => setOpen(false);
+    const closeWithPalette = () => closeMenu(false);
     const offTransientDismiss = onTransientUiDismiss(closeWithPalette);
     document.addEventListener("pointerdown", closeOnOutsidePress);
     document.addEventListener("prism:close", closeWithPalette);
@@ -47,11 +76,11 @@ export function PowerMenu() {
       document.removeEventListener("pointerdown", closeOnOutsidePress);
       document.removeEventListener("prism:close", closeWithPalette);
     };
-  }, [open]);
+  }, [open, closeMenu]);
 
   useEffect(() => {
-    if (openSettings) setOpen(false);
-  }, [openSettings]);
+    if (openSettings) closeMenu(false);
+  }, [openSettings, closeMenu]);
 
   const runAction = async (action: PowerAction) => {
     if (busy) return;
@@ -77,7 +106,7 @@ export function PowerMenu() {
     else if (event.key === "End") next = items.length - 1;
     else if (event.key === "Escape") {
       event.preventDefault();
-      setOpen(false);
+      closeMenu(true);
       triggerRef.current?.querySelector<HTMLButtonElement>("button")?.focus();
       return;
     } else {
@@ -95,7 +124,7 @@ export function PowerMenu() {
           role="menu"
           aria-label="Power options"
           onKeyDown={onMenuKeyDown}
-          className="power-menu absolute right-0 bottom-10 z-30 w-40 overflow-hidden rounded-[8px] border border-line bg-bg-raised p-1 shadow-pop backdrop-blur-xl"
+          className={`power-menu${closing ? " power-menu-exit" : ""} absolute right-0 bottom-10 z-30 w-40 overflow-hidden rounded-[8px] border border-line bg-bg-raised p-1 shadow-pop backdrop-blur-xl`}
         >
           {ACTIONS.map(({ action, label, icon: ActionIcon }) => (
             <button
@@ -104,7 +133,7 @@ export function PowerMenu() {
               role="menuitem"
               disabled={busy !== null}
               onClick={() => void runAction(action)}
-              className="focus-ring flex h-9 w-full cursor-pointer items-center gap-2 rounded-[6px] px-2.5 text-left text-[12.5px] font-medium text-fg-secondary transition-colors duration-100 hover:bg-surface-hover hover:text-fg disabled:cursor-default disabled:opacity-50"
+              className="focus-ring press flex h-9 w-full cursor-pointer items-center gap-2 rounded-[4px] px-2.5 text-left text-[12.5px] font-medium text-fg-secondary hover:bg-surface-hover hover:text-fg disabled:cursor-default disabled:opacity-50"
             >
               <ActionIcon
                 className={`h-4 w-4 ${action === "shutdown" ? "text-danger" : "text-fg-tertiary"}`}
@@ -121,7 +150,7 @@ export function PowerMenu() {
           aria-haspopup="menu"
           aria-expanded={open}
           aria-controls={open ? menuId : undefined}
-          onClick={() => (open ? setOpen(false) : openMenu())}
+          onClick={() => (open ? closeMenu(true) : openMenu())}
         >
           <Power className="h-3.5 w-3.5" />
         </IconButton>

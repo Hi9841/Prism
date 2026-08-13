@@ -1,5 +1,5 @@
 import { ShieldCheck } from "lucide-react";
-import { useEffect, useRef } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { onTransientUiDismiss } from "../../lib/transientUi";
 import type { PaletteItem } from "../../lib/types";
 
@@ -31,6 +31,35 @@ export function ResultContextMenu({
   onClose: (restoreFocus: boolean) => void;
 }) {
   const itemRef = useRef<HTMLButtonElement>(null);
+  const [closing, setClosing] = useState(false);
+  const closingRef = useRef(false);
+  const closeTimerRef = useRef<number | null>(null);
+
+  // Deliberate closes animate out first; closes triggered by the palette
+  // hiding (prism:close, transient dismiss) snap since the window is gone.
+  const close = useCallback(
+    (restoreFocus: boolean, animate = true) => {
+      if (closingRef.current) return;
+      if (!animate) {
+        onClose(restoreFocus);
+        return;
+      }
+      closingRef.current = true;
+      setClosing(true);
+      closeTimerRef.current = window.setTimeout(() => {
+        closeTimerRef.current = null;
+        onClose(restoreFocus);
+      }, 110);
+    },
+    [onClose],
+  );
+
+  useEffect(
+    () => () => {
+      if (closeTimerRef.current !== null) window.clearTimeout(closeTimerRef.current);
+    },
+    [],
+  );
 
   useEffect(() => {
     itemRef.current?.focus();
@@ -53,10 +82,10 @@ export function ResultContextMenu({
         tabIndex={-1}
         aria-label="Close result menu"
         className="fixed inset-0 z-40 cursor-default bg-transparent"
-        onClick={() => onClose(true)}
+        onClick={() => close(true)}
         onContextMenu={(event) => {
           event.preventDefault();
-          onClose(true);
+          close(true);
         }}
       />
       <div
@@ -68,10 +97,10 @@ export function ResultContextMenu({
             itemRef.current?.focus();
           } else if (event.key === "Escape" || event.key === "Tab") {
             event.preventDefault();
-            onClose(true);
+            close(true);
           }
         }}
-        className="context-menu-enter fixed z-50 w-[196px] overflow-hidden rounded-[8px] border border-line bg-bg-raised p-1 shadow-pop backdrop-blur-xl"
+        className={`context-menu-enter${closing ? " context-menu-exit" : ""} fixed z-50 w-[196px] overflow-hidden rounded-[8px] border border-line bg-bg-raised p-1 shadow-pop backdrop-blur-xl`}
         style={{ left: position.x, top: position.y }}
       >
         <button
@@ -79,7 +108,7 @@ export function ResultContextMenu({
           type="button"
           role="menuitem"
           onClick={onRunAsAdmin}
-          className="focus-ring flex h-9 w-full cursor-pointer items-center gap-2 rounded-[6px] px-2.5 text-left text-[12.5px] font-medium text-fg-secondary transition-colors duration-100 hover:bg-surface-hover hover:text-fg"
+          className="focus-ring press flex h-9 w-full cursor-pointer items-center gap-2 rounded-[4px] px-2.5 text-left text-[12.5px] font-medium text-fg-secondary hover:bg-surface-hover hover:text-fg"
         >
           <ShieldCheck className="h-4 w-4 text-accent" aria-hidden="true" />
           <span>Run as administrator</span>
