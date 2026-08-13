@@ -556,7 +556,7 @@ const ResultRow = memo(function ResultRow({
         event.preventDefault();
         if (item.runAsAdmin) onOpenContextMenu(item, index, event.clientX, event.clientY);
       }}
-      className={`group row w-full text-left transition-[background-color,box-shadow] duration-100 ${
+      className={`group row w-full text-left transition-colors duration-50 ${
         selected ? "bg-surface-active" : "hover:bg-surface-hover"
       }`}
     >
