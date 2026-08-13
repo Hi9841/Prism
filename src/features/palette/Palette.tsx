@@ -1,16 +1,16 @@
-import { GripVertical, Pin, PinOff, RefreshCw, Search, Settings2 } from "lucide-react";
+import { ChevronDown, GripVertical, Pin, PinOff, RefreshCw, Search, Settings2 } from "lucide-react";
 import { memo, useCallback, useEffect, useRef, useState } from "react";
 import { PowerMenu } from "../../components/PowerMenu";
 import { displayShortcut } from "../../components/SettingsSheet";
 import { IconButton, Kbd, RowIcon, SectionLabel } from "../../components/ui";
-import type { PaletteItem } from "../../lib/types";
-import { PINNED_APP_LIMIT, reorderPinnedApps } from "../../lib/types";
+import type { PaletteItem, QuickAccessKind } from "../../lib/types";
+import { PINNED_APP_LIMIT, reorderPinnedApps, reorderQuickAccess } from "../../lib/types";
 import { useApp } from "../../state/app";
 import { usePalette } from "../../state/palette";
 import { UpdateControl } from "../updater/UpdateControl";
 import { type ContextMenuPosition, clampContextMenuPosition, ResultContextMenu } from "./ResultContextMenu";
 
-interface PinDragState {
+interface ReorderDragState {
   item: PaletteItem;
   pointerId: number;
   startX: number;
@@ -18,7 +18,7 @@ interface PinDragState {
   x: number;
   y: number;
   active: boolean;
-  targetAppId: string | null;
+  targetItemId: string | null;
 }
 
 interface ResultMenuState {
@@ -33,14 +33,14 @@ export function Palette() {
 
   const inputRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
-  const pinDragRef = useRef<PinDragState | null>(null);
-  const pendingPinDragRef = useRef<{ pointerId: number; x: number; y: number } | null>(null);
-  const pinDragFrameRef = useRef<number | null>(null);
-  const [pinDrag, setPinDrag] = useState<PinDragState | null>(null);
+  const reorderDragRef = useRef<ReorderDragState | null>(null);
+  const pendingReorderDragRef = useRef<{ pointerId: number; x: number; y: number } | null>(null);
+  const reorderDragFrameRef = useRef<number | null>(null);
+  const [reorderDrag, setReorderDrag] = useState<ReorderDragState | null>(null);
   const [resultMenu, setResultMenu] = useState<ResultMenuState | null>(null);
   const [previewLeaving, setPreviewLeaving] = useState(false);
   const previewLeaveTimerRef = useRef<number | null>(null);
-  const leavingDragRef = useRef<PinDragState | null>(null);
+  const leavingDragRef = useRef<ReorderDragState | null>(null);
 
   const closeResultMenu = useCallback((restoreFocus: boolean) => {
     setResultMenu(null);
@@ -82,33 +82,54 @@ export function Palette() {
     [app, settings.pinnedApps],
   );
 
-  const reorderPin = useCallback(
-    (sourceAppId: string, targetAppId: string) => {
-      const pinnedApps = reorderPinnedApps(settings.pinnedApps, sourceAppId, targetAppId);
-      if (pinnedApps.every((appId, index) => appId === settings.pinnedApps[index])) return;
-      app.updateSettings({ pinnedApps });
+  const reorderItem = useCallback(
+    (source: PaletteItem, targetItemId: string) => {
+      if (source.appId && targetItemId.startsWith("app:")) {
+        const pinnedApps = reorderPinnedApps(settings.pinnedApps, source.appId, targetItemId.slice(4));
+        if (!pinnedApps.every((appId, index) => appId === settings.pinnedApps[index])) {
+          app.updateSettings({ pinnedApps });
+        }
+        return;
+      }
+      if (source.quickAccessKind && targetItemId.startsWith("quick:")) {
+        const quickAccess = reorderQuickAccess(
+          settings.quickAccess,
+          source.quickAccessKind,
+          targetItemId.slice(6) as QuickAccessKind,
+        );
+        if (!quickAccess.every((kind, index) => kind === settings.quickAccess[index])) {
+          app.updateSettings({ quickAccess });
+        }
+      }
     },
-    [app, settings.pinnedApps],
+    [app, settings.pinnedApps, settings.quickAccess],
   );
 
-  const movePin = useCallback(
-    (appId: string, direction: -1 | 1) => {
-      const index = settings.pinnedApps.indexOf(appId);
-      const targetAppId = settings.pinnedApps[index + direction];
-      if (index < 0 || !targetAppId) return;
-      reorderPin(appId, targetAppId);
+  const moveItem = useCallback(
+    (item: PaletteItem, direction: -1 | 1) => {
+      if (item.appId) {
+        const index = settings.pinnedApps.indexOf(item.appId);
+        const targetAppId = settings.pinnedApps[index + direction];
+        if (index >= 0 && targetAppId) reorderItem(item, `app:${targetAppId}`);
+        return;
+      }
+      if (item.quickAccessKind) {
+        const index = settings.quickAccess.indexOf(item.quickAccessKind);
+        const targetKind = settings.quickAccess[index + direction];
+        if (index >= 0 && targetKind) reorderItem(item, `quick:${targetKind}`);
+      }
     },
-    [reorderPin, settings.pinnedApps],
+    [reorderItem, settings.pinnedApps, settings.quickAccess],
   );
 
-  const updatePinDragState = useCallback((next: PinDragState | null) => {
-    pinDragRef.current = next;
-    setPinDrag(next);
+  const updateReorderDragState = useCallback((next: ReorderDragState | null) => {
+    reorderDragRef.current = next;
+    setReorderDrag(next);
   }, []);
 
-  const startPinDrag = useCallback(
+  const startReorderDrag = useCallback(
     (item: PaletteItem, pointerId: number, x: number, y: number) => {
-      updatePinDragState({
+      updateReorderDragState({
         item,
         pointerId,
         startX: x,
@@ -116,44 +137,46 @@ export function Palette() {
         x,
         y,
         active: false,
-        targetAppId: null,
+        targetItemId: null,
       });
     },
-    [updatePinDragState],
+    [updateReorderDragState],
   );
 
-  const applyPinDrag = useCallback(
+  const applyReorderDrag = useCallback(
     (pointerId: number, x: number, y: number) => {
-      const current = pinDragRef.current;
+      const current = reorderDragRef.current;
       if (!current || current.pointerId !== pointerId) return;
 
       const active = current.active || Math.hypot(x - current.startX, y - current.startY) >= 4;
       const hoveredRow = active
-        ? document.elementFromPoint(x, y)?.closest<HTMLElement>("[data-pinned-app-id]")
+        ? document.elementFromPoint(x, y)?.closest<HTMLElement>("[data-reorder-item-id]")
         : null;
-      const hoveredAppId = hoveredRow?.dataset.pinnedAppId ?? null;
-      const targetAppId = hoveredAppId === current.item.appId ? null : hoveredAppId;
-      updatePinDragState({ ...current, x, y, active, targetAppId });
+      const hoveredItemId = hoveredRow?.dataset.reorderItemId ?? null;
+      const sourceItemId = reorderItemId(current.item);
+      const sameGroup = hoveredItemId?.split(":", 1)[0] === sourceItemId?.split(":", 1)[0];
+      const targetItemId = hoveredItemId !== sourceItemId && sameGroup ? hoveredItemId : null;
+      updateReorderDragState({ ...current, x, y, active, targetItemId });
     },
-    [updatePinDragState],
+    [updateReorderDragState],
   );
 
-  const updatePinDrag = useCallback(
+  const updateReorderDrag = useCallback(
     (pointerId: number, x: number, y: number) => {
-      pendingPinDragRef.current = { pointerId, x, y };
-      if (pinDragFrameRef.current !== null) return;
-      pinDragFrameRef.current = requestAnimationFrame(() => {
-        pinDragFrameRef.current = null;
-        const pending = pendingPinDragRef.current;
-        pendingPinDragRef.current = null;
-        if (pending) applyPinDrag(pending.pointerId, pending.x, pending.y);
+      pendingReorderDragRef.current = { pointerId, x, y };
+      if (reorderDragFrameRef.current !== null) return;
+      reorderDragFrameRef.current = requestAnimationFrame(() => {
+        reorderDragFrameRef.current = null;
+        const pending = pendingReorderDragRef.current;
+        pendingReorderDragRef.current = null;
+        if (pending) applyReorderDrag(pending.pointerId, pending.x, pending.y);
       });
     },
-    [applyPinDrag],
+    [applyReorderDrag],
   );
 
   const animatePreviewOut = useCallback(() => {
-    const current = pinDragRef.current;
+    const current = reorderDragRef.current;
     if (!current?.active) return;
     leavingDragRef.current = current;
     setPreviewLeaving(true);
@@ -165,53 +188,54 @@ export function Palette() {
     }, 110);
   }, []);
 
-  const finishPinDrag = useCallback(
+  const finishReorderDrag = useCallback(
     (pointerId: number) => {
-      if (pinDragFrameRef.current !== null) {
-        cancelAnimationFrame(pinDragFrameRef.current);
-        pinDragFrameRef.current = null;
+      if (reorderDragFrameRef.current !== null) {
+        cancelAnimationFrame(reorderDragFrameRef.current);
+        reorderDragFrameRef.current = null;
       }
-      const pending = pendingPinDragRef.current;
-      pendingPinDragRef.current = null;
-      if (pending) applyPinDrag(pending.pointerId, pending.x, pending.y);
-      const current = pinDragRef.current;
-      if (!current || current.pointerId !== pointerId) return;
-      if (current.active && current.item.appId && current.targetAppId) {
-        reorderPin(current.item.appId, current.targetAppId);
+      const pending = pendingReorderDragRef.current;
+      pendingReorderDragRef.current = null;
+      if (pending) applyReorderDrag(pending.pointerId, pending.x, pending.y);
+      const current = reorderDragRef.current;
+      if (!current || current.pointerId !== pointerId) return false;
+      if (current.active && current.targetItemId) {
+        reorderItem(current.item, current.targetItemId);
       }
       if (current.active) animatePreviewOut();
-      updatePinDragState(null);
+      updateReorderDragState(null);
+      return current.active;
     },
-    [applyPinDrag, animatePreviewOut, reorderPin, updatePinDragState],
+    [applyReorderDrag, animatePreviewOut, reorderItem, updateReorderDragState],
   );
 
-  const cancelPinDrag = useCallback(
+  const cancelReorderDrag = useCallback(
     (pointerId: number) => {
-      pendingPinDragRef.current = null;
-      if (pinDragFrameRef.current !== null) {
-        cancelAnimationFrame(pinDragFrameRef.current);
-        pinDragFrameRef.current = null;
+      pendingReorderDragRef.current = null;
+      if (reorderDragFrameRef.current !== null) {
+        cancelAnimationFrame(reorderDragFrameRef.current);
+        reorderDragFrameRef.current = null;
       }
-      if (pinDragRef.current?.pointerId === pointerId) {
-        if (pinDragRef.current.active) animatePreviewOut();
-        updatePinDragState(null);
+      if (reorderDragRef.current?.pointerId === pointerId) {
+        if (reorderDragRef.current.active) animatePreviewOut();
+        updateReorderDragState(null);
       }
     },
-    [animatePreviewOut, updatePinDragState],
+    [animatePreviewOut, updateReorderDragState],
   );
 
   useEffect(() => {
-    if (!pinDrag) return;
+    if (!reorderDrag) return;
     const cancelOnEscape = (event: KeyboardEvent) => {
-      if (event.key === "Escape") updatePinDragState(null);
+      if (event.key === "Escape") updateReorderDragState(null);
     };
     window.addEventListener("keydown", cancelOnEscape);
     return () => window.removeEventListener("keydown", cancelOnEscape);
-  }, [pinDrag, updatePinDragState]);
+  }, [reorderDrag, updateReorderDragState]);
 
   useEffect(
     () => () => {
-      if (pinDragFrameRef.current !== null) cancelAnimationFrame(pinDragFrameRef.current);
+      if (reorderDragFrameRef.current !== null) cancelAnimationFrame(reorderDragFrameRef.current);
       if (previewLeaveTimerRef.current !== null) window.clearTimeout(previewLeaveTimerRef.current);
     },
     [],
@@ -330,7 +354,7 @@ export function Palette() {
         aria-busy={!palette.appsLoaded || palette.filesBusy}
         className="scroll-thin min-h-0 flex-1 overflow-y-auto px-2.5 pb-2"
       >
-        {palette.flatItems.length === 0 ? (
+        {palette.sections.length === 0 ? (
           <EmptyState
             query={palette.query}
             loading={palette.query ? palette.filesBusy : !palette.appsLoaded}
@@ -343,11 +367,34 @@ export function Palette() {
             let flat = 0;
             return palette.sections.map((section) => (
               <div key={section.id}>
-                <SectionLabel>{section.label}</SectionLabel>
-                <ul aria-label={section.label} className="m-0 flex list-none flex-col gap-[2px] p-0">
+                {section.collapsible ? (
+                  <button
+                    type="button"
+                    aria-expanded={!section.collapsed}
+                    aria-controls={`prism-section-${section.id}`}
+                    onClick={() =>
+                      app.updateSettings({ quickAccessCollapsed: !settings.quickAccessCollapsed })
+                    }
+                    className="focus-ring group/section flex w-full cursor-pointer items-center gap-1 rounded-[6px] px-3.5 pb-1.5 pt-4 text-left text-[11px] font-semibold text-fg-quiet uppercase hover:text-fg-secondary"
+                  >
+                    <ChevronDown
+                      className={`h-3.5 w-3.5 transition-transform duration-150 ${
+                        section.collapsed ? "-rotate-90" : "rotate-0"
+                      }`}
+                    />
+                    <span>{section.label}</span>
+                  </button>
+                ) : (
+                  <SectionLabel>{section.label}</SectionLabel>
+                )}
+                <ul
+                  id={`prism-section-${section.id}`}
+                  aria-label={section.label}
+                  className="m-0 flex list-none flex-col gap-[2px] p-0"
+                >
                   {section.items.map((item) => {
                     const index = flat++;
-                    const reorderable = section.id === "pinned";
+                    const reorderable = section.id === "pinned" || section.id === "quick";
                     return (
                       <ResultRow
                         key={item.id}
@@ -356,17 +403,17 @@ export function Palette() {
                         selected={palette.selected === index}
                         pinned={item.appId ? settings.pinnedApps.includes(item.appId) : false}
                         reorderable={reorderable}
-                        draggedPin={pinDrag?.active ? (pinDrag.item.appId ?? null) : null}
-                        dropTargetPin={pinDrag?.active ? pinDrag.targetAppId : null}
+                        draggedItem={reorderDrag?.active ? reorderItemId(reorderDrag.item) : null}
+                        dropTargetItem={reorderDrag?.active ? reorderDrag.targetItemId : null}
                         onSelect={palette.select}
                         onRun={palette.runItem}
                         onOpenContextMenu={openResultMenu}
                         onTogglePin={togglePin}
-                        onMovePin={movePin}
-                        onStartPinDrag={startPinDrag}
-                        onUpdatePinDrag={updatePinDrag}
-                        onFinishPinDrag={finishPinDrag}
-                        onCancelPinDrag={cancelPinDrag}
+                        onMoveItem={moveItem}
+                        onStartReorderDrag={startReorderDrag}
+                        onUpdateReorderDrag={updateReorderDrag}
+                        onFinishReorderDrag={finishReorderDrag}
+                        onCancelReorderDrag={cancelReorderDrag}
                       />
                     );
                   })}
@@ -390,10 +437,10 @@ export function Palette() {
         />
       ) : null}
 
-      {pinDrag?.active ? (
-        <PinDragPreview drag={pinDrag} />
+      {reorderDrag?.active ? (
+        <ReorderDragPreview drag={reorderDrag} />
       ) : previewLeaving && leavingDragRef.current ? (
-        <PinDragPreview drag={leavingDragRef.current} leaving />
+        <ReorderDragPreview drag={leavingDragRef.current} leaving />
       ) : null}
 
       {/* ------- footer ------- */}
@@ -440,7 +487,13 @@ export function Palette() {
   );
 }
 
-function PinDragPreview({ drag, leaving }: { drag: PinDragState; leaving?: boolean }) {
+function reorderItemId(item: PaletteItem): string | null {
+  if (item.appId) return `app:${item.appId}`;
+  if (item.quickAccessKind) return `quick:${item.quickAccessKind}`;
+  return null;
+}
+
+function ReorderDragPreview({ drag, leaving }: { drag: ReorderDragState; leaving?: boolean }) {
   const previewWidth = 232;
   const previewHeight = 54;
   const x = Math.min(Math.max(8, drag.x - previewWidth - 14), window.innerWidth - previewWidth - 8);
@@ -452,7 +505,7 @@ function PinDragPreview({ drag, leaving }: { drag: PinDragState; leaving?: boole
       className="pointer-events-none fixed top-0 left-0 z-50 will-change-transform"
       style={{ transform: `translate3d(${x}px, ${y}px, 0)` }}
     >
-      <div className={`pin-drag-preview${leaving ? " pin-drag-preview-exit" : ""}`}>
+      <div className={`reorder-drag-preview${leaving ? " reorder-drag-preview-exit" : ""}`}>
         <RowIcon icon={drag.item.icon} />
         <div className="min-w-0">
           <div className="truncate text-[13.5px] leading-tight font-semibold text-fg">{drag.item.title}</div>
@@ -537,45 +590,45 @@ const ResultRow = memo(function ResultRow({
   selected,
   pinned,
   reorderable,
-  draggedPin,
-  dropTargetPin,
+  draggedItem,
+  dropTargetItem,
   onSelect,
   onRun,
   onOpenContextMenu,
   onTogglePin,
-  onMovePin,
-  onStartPinDrag,
-  onUpdatePinDrag,
-  onFinishPinDrag,
-  onCancelPinDrag,
+  onMoveItem,
+  onStartReorderDrag,
+  onUpdateReorderDrag,
+  onFinishReorderDrag,
+  onCancelReorderDrag,
 }: {
   item: PaletteItem;
   index: number;
   selected: boolean;
   pinned: boolean;
   reorderable: boolean;
-  draggedPin: string | null;
-  dropTargetPin: string | null;
+  draggedItem: string | null;
+  dropTargetItem: string | null;
   onSelect: (i: number) => void;
   onRun: (item: PaletteItem) => void;
   onOpenContextMenu: (item: PaletteItem, index: number, x: number, y: number) => void;
   onTogglePin: (item: PaletteItem) => void;
-  onMovePin: (appId: string, direction: -1 | 1) => void;
-  onStartPinDrag: (item: PaletteItem, pointerId: number, x: number, y: number) => void;
-  onUpdatePinDrag: (pointerId: number, x: number, y: number) => void;
-  onFinishPinDrag: (pointerId: number) => void;
-  onCancelPinDrag: (pointerId: number) => void;
+  onMoveItem: (item: PaletteItem, direction: -1 | 1) => void;
+  onStartReorderDrag: (item: PaletteItem, pointerId: number, x: number, y: number) => void;
+  onUpdateReorderDrag: (pointerId: number, x: number, y: number) => void;
+  onFinishReorderDrag: (pointerId: number) => boolean;
+  onCancelReorderDrag: (pointerId: number) => void;
 }) {
-  const appId = item.appId;
-  const canReorder = reorderable && Boolean(appId);
+  const itemReorderId = reorderItemId(item);
+  const canReorder = reorderable && Boolean(itemReorderId);
 
   return (
     <li
       id={`prism-opt-${index}`}
       data-selected={selected}
-      data-drop-target={canReorder && dropTargetPin === appId}
-      data-dragging={canReorder && draggedPin === appId}
-      data-pinned-app-id={canReorder ? appId : undefined}
+      data-drop-target={canReorder && dropTargetItem === itemReorderId}
+      data-dragging={canReorder && draggedItem === itemReorderId}
+      data-reorder-item-id={canReorder ? (itemReorderId ?? undefined) : undefined}
       onMouseEnter={() => onSelect(index)}
       onContextMenu={(event) => {
         event.preventDefault();
@@ -593,7 +646,31 @@ const ResultRow = memo(function ResultRow({
         className="focus-ring absolute inset-0 z-0 cursor-pointer rounded-[14px]"
       />
       <div className="pointer-events-none relative z-[1]">
-        <RowIcon icon={item.icon} />
+        <div
+          onPointerDown={(event) => {
+            if (!canReorder || event.button !== 0) return;
+            event.preventDefault();
+            event.currentTarget.setPointerCapture(event.pointerId);
+            onStartReorderDrag(item, event.pointerId, event.clientX, event.clientY);
+          }}
+          onPointerMove={(event) => {
+            if (!event.currentTarget.hasPointerCapture(event.pointerId)) return;
+            onUpdateReorderDrag(event.pointerId, event.clientX, event.clientY);
+          }}
+          onPointerUp={(event) => {
+            if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+              event.currentTarget.releasePointerCapture(event.pointerId);
+            }
+            const dragged = onFinishReorderDrag(event.pointerId);
+            if (!dragged) onRun(item);
+          }}
+          onPointerCancel={(event) => onCancelReorderDrag(event.pointerId)}
+          className={
+            canReorder ? "pointer-events-auto touch-none cursor-grab active:cursor-grabbing" : undefined
+          }
+        >
+          <RowIcon icon={item.icon} />
+        </div>
       </div>
       <div className="pointer-events-none relative z-[1] min-w-0">
         <div
@@ -610,7 +687,7 @@ const ResultRow = memo(function ResultRow({
         ) : null}
       </div>
       <div className="relative z-10 flex items-center gap-0.5">
-        {canReorder && appId ? (
+        {canReorder ? (
           <button
             type="button"
             aria-label={`Reorder ${item.title}. Use Up and Down arrow keys.`}
@@ -620,29 +697,29 @@ const ResultRow = memo(function ResultRow({
               if (event.button !== 0) return;
               event.preventDefault();
               event.currentTarget.setPointerCapture(event.pointerId);
-              onStartPinDrag(item, event.pointerId, event.clientX, event.clientY);
+              onStartReorderDrag(item, event.pointerId, event.clientX, event.clientY);
             }}
             onPointerMove={(event) => {
               if (!event.currentTarget.hasPointerCapture(event.pointerId)) return;
-              onUpdatePinDrag(event.pointerId, event.clientX, event.clientY);
+              onUpdateReorderDrag(event.pointerId, event.clientX, event.clientY);
             }}
             onPointerUp={(event) => {
               if (event.currentTarget.hasPointerCapture(event.pointerId)) {
                 event.currentTarget.releasePointerCapture(event.pointerId);
               }
-              onFinishPinDrag(event.pointerId);
+              onFinishReorderDrag(event.pointerId);
             }}
             onPointerCancel={(event) => {
-              onCancelPinDrag(event.pointerId);
+              onCancelReorderDrag(event.pointerId);
             }}
             onKeyDown={(event) => {
               if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
               event.preventDefault();
               event.stopPropagation();
-              onMovePin(appId, event.key === "ArrowUp" ? -1 : 1);
+              onMoveItem(item, event.key === "ArrowUp" ? -1 : 1);
             }}
             className={`focus-ring grid h-8 w-8 touch-none place-items-center rounded-[8px] text-fg-quiet transition-[color,background-color] duration-100 hover:bg-surface-hover hover:text-fg ${
-              draggedPin === appId ? "cursor-grabbing bg-accent-soft text-accent" : "cursor-grab"
+              draggedItem === itemReorderId ? "cursor-grabbing bg-accent-soft text-accent" : "cursor-grab"
             }`}
           >
             <GripVertical className="h-4 w-4" />

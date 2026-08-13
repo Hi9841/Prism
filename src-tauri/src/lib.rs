@@ -1444,6 +1444,11 @@ fn validate_state(state: &serde_json::Value) -> Result<(), String> {
             }
         }
     }
+    if let Some(collapsed) = settings.get("quickAccessCollapsed") {
+        if !collapsed.is_boolean() {
+            return Err("state.settings.quickAccessCollapsed must be a boolean".to_string());
+        }
+    }
     if let Some(pinned_apps) = settings.get("pinnedApps") {
         let entries = pinned_apps
             .as_array()
@@ -1769,6 +1774,7 @@ mod tests {
                 "taskbarAlignment": "left",
                 "theme": "system",
                 "quickAccess": ["home", "desktop", "downloads", "documents", "pictures", "music"],
+                "quickAccessCollapsed": false,
                 "pinnedApps": ["app-one", "app-two"]
             },
             "history": []
@@ -1790,6 +1796,7 @@ mod tests {
             serde_json::json!({"settings": {"quickAccess": ["home", "home"]}}),
             serde_json::json!({"settings": {"quickAccess": ["network"]}}),
             serde_json::json!({"settings": {"quickAccess": ["home", "desktop", "downloads", "documents", "pictures", "music", "videos"]}}),
+            serde_json::json!({"settings": {"quickAccessCollapsed": "yes"}}),
             serde_json::json!({"settings": {"pinnedApps": "app-one"}}),
             serde_json::json!({"settings": {"pinnedApps": [""]}}),
             serde_json::json!({"settings": {"pinnedApps": ["app-one", "app-one"]}}),

@@ -4,6 +4,7 @@ import {
   DEFAULT_SETTINGS,
   isElevatablePath,
   reorderPinnedApps,
+  reorderQuickAccess,
   stepViewZoom,
 } from "../lib/types";
 import { SHORTCUT_OPTIONS, sanitizeHistory, sanitizeSettings } from "./app";
@@ -68,6 +69,12 @@ describe("quick access settings", () => {
       }).quickAccess,
     ).toEqual(["videos", "home", "desktop", "downloads", "documents", "pictures"]);
   });
+
+  it("persists the collapsed state and defaults older settings to expanded", () => {
+    expect(sanitizeSettings({}).quickAccessCollapsed).toBe(false);
+    expect(sanitizeSettings({ quickAccessCollapsed: true }).quickAccessCollapsed).toBe(true);
+    expect(sanitizeSettings({ quickAccessCollapsed: "yes" }).quickAccessCollapsed).toBe(false);
+  });
 });
 
 describe("pinned app settings", () => {
@@ -107,6 +114,21 @@ describe("pinned app ordering", () => {
     expect(reorderPinnedApps(pinnedApps, "missing", "app-b")).toEqual(pinnedApps);
     expect(reorderPinnedApps(pinnedApps, "app-a", "app-a")).toEqual(pinnedApps);
     expect(pinnedApps).toEqual(["app-a", "app-b"]);
+  });
+});
+
+describe("quick access ordering", () => {
+  it("moves a folder to the selected target position", () => {
+    expect(reorderQuickAccess(["home", "desktop", "downloads"], "home", "downloads")).toEqual([
+      "desktop",
+      "downloads",
+      "home",
+    ]);
+  });
+
+  it("leaves invalid moves untouched", () => {
+    const quickAccess = ["home", "desktop"] as const;
+    expect(reorderQuickAccess(quickAccess, "home", "home")).toEqual(quickAccess);
   });
 });
 

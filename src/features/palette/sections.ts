@@ -38,6 +38,8 @@ export interface Section {
   id: string;
   label: string;
   items: PaletteItem[];
+  collapsible?: boolean;
+  collapsed?: boolean;
 }
 
 /** Everything the section policy may read, in one place. */
@@ -49,6 +51,7 @@ export interface PaletteSources {
   pinnedApps: AppEntry[];
   /** Resolved quick-access items, in user order. */
   quickItems: PaletteItem[];
+  quickAccessCollapsed: boolean;
   /** `settings.pinnedApps` - ids that must not repeat in the Apps section. */
   pinnedAppIds: readonly string[];
   history: HistoryEntry[];
@@ -77,6 +80,7 @@ export function buildSections(sources: PaletteSources): {
     apps,
     pinnedApps,
     quickItems,
+    quickAccessCollapsed,
     pinnedAppIds,
     history,
     existingHistoryPaths,
@@ -111,10 +115,15 @@ export function buildSections(sources: PaletteSources): {
       out.push({ id: "recent", label: "Recent", items: recentItems });
     }
 
-    const recentIds = new Set(recentItems.map((item) => item.id));
-    const availableQuick = quickItems.filter((item) => !recentIds.has(item.id)).slice(0, IDLE_QUICK_LIMIT);
-    if (availableQuick.length > 0) {
-      out.push({ id: "quick", label: "Quick Access", items: availableQuick });
+    if (quickItems.length > 0) {
+      const availableQuick = quickItems.slice(0, IDLE_QUICK_LIMIT);
+      out.push({
+        id: "quick",
+        label: "Quick Access",
+        items: quickAccessCollapsed ? [] : availableQuick,
+        collapsible: true,
+        collapsed: quickAccessCollapsed,
+      });
     }
 
     if (sortedApps.length > 0) {
@@ -231,6 +240,7 @@ export function quickAccessPaletteItem(entry: QuickAccessEntry): PaletteItem {
     keywords: ["open", "folder", "files", entry.kind, entry.path],
     icon: { kind: "tile", icon: iconMap[entry.kind], tint: tintMap[entry.kind] },
     historyTitle: entry.name,
+    quickAccessKind: entry.kind,
     run: () => openPath(entry.path),
   };
 }

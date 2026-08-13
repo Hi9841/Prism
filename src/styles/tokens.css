@@ -274,7 +274,7 @@ body {
       inset 0 1px 0 var(--t-field-hi),
       inset 0 0 0 1px var(--t-field-line);
   }
-  .search-field:focus-within {
+  .search-field:has(input:focus) {
     background: var(--t-field-bg-focus);
     box-shadow:
       inset 0 1px 0 var(--t-field-hi),
@@ -284,7 +284,7 @@ body {
   .search-field > svg {
     transition: color 120ms ease-out;
   }
-  .search-field:focus-within > svg {
+  .search-field:has(input:focus) > svg {
     color: color-mix(in oklab, var(--accent) 72%, var(--t-fg-secondary));
   }
 
@@ -316,7 +316,7 @@ body {
     opacity: 0.42;
   }
 
-  .pin-drag-preview {
+  .reorder-drag-preview {
     display: grid;
     grid-template-columns: 40px minmax(0, 1fr) auto;
     width: 232px;
@@ -328,7 +328,7 @@ body {
     box-shadow:
       inset 0 1px 0 color-mix(in oklab, var(--t-fg) 10%, transparent),
       0 8px 22px rgb(0 0 0 / 0.34);
-    animation: pin-drag-pickup 120ms var(--ease-out-soft) both;
+    animation: reorder-drag-pickup 120ms var(--ease-out-soft) both;
   }
 
   /* Focus ring - keyboard-first, never decorative */
@@ -519,8 +519,8 @@ body {
 .context-menu-exit {
   animation: context-menu-out 110ms ease-in both;
 }
-.pin-drag-preview-exit {
-  animation: pin-drag-out 110ms ease-in both;
+.reorder-drag-preview-exit {
+  animation: reorder-drag-out 110ms ease-in both;
 }
 
 @keyframes launcher-in {
@@ -589,13 +589,13 @@ body {
     transform: scale(0.96);
   }
 }
-@keyframes pin-drag-pickup {
+@keyframes reorder-drag-pickup {
   from {
     opacity: 0.72;
     transform: scale(0.96);
   }
 }
-@keyframes pin-drag-out {
+@keyframes reorder-drag-out {
   to {
     opacity: 0.72;
     transform: scale(0.96);

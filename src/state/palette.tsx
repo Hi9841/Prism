@@ -236,6 +236,7 @@ export function PaletteProvider({ children }: { children: ReactNode }) {
         apps: visibleApps,
         pinnedApps,
         quickItems,
+        quickAccessCollapsed: app.settings.quickAccessCollapsed,
         pinnedAppIds: app.settings.pinnedApps,
         history: app.history,
         existingHistoryPaths,
@@ -251,6 +252,7 @@ export function PaletteProvider({ children }: { children: ReactNode }) {
       visibleApps,
       pinnedApps,
       quickItems,
+      app.settings.quickAccessCollapsed,
       app.settings.pinnedApps,
       app.history,
       existingHistoryPaths,
@@ -304,6 +306,10 @@ export function PaletteProvider({ children }: { children: ReactNode }) {
     },
     [flatItems.length],
   );
+
+  useEffect(() => {
+    setSelected((previous) => Math.min(previous, Math.max(0, flatItems.length - 1)));
+  }, [flatItems.length]);
 
   const runItem = useCallback(
     async (item: PaletteItem) => {

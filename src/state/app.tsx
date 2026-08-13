@@ -394,6 +394,10 @@ export function sanitizeSettings(raw: unknown): Settings {
     ),
     theme: pick(src.theme, ["system", "dark", "light"], DEFAULT_SETTINGS.theme),
     quickAccess: sanitizeQuickAccess(src.quickAccess),
+    quickAccessCollapsed:
+      typeof src.quickAccessCollapsed === "boolean"
+        ? src.quickAccessCollapsed
+        : DEFAULT_SETTINGS.quickAccessCollapsed,
     pinnedApps: sanitizePinnedApps(src.pinnedApps),
   };
 }
