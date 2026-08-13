@@ -1,10 +1,16 @@
-import { ChevronDown, GripVertical, Pin, PinOff, RefreshCw, Search, Settings2 } from "lucide-react";
+import { ChevronDown, GripVertical, Pin, PinOff, RefreshCw, Search, Settings2, X } from "lucide-react";
 import { memo, useCallback, useEffect, useRef, useState } from "react";
 import { PowerMenu } from "../../components/PowerMenu";
 import { displayShortcut } from "../../components/SettingsSheet";
 import { IconButton, Kbd, RowIcon, SectionLabel } from "../../components/ui";
 import type { PaletteItem, QuickAccessKind } from "../../lib/types";
-import { PINNED_APP_LIMIT, reorderPinnedApps, reorderQuickAccess } from "../../lib/types";
+import {
+  PINNED_APP_LIMIT,
+  reorderAppGroups,
+  reorderPinnedApps,
+  reorderQuickAccess,
+  reorderSections,
+} from "../../lib/types";
 import { useApp } from "../../state/app";
 import { usePalette } from "../../state/palette";
 import { UpdateControl } from "../updater/UpdateControl";
@@ -26,6 +32,18 @@ interface ResultMenuState {
   position: ContextMenuPosition;
 }
 
+interface CategoryDragState {
+  kind: "section" | "group";
+  id: string;
+  pointerId: number;
+  startX: number;
+  startY: number;
+  x: number;
+  y: number;
+  active: boolean;
+  targetId: string | null;
+}
+
 export function Palette() {
   const palette = usePalette();
   const app = useApp();
@@ -37,6 +55,10 @@ export function Palette() {
   const pendingReorderDragRef = useRef<{ pointerId: number; x: number; y: number } | null>(null);
   const reorderDragFrameRef = useRef<number | null>(null);
   const [reorderDrag, setReorderDrag] = useState<ReorderDragState | null>(null);
+  const categoryDragRef = useRef<CategoryDragState | null>(null);
+  const pendingCategoryDragRef = useRef<{ pointerId: number; x: number; y: number } | null>(null);
+  const categoryDragFrameRef = useRef<number | null>(null);
+  const [categoryDrag, setCategoryDrag] = useState<CategoryDragState | null>(null);
   const [resultMenu, setResultMenu] = useState<ResultMenuState | null>(null);
   const [previewLeaving, setPreviewLeaving] = useState(false);
   const previewLeaveTimerRef = useRef<number | null>(null);
@@ -91,6 +113,120 @@ export function Palette() {
       });
     },
     [app, settings.appGroups],
+  );
+
+  const updateCategoryDragState = useCallback((next: CategoryDragState | null) => {
+    categoryDragRef.current = next;
+    setCategoryDrag(next);
+  }, []);
+
+  const applyCategoryDrag = useCallback(
+    (pointerId: number, x: number, y: number) => {
+      const current = categoryDragRef.current;
+      if (!current || current.pointerId !== pointerId) return;
+      const active = current.active || Math.hypot(x - current.startX, y - current.startY) >= 4;
+      const selector = current.kind === "section" ? "[data-palette-section-id]" : "[data-palette-group-id]";
+      const hovered = active ? document.elementFromPoint(x, y)?.closest<HTMLElement>(selector) : null;
+      const hoveredId =
+        current.kind === "section" ? hovered?.dataset.paletteSectionId : hovered?.dataset.paletteGroupId;
+      const targetId = hoveredId && hoveredId !== current.id ? hoveredId : null;
+      updateCategoryDragState({ ...current, x, y, active, targetId: targetId ?? null });
+    },
+    [updateCategoryDragState],
+  );
+
+  const updateCategoryDrag = useCallback(
+    (pointerId: number, x: number, y: number) => {
+      pendingCategoryDragRef.current = { pointerId, x, y };
+      if (categoryDragFrameRef.current !== null) return;
+      categoryDragFrameRef.current = requestAnimationFrame(() => {
+        categoryDragFrameRef.current = null;
+        const pending = pendingCategoryDragRef.current;
+        pendingCategoryDragRef.current = null;
+        if (pending) applyCategoryDrag(pending.pointerId, pending.x, pending.y);
+      });
+    },
+    [applyCategoryDrag],
+  );
+
+  const finishCategoryDrag = useCallback(
+    (pointerId: number) => {
+      if (categoryDragFrameRef.current !== null) {
+        cancelAnimationFrame(categoryDragFrameRef.current);
+        categoryDragFrameRef.current = null;
+      }
+      const pending = pendingCategoryDragRef.current;
+      pendingCategoryDragRef.current = null;
+      if (pending) applyCategoryDrag(pending.pointerId, pending.x, pending.y);
+      const current = categoryDragRef.current;
+      if (!current || current.pointerId !== pointerId) return;
+      if (current.active && current.targetId) {
+        if (current.kind === "section") {
+          app.updateSettings({
+            sectionOrder: reorderSections(settings.sectionOrder, current.id, current.targetId),
+          });
+        } else {
+          app.updateSettings({
+            appGroups: reorderAppGroups(settings.appGroups, current.id, current.targetId),
+          });
+        }
+      }
+      updateCategoryDragState(null);
+    },
+    [app, applyCategoryDrag, settings.appGroups, settings.sectionOrder, updateCategoryDragState],
+  );
+
+  const cancelCategoryDrag = useCallback(
+    (pointerId: number) => {
+      pendingCategoryDragRef.current = null;
+      if (categoryDragFrameRef.current !== null) {
+        cancelAnimationFrame(categoryDragFrameRef.current);
+        categoryDragFrameRef.current = null;
+      }
+      if (categoryDragRef.current?.pointerId === pointerId) updateCategoryDragState(null);
+    },
+    [updateCategoryDragState],
+  );
+
+  const startCategoryDrag = useCallback(
+    (kind: CategoryDragState["kind"], id: string, pointerId: number, x: number, y: number) => {
+      updateCategoryDragState({
+        kind,
+        id,
+        pointerId,
+        startX: x,
+        startY: y,
+        x,
+        y,
+        active: false,
+        targetId: null,
+      });
+    },
+    [updateCategoryDragState],
+  );
+
+  const categoryDragHandlers = useCallback(
+    (kind: CategoryDragState["kind"], id: string) => ({
+      onPointerDown: (event: React.PointerEvent) => {
+        if (event.button !== 0 || palette.query.trim() !== "") return;
+        event.preventDefault();
+        event.currentTarget.setPointerCapture(event.pointerId);
+        startCategoryDrag(kind, id, event.pointerId, event.clientX, event.clientY);
+      },
+      onPointerMove: (event: React.PointerEvent) => {
+        if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+          updateCategoryDrag(event.pointerId, event.clientX, event.clientY);
+        }
+      },
+      onPointerUp: (event: React.PointerEvent) => {
+        if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+          event.currentTarget.releasePointerCapture(event.pointerId);
+        }
+        finishCategoryDrag(event.pointerId);
+      },
+      onPointerCancel: (event: React.PointerEvent) => cancelCategoryDrag(event.pointerId),
+    }),
+    [cancelCategoryDrag, finishCategoryDrag, palette.query, startCategoryDrag, updateCategoryDrag],
   );
 
   const reorderItem = useCallback(
@@ -236,17 +372,21 @@ export function Palette() {
   );
 
   useEffect(() => {
-    if (!reorderDrag) return;
+    if (!reorderDrag && !categoryDrag) return;
     const cancelOnEscape = (event: KeyboardEvent) => {
-      if (event.key === "Escape") updateReorderDragState(null);
+      if (event.key === "Escape") {
+        updateReorderDragState(null);
+        updateCategoryDragState(null);
+      }
     };
     window.addEventListener("keydown", cancelOnEscape);
     return () => window.removeEventListener("keydown", cancelOnEscape);
-  }, [reorderDrag, updateReorderDragState]);
+  }, [categoryDrag, reorderDrag, updateCategoryDragState, updateReorderDragState]);
 
   useEffect(
     () => () => {
       if (reorderDragFrameRef.current !== null) cancelAnimationFrame(reorderDragFrameRef.current);
+      if (categoryDragFrameRef.current !== null) cancelAnimationFrame(categoryDragFrameRef.current);
       if (previewLeaveTimerRef.current !== null) window.clearTimeout(previewLeaveTimerRef.current);
     },
     [],
@@ -376,71 +516,156 @@ export function Palette() {
         ) : (
           (() => {
             let flat = 0;
-            return palette.sections.map((section) => (
-              <div key={section.id}>
-                {section.collapsible ? (
-                  <button
-                    type="button"
-                    aria-expanded={!section.collapsed}
-                    aria-controls={`prism-section-${section.id}`}
-                    onClick={() =>
-                      app.updateSettings({ quickAccessCollapsed: !settings.quickAccessCollapsed })
-                    }
-                    className="focus-ring group/section flex w-full cursor-pointer items-center gap-1 rounded-[6px] px-3.5 pb-1.5 pt-4 text-left text-[11px] font-semibold text-fg-quiet uppercase hover:text-fg-secondary"
-                  >
-                    <ChevronDown
-                      className={`h-3.5 w-3.5 transition-transform duration-150 ${
-                        section.collapsed ? "-rotate-90" : "rotate-0"
-                      }`}
-                    />
-                    <span>{section.label}</span>
-                  </button>
-                ) : (
-                  <SectionLabel>{section.label}</SectionLabel>
-                )}
-                {section.groups?.map((group) => (
-                  <div key={group.id}>
-                    <button
-                      type="button"
-                      aria-expanded={!group.collapsed}
-                      aria-controls={`prism-section-${group.id}`}
-                      onClick={() => toggleAppGroup(group.groupId)}
-                      className="focus-ring group/section flex w-full cursor-pointer items-center gap-1 rounded-[6px] px-3.5 pb-1.5 pt-2 text-left text-[11px] font-semibold text-fg-secondary hover:text-fg"
-                    >
-                      <ChevronDown
-                        className={`h-3.5 w-3.5 transition-transform duration-150 ${
-                          group.collapsed ? "-rotate-90" : "rotate-0"
-                        }`}
-                      />
-                      <span className="truncate">{group.label}</span>
-                    </button>
-                    <ul
-                      id={`prism-section-${group.id}`}
-                      aria-label={group.label}
-                      className="m-0 flex list-none flex-col gap-[2px] p-0"
-                    >
-                      {group.items.map((item) => {
-                        const index = flat++;
-                        return renderResultRow(item, index, false);
-                      })}
-                    </ul>
-                  </div>
-                ))}
-                <ul
-                  id={`prism-section-${section.id}`}
-                  aria-label={section.label}
-                  className="m-0 flex list-none flex-col gap-[2px] p-0"
+            return palette.sections.map((section) => {
+              const sectionReorderable = palette.query.trim() === "";
+              const sectionDropTarget =
+                categoryDrag?.kind === "section" && categoryDrag.targetId === section.id;
+              const sectionDragTargetProps = sectionReorderable
+                ? { "data-palette-section-id": section.id }
+                : {};
+              return (
+                <div
+                  key={section.id}
+                  {...sectionDragTargetProps}
+                  data-category-drop-target={sectionDropTarget || undefined}
+                  data-category-dragging={
+                    categoryDrag?.kind === "section" && categoryDrag.id === section.id ? true : undefined
+                  }
+                  className={sectionDropTarget ? "section-category-drop" : undefined}
                 >
-                  {section.items.map((item) => {
-                    const index = flat++;
-                    const reorderable = section.id === "pinned" || section.id === "quick";
-                    return renderResultRow(item, index, reorderable);
-                  })}
-                </ul>
-              </div>
-            ));
+                  {section.collapsible ? (
+                    <div className="flex items-center gap-1 px-3.5 pb-1.5 pt-4">
+                      <button
+                        type="button"
+                        aria-expanded={!section.collapsed}
+                        aria-controls={`prism-section-${section.id}`}
+                        onClick={() =>
+                          app.updateSettings({ quickAccessCollapsed: !settings.quickAccessCollapsed })
+                        }
+                        className="focus-ring group/section flex min-w-0 flex-1 cursor-pointer items-center gap-1 rounded-[6px] text-left text-[11px] font-semibold text-fg-quiet uppercase hover:text-fg-secondary"
+                      >
+                        <ChevronDown
+                          className={`h-3.5 w-3.5 transition-transform duration-150 ${
+                            section.collapsed ? "-rotate-90" : "rotate-0"
+                          }`}
+                        />
+                        <span className="truncate">{section.label}</span>
+                      </button>
+                      {sectionReorderable ? (
+                        <button
+                          type="button"
+                          aria-label={`Reorder ${section.label} section`}
+                          title={`Reorder ${section.label}`}
+                          className="focus-ring grid h-7 w-7 shrink-0 touch-none cursor-grab place-items-center rounded-[7px] text-fg-quiet hover:bg-surface-hover hover:text-fg active:cursor-grabbing"
+                          {...categoryDragHandlers("section", section.id)}
+                        >
+                          <GripVertical className="h-3.5 w-3.5" />
+                        </button>
+                      ) : null}
+                    </div>
+                  ) : (
+                    <div className="flex items-center gap-1">
+                      <div className="min-w-0 flex-1">
+                        <SectionLabel>{section.label}</SectionLabel>
+                      </div>
+                      {sectionReorderable ? (
+                        <button
+                          type="button"
+                          aria-label={`Reorder ${section.label} section`}
+                          title={`Reorder ${section.label}`}
+                          className="focus-ring mr-3.5 grid h-7 w-7 shrink-0 touch-none cursor-grab place-items-center rounded-[7px] text-fg-quiet hover:bg-surface-hover hover:text-fg active:cursor-grabbing"
+                          {...categoryDragHandlers("section", section.id)}
+                        >
+                          <GripVertical className="h-3.5 w-3.5" />
+                        </button>
+                      ) : null}
+                    </div>
+                  )}
+                  {section.groups?.map((group, groupIndex) => (
+                    <div
+                      key={group.id}
+                      data-palette-group-id={palette.query.trim() === "" ? group.groupId : undefined}
+                      data-category-drop-target={
+                        categoryDrag?.kind === "group" && categoryDrag.targetId === group.groupId
+                          ? true
+                          : undefined
+                      }
+                      data-category-dragging={
+                        categoryDrag?.kind === "group" && categoryDrag.id === group.groupId ? true : undefined
+                      }
+                      className={`${groupIndex > 0 ? "mt-1 border-t border-line pt-1" : ""} ${
+                        categoryDrag?.kind === "group" && categoryDrag.targetId === group.groupId
+                          ? "section-category-drop"
+                          : ""
+                      }`}
+                    >
+                      <div className="flex items-center gap-1 px-3.5 pb-1.5 pt-2">
+                        <button
+                          type="button"
+                          aria-expanded={!group.collapsed}
+                          aria-controls={`prism-section-${group.id}`}
+                          onClick={() => toggleAppGroup(group.groupId)}
+                          className="focus-ring group/section flex min-w-0 flex-1 cursor-pointer items-center gap-1 rounded-[6px] text-left text-[11px] font-semibold text-fg-secondary hover:text-fg"
+                        >
+                          <ChevronDown
+                            className={`h-3.5 w-3.5 transition-transform duration-150 ${
+                              group.collapsed ? "-rotate-90" : "rotate-0"
+                            }`}
+                          />
+                          <span className="truncate">{group.label}</span>
+                        </button>
+                        {palette.query.trim() === "" ? (
+                          <button
+                            type="button"
+                            aria-label={`Reorder ${group.label} group`}
+                            title={`Reorder ${group.label}`}
+                            className="focus-ring grid h-7 w-7 shrink-0 touch-none cursor-grab place-items-center rounded-[7px] text-fg-quiet hover:bg-surface-hover hover:text-fg active:cursor-grabbing"
+                            {...categoryDragHandlers("group", group.groupId)}
+                          >
+                            <GripVertical className="h-3.5 w-3.5" />
+                          </button>
+                        ) : null}
+                      </div>
+                      <ul
+                        id={`prism-section-${group.id}`}
+                        aria-label={group.label}
+                        className="m-0 flex list-none flex-col gap-[2px] p-0"
+                      >
+                        {group.items.map((item) => {
+                          const index = flat++;
+                          return renderResultRow(item, index, false, false);
+                        })}
+                      </ul>
+                    </div>
+                  ))}
+                  {section.groups && section.groups.length > 0 && section.items.length > 0 ? (
+                    <div className="mt-2 flex items-center gap-2 px-3.5 pb-1 pt-2 text-[10px] font-semibold text-fg-quiet uppercase">
+                      <span className="h-px flex-1 bg-line" aria-hidden="true" />
+                      <span>Other apps</span>
+                      <span className="h-px flex-1 bg-line" aria-hidden="true" />
+                    </div>
+                  ) : null}
+                  <ul
+                    id={`prism-section-${section.id}`}
+                    aria-label={section.groups?.length ? "Other apps" : section.label}
+                    className="m-0 flex list-none flex-col gap-[2px] p-0"
+                  >
+                    {section.items.map((item) => {
+                      const index = flat++;
+                      const reorderable = section.id === "pinned" || section.id === "quick";
+                      return renderResultRow(item, index, reorderable, section.id === "recent");
+                    })}
+                  </ul>
+                </div>
+              );
+            });
 
-            function renderResultRow(item: PaletteItem, index: number, reorderable: boolean) {
+            function renderResultRow(
+              item: PaletteItem,
+              index: number,
+              reorderable: boolean,
+              removable: boolean,
+            ) {
               return (
                 <ResultRow
                   key={item.id}
@@ -455,6 +680,8 @@ export function Palette() {
                   onRun={palette.runItem}
                   onOpenContextMenu={openResultMenu}
                   onTogglePin={togglePin}
+                  removable={removable}
+                  onRemoveHistory={() => app.removeHistory(item.id)}
                   onMoveItem={moveItem}
                   onStartReorderDrag={startReorderDrag}
                   onUpdateReorderDrag={updateReorderDrag}
@@ -639,6 +866,8 @@ const ResultRow = memo(function ResultRow({
   onRun,
   onOpenContextMenu,
   onTogglePin,
+  removable,
+  onRemoveHistory,
   onMoveItem,
   onStartReorderDrag,
   onUpdateReorderDrag,
@@ -656,6 +885,8 @@ const ResultRow = memo(function ResultRow({
   onRun: (item: PaletteItem) => void;
   onOpenContextMenu: (item: PaletteItem, index: number, x: number, y: number) => void;
   onTogglePin: (item: PaletteItem) => void;
+  removable: boolean;
+  onRemoveHistory: () => void;
   onMoveItem: (item: PaletteItem, direction: -1 | 1) => void;
   onStartReorderDrag: (item: PaletteItem, pointerId: number, x: number, y: number) => void;
   onUpdateReorderDrag: (pointerId: number, x: number, y: number) => void;
@@ -769,29 +1000,56 @@ const ResultRow = memo(function ResultRow({
           </button>
         ) : null}
         {item.appId ? (
+          <>
+            <button
+              type="button"
+              aria-label={`${pinned ? "Unpin" : "Pin"} ${item.title}`}
+              aria-pressed={pinned}
+              title={`${pinned ? "Unpin" : "Pin"} ${item.title}`}
+              tabIndex={selected ? 0 : -1}
+              onClick={() => onTogglePin(item)}
+              className={`focus-ring press grid h-8 w-8 cursor-pointer place-items-center rounded-[8px] opacity-0 group-hover:opacity-100 focus:opacity-100 ${
+                pinned
+                  ? "bg-accent-soft text-accent"
+                  : "text-fg-tertiary hover:bg-surface-hover hover:text-fg"
+              }`}
+            >
+              <span className="relative grid h-4 w-4 place-items-center" aria-hidden="true">
+                <PinOff
+                  className={`icon-swap absolute inset-0 h-4 w-4 ${
+                    pinned ? "scale-100 opacity-100 blur-[0px]" : "scale-[0.25] opacity-0 blur-[4px]"
+                  }`}
+                />
+                <Pin
+                  className={`icon-swap h-4 w-4 ${
+                    pinned ? "scale-[0.25] opacity-0 blur-[4px]" : "scale-100 opacity-100 blur-[0px]"
+                  }`}
+                />
+              </span>
+            </button>
+            {removable ? (
+              <button
+                type="button"
+                aria-label={`Remove ${item.title} from Recent`}
+                title="Remove from Recent"
+                tabIndex={selected ? 0 : -1}
+                onClick={onRemoveHistory}
+                className="focus-ring press grid h-8 w-8 cursor-pointer place-items-center rounded-[8px] text-fg-tertiary opacity-60 transition-opacity duration-150 group-hover:opacity-100 focus:opacity-100 hover:bg-danger-soft hover:text-danger"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            ) : null}
+          </>
+        ) : removable ? (
           <button
             type="button"
-            aria-label={`${pinned ? "Unpin" : "Pin"} ${item.title}`}
-            aria-pressed={pinned}
-            title={`${pinned ? "Unpin" : "Pin"} ${item.title}`}
+            aria-label={`Remove ${item.title} from Recent`}
+            title="Remove from Recent"
             tabIndex={selected ? 0 : -1}
-            onClick={() => onTogglePin(item)}
-            className={`focus-ring press grid h-8 w-8 cursor-pointer place-items-center rounded-[8px] opacity-0 group-hover:opacity-100 focus:opacity-100 ${
-              pinned ? "bg-accent-soft text-accent" : "text-fg-tertiary hover:bg-surface-hover hover:text-fg"
-            }`}
+            onClick={onRemoveHistory}
+            className="focus-ring press grid h-8 w-8 cursor-pointer place-items-center rounded-[8px] text-fg-tertiary opacity-60 transition-opacity duration-150 group-hover:opacity-100 focus:opacity-100 hover:bg-danger-soft hover:text-danger"
           >
-            <span className="relative grid h-4 w-4 place-items-center" aria-hidden="true">
-              <PinOff
-                className={`icon-swap absolute inset-0 h-4 w-4 ${
-                  pinned ? "scale-100 opacity-100 blur-[0px]" : "scale-[0.25] opacity-0 blur-[4px]"
-                }`}
-              />
-              <Pin
-                className={`icon-swap h-4 w-4 ${
-                  pinned ? "scale-[0.25] opacity-0 blur-[4px]" : "scale-100 opacity-100 blur-[0px]"
-                }`}
-              />
-            </span>
+            <X className="h-4 w-4" />
           </button>
         ) : selected && item.id.startsWith("calc::") ? (
           <span className="text-[12px] font-semibold text-accent tabular-nums">Enter to copy</span>

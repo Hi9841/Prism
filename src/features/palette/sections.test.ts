@@ -126,6 +126,31 @@ describe("buildSections - idle layout (empty query)", () => {
     expect(result.sections[0].items.map((i) => i.title)).toEqual(["Zebra", "Alpha"]);
   });
 
+  it("uses the persisted section order for the idle dashboard", () => {
+    const result = buildSections(
+      sources({
+        apps: [app("Alpha")],
+        pinnedApps: [app("Pinned")],
+        quickItems: quickItems(),
+        sectionOrder: ["apps", "quick", "pinned", "recent"],
+      }),
+    );
+    expect(ids(result.sections)).toEqual(["apps", "quick", "pinned"]);
+    expect(result.flatItems[0]?.title).toBe("Alpha");
+  });
+
+  it("does not apply idle section order while searching", () => {
+    const result = buildSections(
+      sources({
+        query: "alpha",
+        apps: [app("Alpha")],
+        quickItems: quickItems(),
+        sectionOrder: ["apps", "quick", "pinned", "recent"],
+      }),
+    );
+    expect(ids(result.sections)).toEqual(["apps"]);
+  });
+
   it("renders configured app collections before remaining apps", () => {
     const result = buildSections(
       sources({

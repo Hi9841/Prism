@@ -64,6 +64,7 @@ export interface PaletteSources {
   quickItems: PaletteItem[];
   quickAccessCollapsed: boolean;
   appGroups?: readonly AppGroup[];
+  sectionOrder?: readonly string[];
   /** `settings.pinnedApps` - ids that must not repeat in the Apps section. */
   pinnedAppIds: readonly string[];
   history: HistoryEntry[];
@@ -94,6 +95,7 @@ export function buildSections(sources: PaletteSources): {
     quickItems,
     quickAccessCollapsed,
     appGroups = [],
+    sectionOrder,
     pinnedAppIds,
     history,
     existingHistoryPaths,
@@ -179,13 +181,30 @@ export function buildSections(sources: PaletteSources): {
     }
   }
 
+  const sections = normalized.length === 0 ? orderSections(out, sectionOrder) : out;
   return {
-    sections: out,
-    flatItems: out.flatMap((section) => [
+    sections,
+    flatItems: sections.flatMap((section) => [
       ...(section.groups?.flatMap((group) => group.items) ?? []),
       ...section.items,
     ]),
   };
+}
+
+function orderSections(sections: Section[], requestedOrder?: readonly string[]): Section[] {
+  if (!requestedOrder || requestedOrder.length === 0) return sections;
+  const byId = new Map(sections.map((section) => [section.id, section]));
+  const ordered: Section[] = [];
+  for (const id of requestedOrder) {
+    const section = byId.get(id);
+    if (!section) continue;
+    ordered.push(section);
+    byId.delete(id);
+  }
+  for (const section of sections) {
+    if (byId.has(section.id)) ordered.push(section);
+  }
+  return ordered;
 }
 
 function buildAppsSection(

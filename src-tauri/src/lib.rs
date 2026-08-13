@@ -1447,6 +1447,26 @@ fn validate_state(state: &serde_json::Value) -> Result<(), String> {
             return Err("state.settings.quickAccessCollapsed must be a boolean".to_string());
         }
     }
+    if let Some(section_order) = settings.get("sectionOrder") {
+        let entries = section_order
+            .as_array()
+            .ok_or("state.settings.sectionOrder must be an array")?;
+        if entries.len() > 4 {
+            return Err("state.settings.sectionOrder has too many entries".to_string());
+        }
+        let mut seen = std::collections::HashSet::new();
+        for entry in entries {
+            let id = entry
+                .as_str()
+                .ok_or("section order entries must be strings")?;
+            if !matches!(id, "pinned" | "recent" | "quick" | "apps") {
+                return Err(format!("unknown section order entry '{id}'"));
+            }
+            if !seen.insert(id) {
+                return Err(format!("duplicate section order entry '{id}'"));
+            }
+        }
+    }
     if let Some(pinned_apps) = settings.get("pinnedApps") {
         let entries = pinned_apps
             .as_array()
@@ -1823,7 +1843,8 @@ mod tests {
                 "theme": "system",
                 "quickAccess": ["home", "desktop", "downloads", "documents", "pictures", "music"],
                 "quickAccessCollapsed": false,
-                "pinnedApps": ["app-one", "app-two"]
+                "pinnedApps": ["app-one", "app-two"],
+                "sectionOrder": ["apps", "recent", "quick", "pinned"]
             },
             "history": []
         });
@@ -1845,6 +1866,9 @@ mod tests {
             serde_json::json!({"settings": {"quickAccess": ["network"]}}),
             serde_json::json!({"settings": {"quickAccess": ["home", "desktop", "downloads", "documents", "pictures", "music", "videos"]}}),
             serde_json::json!({"settings": {"quickAccessCollapsed": "yes"}}),
+            serde_json::json!({"settings": {"sectionOrder": "apps"}}),
+            serde_json::json!({"settings": {"sectionOrder": ["apps", "apps"]}}),
+            serde_json::json!({"settings": {"sectionOrder": ["unknown"]}}),
             serde_json::json!({"settings": {"pinnedApps": "app-one"}}),
             serde_json::json!({"settings": {"pinnedApps": [""]}}),
             serde_json::json!({"settings": {"pinnedApps": ["app-one", "app-one"]}}),

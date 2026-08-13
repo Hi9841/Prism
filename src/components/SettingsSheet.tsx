@@ -1,4 +1,7 @@
 import {
+  Check,
+  ChevronDown,
+  ChevronUp,
   Download,
   FileText,
   FileVideo,
@@ -12,6 +15,7 @@ import {
   Music,
   Plus,
   RotateCcw,
+  Search,
   Trash2,
   X,
 } from "lucide-react";
@@ -261,8 +265,26 @@ function AppGroupsPicker() {
   const { settings, updateSettings, showToast } = useApp();
   const { apps } = usePalette();
   const [newName, setNewName] = useState("");
-  const [selectedAppByGroup, setSelectedAppByGroup] = useState<Record<string, string>>({});
+  const [openGroupId, setOpenGroupId] = useState<string | null>(null);
+  const [appQuery, setAppQuery] = useState("");
+  const appSearchRef = useRef<HTMLInputElement>(null);
+  const appPickerRef = useRef<HTMLDivElement>(null);
   const availableApps = [...apps].sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
+
+  useEffect(() => {
+    if (!openGroupId) return;
+    appSearchRef.current?.focus();
+    const closeOnOutside = (event: PointerEvent) => {
+      if (!appPickerRef.current?.contains(event.target as Node)) setOpenGroupId(null);
+    };
+    document.addEventListener("pointerdown", closeOnOutside);
+    return () => document.removeEventListener("pointerdown", closeOnOutside);
+  }, [openGroupId]);
+
+  const toggleAppPicker = (groupId: string) => {
+    setOpenGroupId((current) => (current === groupId ? null : groupId));
+    setAppQuery("");
+  };
 
   const createGroup = () => {
     const name = newName.trim();
@@ -286,6 +308,16 @@ function AppGroupsPicker() {
     updateSettings({ appGroups: settings.appGroups.filter((group) => group.id !== id) });
   };
 
+  const moveGroup = (id: string, direction: -1 | 1) => {
+    const index = settings.appGroups.findIndex((group) => group.id === id);
+    const target = index + direction;
+    if (index < 0 || target < 0 || target >= settings.appGroups.length) return;
+    const appGroups = [...settings.appGroups];
+    const [group] = appGroups.splice(index, 1);
+    appGroups.splice(target, 0, group);
+    updateSettings({ appGroups });
+  };
+
   const assignApp = (groupId: string, appId: string) => {
     if (!appId) return;
     const target = settings.appGroups.find((group) => group.id === groupId);
@@ -303,7 +335,8 @@ function AppGroupsPicker() {
             : group.appIds.filter((candidate) => candidate !== appId),
       })),
     });
-    setSelectedAppByGroup((previous) => ({ ...previous, [groupId]: "" }));
+    setOpenGroupId(null);
+    setAppQuery("");
   };
 
   const removeApp = (groupId: string, appId: string) => {
@@ -352,31 +385,109 @@ function AppGroupsPicker() {
                 onChange={(event) => updateGroup(group.id, { name: event.target.value })}
                 className="focus-ring min-w-0 flex-1 bg-transparent text-[12px] font-semibold text-fg outline-none"
               />
+              <div className="flex shrink-0 items-center gap-0.5">
+                <button
+                  type="button"
+                  aria-label={`Move ${group.name} up`}
+                  title="Move up"
+                  disabled={settings.appGroups[0]?.id === group.id}
+                  onClick={() => moveGroup(group.id, -1)}
+                  className="focus-ring press grid h-7 w-7 cursor-pointer place-items-center rounded-[7px] text-fg-quiet hover:bg-surface-hover hover:text-fg disabled:cursor-default disabled:opacity-25"
+                >
+                  <ChevronUp className="h-3.5 w-3.5" />
+                </button>
+                <button
+                  type="button"
+                  aria-label={`Move ${group.name} down`}
+                  title="Move down"
+                  disabled={settings.appGroups[settings.appGroups.length - 1]?.id === group.id}
+                  onClick={() => moveGroup(group.id, 1)}
+                  className="focus-ring press grid h-7 w-7 cursor-pointer place-items-center rounded-[7px] text-fg-quiet hover:bg-surface-hover hover:text-fg disabled:cursor-default disabled:opacity-25"
+                >
+                  <ChevronDown className="h-3.5 w-3.5" />
+                </button>
+                <button
+                  type="button"
+                  aria-label={`Delete ${group.name} collection`}
+                  title="Delete collection"
+                  onClick={() => removeGroup(group.id)}
+                  className="focus-ring press grid h-7 w-7 cursor-pointer place-items-center rounded-[7px] text-fg-quiet hover:bg-danger-soft hover:text-danger"
+                >
+                  <Trash2 className="h-3.5 w-3.5" />
+                </button>
+              </div>
+            </div>
+            <div ref={openGroupId === group.id ? appPickerRef : undefined} className="relative mt-1.5">
               <button
                 type="button"
-                aria-label={`Delete ${group.name} collection`}
-                title="Delete collection"
-                onClick={() => removeGroup(group.id)}
-                className="focus-ring press grid h-7 w-7 shrink-0 cursor-pointer place-items-center rounded-[7px] text-fg-quiet hover:bg-danger-soft hover:text-danger"
+                aria-label={`Add app to ${group.name}`}
+                aria-haspopup="listbox"
+                aria-expanded={openGroupId === group.id}
+                onClick={() => toggleAppPicker(group.id)}
+                className="focus-ring flex h-8 w-full cursor-pointer items-center justify-between gap-2 rounded-[8px] bg-surface px-2.5 text-left text-[11.5px] font-medium text-fg-secondary hover:bg-surface-hover hover:text-fg"
               >
-                <Trash2 className="h-3.5 w-3.5" />
+                <span>{openGroupId === group.id ? "Search installed apps" : "Add an app"}</span>
+                <ChevronDown
+                  className={`h-3.5 w-3.5 shrink-0 text-fg-quiet transition-transform duration-150 ${
+                    openGroupId === group.id ? "rotate-180" : ""
+                  }`}
+                />
               </button>
+              {openGroupId === group.id ? (
+                <div className="absolute right-0 top-full z-20 mt-1 w-full overflow-hidden rounded-[9px] border border-line bg-bg-raised shadow-pop">
+                  <div className="flex items-center gap-2 border-b border-line px-2.5 py-2">
+                    <Search className="h-3.5 w-3.5 shrink-0 text-fg-quiet" />
+                    <input
+                      ref={appSearchRef}
+                      value={appQuery}
+                      onChange={(event) => setAppQuery(event.target.value)}
+                      onKeyDown={(event) => {
+                        if (event.key === "Escape") {
+                          event.preventDefault();
+                          event.stopPropagation();
+                          setOpenGroupId(null);
+                        }
+                      }}
+                      placeholder="Filter apps"
+                      aria-label={`Filter apps for ${group.name}`}
+                      className="min-w-0 flex-1 bg-transparent text-[11.5px] text-fg outline-none placeholder:text-fg-quiet"
+                    />
+                  </div>
+                  <div
+                    role="listbox"
+                    aria-label={`Apps available for ${group.name}`}
+                    className="scroll-thin max-h-44 overflow-y-auto p-1"
+                  >
+                    {availableApps
+                      .filter((entry) => !assignedIds.has(entry.appId))
+                      .filter((entry) => entry.name.toLowerCase().includes(appQuery.trim().toLowerCase()))
+                      .map((entry) => (
+                        <button
+                          key={entry.appId}
+                          type="button"
+                          role="option"
+                          aria-selected={false}
+                          onClick={() => assignApp(group.id, entry.appId)}
+                          className="focus-ring flex min-h-8 w-full cursor-pointer items-center gap-2 rounded-[6px] px-2 text-left text-[11.5px] text-fg-secondary hover:bg-surface-hover hover:text-fg"
+                        >
+                          <span
+                            className="h-1.5 w-1.5 shrink-0 rounded-full bg-accent/70"
+                            aria-hidden="true"
+                          />
+                          <span className="min-w-0 flex-1 truncate">{entry.name}</span>
+                          <Check className="h-3.5 w-3.5 shrink-0 text-accent opacity-0" aria-hidden="true" />
+                        </button>
+                      ))}
+                    {availableApps
+                      .filter((entry) => !assignedIds.has(entry.appId))
+                      .filter((entry) => entry.name.toLowerCase().includes(appQuery.trim().toLowerCase()))
+                      .length === 0 ? (
+                      <div className="px-2 py-3 text-center text-[11px] text-fg-quiet">No matching apps</div>
+                    ) : null}
+                  </div>
+                </div>
+              ) : null}
             </div>
-            <select
-              value={selectedAppByGroup[group.id] ?? ""}
-              aria-label={`Add app to ${group.name}`}
-              onChange={(event) => assignApp(group.id, event.target.value)}
-              className="focus-ring mt-1.5 w-full rounded-[8px] bg-surface px-2 py-1.5 text-[11.5px] text-fg-secondary outline-none"
-            >
-              <option value="">Add an app...</option>
-              {availableApps
-                .filter((entry) => !assignedIds.has(entry.appId))
-                .map((entry) => (
-                  <option key={entry.appId} value={entry.appId}>
-                    {entry.name}
-                  </option>
-                ))}
-            </select>
             {assigned.length > 0 ? (
               <div className="mt-1.5 flex flex-wrap gap-1">
                 {assigned.map((entry) => (
