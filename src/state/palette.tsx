@@ -1,54 +1,28 @@
-import {
-  Calculator,
-  ClipboardCopy,
-  Download,
-  File,
-  FileImage,
-  FileText,
-  FileVideo,
-  Folder,
-  Home,
-  Images,
-  Monitor,
-  Music,
-} from "lucide-react";
 import type { ReactNode } from "react";
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import {
-  copyText,
+  buildSections,
+  historyFilePath,
+  isClipboardKind,
+  quickAccessPaletteItem,
+  type Section,
+} from "../features/palette/sections";
+import {
   existingPaths,
   refreshApps as forceRefresh,
   getAppIcons,
   getApps,
   getQuickAccess,
   hidePaletteWindow,
-  launchApp,
-  launchAppAsAdmin,
   onFileIndexUpdated,
   onWindowFocused,
-  openPath,
-  runPathAsAdmin,
   searchFiles,
 } from "../lib/bridge";
-import { sortApps } from "../lib/emoji";
-import { formatNumber, isMathLike, tryEvaluate } from "../lib/math";
-import { dedupeApps, fuzzy, fuzzyApps } from "../lib/search";
-import type {
-  AppEntry,
-  FileEntry,
-  HistoryEntry,
-  PaletteItem,
-  QuickAccessEntry,
-  TileTint,
-} from "../lib/types";
-import { isElevatablePath } from "../lib/types";
+import { dedupeApps } from "../lib/search";
+import type { AppEntry, FileEntry, PaletteItem, QuickAccessEntry } from "../lib/types";
 import { useApp } from "./app";
 
-export interface Section {
-  id: string;
-  label: string;
-  items: PaletteItem[];
-}
+export type { Section } from "../features/palette/sections";
 
 interface PaletteCtx {
   query: string;
@@ -72,19 +46,6 @@ interface PaletteCtx {
 }
 
 const Ctx = createContext<PaletteCtx | null>(null);
-
-function appPaletteItem(app: AppEntry, icons: Readonly<Record<string, string>>): PaletteItem {
-  return {
-    id: `app::${app.appId}`,
-    title: app.name,
-    subtitle: "Application",
-    icon: { kind: "app", name: app.name, icon: icons[app.appId] ?? app.icon },
-    historyTitle: app.name,
-    appId: app.appId,
-    run: () => launchApp(app.appId),
-    runAsAdmin: isElevatablePath(app.path) ? () => launchAppAsAdmin(app.appId) : undefined,
-  };
-}
 
 export function PaletteProvider({ children }: { children: ReactNode }) {
   const app = useApp();
@@ -268,94 +229,39 @@ export function PaletteProvider({ children }: { children: ReactNode }) {
   }, [quickAccess, app.settings.quickAccess]);
   const filesBusy = filesSearching || (!filePathBrowse && !fileIndexReady && fileIndexing);
 
-  const { sections, flatItems } = useMemo(() => {
-    const normalized = query.trim();
-    const searchQuery = normalized.toLowerCase();
-    const out: Section[] = [];
-
-    if (normalized.length === 0) {
-      // Only needed for the idle (empty query) view; sorting every app is
-      // wasted work while the user is typing.
-      const sortedApps = sortApps(visibleApps);
-      const pinnedItems = pinnedApps.map((entry) => appPaletteItem(entry, appIcons));
-      if (pinnedItems.length > 0) {
-        out.push({ id: "pinned", label: "Pinned", items: pinnedItems });
-      }
-      const pinnedItemIds = new Set(pinnedItems.map((item) => item.id));
-      const recentItems: PaletteItem[] = [];
-      for (const entry of app.history) {
-        const item = rehydrate(entry, visibleApps, existingHistoryPaths, appIcons);
-        if (item && pinnedItemIds.has(item.id)) continue;
-        if (item) recentItems.push(item);
-        if (recentItems.length >= 5) break;
-      }
-      if (recentItems.length > 0) out.push({ id: "recent", label: "Recent", items: recentItems });
-
-      const recentIds = new Set(recentItems.map((item) => item.id));
-      const availableQuick = quickItems.filter((item) => !recentIds.has(item.id)).slice(0, 6);
-      if (availableQuick.length > 0) {
-        out.push({ id: "quick", label: "Quick Access", items: availableQuick });
-      }
-
-      if (sortedApps.length > 0) {
-        const availableApps = sortedApps
-          .filter((entry) => !app.settings.pinnedApps.includes(entry.appId))
-          .slice(0, 8)
-          .map((entry) => appPaletteItem(entry, appIcons));
-        if (availableApps.length > 0) {
-          out.push({ id: "apps", label: "Apps", items: availableApps });
-        }
-      }
-    } else {
-      const math = isMathLike(normalized) ? tryEvaluate(normalized) : null;
-      if (math) {
-        out.push({ id: "calc", label: "Calculator", items: [calcItem(math.value)] });
-      }
-
-      const quickHits = fuzzy(quickItems, normalized, { limit: 3 });
-      if (quickHits.length > 0) {
-        out.push({ id: "quick", label: "Quick Access", items: quickHits.map((hit) => hit.item) });
-      }
-
-      const appHits = fuzzyApps(visibleApps, normalized, 6, { preDeduped: true });
-      const fileItems =
-        fileResultQuery === searchQuery && fileResults.length > 0 ? fileResults.map(filePaletteItem) : [];
-
-      if (filePathBrowse && fileItems.length > 0) {
-        out.push({ id: "files", label: "Folder Contents", items: fileItems });
-      }
-      if (appHits.length > 0) {
-        out.push({
-          id: "apps",
-          label: "Apps",
-          items: appHits.map((entry) => appPaletteItem(entry, appIcons)),
-        });
-      }
-      if (!filePathBrowse && fileItems.length > 0) {
-        out.push({ id: "files", label: "Files & Folders", items: fileItems });
-      }
-
-      if (out.length === 0 && !filesBusy && !filesError && !filePathBrowse) {
-        out.push({ id: "fallback", label: "No Local Matches", items: [copyItem(normalized)] });
-      }
-    }
-
-    return { sections: out, flatItems: out.flatMap((section) => section.items) };
-  }, [
-    query,
-    app.history,
-    existingHistoryPaths,
-    appIcons,
-    visibleApps,
-    pinnedApps,
-    app.settings.pinnedApps,
-    quickItems,
-    fileResults,
-    fileResultQuery,
-    filePathBrowse,
-    filesBusy,
-    filesError,
-  ]);
+  const { sections, flatItems } = useMemo(
+    () =>
+      buildSections({
+        query,
+        apps: visibleApps,
+        pinnedApps,
+        quickItems,
+        pinnedAppIds: app.settings.pinnedApps,
+        history: app.history,
+        existingHistoryPaths,
+        appIcons,
+        fileResults,
+        fileResultQuery,
+        filePathBrowse,
+        filesBusy,
+        filesError,
+      }),
+    [
+      query,
+      visibleApps,
+      pinnedApps,
+      quickItems,
+      app.settings.pinnedApps,
+      app.history,
+      existingHistoryPaths,
+      appIcons,
+      fileResults,
+      fileResultQuery,
+      filePathBrowse,
+      filesBusy,
+      filesError,
+    ],
+  );
 
   // Lazily fill app icons for the rows that are actually rendered. The app
   // metadata list stays lean; one small batched IPC covers the visible set.
@@ -492,134 +398,4 @@ export function usePalette(): PaletteCtx {
   const context = useContext(Ctx);
   if (!context) throw new Error("usePalette outside PaletteProvider");
   return context;
-}
-
-function calcItem(value: number): PaletteItem {
-  const formatted = formatNumber(value);
-  return {
-    id: `calc::${value}`,
-    title: formatted,
-    subtitle: "Copy result to clipboard",
-    icon: { kind: "tile", icon: Calculator, tint: "iris" },
-    historyTitle: `Calculate ${formatted}`,
-    toastDetail: formatted,
-    run: () => copyText(formatted),
-  };
-}
-
-function isClipboardKind(id: string): boolean {
-  return id.startsWith("calc::") || id.startsWith("copy::");
-}
-
-function copyItem(query: string): PaletteItem {
-  return {
-    id: `copy::${query}`,
-    title: `Copy “${query}”`,
-    subtitle: "No files, folders, or apps matched",
-    icon: { kind: "tile", icon: ClipboardCopy, tint: "slate" },
-    historyTitle: query,
-    run: () => copyText(query),
-  };
-}
-
-function quickAccessPaletteItem(entry: QuickAccessEntry): PaletteItem {
-  const iconMap = {
-    home: Home,
-    desktop: Monitor,
-    downloads: Download,
-    documents: FileText,
-    pictures: Images,
-    music: Music,
-    videos: FileVideo,
-  };
-  const tintMap: Record<QuickAccessEntry["kind"], TileTint> = {
-    home: "iris",
-    desktop: "azure",
-    downloads: "mint",
-    documents: "slate",
-    pictures: "amber",
-    music: "rose",
-    videos: "rose",
-  };
-  return {
-    id: pathItemId(entry.path, true),
-    title: entry.name,
-    subtitle: entry.path,
-    keywords: ["open", "folder", "files", entry.kind, entry.path],
-    icon: { kind: "tile", icon: iconMap[entry.kind], tint: tintMap[entry.kind] },
-    historyTitle: entry.name,
-    run: () => openPath(entry.path),
-  };
-}
-
-function filePaletteItem(entry: FileEntry): PaletteItem {
-  const { icon, tint } = fileAppearance(entry);
-  return {
-    id: pathItemId(entry.path, entry.isDirectory),
-    title: entry.name,
-    subtitle: entry.parent,
-    keywords: [entry.path, entry.parent],
-    icon: { kind: "tile", icon, tint },
-    historyTitle: entry.name,
-    run: () => openPath(entry.path),
-    runAsAdmin:
-      !entry.isDirectory && isElevatablePath(entry.path) ? () => runPathAsAdmin(entry.path) : undefined,
-  };
-}
-
-function fileAppearance(entry: FileEntry) {
-  if (entry.isDirectory) return { icon: Folder, tint: "azure" as const };
-  const extension = entry.name.split(".").pop()?.toLowerCase() ?? "";
-  if (["jpg", "jpeg", "png", "gif", "webp", "bmp", "svg"].includes(extension)) {
-    return { icon: FileImage, tint: "amber" as const };
-  }
-  if (["mp4", "mov", "mkv", "avi", "webm"].includes(extension)) {
-    return { icon: FileVideo, tint: "rose" as const };
-  }
-  if (["mp3", "wav", "flac", "m4a", "aac", "ogg"].includes(extension)) {
-    return { icon: Music, tint: "mint" as const };
-  }
-  if (["txt", "md", "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "csv"].includes(extension)) {
-    return { icon: FileText, tint: "slate" as const };
-  }
-  return { icon: File, tint: "slate" as const };
-}
-
-function pathItemId(path: string, isDirectory: boolean): string {
-  return `file::${isDirectory ? "d" : "f"}::${path}`;
-}
-
-function historyFilePath(id: string): string | null {
-  const directoryPrefix = "file::d::";
-  const filePrefix = "file::f::";
-  if (id.startsWith(directoryPrefix)) return id.slice(directoryPrefix.length);
-  if (id.startsWith(filePrefix)) return id.slice(filePrefix.length);
-  return null;
-}
-
-function rehydrate(
-  history: HistoryEntry,
-  apps: AppEntry[],
-  existingHistoryPaths: ReadonlySet<string>,
-  icons: Readonly<Record<string, string>>,
-): PaletteItem | null {
-  if (history.id.startsWith("app::")) {
-    const appId = history.id.slice(5);
-    const entry = apps.find((candidate) => candidate.appId === appId);
-    return entry ? appPaletteItem(entry, icons) : null;
-  }
-  const directoryPrefix = "file::d::";
-  const filePrefix = "file::f::";
-  const isDirectory = history.id.startsWith(directoryPrefix);
-  const prefix = isDirectory ? directoryPrefix : filePrefix;
-  if (!history.id.startsWith(prefix)) return null;
-  const path = history.id.slice(prefix.length);
-  if (!existingHistoryPaths.has(path)) return null;
-  const boundary = Math.max(path.lastIndexOf("\\"), path.lastIndexOf("/"));
-  return filePaletteItem({
-    name: history.title,
-    path,
-    parent: boundary > 0 ? path.slice(0, boundary) : path,
-    isDirectory,
-  });
 }
