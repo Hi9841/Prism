@@ -250,6 +250,8 @@ function QuickAccessPicker() {
 export function SettingsSheet() {
   const { settings, updateSettings, openSettings, setOpenSettings, clearHistory } = useApp();
   const panelRef = useRef<HTMLDivElement>(null);
+  const closeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [closing, setClosing] = useState(false);
   const [titleId] = useState(() => `prism-settings-title-${Math.random().toString(36).slice(2, 8)}`);
   const [version, setVersion] = useState("");
 
@@ -258,6 +260,33 @@ export function SettingsSheet() {
       .then(setVersion)
       .catch(() => {});
   }, []);
+
+  // Deliberate closes (X, backdrop) animate the sheet out first; Esc snaps.
+  const requestClose = useCallback(() => {
+    if (closing) return;
+    setClosing(true);
+    closeTimerRef.current = setTimeout(() => {
+      closeTimerRef.current = null;
+      setOpenSettings(false);
+    }, 190);
+  }, [closing, setOpenSettings]);
+
+  // A fresh open resets the exit state and cancels any pending close.
+  useEffect(() => {
+    if (!openSettings) return;
+    if (closeTimerRef.current) {
+      clearTimeout(closeTimerRef.current);
+      closeTimerRef.current = null;
+    }
+    setClosing(false);
+  }, [openSettings]);
+
+  useEffect(
+    () => () => {
+      if (closeTimerRef.current) clearTimeout(closeTimerRef.current);
+    },
+    [],
+  );
 
   // Focus management: focus the panel on open, restore it on close.
   useEffect(() => {
@@ -304,12 +333,14 @@ export function SettingsSheet() {
   if (!openSettings) return null;
 
   return (
-    <div className="settings-backdrop absolute inset-0 z-40 flex">
+    <div
+      className={`settings-backdrop ${closing ? "settings-backdrop-exit" : ""} absolute inset-0 z-40 flex`}
+    >
       <button
         type="button"
         aria-label="Close settings"
         className="absolute inset-0 cursor-default rounded-[26px_26px_8px_8px] bg-backdrop backdrop-blur-[2px]"
-        onClick={() => setOpenSettings(false)}
+        onClick={() => requestClose()}
       />
       <div
         ref={panelRef}
@@ -317,7 +348,7 @@ export function SettingsSheet() {
         aria-modal="true"
         aria-labelledby={titleId}
         onKeyDown={onPanelKeyDown}
-        className="settings-panel relative ml-auto flex w-[min(340px,88%)] flex-col overflow-hidden rounded-tr-[26px] rounded-br-[8px] border-l border-line bg-bg-raised backdrop-blur-2xl"
+        className={`settings-panel ${closing ? "settings-panel-exit" : ""} relative ml-auto flex w-[min(340px,88%)] flex-col overflow-hidden rounded-tr-[26px] rounded-br-[8px] border-l border-line bg-bg-raised backdrop-blur-2xl`}
         style={{ boxShadow: "-24px 0 64px rgb(0 0 0 / 0.35)" }}
       >
         <div className="flex items-center justify-between px-5 pb-2 pt-5">
@@ -327,7 +358,7 @@ export function SettingsSheet() {
           <button
             type="button"
             aria-label="Close settings"
-            onClick={() => setOpenSettings(false)}
+            onClick={() => requestClose()}
             className="focus-ring grid h-7 w-7 cursor-pointer place-items-center rounded-lg text-fg-tertiary transition-colors hover:bg-surface-hover hover:text-fg-secondary"
           >
             <X className="h-4 w-4" />

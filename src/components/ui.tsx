@@ -134,7 +134,7 @@ export function Toggle({
       style={{ background: checked ? "var(--accent)" : "var(--t-track)" }}
     >
       <span
-        className="absolute top-[3px] left-[3px] block h-[18px] w-[18px] rounded-full bg-white shadow-sm transition-transform duration-150 ease-out"
+        className="absolute top-[3px] left-[3px] block h-[18px] w-[18px] rounded-full bg-white shadow-sm transition-transform duration-150 [transition-timing-function:var(--ease-out-soft)]"
         style={{ transform: checked ? "translateX(16px)" : "translateX(0)" }}
       />
     </button>

@@ -11,7 +11,7 @@ export function ToastStack() {
       {toasts.map((t) => (
         <div
           key={t.id}
-          className="toast-enter flex cursor-default items-center gap-2.5 rounded-[14px] border border-line bg-toast py-2 pl-3 pr-4 shadow-raised backdrop-blur-xl"
+          className={`toast-enter ${t.closing ? "toast-exit" : ""} flex cursor-default items-center gap-2.5 rounded-[14px] border border-line bg-toast py-2 pl-3 pr-4 shadow-raised backdrop-blur-xl`}
           style={{ boxShadow: "inset 0 1px 0 rgb(255 255 255 / 0.05), var(--shadow-raised)" }}
         >
           <span className="grid h-5 w-5 place-items-center rounded-full bg-accent/90 text-[11px] text-accent-fg">

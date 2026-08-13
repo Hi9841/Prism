@@ -71,7 +71,7 @@ export function ResultContextMenu({
             onClose(true);
           }
         }}
-        className="fixed z-50 w-[196px] overflow-hidden rounded-[8px] border border-line bg-bg-raised p-1 shadow-pop backdrop-blur-xl"
+        className="context-menu-enter fixed z-50 w-[196px] overflow-hidden rounded-[8px] border border-line bg-bg-raised p-1 shadow-pop backdrop-blur-xl"
         style={{ left: position.x, top: position.y }}
       >
         <button
