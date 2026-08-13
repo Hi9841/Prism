@@ -96,6 +96,9 @@ export const QUICK_ACCESS_LIMIT = 6;
 export const PINNED_APP_LIMIT = 64;
 export const APP_GROUP_LIMIT = 16;
 export const APP_GROUP_APP_LIMIT = 64;
+export const DEFAULT_SECTION_ORDER = ["pinned", "recent", "quick", "apps"] as const;
+export type BuiltInSectionId = (typeof DEFAULT_SECTION_ORDER)[number];
+export const SECTION_ORDER_LIMIT = DEFAULT_SECTION_ORDER.length;
 
 const ELEVATABLE_EXTENSIONS = new Set(["exe", "com", "bat", "cmd", "ps1", "vbs", "js", "wsf"]);
 
@@ -140,6 +143,40 @@ export function reorderQuickAccess(
   return reordered;
 }
 
+export function reorderSections(
+  sectionOrder: readonly string[],
+  sourceId: string,
+  targetId: string,
+): string[] {
+  const sourceIndex = sectionOrder.indexOf(sourceId);
+  const targetIndex = sectionOrder.indexOf(targetId);
+  if (sourceIndex < 0 || targetIndex < 0 || sourceIndex === targetIndex) {
+    return [...sectionOrder];
+  }
+
+  const reordered = [...sectionOrder];
+  const [movedId] = reordered.splice(sourceIndex, 1);
+  reordered.splice(targetIndex, 0, movedId);
+  return reordered;
+}
+
+export function reorderAppGroups(
+  groups: readonly AppGroup[],
+  sourceId: string,
+  targetId: string,
+): AppGroup[] {
+  const sourceIndex = groups.findIndex((group) => group.id === sourceId);
+  const targetIndex = groups.findIndex((group) => group.id === targetId);
+  if (sourceIndex < 0 || targetIndex < 0 || sourceIndex === targetIndex) {
+    return [...groups];
+  }
+
+  const reordered = [...groups];
+  const [movedGroup] = reordered.splice(sourceIndex, 1);
+  reordered.splice(targetIndex, 0, movedGroup);
+  return reordered;
+}
+
 export interface QuickAccessEntry {
   name: string;
   path: string;
@@ -180,6 +217,7 @@ export interface Settings {
   quickAccessCollapsed: boolean;
   pinnedApps: string[];
   appGroups: AppGroup[];
+  sectionOrder: string[];
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -195,6 +233,7 @@ export const DEFAULT_SETTINGS: Settings = {
   quickAccessCollapsed: false,
   pinnedApps: [],
   appGroups: [],
+  sectionOrder: [...DEFAULT_SECTION_ORDER],
 };
 
 export interface PersistedState {

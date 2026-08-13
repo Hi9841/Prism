@@ -1,10 +1,13 @@
 import { describe, expect, it } from "vitest";
 import {
   DEFAULT_QUICK_ACCESS,
+  DEFAULT_SECTION_ORDER,
   DEFAULT_SETTINGS,
   isElevatablePath,
+  reorderAppGroups,
   reorderPinnedApps,
   reorderQuickAccess,
+  reorderSections,
   stepViewZoom,
 } from "../lib/types";
 import { SHORTCUT_OPTIONS, sanitizeHistory, sanitizeSettings } from "./app";
@@ -74,6 +77,37 @@ describe("quick access settings", () => {
     expect(sanitizeSettings({}).quickAccessCollapsed).toBe(false);
     expect(sanitizeSettings({ quickAccessCollapsed: true }).quickAccessCollapsed).toBe(true);
     expect(sanitizeSettings({ quickAccessCollapsed: "yes" }).quickAccessCollapsed).toBe(false);
+  });
+});
+
+describe("palette section ordering", () => {
+  it("defaults older state to the standard section order", () => {
+    expect(sanitizeSettings({}).sectionOrder).toEqual(DEFAULT_SECTION_ORDER);
+  });
+
+  it("keeps valid order, removes duplicates, and appends missing sections", () => {
+    expect(sanitizeSettings({ sectionOrder: ["apps", "apps", "unknown", "recent"] }).sectionOrder).toEqual([
+      "apps",
+      "recent",
+      "pinned",
+      "quick",
+    ]);
+  });
+
+  it("reorders sections and app groups without mutating the source", () => {
+    const sectionOrder = ["pinned", "recent", "quick", "apps"];
+    expect(reorderSections(sectionOrder, "apps", "recent")).toEqual(["pinned", "apps", "recent", "quick"]);
+    expect(sectionOrder).toEqual(["pinned", "recent", "quick", "apps"]);
+
+    const groups = [
+      { id: "creative", name: "Creative", appIds: [], collapsed: false },
+      { id: "developer", name: "Developer", appIds: [], collapsed: false },
+    ];
+    expect(reorderAppGroups(groups, "developer", "creative").map((group) => group.id)).toEqual([
+      "developer",
+      "creative",
+    ]);
+    expect(groups.map((group) => group.id)).toEqual(["creative", "developer"]);
   });
 });
 

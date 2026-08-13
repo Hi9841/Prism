@@ -27,10 +27,12 @@ import {
   APP_GROUP_APP_LIMIT,
   APP_GROUP_LIMIT,
   DEFAULT_QUICK_ACCESS,
+  DEFAULT_SECTION_ORDER,
   DEFAULT_SETTINGS,
   PINNED_APP_LIMIT,
   QUICK_ACCESS_KINDS,
   QUICK_ACCESS_LIMIT,
+  SECTION_ORDER_LIMIT,
   stepViewZoom,
   VIEW_ZOOM_LEVELS,
 } from "../lib/types";
@@ -52,6 +54,7 @@ interface AppCtx {
   setOpenSettings: (open: boolean) => void;
   history: HistoryEntry[];
   pushHistory: (id: string, title: string) => void;
+  removeHistory: (id: string) => void;
   clearHistory: () => void;
   toasts: Toast[];
   showToast: (title: string, detail?: string) => void;
@@ -244,6 +247,17 @@ export function AppProvider({ children }: { children: ReactNode }) {
     schedulePersist();
   }, [schedulePersist]);
 
+  const removeHistory = useCallback(
+    (id: string) => {
+      const next = historyRef.current.filter((entry) => entry.id !== id);
+      if (next.length === historyRef.current.length) return;
+      historyRef.current = next;
+      setHistory(next);
+      schedulePersist();
+    },
+    [schedulePersist],
+  );
+
   const resetSettings = useCallback(async () => {
     // Apply native registrations first so a failed shortcut or taskbar
     // transition cannot leave the UI claiming that defaults are active.
@@ -254,6 +268,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       quickAccess: [...DEFAULT_SETTINGS.quickAccess],
       pinnedApps: [],
       appGroups: [],
+      sectionOrder: [...DEFAULT_SECTION_ORDER],
     };
     settingsRef.current = next;
     setSettings(next);
@@ -365,6 +380,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       setOpenSettings,
       history,
       pushHistory,
+      removeHistory,
       clearHistory,
       toasts,
       showToast,
@@ -378,6 +394,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       openSettings,
       history,
       pushHistory,
+      removeHistory,
       clearHistory,
       toasts,
       showToast,
@@ -424,7 +441,30 @@ export function sanitizeSettings(raw: unknown): Settings {
         : DEFAULT_SETTINGS.quickAccessCollapsed,
     pinnedApps: sanitizePinnedApps(src.pinnedApps),
     appGroups: sanitizeAppGroups(src.appGroups),
+    sectionOrder: sanitizeSectionOrder(src.sectionOrder),
   };
+}
+
+function sanitizeSectionOrder(raw: unknown): string[] {
+  if (!Array.isArray(raw)) return [...DEFAULT_SECTION_ORDER];
+  const result: string[] = [];
+  const seen = new Set<string>();
+  for (const value of raw) {
+    if (
+      typeof value !== "string" ||
+      !DEFAULT_SECTION_ORDER.includes(value as (typeof DEFAULT_SECTION_ORDER)[number]) ||
+      seen.has(value)
+    ) {
+      continue;
+    }
+    seen.add(value);
+    result.push(value);
+    if (result.length >= SECTION_ORDER_LIMIT) break;
+  }
+  for (const id of DEFAULT_SECTION_ORDER) {
+    if (!seen.has(id)) result.push(id);
+  }
+  return result;
 }
 
 function sanitizeAppGroups(raw: unknown): AppGroup[] {
