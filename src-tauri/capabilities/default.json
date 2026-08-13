@@ -13,7 +13,6 @@
     "core:webview:allow-set-webview-zoom",
     "core:event:allow-listen",
     "clipboard-manager:allow-write-text",
-    "process:allow-restart",
     "updater:default"
   ]
 }
