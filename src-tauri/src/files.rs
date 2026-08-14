@@ -2,7 +2,7 @@
 
 use base64::Engine;
 use serde::{Deserialize, Serialize};
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::ffi::c_void;
 use std::io::Cursor;
 use std::os::windows::ffi::OsStrExt;
@@ -17,20 +17,21 @@ use windows::Win32::Storage::FileSystem::{
     MOVEFILE_WRITE_THROUGH,
 };
 use windows::Win32::System::Com::CoTaskMemFree;
-use windows::Win32::System::WindowsProgramming::DRIVE_FIXED;
+use windows::Win32::System::WindowsProgramming::{DRIVE_FIXED, DRIVE_RAMDISK, DRIVE_REMOVABLE};
 use windows::Win32::UI::Shell::{
     FOLDERID_Desktop, FOLDERID_Documents, FOLDERID_Downloads, FOLDERID_Music, FOLDERID_Pictures,
     FOLDERID_Profile, FOLDERID_Videos, SHGetKnownFolderPath,
 };
 
-const CACHE_VERSION: u32 = 3;
+const CACHE_VERSION: u32 = 4;
 const CACHE_TTL_SECONDS: u64 = 6 * 60 * 60;
 // The index is a bounded snapshot, not a filesystem watcher. Refreshing it
 // every minute causes a full recursive scan and an atomic cache write while
 // the launcher is usually hidden. Keep the snapshot reasonably fresh without
 // turning idle time into sustained disk I/O.
 const REFRESH_INTERVAL: Duration = Duration::from_secs(15 * 60);
-const MAX_ENTRIES: usize = 100_000;
+const DRIVE_POLL_INTERVAL: Duration = Duration::from_secs(5);
+const MAX_ENTRIES_PER_DRIVE: usize = 100_000;
 const MAX_DEPTH: usize = 16;
 const DEFAULT_LIMIT: usize = 10;
 const MAX_LIMIT: usize = 20;
@@ -106,6 +107,7 @@ pub struct FileIndex {
 #[derive(Default)]
 struct IndexData {
     entries: Vec<SearchEntry>,
+    drive_roots: Vec<String>,
     ready: bool,
     indexing: bool,
 }
@@ -128,6 +130,8 @@ struct CachedEntry {
 struct CacheFile {
     version: u32,
     generated_at: u64,
+    #[serde(default)]
+    drive_roots: Vec<String>,
     entries: Vec<CachedEntry>,
 }
 
@@ -135,7 +139,13 @@ struct CacheFile {
 struct CacheFileRef<'a> {
     version: u32,
     generated_at: u64,
+    drive_roots: &'a [String],
     entries: &'a [CachedEntry],
+}
+
+struct IndexSnapshot {
+    drive_roots: Vec<String>,
+    entries: Vec<CachedEntry>,
 }
 
 impl FileIndex {
@@ -218,20 +228,34 @@ impl FileIndex {
             .unwrap_or((false, false))
     }
 
-    fn replace(&self, entries: Vec<CachedEntry>, indexing: bool) {
+    fn replace_snapshot(&self, snapshot: IndexSnapshot, indexing: bool) {
         if let Ok(mut data) = self.inner.write() {
-            data.entries = prepare(entries);
+            data.entries = prepare(snapshot.entries);
+            data.drive_roots = snapshot.drive_roots;
             data.ready = true;
             data.indexing = indexing;
         }
     }
 
     /// Returns true when a fresh scan differs from the in-memory snapshot.
-    fn changed(&self, next: &[CachedEntry]) -> bool {
+    fn changed(&self, next: &IndexSnapshot) -> bool {
         self.inner
             .read()
-            .map(|data| !same_entries(&data.entries, next))
+            .map(|data| {
+                data.drive_roots != next.drive_roots || !same_entries(&data.entries, &next.entries)
+            })
             .unwrap_or(false)
+    }
+
+    #[cfg(test)]
+    fn replace(&self, entries: Vec<CachedEntry>, indexing: bool) {
+        self.replace_snapshot(
+            IndexSnapshot {
+                drive_roots: Vec::new(),
+                entries,
+            },
+            indexing,
+        );
     }
 
     fn set_indexing(&self, indexing: bool) {
@@ -336,11 +360,13 @@ pub fn warm(index: FileIndex, cache_path: PathBuf, app: tauri::AppHandle) {
     index.set_indexing(true);
     tauri::async_runtime::spawn(async move {
         let mut refresh_now = true;
+        let mut indexed_drive_roots = Vec::new();
         let cached_path = cache_path.clone();
-        if let Ok(Ok((entries, fresh))) =
+        if let Ok(Ok((snapshot, fresh))) =
             tauri::async_runtime::spawn_blocking(move || load_cache(&cached_path)).await
         {
-            index.replace(entries, !fresh);
+            indexed_drive_roots = snapshot.drive_roots.clone();
+            index.replace_snapshot(snapshot, !fresh);
             let _ = app.emit("file-index-updated", ());
             if fresh {
                 refresh_now = false;
@@ -348,12 +374,23 @@ pub fn warm(index: FileIndex, cache_path: PathBuf, app: tauri::AppHandle) {
         }
 
         if refresh_now {
-            refresh_index(&index, &cache_path, &app).await;
+            if let Some(roots) = refresh_index(&index, &cache_path, &app).await {
+                indexed_drive_roots = roots;
+            }
         }
 
+        let mut last_refresh = tokio::time::Instant::now();
         loop {
-            tokio::time::sleep(REFRESH_INTERVAL).await;
-            refresh_index(&index, &cache_path, &app).await;
+            tokio::time::sleep(DRIVE_POLL_INTERVAL).await;
+            let current_roots = tauri::async_runtime::spawn_blocking(local_drive_root_strings)
+                .await
+                .unwrap_or_default();
+            if current_roots != indexed_drive_roots || last_refresh.elapsed() >= REFRESH_INTERVAL {
+                if let Some(roots) = refresh_index(&index, &cache_path, &app).await {
+                    indexed_drive_roots = roots;
+                }
+                last_refresh = tokio::time::Instant::now();
+            }
         }
     });
 }
@@ -365,32 +402,45 @@ fn same_entries(current: &[SearchEntry], next: &[CachedEntry]) -> bool {
         })
 }
 
-async fn refresh_index(index: &FileIndex, cache_path: &Path, app: &tauri::AppHandle) {
+async fn refresh_index(
+    index: &FileIndex,
+    cache_path: &Path,
+    app: &tauri::AppHandle,
+) -> Option<Vec<String>> {
     index.set_indexing(true);
     let scan_path = cache_path.to_path_buf();
     let index_for_task = index.clone();
-    let changed = tauri::async_runtime::spawn_blocking(move || {
-        let entries = scan_user_folders();
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        let snapshot = scan_user_folders();
+        let drive_roots = snapshot.drive_roots.clone();
         // Every successful scan refreshes the verification timestamp, so a
         // boot shortly after a periodic refresh skips the startup rescan even
         // when the unchanged snapshot was not rewritten.
         let _ = write_verified_at(&scan_path);
         // Identical scans skip the multi-MB cache rewrite entirely.
-        if !index_for_task.changed(&entries) {
-            return false;
+        if !index_for_task.changed(&snapshot) {
+            return (drive_roots, false);
         }
         // A cache write failure must not discard a valid in-memory scan.
-        let _ = save_cache(&scan_path, &entries);
-        index_for_task.replace(entries, false);
-        true
+        let _ = save_cache(&scan_path, &snapshot);
+        index_for_task.replace_snapshot(snapshot, false);
+        (drive_roots, true)
     })
-    .await
-    .unwrap_or(false);
+    .await;
 
-    if changed {
-        let _ = app.emit("file-index-updated", ());
-    } else {
-        index.set_indexing(false);
+    match result {
+        Ok((drive_roots, changed)) => {
+            if changed {
+                let _ = app.emit("file-index-updated", ());
+            } else {
+                index.set_indexing(false);
+            }
+            Some(drive_roots)
+        }
+        Err(_) => {
+            index.set_indexing(false);
+            None
+        }
     }
 }
 
@@ -406,33 +456,76 @@ pub fn quick_access() -> Vec<QuickAccessEntry> {
         .collect()
 }
 
-fn scan_user_folders() -> Vec<CachedEntry> {
-    let mut roots = fixed_drive_roots();
-    roots.extend(
-        known_locations()
-            .into_iter()
-            .filter(|(_, _, kind)| *kind != "home")
-            .map(|(_, path, _)| path)
-            .filter(|path| path.is_dir()),
-    );
-    roots.sort();
-    roots.dedup();
+fn scan_user_folders() -> IndexSnapshot {
+    let drive_roots = local_drive_roots();
+    let known_roots: Vec<PathBuf> = known_locations()
+        .into_iter()
+        .filter(|(_, _, kind)| *kind != "home")
+        .map(|(_, path, _)| path)
+        .filter(|path| path.is_dir())
+        .collect();
+    scan_drive_roots(&drive_roots, &known_roots, MAX_ENTRIES_PER_DRIVE)
+}
 
-    let mut entries = Vec::with_capacity(16_384);
+fn scan_drive_roots(
+    drive_roots: &[PathBuf],
+    known_roots: &[PathBuf],
+    max_entries_per_drive: usize,
+) -> IndexSnapshot {
+    let mut assigned_known_roots = HashSet::new();
+    let mut entries = Vec::with_capacity(16_384 * drive_roots.len().max(1));
+
+    // Give every local volume its own budget. A large C: drive must not use
+    // the entire index before a secondary or external drive is visited.
+    for drive_root in drive_roots {
+        let mut roots = vec![drive_root.clone()];
+        for (index, known_root) in known_roots.iter().enumerate() {
+            if known_root.starts_with(drive_root) {
+                roots.push(known_root.clone());
+                assigned_known_roots.insert(index);
+            }
+        }
+        entries.extend(scan_roots(&roots, max_entries_per_drive));
+    }
+
+    // Keep redirected known folders searchable even when their backing path
+    // is not represented by a normal drive letter.
+    let other_roots: Vec<PathBuf> = known_roots
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| !assigned_known_roots.contains(index))
+        .map(|(_, path)| path.clone())
+        .collect();
+    entries.extend(scan_roots(&other_roots, max_entries_per_drive));
+
+    IndexSnapshot {
+        drive_roots: drive_roots
+            .iter()
+            .map(|root| root.to_string_lossy().into_owned())
+            .collect(),
+        entries,
+    }
+}
+
+fn scan_roots(roots: &[PathBuf], max_entries: usize) -> Vec<CachedEntry> {
+    let mut entries = Vec::with_capacity(16_384.min(max_entries));
     let mut queue = VecDeque::new();
+    let mut queued_directories = HashSet::new();
     for root in roots {
-        queue.push_back((root, 0usize));
+        if queued_directories.insert(path_key(root)) {
+            queue.push_back((root.clone(), 0usize));
+        }
     }
 
     while let Some((dir, depth)) = queue.pop_front() {
-        if entries.len() >= MAX_ENTRIES || depth > MAX_DEPTH {
+        if entries.len() >= max_entries || depth > MAX_DEPTH {
             break;
         }
         let Ok(children) = std::fs::read_dir(&dir) else {
             continue;
         };
         for child in children.flatten() {
-            if entries.len() >= MAX_ENTRIES {
+            if entries.len() >= max_entries {
                 break;
             }
             let path = child.path();
@@ -455,7 +548,7 @@ fn scan_user_folders() -> Vec<CachedEntry> {
                 path: path_text,
                 is_directory,
             });
-            if is_directory && depth < MAX_DEPTH {
+            if is_directory && depth < MAX_DEPTH && queued_directories.insert(path_key(&path)) {
                 queue.push_back((path, depth + 1));
             }
         }
@@ -463,7 +556,11 @@ fn scan_user_folders() -> Vec<CachedEntry> {
     entries
 }
 
-fn fixed_drive_roots() -> Vec<PathBuf> {
+fn path_key(path: &Path) -> String {
+    path.to_string_lossy().to_lowercase()
+}
+
+fn local_drive_roots() -> Vec<PathBuf> {
     let required = unsafe { GetLogicalDriveStringsW(None) };
     if required == 0 {
         return Vec::new();
@@ -480,10 +577,21 @@ fn fixed_drive_roots() -> Vec<PathBuf> {
         .filter_map(|slice| {
             let mut root = slice.to_vec();
             root.push(0);
-            (unsafe { GetDriveTypeW(PCWSTR(root.as_ptr())) } == DRIVE_FIXED)
+            is_searchable_drive_type(unsafe { GetDriveTypeW(PCWSTR(root.as_ptr())) })
                 .then(|| PathBuf::from(String::from_utf16_lossy(slice)))
         })
         .collect()
+}
+
+fn local_drive_root_strings() -> Vec<String> {
+    local_drive_roots()
+        .into_iter()
+        .map(|root| root.to_string_lossy().into_owned())
+        .collect()
+}
+
+fn is_searchable_drive_type(drive_type: u32) -> bool {
+    matches!(drive_type, DRIVE_FIXED | DRIVE_REMOVABLE | DRIVE_RAMDISK)
 }
 
 fn should_skip_dir(name: &str) -> bool {
@@ -627,7 +735,7 @@ fn target_score(query: &str, target: &str) -> Option<i32> {
     None
 }
 
-fn load_cache(path: &Path) -> Result<(Vec<CachedEntry>, bool), String> {
+fn load_cache(path: &Path) -> Result<(IndexSnapshot, bool), String> {
     let text = std::fs::read_to_string(path).map_err(|error| error.to_string())?;
     let cache: CacheFile = serde_json::from_str(&text).map_err(|error| error.to_string())?;
     if cache.version != CACHE_VERSION {
@@ -637,13 +745,37 @@ fn load_cache(path: &Path) -> Result<(Vec<CachedEntry>, bool), String> {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
-    let age = now.saturating_sub(cache.generated_at);
     // A recent verification pass (sidecar timestamp) also counts as fresh,
     // since it rescanned the same unchanged snapshot.
-    let verified_fresh = read_verified_at(path)
+    let fresh = cache_is_fresh(
+        &cache,
+        now,
+        read_verified_at(path),
+        &local_drive_root_strings(),
+    );
+    Ok((
+        IndexSnapshot {
+            drive_roots: cache.drive_roots,
+            entries: cache.entries,
+        },
+        fresh,
+    ))
+}
+
+fn cache_is_fresh(
+    cache: &CacheFile,
+    now: u64,
+    verified_at: Option<u64>,
+    current_drive_roots: &[String],
+) -> bool {
+    if cache.drive_roots != current_drive_roots {
+        return false;
+    }
+    let generated_fresh = now.saturating_sub(cache.generated_at) <= CACHE_TTL_SECONDS;
+    let verified_fresh = verified_at
         .map(|verified| now.saturating_sub(verified) <= CACHE_TTL_SECONDS)
         .unwrap_or(false);
-    Ok((cache.entries, age <= CACHE_TTL_SECONDS || verified_fresh))
+    generated_fresh || verified_fresh
 }
 
 fn verified_path(cache_path: &Path) -> PathBuf {
@@ -666,7 +798,7 @@ fn read_verified_at(cache_path: &Path) -> Option<u64> {
     text.trim().parse().ok()
 }
 
-fn save_cache(path: &Path, entries: &[CachedEntry]) -> Result<(), String> {
+fn save_cache(path: &Path, snapshot: &IndexSnapshot) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
     }
@@ -676,7 +808,8 @@ fn save_cache(path: &Path, entries: &[CachedEntry]) -> Result<(), String> {
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs(),
-        entries,
+        drive_roots: &snapshot.drive_roots,
+        entries: &snapshot.entries,
     };
     let text = serde_json::to_vec(&cache).map_err(|error| error.to_string())?;
     let temp = path.with_extension("json.tmp");
@@ -911,6 +1044,72 @@ mod tests {
             assert!(should_skip_dir(name), "should skip {name}");
         }
         assert!(!should_skip_dir("Projects"));
+    }
+
+    #[test]
+    fn external_local_drive_types_are_searchable() {
+        assert!(is_searchable_drive_type(DRIVE_FIXED));
+        assert!(is_searchable_drive_type(DRIVE_REMOVABLE));
+        assert!(is_searchable_drive_type(DRIVE_RAMDISK));
+        assert!(!is_searchable_drive_type(0));
+    }
+
+    #[test]
+    fn each_drive_gets_its_own_entry_budget() {
+        let base = std::env::temp_dir().join(format!(
+            "prism-multi-drive-scan-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let first = base.join("first");
+        let second = base.join("second");
+        std::fs::create_dir_all(&first).expect("create first drive root");
+        std::fs::create_dir_all(&second).expect("create second drive root");
+        for root in [&first, &second] {
+            for number in 0..4 {
+                std::fs::write(root.join(format!("file-{number}.txt")), "test")
+                    .expect("create drive test file");
+            }
+        }
+
+        let snapshot = scan_drive_roots(&[first.clone(), second.clone()], &[], 2);
+        assert_eq!(snapshot.entries.len(), 4);
+        assert_eq!(
+            snapshot
+                .entries
+                .iter()
+                .filter(|entry| Path::new(&entry.path).starts_with(&first))
+                .count(),
+            2
+        );
+        assert_eq!(
+            snapshot
+                .entries
+                .iter()
+                .filter(|entry| Path::new(&entry.path).starts_with(&second))
+                .count(),
+            2
+        );
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn mounted_drive_change_invalidates_a_fresh_cache() {
+        let cache = CacheFile {
+            version: CACHE_VERSION,
+            generated_at: 10_000,
+            drive_roots: vec![r"C:\".to_string()],
+            entries: Vec::new(),
+        };
+        assert!(cache_is_fresh(&cache, 10_001, None, &[r"C:\".to_string()]));
+        assert!(!cache_is_fresh(
+            &cache,
+            10_001,
+            None,
+            &[r"C:\".to_string(), r"E:\".to_string()]
+        ));
     }
 
     /// Manual hot-path benchmark: per-search cost against a full 100k index.

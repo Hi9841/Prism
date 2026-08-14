@@ -161,7 +161,7 @@ export async function runPathAsAdmin(path: string): Promise<void> {
   await invoke("run_path_as_admin", { path });
 }
 
-export async function searchFiles(query: string, limit = 8): Promise<FileSearchResponse> {
+export async function searchFiles(query: string, limit = 20): Promise<FileSearchResponse> {
   if (!inTauri) {
     const lower = query.toLowerCase();
     const sample = [
