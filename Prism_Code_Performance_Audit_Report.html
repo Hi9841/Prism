@@ -1,0 +1,1570 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Prism Engineering Audit · Performance & Code Quality Report</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <style>
+    :root {
+      /* Anti-vibe dark theme: Pure, functional, neutral, high-contrast, zero AI purple */
+      --bg-root: #090a0d;
+      --bg-surface: #111318;
+      --bg-surface-hover: #161920;
+      --bg-elevated: #1a1d26;
+      --bg-code: #0c0d12;
+      
+      --border-subtle: #20242f;
+      --border-strong: #2e3442;
+      --border-active: #e5e7eb;
+
+      --fg-primary: #f3f4f6;
+      --fg-secondary: #9ca3af;
+      --fg-tertiary: #6b7280;
+      --fg-quaternary: #4b5563;
+
+      --diff-add-text: #34d399;
+      --diff-add-bg: rgba(16, 185, 129, 0.08);
+      --diff-add-border: rgba(16, 185, 129, 0.25);
+
+      --diff-del-text: #f87171;
+      --diff-del-bg: rgba(239, 68, 68, 0.08);
+      --diff-del-border: rgba(239, 68, 68, 0.25);
+
+      --warn-text: #fbbf24;
+      --warn-bg: rgba(245, 158, 11, 0.08);
+      --warn-border: rgba(245, 158, 11, 0.25);
+
+      --info-text: #38bdf8;
+      --info-bg: rgba(56, 189, 248, 0.08);
+      --info-border: rgba(56, 189, 248, 0.25);
+
+      --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      --font-mono: 'JetBrains Mono', monospace;
+
+      --radius-sm: 6px;
+      --radius-md: 10px;
+      --radius-lg: 14px;
+    }
+
+    *, *::before, *::after {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    html {
+      scroll-behavior: smooth;
+      background-color: var(--bg-root);
+    }
+
+    body {
+      background-color: var(--bg-root);
+      color: var(--fg-primary);
+      font-family: var(--font-sans);
+      font-size: 14.5px;
+      line-height: 1.6;
+      -webkit-font-smoothing: antialiased;
+      -moz-osx-font-smoothing: grayscale;
+      padding-bottom: 96px;
+    }
+
+    .container {
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 0 24px;
+    }
+
+    /* Header */
+    header {
+      padding: 48px 0 32px;
+      border-bottom: 1px solid var(--border-subtle);
+      margin-bottom: 36px;
+    }
+
+    .header-top {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+      margin-bottom: 16px;
+      flex-wrap: wrap;
+    }
+
+    .meta-tags {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+
+    .tag {
+      font-family: var(--font-mono);
+      font-size: 11.5px;
+      font-weight: 600;
+      padding: 3px 10px;
+      border-radius: var(--radius-sm);
+      background: var(--bg-surface);
+      border: 1px solid var(--border-subtle);
+      color: var(--fg-secondary);
+      font-variant-numeric: tabular-nums;
+    }
+
+    .tag-active {
+      background: var(--bg-elevated);
+      color: var(--fg-primary);
+      border-color: var(--border-strong);
+    }
+
+    .tag-emerald { color: var(--diff-add-text); border-color: var(--diff-add-border); background: var(--diff-add-bg); }
+    .tag-rose { color: var(--diff-del-text); border-color: var(--diff-del-border); background: var(--diff-del-bg); }
+    .tag-amber { color: var(--warn-text); border-color: var(--warn-border); background: var(--warn-bg); }
+    .tag-sky { color: var(--info-text); border-color: var(--info-border); background: var(--info-bg); }
+
+    h1 {
+      font-size: 32px;
+      font-weight: 800;
+      letter-spacing: -0.025em;
+      line-height: 1.2;
+      color: #ffffff;
+      margin-bottom: 8px;
+    }
+
+    .header-desc {
+      font-size: 15px;
+      color: var(--fg-secondary);
+      max-width: 800px;
+      line-height: 1.6;
+    }
+
+    /* Executive Metrics Dashboard */
+    .dashboard-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+      gap: 14px;
+      margin-bottom: 36px;
+    }
+
+    .metric-box {
+      background: var(--bg-surface);
+      border: 1px solid var(--border-subtle);
+      border-radius: var(--radius-md);
+      padding: 18px 20px;
+    }
+
+    .metric-title {
+      font-size: 11px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: var(--fg-tertiary);
+      margin-bottom: 8px;
+    }
+
+    .metric-number {
+      font-size: 28px;
+      font-weight: 800;
+      font-family: var(--font-mono);
+      color: #ffffff;
+      letter-spacing: -0.02em;
+      line-height: 1.1;
+      margin-bottom: 4px;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .metric-note {
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--diff-add-text);
+      font-variant-numeric: tabular-nums;
+    }
+
+    .metric-neutral {
+      color: var(--fg-secondary);
+    }
+
+    /* Sticky Control Toolbar */
+    .toolbar {
+      position: sticky;
+      top: 16px;
+      z-index: 50;
+      background: rgba(17, 19, 24, 0.95);
+      backdrop-filter: blur(8px);
+      -webkit-backdrop-filter: blur(8px);
+      border: 1px solid var(--border-strong);
+      border-radius: var(--radius-md);
+      padding: 8px 12px;
+      margin-bottom: 28px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+
+    .toolbar-tabs {
+      display: flex;
+      gap: 4px;
+      flex-wrap: wrap;
+    }
+
+    .tab-item {
+      background: transparent;
+      border: 1px solid transparent;
+      color: var(--fg-secondary);
+      font-family: inherit;
+      font-size: 12.5px;
+      font-weight: 600;
+      padding: 6px 12px;
+      border-radius: var(--radius-sm);
+      cursor: pointer;
+      transition: background 120ms, color 120ms;
+    }
+
+    .tab-item:hover {
+      background: var(--bg-elevated);
+      color: var(--fg-primary);
+    }
+
+    .tab-item.active {
+      background: #ffffff;
+      color: #090a0d;
+      font-weight: 700;
+    }
+
+    .search-field {
+      background: var(--bg-root);
+      border: 1px solid var(--border-subtle);
+      border-radius: var(--radius-sm);
+      padding: 6px 12px;
+      font-family: inherit;
+      font-size: 12.5px;
+      color: var(--fg-primary);
+      min-width: 240px;
+      outline: none;
+    }
+
+    .search-field:focus {
+      border-color: var(--border-strong);
+    }
+
+    /* Finding Card */
+    .finding-block {
+      background: var(--bg-surface);
+      border: 1px solid var(--border-subtle);
+      border-radius: var(--radius-lg);
+      margin-bottom: 28px;
+      overflow: hidden;
+    }
+
+    .finding-header {
+      padding: 22px 24px 18px;
+      border-bottom: 1px solid var(--border-subtle);
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      gap: 16px;
+      flex-wrap: wrap;
+    }
+
+    .finding-header-main {
+      flex: 1;
+      min-width: 280px;
+    }
+
+    .finding-meta {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 8px;
+      flex-wrap: wrap;
+    }
+
+    .finding-h2 {
+      font-size: 18px;
+      font-weight: 700;
+      color: #ffffff;
+      letter-spacing: -0.015em;
+      margin-bottom: 6px;
+      line-height: 1.35;
+    }
+
+    .code-path {
+      font-family: var(--font-mono);
+      font-size: 12px;
+      color: var(--info-text);
+      background: var(--info-bg);
+      border: 1px solid var(--info-border);
+      padding: 2px 8px;
+      border-radius: 4px;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      text-decoration: none;
+    }
+
+    .code-path:hover {
+      background: rgba(56, 189, 248, 0.15);
+    }
+
+    .metric-pills {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
+    .pill-stat {
+      background: var(--bg-elevated);
+      border: 1px solid var(--border-subtle);
+      border-radius: var(--radius-sm);
+      padding: 6px 10px;
+      text-align: right;
+    }
+
+    .pill-stat-label {
+      font-size: 10px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: var(--fg-tertiary);
+    }
+
+    .pill-stat-val {
+      font-family: var(--font-mono);
+      font-size: 13px;
+      font-weight: 700;
+      color: #ffffff;
+      margin-top: 2px;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .finding-content {
+      padding: 22px 24px;
+    }
+
+    .finding-summary {
+      font-size: 14px;
+      color: #d1d5db;
+      margin-bottom: 20px;
+      line-height: 1.65;
+    }
+
+    .finding-summary strong {
+      color: #ffffff;
+    }
+
+    /* Side-by-Side Diff Panels */
+    .diff-section {
+      margin-bottom: 20px;
+    }
+
+    .diff-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+    }
+
+    @media (max-width: 880px) {
+      .diff-grid {
+        grid-template-columns: 1fr;
+      }
+    }
+
+    .diff-box {
+      background: var(--bg-code);
+      border: 1px solid var(--border-subtle);
+      border-radius: var(--radius-md);
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+    }
+
+    .diff-box-del { border-color: rgba(239, 68, 68, 0.2); }
+    .diff-box-add { border-color: rgba(16, 185, 129, 0.2); }
+
+    .diff-box-bar {
+      padding: 8px 14px;
+      font-size: 11px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      border-bottom: 1px solid var(--border-subtle);
+      font-family: var(--font-mono);
+    }
+
+    .bar-del { background: rgba(239, 68, 68, 0.06); color: var(--diff-del-text); }
+    .bar-add { background: rgba(16, 185, 129, 0.06); color: var(--diff-add-text); }
+
+    .code-view {
+      padding: 14px 16px;
+      font-family: var(--font-mono);
+      font-size: 12px;
+      line-height: 1.65;
+      color: #e5e7eb;
+      overflow-x: auto;
+      white-space: pre;
+      flex: 1;
+    }
+
+    .line-del {
+      color: var(--diff-del-text);
+      background: var(--diff-del-bg);
+      display: block;
+      margin: 0 -16px;
+      padding: 0 16px;
+      border-left: 3px solid #ef4444;
+    }
+
+    .line-add {
+      color: var(--diff-add-text);
+      background: var(--diff-add-bg);
+      display: block;
+      margin: 0 -16px;
+      padding: 0 16px;
+      border-left: 3px solid #10b981;
+    }
+
+    .line-comment {
+      color: var(--fg-tertiary);
+      font-style: italic;
+    }
+
+    /* Pros / Cons Section */
+    .pros-cons-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+    }
+
+    @media (max-width: 768px) {
+      .pros-cons-grid {
+        grid-template-columns: 1fr;
+      }
+    }
+
+    .pro-card {
+      background: rgba(16, 185, 129, 0.03);
+      border: 1px solid rgba(16, 185, 129, 0.15);
+      border-radius: var(--radius-md);
+      padding: 14px 16px;
+    }
+
+    .con-card {
+      background: rgba(239, 68, 68, 0.03);
+      border: 1px solid rgba(239, 68, 68, 0.15);
+      border-radius: var(--radius-md);
+      padding: 14px 16px;
+    }
+
+    .pc-title {
+      font-size: 11.5px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      margin-bottom: 8px;
+    }
+
+    .pro-card .pc-title { color: var(--diff-add-text); }
+    .con-card .pc-title { color: var(--diff-del-text); }
+
+    .pc-list {
+      list-style: none;
+      font-size: 13px;
+      color: var(--fg-secondary);
+    }
+
+    .pc-list li {
+      position: relative;
+      padding-left: 18px;
+      margin-bottom: 6px;
+      line-height: 1.5;
+    }
+
+    .pc-list li:last-child {
+      margin-bottom: 0;
+    }
+
+    .pro-card .pc-list li::before {
+      content: '+';
+      position: absolute;
+      left: 0;
+      color: var(--diff-add-text);
+      font-weight: 700;
+      font-family: var(--font-mono);
+    }
+
+    .con-card .pc-list li::before {
+      content: '-';
+      position: absolute;
+      left: 0;
+      color: var(--diff-del-text);
+      font-weight: 700;
+      font-family: var(--font-mono);
+    }
+
+    /* Master Summary Table */
+    .table-section {
+      background: var(--bg-surface);
+      border: 1px solid var(--border-subtle);
+      border-radius: var(--radius-lg);
+      padding: 28px 24px;
+      margin-top: 44px;
+    }
+
+    .table-head-title {
+      font-size: 20px;
+      font-weight: 800;
+      color: #ffffff;
+      letter-spacing: -0.02em;
+      margin-bottom: 4px;
+    }
+
+    .table-head-desc {
+      font-size: 13.5px;
+      color: var(--fg-secondary);
+      margin-bottom: 20px;
+    }
+
+    .table-scroll {
+      overflow-x: auto;
+    }
+
+    table.matrix-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 13px;
+      text-align: left;
+    }
+
+    table.matrix-table th {
+      background: var(--bg-elevated);
+      color: var(--fg-tertiary);
+      font-size: 11px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      padding: 10px 12px;
+      border-bottom: 1px solid var(--border-subtle);
+      white-space: nowrap;
+    }
+
+    table.matrix-table td {
+      padding: 12px;
+      border-bottom: 1px solid var(--border-subtle);
+      color: #d1d5db;
+    }
+
+    table.matrix-table tr:hover td {
+      background: var(--bg-surface-hover);
+    }
+
+    .table-file {
+      font-family: var(--font-mono);
+      font-size: 12px;
+      color: var(--info-text);
+    }
+
+    .table-gain {
+      color: var(--diff-add-text);
+      font-weight: 700;
+      font-family: var(--font-mono);
+      font-variant-numeric: tabular-nums;
+    }
+
+    footer {
+      margin-top: 64px;
+      text-align: center;
+      font-size: 12.5px;
+      color: var(--fg-tertiary);
+      border-top: 1px solid var(--border-subtle);
+      padding-top: 28px;
+      font-family: var(--font-mono);
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <!-- Header -->
+    <header>
+      <div class="header-top">
+        <div class="meta-tags">
+          <span class="tag tag-active">Prism v0.8.7</span>
+          <span class="tag tag-emerald">Verified Update</span>
+          <span class="tag">Rust + React 19 + Tauri 2</span>
+        </div>
+        <span class="tag">Environment: Windows 11 x64</span>
+      </div>
+      <h1>Engineering Code & Performance Audit</h1>
+      <p class="header-desc">
+        Evidence-based review of Prism's native Windows backend (<code>src-tauri</code>) and TypeScript client (<code>src</code>). Findings distinguish confirmed code paths, repository tests, and estimates that still require profiling. The confirmed, behavior-preserving fixes in this report are applied in the checkout.
+      </p>
+      <p class="header-desc"><span class="tag tag-emerald">Decision status: implemented and verified</span> Numeric claims without a reproducible benchmark remain excluded from the roadmap.</p>
+    </header>
+
+    <!-- Top Dashboard -->
+    <section class="dashboard-grid" aria-label="Key Performance Indicators">
+      <div class="metric-box">
+        <div class="metric-title">Release Search Benchmark</div>
+        <div class="metric-number">2.05-5.24 ms/search</div>
+        <div class="metric-note">Release benchmark; 100k-entry index; no thumbnail hits returned</div>
+      </div>
+      <div class="metric-box">
+        <div class="metric-title">Frontend Tests</div>
+        <div class="metric-number">79 / 79</div>
+        <div class="metric-note">Vitest suite passing</div>
+      </div>
+      <div class="metric-box">
+        <div class="metric-title">Targeted Rust Tests</div>
+        <div class="metric-number">18 / 18</div>
+        <div class="metric-note">File-index and taskbar tests passing</div>
+      </div>
+      <div class="metric-box">
+        <div class="metric-title">Scoped Fixes Applied</div>
+        <div class="metric-number">7</div>
+        <div class="metric-note metric-neutral">Source changes implemented and verified</div>
+      </div>
+    </section>
+
+    <!-- Sticky Toolbar -->
+    <nav class="toolbar" aria-label="Category Filters">
+      <div class="toolbar-tabs" role="tablist">
+        <button class="tab-item active" onclick="filterCategory('all', this)">All Findings (8)</button>
+        <button class="tab-item" onclick="filterCategory('io-perf', this)">I/O & Memory (2)</button>
+        <button class="tab-item" onclick="filterCategory('frontend', this)">React & Logic (3)</button>
+        <button class="tab-item" onclick="filterCategory('native', this)">Rust & Win32 (3)</button>
+      </div>
+      <input type="search" id="issueSearch" class="search-field" placeholder="Search issues, files, or tokens..." oninput="handleSearch(this.value)" aria-label="Search issues" />
+    </nav>
+
+    <!-- Findings Section -->
+    <main id="findingsList">
+
+      <!-- ISSUE 1 -->
+      <article class="finding-block" data-category="io-perf" id="PRISM-PERF-01">
+        <div class="finding-header">
+          <div class="finding-header-main">
+            <div class="finding-meta">
+              <span class="tag tag-rose">PRISM-PERF-01</span>
+              <span class="tag tag-amber">P1 · High (situational)</span>
+              <span class="tag">I/O & Memory</span>
+            </div>
+            <h2 class="finding-h2">Image Thumbnail Decoding on Indexed File Search Results</h2>
+            <a href="file:///C:/Users/hi/Desktop/Work/Prism/src-tauri/src/files.rs#L523-L568" class="code-path">
+              src-tauri/src/files.rs:523–568
+            </a>
+          </div>
+          <div class="metric-pills">
+            <div class="pill-stat">
+              <div class="pill-stat-label">Evidence</div>
+              <div class="pill-stat-val table-gain">Static code path confirmed</div>
+            </div>
+            <div class="pill-stat">
+              <div class="pill-stat-label">Normal UI Limit</div>
+              <div class="pill-stat-val table-gain">Up to 8 results</div>
+            </div>
+            <div class="pill-stat">
+              <div class="pill-stat-label">Disposition</div>
+              <div class="pill-stat-val">Implemented lazy thumbnails</div>
+            </div>
+          </div>
+        </div>
+        <div class="finding-content">
+          <p class="finding-summary">
+            <strong>Confirmed issue (fixed):</strong> Before the change, <code>files.rs</code> <code>indexed_file_entry</code> invoked <code>image_thumbnail(path)</code> for each selected indexed result. The command already ran inside <code>spawn_blocking</code>, so this was search-result latency and worker I/O, not a direct WebView UI-thread stall. The helper caps the input file at 32 MiB, but decoded memory can exceed the compressed file size. The normal frontend request asks for 8 results, not 20.
+          </p>
+
+          <div class="diff-section">
+            <div class="diff-grid">
+              <div class="diff-box diff-box-del">
+                <div class="diff-box-bar bar-del">Before (Synchronous Decode per Search Hit)</div>
+                <div class="code-view"><code>fn indexed_file_entry(entry: &SearchEntry) -> Option&lt;FileEntry&gt; {
+    let path = Path::new(entry.path.as_ref());
+<span class="line-del">-   let metadata = std::fs::metadata(path).ok()?;</span>
+    let name = path.file_name()?.to_string_lossy().into_owned();
+    Some(FileEntry {
+        name,
+        path: entry.path.to_string(),
+        parent: path.parent().map(|v| v.to_string_lossy().into_owned()).unwrap_or_default(),
+<span class="line-del">-       is_directory: metadata.is_dir(),
+-       thumbnail: (!metadata.is_dir())
+-           .then(|| image_thumbnail(path))
+-           .flatten(),</span>
+    })
+}
+
+<span class="line-del"><span class="line-comment">// Decodes up to 32MB JPEG/PNG/WebP per hit synchronously!</span>
+fn image_thumbnail(path: &Path) -> Option&lt;String&gt; {
+    let image = image::ImageReader::open(path).ok()?.with_guessed_format().ok()?.decode().ok()?;
+    let preview = image.thumbnail(64, 64);
+    ...
+}</span></code></div>
+              </div>
+
+              <div class="diff-box diff-box-add">
+                <div class="diff-box-bar bar-add">Implemented (Lazy Thumbnail, Preserved Stale-Path Check)</div>
+                <div class="code-view"><code>fn indexed_file_entry(entry: &SearchEntry) -> Option&lt;FileEntry&gt; {
+    let path = Path::new(entry.path.as_ref());
+    let metadata = std::fs::metadata(path).ok()?; <span class="line-comment">// Preserve deleted-entry behavior</span>
+    let name = path.file_name()?.to_string_lossy().into_owned();
+    Some(FileEntry {
+        name,
+        path: entry.path.to_string(),
+        parent: path.parent().map(|v| v.to_string_lossy().into_owned()).unwrap_or_default(),
+<span class="line-add">+       is_directory: metadata.is_dir(),
++       thumbnail: None, <span class="line-comment">// Filled by get_file_thumbnail for image rows</span></span>
+    })
+}</code></div>
+              </div>
+            </div>
+          </div>
+
+          <div class="pros-cons-grid">
+            <div class="pro-card">
+              <div class="pc-title">Pros & Performance Gains</div>
+              <ul class="pc-list">
+                <li>Removes image decode and PNG/base64 work from ordinary indexed search responses.</li>
+                <li>Preserves the existing stale-entry contract while allowing a separate visible-row thumbnail request.</li>
+                <li>Measure search latency and decoded allocations on representative image sets before assigning a priority.</li>
+              </ul>
+            </div>
+            <div class="con-card">
+              <div class="pc-title">Trade-offs</div>
+              <ul class="pc-list">
+                <li>Inline previews need a lazy, cancellable IPC path and a cache; removing thumbnails outright changes the UI.</li>
+              </ul>
+            </div>
+          </div>
+        </div>
+      </article>
+
+      <!-- ISSUE 2 -->
+      <article class="finding-block" data-category="frontend" id="PRISM-PERF-02">
+        <div class="finding-header">
+          <div class="finding-header-main">
+            <div class="finding-meta">
+              <span class="tag tag-amber">PRISM-PERF-02</span>
+              <span class="tag">P2 · Medium (situational)</span>
+              <span class="tag">Logic & V8 Engine</span>
+            </div>
+            <h2 class="finding-h2">Math Parser False Positives for Digit-Bearing App Queries</h2>
+            <a href="file:///C:/Users/hi/Desktop/Work/Prism/src/lib/math.ts#L219-L224" class="code-path">
+              src/lib/math.ts:219–224
+            </a>
+          </div>
+          <div class="metric-pills">
+            <div class="pill-stat">
+              <div class="pill-stat-label">Parser Behavior</div>
+              <div class="pill-stat-val table-gain">Caught and returned null</div>
+            </div>
+            <div class="pill-stat">
+              <div class="pill-stat-label">Timing</div>
+              <div class="pill-stat-val table-gain">Not measured</div>
+            </div>
+            <div class="pill-stat">
+              <div class="pill-stat-label">Disposition</div>
+              <div class="pill-stat-val">Implemented with gate tests</div>
+            </div>
+          </div>
+        </div>
+        <div class="finding-content">
+          <p class="finding-summary">
+            <strong>Confirmed issue:</strong> The previous <code>isMathLike</code> gate treated any digit-bearing alphanumeric query as calculator input, so names such as <code>vlc3</code>, <code>7zip</code>, and <code>word2016</code> could reach <code>tryEvaluate</code>. The parser catches malformed input and returns <code>null</code>; this was unnecessary work, not an unhandled exception. The gate now recognizes literals, operators, parser functions/constants, and supported Unicode operators, with regression tests for the app-name cases.
+          </p>
+
+          <div class="diff-section">
+            <div class="diff-grid">
+              <div class="diff-box diff-box-del">
+                <div class="diff-box-bar bar-del">Before (Permissive Regex Matches Normal App Searches)</div>
+                <div class="code-view"><code>export function isMathLike(input: string): boolean {
+  const s = input.trim().toLowerCase();
+  if (s.length === 0 || s.length > 120) return false;
+<span class="line-del">- if (!/\d/.test(s)) return false;
+- return /^[\d\s.+\-*/^%()a-z]+$/.test(s);
+  <span class="line-comment">// 'vlc3' has \d and matches [a-z0-9] -> returns TRUE!</span>
+  <span class="line-comment">// '7zip' has \d and matches [a-z0-9] -> returns TRUE!</span></span>
+}</code></div>
+              </div>
+
+              <div class="diff-box diff-box-add">
+                <div class="diff-box-bar bar-add">Implemented (Strict Gate, Preserved Parser Tokens)</div>
+                <div class="code-view"><code><span class="line-add">+ const hasOperator = /[+\-*/^%()]/;
++ const knownMathToken = /\b(?:sqrt|abs|floor|ceil|round|ln|log|sin|cos|tan|asin|acos|atan|exp|pi|e|tau)\b/;
++ const isLiteral = /^\d+(?:\.\d+)?$/;</span>
+
+export function isMathLike(input: string): boolean {
+  const s = input.trim().toLowerCase().replace(/×/g, "*").replace(/÷/g, "/");
+  if (s.length === 0 || s.length > 120) return false;
+<span class="line-add">+ // Keep bare numeric results; reject ordinary digit-bearing names.
++ if (!/^[\d\s.+\-*/^%()a-z]+$/.test(s)) return false;
++ if (!/\d/.test(s) && !knownMathToken.test(s)) return false;
++ if (!hasOperator.test(s) && !isLiteral.test(s) && !knownMathToken.test(s)) return false;
++ if (/[a-z]/.test(s) && !knownMathToken.test(s)) return false;
++ return true;</span>
+}</code></div>
+              </div>
+            </div>
+          </div>
+
+          <div class="pros-cons-grid">
+            <div class="pro-card">
+              <div class="pc-title">Pros & Performance Gains</div>
+              <ul class="pc-list">
+                <li>Reduces false-positive parser attempts for ordinary app and file names.</li>
+                <li>Retains bare numbers and supported operator/function expressions.</li>
+                <li>Measure parser attempts and input latency in WebView2 before claiming a performance gain.</li>
+              </ul>
+            </div>
+            <div class="con-card">
+              <div class="pc-title">Trade-offs</div>
+              <ul class="pc-list">
+                <li>Guard logic must share the parser's normalization rules, including constants and any supported Unicode operators.</li>
+              </ul>
+            </div>
+          </div>
+        </div>
+      </article>
+
+      <!-- ISSUE 3 -->
+      <article class="finding-block" data-category="frontend" id="PRISM-PERF-03">
+        <div class="finding-header">
+          <div class="finding-header-main">
+            <div class="finding-meta">
+              <span class="tag tag-amber">PRISM-PERF-03</span>
+              <span class="tag">P2 · Low (micro-optimization)</span>
+              <span class="tag">CPU Hot-Path</span>
+            </div>
+            <h2 class="finding-h2">Invariant Query Normalization Inside the App Scoring Loop</h2>
+            <a href="file:///C:/Users/hi/Desktop/Work/Prism/src/lib/search.ts#L108-L160" class="code-path">
+              src/lib/search.ts:108–160
+            </a>
+          </div>
+          <div class="metric-pills">
+            <div class="pill-stat">
+              <div class="pill-stat-label">Evidence</div>
+              <div class="pill-stat-val table-gain">One call per candidate today</div>
+            </div>
+            <div class="pill-stat">
+              <div class="pill-stat-label">Timing</div>
+              <div class="pill-stat-val table-gain">Not measured</div>
+            </div>
+            <div class="pill-stat">
+              <div class="pill-stat-label">Disposition</div>
+              <div class="pill-stat-val">Implemented reuse</div>
+            </div>
+          </div>
+        </div>
+        <div class="finding-content">
+          <p class="finding-summary">
+            <strong>Confirmed issue (fixed):</strong> In <code>fuzzyApps</code>, <code>normalizeText(lowerQuery)</code> was invariant across the candidate loop. The function already normalized the query once to compute <code>significantLength</code>; the fix reuses that exact value rather than adding a second normalization. The candidate count and timing are data-dependent and require profiling.
+          </p>
+
+          <div class="diff-section">
+            <div class="diff-grid">
+              <div class="diff-box diff-box-del">
+                <div class="diff-box-bar bar-del">Before (normalizeText Called in Every Iteration)</div>
+                <div class="code-view"><code>export function fuzzyApps(apps: AppEntry[], query: string, limit = 8, opts = {}): AppEntry[] {
+  ...
+  for (const app of pool) {
+<span class="line-del">-   const score = appScore(app, lower, tokens);</span>
+    if (score !== null && score >= minimumScore) results.push({ item: app, score });
+  }
+}
+
+function appScore(app: AppEntry, lowerQuery: string, tokens: string[]): number | null {
+<span class="line-del">- if (app.normalizedName && normalizeText(lowerQuery) === app.normalizedName) {
+    return 100;
+  }</span>
+  ...
+}</code></div>
+              </div>
+
+              <div class="diff-box diff-box-add">
+                <div class="diff-box-bar bar-add">Implemented (Reuse Existing Pre-Computation)</div>
+                <div class="code-view"><code>export function fuzzyApps(apps: AppEntry[], query: string, limit = 8, opts = {}): AppEntry[] {
+  ...
+<span class="line-add">+ const normalizedQuery = normalizeText(lower);
++ const significantLength = normalizedQuery.length;</span>
+  for (const app of pool) {
+<span class="line-add">+   const score = appScore(app, lower, tokens, normalizedQuery);</span>
+    if (score !== null && score >= minimumScore) results.push({ item: app, score });
+  }
+}
+
+<span class="line-add">+ function appScore(app: AppEntry, lowerQuery: string, tokens: string[], normalizedQuery: string): number | null {
++ if (app.normalizedName && normalizedQuery === app.normalizedName) {
+    return 100;
+  }</span></code></div>
+              </div>
+            </div>
+          </div>
+
+          <div class="pros-cons-grid">
+            <div class="pro-card">
+              <div class="pc-title">Pros & Performance Gains</div>
+              <ul class="pc-list">
+                <li>Removes repeated query-string allocation from the exact-match branch.</li>
+                <li>Small, low-risk improvement on the per-keystroke path.</li>
+                <li>Benchmark with representative app counts before assigning a larger priority.</li>
+              </ul>
+            </div>
+            <div class="con-card">
+              <div class="pc-title">Trade-offs</div>
+              <ul class="pc-list">
+                <li>Keep the normalized value and its length derived from one source to avoid duplicating work.</li>
+              </ul>
+            </div>
+          </div>
+        </div>
+      </article>
+
+      <!-- ISSUE 4 -->
+      <article class="finding-block" data-category="native" id="PRISM-NATIVE-01">
+        <div class="finding-header">
+          <div class="finding-header-main">
+            <div class="finding-meta">
+              <span class="tag tag-amber">PRISM-NATIVE-01</span>
+              <span class="tag tag-amber">P1 · High</span>
+              <span class="tag tag-rose">UI Thread Blocking</span>
+            </div>
+            <h2 class="finding-h2">Slow Taskbar Settings IPC Work on the Blocking Command Path</h2>
+            <a href="file:///C:/Users/hi/Desktop/Work/Prism/src-tauri/src/lib.rs#L1037-L1090" class="code-path">
+              src-tauri/src/lib.rs:1037–1090
+            </a>
+          </div>
+          <div class="metric-pills">
+            <div class="pill-stat">
+              <div class="pill-stat-label">Evidence</div>
+              <div class="pill-stat-val table-gain">Blocking commands confirmed</div>
+            </div>
+            <div class="pill-stat">
+              <div class="pill-stat-label">Slow Work Scope</div>
+              <div class="pill-stat-val table-gain">Registry, files, PNG decode</div>
+            </div>
+            <div class="pill-stat">
+              <div class="pill-stat-label">Disposition</div>
+              <div class="pill-stat-val">Implemented async offload</div>
+            </div>
+          </div>
+        </div>
+        <div class="finding-content">
+          <p class="finding-summary">
+            <strong>Confirmed issue (fixed):</strong> Before the change, these non-async Tauri commands ran on the blocking IPC path. <code>get_taskbar_settings</code> reads registry values and preview files; <code>select_custom_start_icon</code> and <code>set_taskbar_start_icon</code> can read and decode PNG data; <code>remove_custom_start_icon</code> performs filesystem/settings work but does not decode a PNG on every call. The code path could delay the window while the operation ran, but no 15–45 ms or dropped-frame measurement is present.
+          </p>
+
+          <div class="diff-section">
+            <div class="diff-grid">
+              <div class="diff-box diff-box-del">
+                <div class="diff-box-bar bar-del">Before (Sync Commands Blocking Main UI Thread)</div>
+                <div class="code-view"><code><span class="line-del">#[tauri::command]
+fn get_taskbar_settings(app: tauri::AppHandle) -> Result&lt;taskbar_customization::TaskbarSettings, String&gt; {
+    // Synchronously reads registry + reads up to 12 PNG files from disk!
+    taskbar_customization::settings(&app)
+}
+
+#[tauri::command]
+fn select_custom_start_icon(app: tauri::AppHandle, id: String) -> Result&lt;(), String&gt; {
+    // Synchronously reads file and runs PNG decoder on main thread!
+    taskbar_customization::select_custom_start_icon(&app, &id)
+}</span></code></div>
+              </div>
+
+              <div class="diff-box diff-box-add">
+                <div class="diff-box-bar bar-add">Implemented (Offload Slow Variants)</div>
+                <div class="code-view"><code><span class="line-add">// Apply this async + spawn_blocking shape to get, select, set, and remove.
+#[tauri::command]
+async fn get_taskbar_settings(app: tauri::AppHandle) -> Result&lt;taskbar_customization::TaskbarSettings, String&gt; {
+    tauri::async_runtime::spawn_blocking(move || taskbar_customization::settings(&app))
+        .await
+        .map_err(|e| format!("settings task failed: {e}"))?
+}
+
+#[tauri::command]
+async fn select_custom_start_icon(app: tauri::AppHandle, id: String) -> Result&lt;(), String&gt; {
+    tauri::async_runtime::spawn_blocking(move || {
+        taskbar_customization::select_custom_start_icon(&app, &id)
+    })
+    .await
+    .map_err(|e| format!("custom icon task failed: {e}"))?
+}</span></code></div>
+              </div>
+            </div>
+          </div>
+
+          <div class="pros-cons-grid">
+            <div class="pro-card">
+              <div class="pc-title">Pros & Performance Gains</div>
+              <ul class="pc-list">
+                <li>Moves filesystem, registry, and decode work off the command/UI thread.</li>
+                <li>Measure command duration and frame timing on slow and redirected drives after the change.</li>
+              </ul>
+            </div>
+            <div class="con-card">
+              <div class="pc-title">Trade-offs</div>
+              <ul class="pc-list">
+                <li>The operation still consumes worker time and has completion latency; async dispatch does not make it zero-cost.</li>
+              </ul>
+            </div>
+          </div>
+        </div>
+      </article>
+
+      <!-- ISSUE 5 -->
+      <article class="finding-block" data-category="frontend" id="PRISM-FE-01">
+        <div class="finding-header">
+          <div class="finding-header-main">
+            <div class="finding-meta">
+              <span class="tag">PRISM-FE-01</span>
+              <span class="tag">P3 · Low</span>
+              <span class="tag">React Rendering</span>
+            </div>
+            <h2 class="finding-h2">Inline Row Callbacks Prevent ResultRow React.memo from Skipping Work</h2>
+            <a href="file:///C:/Users/hi/Desktop/Work/Prism/src/features/palette/Palette.tsx#L665-L694" class="code-path">
+              src/features/palette/Palette.tsx:665–694
+            </a>
+          </div>
+          <div class="metric-pills">
+            <div class="pill-stat">
+              <div class="pill-stat-label">Evidence</div>
+              <div class="pill-stat-val table-gain">Inline callback confirmed</div>
+            </div>
+            <div class="pill-stat">
+              <div class="pill-stat-label">Scope</div>
+              <div class="pill-stat-val table-gain">One prop among many</div>
+            </div>
+            <div class="pill-stat">
+              <div class="pill-stat-label">Disposition</div>
+              <div class="pill-stat-val">Implemented callback contract</div>
+            </div>
+          </div>
+        </div>
+        <div class="finding-content">
+          <p class="finding-summary">
+            <strong>Confirmed issue (fixed):</strong> <code>renderResultRow</code> previously passed a fresh <code>onRemoveHistory</code> closure for every row. That prop alone prevented <code>React.memo(ResultRow)</code> from skipping a row when the parent rendered. The IIFE is incidental, other callbacks can also change identity, and the resulting render cost has not been profiled.
+          </p>
+
+          <div class="diff-section">
+            <div class="diff-grid">
+              <div class="diff-box diff-box-del">
+                <div class="diff-box-bar bar-del">Before (Fresh Closures Generated on Every Render)</div>
+                <div class="code-view"><code>function renderResultRow(item: PaletteItem, index: number, reorderable: boolean, removable: boolean) {
+  return (
+    &lt;ResultRow
+      key={item.id}
+      item={item}
+      index={index}
+      selected={palette.selected === index}
+      removable={removable}
+<span class="line-del">-     onRemoveHistory={() => app.removeHistory(item.id)}</span>
+      onSelect={palette.select}
+      ...
+    /&gt;
+  );
+}</code></div>
+              </div>
+
+              <div class="diff-box diff-box-add">
+                <div class="diff-box-bar bar-add">Implemented (Correct Callback Contract)</div>
+                <div class="code-view"><code>
+function renderResultRow(item: PaletteItem, index: number, reorderable: boolean, removable: boolean) {
+  return (
+    &lt;ResultRow
+      key={item.id}
+      item={item}
+      index={index}
+      selected={palette.selected === index}
+      removable={removable}
+<span class="line-add">+     onRemoveHistory={app.removeHistory}</span>
+      onSelect={palette.select}
+      ...
+    /&gt;
+  );
+}</code></div>
+              </div>
+            </div>
+          </div>
+
+          <div class="pros-cons-grid">
+            <div class="pro-card">
+              <div class="pc-title">Pros & Performance Gains</div>
+              <ul class="pc-list">
+                <li>Removes one avoidable fresh function prop from each row.</li>
+                <li><code>ResultRow</code> now accepts an item id and calls <code>onRemoveHistory(item.id)</code> inside each remove-button handler.</li>
+                <li>Profile render counts before claiming that all row reconciliation is eliminated.</li>
+              </ul>
+            </div>
+            <div class="con-card">
+              <div class="pc-title">Trade-offs</div>
+              <ul class="pc-list">
+                <li>The current prop type is <code>() => void</code>; changing it to <code>(id: string) => void</code> requires updating both remove buttons.</li>
+              </ul>
+            </div>
+          </div>
+        </div>
+      </article>
+
+      <!-- ISSUE 6 -->
+      <article class="finding-block" data-category="native" id="PRISM-NATIVE-02">
+        <div class="finding-header">
+          <div class="finding-header-main">
+            <div class="finding-meta">
+              <span class="tag">PRISM-NATIVE-02</span>
+              <span class="tag">P2 · Medium</span>
+              <span class="tag">Vectorization</span>
+            </div>
+            <h2 class="finding-h2">Per-Pixel Buffer Copy in Taskbar Icon Overlay</h2>
+            <a href="file:///C:/Users/hi/Desktop/Work/Prism/src-tauri/src/taskbar_icon_overlay.rs#L51-L53" class="code-path">
+              src-tauri/src/taskbar_icon_overlay.rs:51–53
+            </a>
+          </div>
+          <div class="metric-pills">
+            <div class="pill-stat">
+              <div class="pill-stat-label">Static Cost</div>
+              <div class="pill-stat-val table-gain">9,216 pixels at 96×96</div>
+            </div>
+            <div class="pill-stat">
+              <div class="pill-stat-label">Timing</div>
+              <div class="pill-stat-val table-gain">Not measured</div>
+            </div>
+            <div class="pill-stat">
+              <div class="pill-stat-label">Disposition</div>
+              <div class="pill-stat-val">Implemented buffer cleanup</div>
+            </div>
+          </div>
+        </div>
+        <div class="finding-content">
+          <p class="finding-summary">
+            <strong>Confirmed issue (fixed):</strong> <code>write_icon_file</code> previously copied a 96×96 RGBA buffer through a per-pixel loop. <code>pixels.as_raw()</code> exposes the contiguous subpixel buffer, but the compiler may already optimize the loop. The old capacity expression also multiplied the raw buffer length by four, over-reserving memory.
+          </p>
+
+          <div class="diff-section">
+            <div class="diff-grid">
+              <div class="diff-box diff-box-del">
+                <div class="diff-box-bar bar-del">Before (Per-Pixel Iterator Loop)</div>
+                <div class="code-view"><code>fn write_icon_file(path: &Path, pixels: &RgbaImage) -> Result&lt;(), String&gt; {
+    ...
+    let mut bytes = Vec::with_capacity(ICON_MAGIC.len() + 8 + pixels.len() * 4);
+    bytes.extend_from_slice(ICON_MAGIC);
+    bytes.extend_from_slice(&pixels.width().to_le_bytes());
+    bytes.extend_from_slice(&pixels.height().to_le_bytes());
+<span class="line-del">-   for pixel in pixels.pixels() {
+-       bytes.extend_from_slice(&pixel.0);
+-   }</span>
+    ...
+}</code></div>
+              </div>
+
+              <div class="diff-box diff-box-add">
+                <div class="diff-box-bar bar-add">Implemented (Contiguous Copy and Correct Capacity)</div>
+                <div class="code-view"><code>fn write_icon_file(path: &Path, pixels: &RgbaImage) -> Result&lt;(), String&gt; {
+    ...
+    let raw_pixels = pixels.as_raw();
+    let mut bytes = Vec::with_capacity(ICON_MAGIC.len() + 8 + raw_pixels.len());
+    bytes.extend_from_slice(ICON_MAGIC);
+    bytes.extend_from_slice(&pixels.width().to_le_bytes());
+    bytes.extend_from_slice(&pixels.height().to_le_bytes());
+<span class="line-add">+   bytes.extend_from_slice(raw_pixels);</span>
+    ...
+}</code></div>
+              </div>
+            </div>
+          </div>
+
+          <div class="pros-cons-grid">
+            <div class="pro-card">
+              <div class="pc-title">Pros & Performance Gains</div>
+              <ul class="pc-list">
+                <li>Uses the image crate's contiguous raw buffer and avoids over-reserving capacity.</li>
+                <li>Output remains byte-for-byte identical; benchmark this infrequent settings operation before prioritizing it.</li>
+              </ul>
+            </div>
+            <div class="con-card">
+              <div class="pc-title">Trade-offs</div>
+              <ul class="pc-list">
+                <li>Rust and allocator behavior should be measured in release builds; no instruction-count claim is justified.</li>
+              </ul>
+            </div>
+          </div>
+        </div>
+      </article>
+
+      <!-- ISSUE 7 -->
+      <article class="finding-block" data-category="native" id="PRISM-QUAL-01">
+        <div class="finding-header">
+          <div class="finding-header-main">
+            <div class="finding-meta">
+              <span class="tag">PRISM-QUAL-01</span>
+              <span class="tag">P3 · Low</span>
+              <span class="tag">Code Quality</span>
+            </div>
+            <h2 class="finding-h2">Production stderr Logging in the Registry Theme Fallback</h2>
+            <a href="file:///C:/Users/hi/Desktop/Work/Prism/src-tauri/src/theme.rs#L45-L47" class="code-path">
+              src-tauri/src/theme.rs:45–47
+            </a>
+          </div>
+          <div class="metric-pills">
+            <div class="pill-stat">
+              <div class="pill-stat-label">Evidence</div>
+              <div class="pill-stat-val table-gain">Unconditional eprintln confirmed</div>
+            </div>
+            <div class="pill-stat">
+              <div class="pill-stat-label">Performance Impact</div>
+              <div class="pill-stat-val table-gain">Not material / unmeasured</div>
+            </div>
+            <div class="pill-stat">
+              <div class="pill-stat-label">Disposition</div>
+              <div class="pill-stat-val">Implemented debug-only logging</div>
+            </div>
+          </div>
+        </div>
+        <div class="finding-content">
+          <p class="finding-summary">
+            <strong>Confirmed issue (fixed):</strong> <code>apps_light()</code> previously output both registry failure messages with <code>eprintln!</code> in release builds. This was a diagnostic-policy issue, not a demonstrated hot-path performance problem; the fallback normally runs only when the registry lookup fails.
+          </p>
+
+          <div class="diff-section">
+            <div class="diff-grid">
+              <div class="diff-box diff-box-del">
+                <div class="diff-box-bar bar-del">Before (Unguarded Debug eprintln)</div>
+                <div class="code-view"><code>if result.is_ok() {
+    return Some(value != 0);
+}
+<span class="line-del">- eprintln!("[theme] query failed: {result:?} size={size}");
+} else {
+- eprintln!("[theme] open failed: {open:?}");</span>
+}
+None</code></div>
+              </div>
+
+              <div class="diff-box diff-box-add">
+                <div class="diff-box-bar bar-add">Implemented (Debug-Only Fallback Logging)</div>
+                <div class="code-view"><code>if result.is_ok() {
+    return Some(value != 0);
+}
+<span class="line-add">+ #[cfg(debug_assertions)]
++ eprintln!("[theme] query failed: {result:?} size={size}");
+} else {
++ #[cfg(debug_assertions)]
++ eprintln!("[theme] open failed: {open:?}");</span>
+}
+None</code></div>
+              </div>
+            </div>
+          </div>
+
+          <div class="pros-cons-grid">
+            <div class="pro-card">
+              <div class="pc-title">Pros & Performance Gains</div>
+              <ul class="pc-list">
+                <li>Keeps release stderr quiet while preserving development diagnostics.</li>
+                <li>A structured logger can retain production diagnostics without unconditional console writes.</li>
+              </ul>
+            </div>
+            <div class="con-card">
+              <div class="pc-title">Trade-offs</div>
+              <ul class="pc-list">
+                <li>Silencing release output can hide useful diagnostics; choose the logging policy deliberately.</li>
+              </ul>
+            </div>
+          </div>
+        </div>
+      </article>
+
+      <!-- ISSUE 8 -->
+      <article class="finding-block" data-category="io-perf" id="PRISM-PERF-04">
+        <div class="finding-header">
+          <div class="finding-header-main">
+            <div class="finding-meta">
+              <span class="tag">PRISM-PERF-04</span>
+              <span class="tag">P3 · Low</span>
+              <span class="tag tag-rose">Rejected recommendation</span>
+            </div>
+            <h2 class="finding-h2">Metadata Stat Is Intentional Stale-Index Protection</h2>
+            <a href="file:///C:/Users/hi/Desktop/Work/Prism/src-tauri/src/files.rs#L523-L538" class="code-path">
+              src-tauri/src/files.rs:523–538
+            </a>
+          </div>
+          <div class="metric-pills">
+            <div class="pill-stat">
+              <div class="pill-stat-label">Contract</div>
+              <div class="pill-stat-val table-gain">Deleted entries omitted</div>
+            </div>
+            <div class="pill-stat">
+              <div class="pill-stat-label">Normal UI Limit</div>
+              <div class="pill-stat-val table-gain">Up to 8 results</div>
+            </div>
+            <div class="pill-stat">
+              <div class="pill-stat-label">Disposition</div>
+              <div class="pill-stat-val">Do not remove as written</div>
+            </div>
+          </div>
+        </div>
+        <div class="finding-content">
+          <p class="finding-summary">
+            <strong>Disposition:</strong> This is not a redundant stat under the current contract. <code>metadata(path).ok()?</code> filters deleted or inaccessible entries, and <code>deleted_index_entry_is_never_returned</code> tests that behavior directly. The directory flag can be read from <code>SearchEntry</code>, but the existence check cannot be removed without changing the product contract and its test.
+          </p>
+
+          <div class="diff-section">
+            <div class="diff-grid">
+              <div class="diff-box diff-box-del">
+                <div class="diff-box-bar bar-del">Before (Fresh Stat Call per Result)</div>
+                <div class="code-view"><code>fn indexed_file_entry(entry: &SearchEntry) -> Option&lt;FileEntry&gt; {
+    let path = Path::new(entry.path.as_ref());
+<span class="line-del">-   let metadata = std::fs::metadata(path).ok()?;</span>
+    let name = path.file_name()?.to_string_lossy().into_owned();
+    Some(FileEntry {
+        name,
+        path: entry.path.to_string(),
+<span class="line-del">-       is_directory: metadata.is_dir(),</span>
+        ...
+    })
+}</code></div>
+              </div>
+
+              <div class="diff-box diff-box-add">
+                <div class="diff-box-bar bar-add">Corrected plan (Keep Existence Check, Reuse Directory Flag)</div>
+                <div class="code-view"><code>fn indexed_file_entry(entry: &SearchEntry) -> Option&lt;FileEntry&gt; {
+    let path = Path::new(entry.path.as_ref());
+    let _metadata = std::fs::metadata(path).ok()?;
+    let name = path.file_name()?.to_string_lossy().into_owned();
+    Some(FileEntry {
+        name,
+        path: entry.path.to_string(),
+<span class="line-add">+       is_directory: entry.is_directory,</span>
+        ...
+    })
+}</code></div>
+              </div>
+            </div>
+          </div>
+
+          <div class="pros-cons-grid">
+            <div class="pro-card">
+              <div class="pc-title">Pros & Performance Gains</div>
+              <ul class="pc-list">
+                <li>No standalone optimization should be claimed here while the stale-entry contract remains.</li>
+                <li>If syscall reduction becomes necessary, benchmark a redesigned index-refresh policy separately.</li>
+              </ul>
+            </div>
+            <div class="con-card">
+              <div class="pc-title">Trade-offs</div>
+              <ul class="pc-list">
+                <li>Removing the stat would return deleted or inaccessible files and would fail the existing Rust test.</li>
+              </ul>
+            </div>
+          </div>
+        </div>
+      </article>
+
+    </main>
+
+    <!-- Verification -->
+    <section class="table-section" id="verification">
+      <h2 class="table-head-title">Verification & Evidence Boundaries</h2>
+      <p class="table-head-desc">Checks run after the source fixes in the current v0.8.7 checkout. These validate behavior and build health; they do not manufacture before/after performance numbers.</p>
+      <div class="table-scroll">
+        <table class="matrix-table">
+          <thead>
+            <tr>
+              <th>Check</th>
+              <th>Result</th>
+              <th>Interpretation</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>bun run test</code></td>
+              <td class="table-gain">79 / 79 passed</td>
+              <td>Frontend behavior suite is green.</td>
+            </tr>
+            <tr>
+              <td><code>bun run build</code> and <code>bun run lint</code></td>
+              <td class="table-gain">Passed</td>
+              <td>TypeScript production build and Biome checks are green.</td>
+            </tr>
+            <tr>
+              <td><code>cargo test files::tests</code></td>
+              <td class="table-gain">8 passed; 1 ignored</td>
+              <td>The deleted-index-entry contract is explicitly tested.</td>
+            </tr>
+            <tr>
+              <td><code>cargo test taskbar_</code></td>
+              <td class="table-gain">10 / 10 passed</td>
+              <td>Taskbar and overlay behavior tests are green.</td>
+            </tr>
+            <tr>
+              <td><code>cargo test --release search_bench -- --ignored</code></td>
+              <td class="table-gain">2.05-5.24 ms/search</td>
+              <td>100k synthetic indexed entries; zero hits, so no thumbnail decode. This is not a UI frame-time measurement.</td>
+            </tr>
+            <tr>
+              <td>Missing evidence</td>
+              <td class="tag">Not available</td>
+              <td>No image before/after benchmark, WebView2 V8 trace, React profiler capture, or frame-time sample supports exact latency or frame-time gains.</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- Applied Fix Summary -->
+    <section class="table-section" id="applied-fixes">
+      <h2 class="table-head-title">Applied Fix Summary</h2>
+      <p class="table-head-desc">These are the verified source changes and their expected product effect. Exact gains still require representative profiling.</p>
+      <div class="table-scroll">
+        <table class="matrix-table">
+          <thead>
+            <tr>
+              <th>Fix</th>
+              <th>Expected effect after update</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr><td>Lazy indexed file thumbnails</td><td>File names and folders return without image decoding; image previews load asynchronously for visible image results.</td></tr>
+            <tr><td>Math-query gate</td><td>Queries such as <code>vlc3</code>, <code>7zip</code>, and <code>d3d12</code> stop triggering unnecessary calculator parsing while valid literals and expressions remain available.</td></tr>
+            <tr><td>Query normalization reuse</td><td>Application fuzzy search avoids repeating the same query normalization for every candidate.</td></tr>
+            <tr><td>Taskbar IPC offload</td><td>Taskbar settings reads and custom Start-icon operations covered by the commands now dispatch registry, file, and PNG work away from the blocking command path.</td></tr>
+            <tr><td>Stable history callback contract</td><td>Recent-result rows can skip reconciliation when unrelated palette state changes; remove actions still target the correct item.</td></tr>
+            <tr><td>Contiguous overlay copy</td><td>Taskbar icon serialization copies the existing RGBA buffer directly and reserves the correct byte capacity.</td></tr>
+            <tr><td>Release-safe theme diagnostics</td><td>Registry fallback diagnostics remain available in debug builds without unconditional release stderr output.</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- Master Comparative Table -->
+    <section class="table-section">
+      <h2 class="table-head-title">Corrected Audit Matrix & Implementation Record</h2>
+      <p class="table-head-desc">A conservative implementation record separating confirmed code paths, unmeasured impact, and the recommendation rejected by existing behavior tests.</p>
+
+      <div class="table-scroll">
+        <table class="matrix-table">
+          <thead>
+            <tr>
+              <th>Finding ID</th>
+              <th>Category</th>
+              <th>File Reference</th>
+              <th>Core Improvement</th>
+              <th>Evidence / Expected Direction</th>
+              <th>Source Status</th>
+              <th>Priority</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><span class="tag tag-rose">PRISM-PERF-01</span></td>
+              <td>I/O & Memory</td>
+              <td class="table-file">src-tauri/src/files.rs</td>
+              <td>Lazy thumbnails while retaining the stale-path existence check</td>
+              <td class="table-gain">Confirmed path; impact unmeasured</td>
+              <td class="tag tag-emerald">Implemented</td>
+              <td><span class="tag tag-amber">P1 (Situational)</span></td>
+            </tr>
+            <tr>
+              <td><span class="tag tag-amber">PRISM-PERF-02</span></td>
+              <td>Logic & V8</td>
+              <td class="table-file">src/lib/math.ts</td>
+              <td>Gate ordinary digit-bearing names without regressing supported math literals</td>
+              <td class="table-gain">Caught failures; impact unmeasured</td>
+              <td class="tag tag-emerald">Implemented</td>
+              <td><span class="tag">P2 (Situational)</span></td>
+            </tr>
+            <tr>
+              <td><span class="tag tag-amber">PRISM-PERF-03</span></td>
+              <td>CPU Hot-Path</td>
+              <td class="table-file">src/lib/search.ts</td>
+              <td>Reuse the normalized query already computed for significant length</td>
+              <td class="table-gain">Confirmed micro-optimization; impact unmeasured</td>
+              <td class="tag tag-emerald">Implemented</td>
+              <td><span class="tag">P2 (Low)</span></td>
+            </tr>
+            <tr>
+              <td><span class="tag tag-amber">PRISM-NATIVE-01</span></td>
+              <td>UI Thread</td>
+              <td class="table-file">src-tauri/src/lib.rs</td>
+              <td>Offload get/select/set/remove taskbar work with async + spawn_blocking</td>
+              <td class="table-gain">Blocking path confirmed; duration unmeasured</td>
+              <td class="tag tag-emerald">Implemented</td>
+              <td><span class="tag tag-amber">P1 (Situational)</span></td>
+            </tr>
+            <tr>
+              <td><span class="tag">PRISM-FE-01</span></td>
+              <td>React VDOM</td>
+              <td class="table-file">src/features/palette/Palette.tsx</td>
+              <td>Stabilize the remove callback, then profile remaining prop identities</td>
+              <td class="table-gain">Callback issue confirmed; render cost unmeasured</td>
+              <td class="tag tag-emerald">Implemented</td>
+              <td><span class="tag">P2 (Medium)</span></td>
+            </tr>
+            <tr>
+              <td><span class="tag">PRISM-NATIVE-02</span></td>
+              <td>Vectorization</td>
+              <td class="table-file">src-tauri/src/taskbar_icon_overlay.rs</td>
+              <td>Copy the raw buffer and reserve its actual byte length</td>
+              <td class="table-gain">Cleanup; timing unmeasured</td>
+              <td class="tag tag-emerald">Implemented</td>
+              <td><span class="tag">P3 (Low)</span></td>
+            </tr>
+            <tr>
+              <td><span class="tag">PRISM-QUAL-01</span></td>
+              <td>Code Hygiene</td>
+              <td class="table-file">src-tauri/src/theme.rs</td>
+              <td>Apply debug-only or structured logging to both fallback branches</td>
+              <td class="table-gain">Quality issue; no material perf claim</td>
+              <td class="tag tag-emerald">Implemented</td>
+              <td><span class="tag">P3 (Low)</span></td>
+            </tr>
+            <tr>
+              <td><span class="tag">PRISM-PERF-04</span></td>
+              <td>Syscalls</td>
+              <td class="table-file">src-tauri/src/files.rs</td>
+              <td>Keep the existence check; reuse the cached directory flag only</td>
+              <td class="table-gain">Rejected removal; protected by Rust test</td>
+              <td class="tag">Rejected</td>
+              <td><span class="tag tag-rose">Do not implement</span></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- Footer -->
+    <footer>
+      <p>Prism v0.8.7 Codebase & Performance Audit · Verified Source Update</p>
+    </footer>
+  </div>
+
+  <script>
+    function filterCategory(category, btn) {
+      document.querySelectorAll('.tab-item').forEach(b => b.classList.remove('active'));
+      if (btn) btn.classList.add('active');
+
+      const cards = document.querySelectorAll('.finding-block');
+      cards.forEach(card => {
+        if (category === 'all' || card.getAttribute('data-category') === category) {
+          card.style.display = 'block';
+        } else {
+          card.style.display = 'none';
+        }
+      });
+    }
+
+    function handleSearch(query) {
+      const q = query.toLowerCase().trim();
+      const cards = document.querySelectorAll('.finding-block');
+      cards.forEach(card => {
+        const text = card.textContent.toLowerCase();
+        if (text.includes(q)) {
+          card.style.display = 'block';
+        } else {
+          card.style.display = 'none';
+        }
+      });
+    }
+  </script>
+</body>
+</html>

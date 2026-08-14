@@ -48,7 +48,7 @@ interface CategoryDragState {
 export function Palette() {
   const palette = usePalette();
   const app = useApp();
-  const { settings, setOpenSettings } = app;
+  const { settings, setOpenSettings, updateSettings, showToast } = app;
 
   const inputRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
@@ -76,7 +76,7 @@ export function Palette() {
       palette.select(index);
       setResultMenu({ item, position: clampContextMenuPosition(x, y) });
     },
-    [palette],
+    [palette.select],
   );
 
   const togglePin = useCallback(
@@ -85,24 +85,24 @@ export function Palette() {
       if (!appId) return;
       const pinned = settings.pinnedApps.includes(appId);
       if (pinned) {
-        app.updateSettings({
+        updateSettings({
           pinnedApps: settings.pinnedApps.filter((candidate) => candidate !== appId),
         });
-        app.showToast("Unpinned", item.title);
+        showToast("Unpinned", item.title);
         requestAnimationFrame(() => inputRef.current?.focus());
         return;
       }
       if (settings.pinnedApps.length >= PINNED_APP_LIMIT) {
-        app.showToast("Pin limit reached", `Unpin an app before adding ${item.title}`);
+        showToast("Pin limit reached", `Unpin an app before adding ${item.title}`);
         return;
       }
-      app.updateSettings({
+      updateSettings({
         pinnedApps: [...settings.pinnedApps, appId],
       });
-      app.showToast("Pinned", item.title);
+      showToast("Pinned", item.title);
       requestAnimationFrame(() => inputRef.current?.focus());
     },
-    [app, settings.pinnedApps],
+    [settings.pinnedApps, showToast, updateSettings],
   );
 
   const toggleAppGroup = useCallback(
@@ -683,7 +683,7 @@ export function Palette() {
                   onOpenContextMenu={openResultMenu}
                   onTogglePin={togglePin}
                   removable={removable}
-                  onRemoveHistory={() => app.removeHistory(item.id)}
+                  onRemoveHistory={app.removeHistory}
                   onMoveItem={moveItem}
                   onStartReorderDrag={startReorderDrag}
                   onUpdateReorderDrag={updateReorderDrag}
@@ -917,7 +917,7 @@ const ResultRow = memo(function ResultRow({
   onOpenContextMenu: (item: PaletteItem, index: number, x: number, y: number) => void;
   onTogglePin: (item: PaletteItem) => void;
   removable: boolean;
-  onRemoveHistory: () => void;
+  onRemoveHistory: (id: string) => void;
   onMoveItem: (item: PaletteItem, direction: -1 | 1) => void;
   onStartReorderDrag: (item: PaletteItem, pointerId: number, x: number, y: number) => void;
   onUpdateReorderDrag: (pointerId: number, x: number, y: number) => void;
@@ -1064,7 +1064,7 @@ const ResultRow = memo(function ResultRow({
                 aria-label={`Remove ${item.title} from Recent`}
                 title="Remove from Recent"
                 tabIndex={selected ? 0 : -1}
-                onClick={onRemoveHistory}
+                onClick={() => onRemoveHistory(item.id)}
                 className="focus-ring press grid h-8 w-8 cursor-pointer place-items-center rounded-[8px] text-fg-tertiary opacity-60 transition-opacity duration-150 group-hover:opacity-100 focus:opacity-100 hover:bg-danger-soft hover:text-danger"
               >
                 <X className="h-4 w-4" />
@@ -1077,7 +1077,7 @@ const ResultRow = memo(function ResultRow({
             aria-label={`Remove ${item.title} from Recent`}
             title="Remove from Recent"
             tabIndex={selected ? 0 : -1}
-            onClick={onRemoveHistory}
+            onClick={() => onRemoveHistory(item.id)}
             className="focus-ring press grid h-8 w-8 cursor-pointer place-items-center rounded-[8px] text-fg-tertiary opacity-60 transition-opacity duration-150 group-hover:opacity-100 focus:opacity-100 hover:bg-danger-soft hover:text-danger"
           >
             <X className="h-4 w-4" />

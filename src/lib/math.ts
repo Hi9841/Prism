@@ -217,8 +217,25 @@ export function tryEvaluate(input: string): EvalResult | null {
 
 /** Returns true when a query is "math-like" enough to surface the calculator. */
 export function isMathLike(input: string): boolean {
-  const s = input.trim().toLowerCase();
+  let s = input.trim().toLowerCase();
   if (s.length === 0 || s.length > 120) return false;
-  if (!/\d/.test(s)) return false;
-  return /^[\d\s.+\-*/^%()a-z]+$/.test(s);
+  s = s
+    .replace(/×/g, "*")
+    .replace(/÷/g, "/")
+    .replace(/√([\d.]+)/g, "sqrt($1)")
+    .replace(/√/g, "sqrt(")
+    .replace(/π/g, "pi");
+  if (!/^[\d\s.+\-*/^%()a-z]+$/.test(s)) return false;
+
+  // Application names such as "vlc3" and "7zip" contain digits but have no
+  // math syntax. Keep calculator discovery for literals and known parser
+  // tokens while avoiding a parser attempt for ordinary names.
+  const knownMathToken =
+    /\b(?:sqrt|abs|floor|ceil|round|ln|log|sin|cos|tan|asin|acos|atan|exp|pi|e|tau)\b/.test(s);
+  const hasOperator = /[+\-*/^%()]/.test(s);
+  const isLiteral = /^\d+(?:\.\d+)?$/.test(s);
+  if (!/\d/.test(s) && !knownMathToken) return false;
+  if (!hasOperator && !isLiteral && !knownMathToken) return false;
+  if (/[a-z]/.test(s) && !knownMathToken) return false;
+  return true;
 }

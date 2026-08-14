@@ -190,6 +190,11 @@ export async function searchFiles(query: string, limit = 8): Promise<FileSearchR
   return invoke<FileSearchResponse>("search_files", { query, limit });
 }
 
+export async function getFileThumbnail(path: string): Promise<string | null> {
+  if (!inTauri) return null;
+  return invoke<string | null>("get_file_thumbnail", { path });
+}
+
 export async function getQuickAccess(): Promise<QuickAccessEntry[]> {
   if (!inTauri) {
     return [

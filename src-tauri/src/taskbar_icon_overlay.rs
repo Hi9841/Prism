@@ -44,13 +44,12 @@ fn write_icon_file(path: &Path, pixels: &RgbaImage) -> Result<(), String> {
         .ok_or_else(|| "taskbar icon path has no parent".to_string())?;
     std::fs::create_dir_all(parent)
         .map_err(|error| format!("create taskbar icon directory: {error}"))?;
-    let mut bytes = Vec::with_capacity(ICON_MAGIC.len() + 8 + pixels.len() * 4);
+    let raw_pixels = pixels.as_raw();
+    let mut bytes = Vec::with_capacity(ICON_MAGIC.len() + 8 + raw_pixels.len());
     bytes.extend_from_slice(ICON_MAGIC);
     bytes.extend_from_slice(&pixels.width().to_le_bytes());
     bytes.extend_from_slice(&pixels.height().to_le_bytes());
-    for pixel in pixels.pixels() {
-        bytes.extend_from_slice(&pixel.0);
-    }
+    bytes.extend_from_slice(raw_pixels);
     let temp = path.with_extension("tmp");
     std::fs::write(&temp, bytes).map_err(|error| format!("write taskbar icon file: {error}"))?;
     crate::files::replace_file(&temp, path)

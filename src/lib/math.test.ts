@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { formatNumber, tryEvaluate } from "./math";
+import { formatNumber, isMathLike, tryEvaluate } from "./math";
 
 describe("tryEvaluate", () => {
   it("evaluates arithmetic", () => {
@@ -50,5 +50,21 @@ describe("tryEvaluate", () => {
     expect(formatNumber(2.5)).toBe("2.5");
     expect(formatNumber(1 / 3)).toBe("0.333333");
     expect(formatNumber(1 / 0)).toBe("Undefined");
+  });
+});
+
+describe("isMathLike", () => {
+  it("keeps literals and supported math tokens discoverable", () => {
+    expect(isMathLike("42")).toBe(true);
+    expect(isMathLike("sqrt(144)")).toBe(true);
+    expect(isMathLike("pi * 2")).toBe(true);
+    expect(isMathLike("6 × 7")).toBe(true);
+    expect(isMathLike("√9")).toBe(true);
+  });
+
+  it("does not classify digit-bearing application names as math", () => {
+    expect(isMathLike("vlc3")).toBe(false);
+    expect(isMathLike("7zip")).toBe(false);
+    expect(isMathLike("d3d12")).toBe(false);
   });
 });

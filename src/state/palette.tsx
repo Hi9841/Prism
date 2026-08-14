@@ -12,6 +12,7 @@ import {
   refreshApps as forceRefresh,
   getAppIcons,
   getApps,
+  getFileThumbnail,
   getQuickAccess,
   hidePaletteWindow,
   onFileIndexUpdated,
@@ -68,6 +69,8 @@ export function PaletteProvider({ children }: { children: ReactNode }) {
   const [appIcons, setAppIcons] = useState<Readonly<Record<string, string>>>({});
   const [selected, setSelected] = useState(0);
   const fileRequest = useRef(0);
+  const fileThumbnailCache = useRef<Map<string, string | null>>(new Map());
+  const fileThumbnailInFlight = useRef<Set<string>>(new Set());
   const historyPathRequest = useRef(0);
   const fileStatusKnown = useRef(false);
   const iconSettled = useRef<Set<string>>(new Set());
@@ -183,12 +186,46 @@ export function PaletteProvider({ children }: { children: ReactNode }) {
           if (request !== fileRequest.current) return;
           fileStatusKnown.current = true;
           indexStatusRef.current = { ready: response.ready, indexing: response.indexing };
-          setFileResults(response.items);
+          const itemsWithCachedThumbnails = response.items.map((entry) => {
+            const thumbnail = fileThumbnailCache.current.get(entry.path);
+            return thumbnail ? { ...entry, thumbnail } : entry;
+          });
+          setFileResults(itemsWithCachedThumbnails);
           setFileResultQuery(normalized);
           setFileIndexReady(response.ready);
           setFileIndexing(response.indexing);
           setFilePathBrowse(response.pathBrowse);
           setFilesError(!response.pathBrowse && !response.ready && !response.indexing);
+
+          const candidates = itemsWithCachedThumbnails.filter((entry) => {
+            if (entry.isDirectory || entry.thumbnail || fileThumbnailCache.current.has(entry.path))
+              return false;
+            const extension = entry.name.split(".").pop()?.toLowerCase();
+            return (
+              extension !== undefined && ["png", "jpg", "jpeg", "gif", "bmp", "webp"].includes(extension)
+            );
+          });
+          const pending = candidates.filter((entry) => !fileThumbnailInFlight.current.has(entry.path));
+          if (pending.length > 0) {
+            for (const entry of pending) fileThumbnailInFlight.current.add(entry.path);
+            void Promise.all(
+              pending.map(async (entry) => {
+                const thumbnail = await getFileThumbnail(entry.path).catch(() => null);
+                fileThumbnailCache.current.set(entry.path, thumbnail);
+                fileThumbnailInFlight.current.delete(entry.path);
+                return [entry.path, thumbnail] as const;
+              }),
+            ).then((thumbnails) => {
+              const byPath = new Map(thumbnails);
+              setFileResults((current) =>
+                current.map((entry) => {
+                  if (entry.thumbnail) return entry;
+                  const thumbnail = byPath.get(entry.path);
+                  return thumbnail ? { ...entry, thumbnail } : entry;
+                }),
+              );
+            });
+          }
         })
         .catch(() => {
           if (request !== fileRequest.current) return;
