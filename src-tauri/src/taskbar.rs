@@ -11,17 +11,23 @@ use windows::Win32::Graphics::Gdi::{
 };
 use windows::Win32::UI::Shell::{SHAppBarMessage, ABM_ACTIVATE, APPBARDATA};
 use windows::Win32::UI::WindowsAndMessaging::{
-    FindWindowW, GetForegroundWindow, GetWindowLongPtrW, GetWindowRect, SetWindowPos, ShowWindow,
-    GWL_EXSTYLE, HWND_NOTOPMOST, HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
-    SWP_SHOWWINDOW, SW_SHOWNOACTIVATE, WS_EX_TOPMOST,
+    FindWindowW, GetForegroundWindow, GetWindowRect, SetWindowPos, ShowWindow, HWND_BOTTOM,
+    HWND_NOTOPMOST, HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW,
+    SW_SHOWNOACTIVATE,
 };
 
-/// Persistent marker proving Prism made the taskbar topmost. If Prism dies
-/// while the palette is open, the next launch reads the marker and restores
-/// the taskbar instead of leaving it stuck above every window.
+/// Persistent marker proving Prism presented the taskbar over a fullscreen
+/// window. If Prism dies while the palette is open, the next launch reads the
+/// marker and restores the taskbar instead of leaving it stuck above every
+/// window.
 const TOPMOST_MARKER: &str = "taskbar-topmost";
 
-static MADE_TOPMOST: AtomicBool = AtomicBool::new(false);
+/// Tracks a temporary taskbar z-order lease for the current process. This is
+/// deliberately presentation-based rather than based on the taskbar's
+/// initial `WS_EX_TOPMOST` bit: Explorer commonly starts with that bit set,
+/// but Prism still needs to demote the taskbar when its fullscreen presentation
+/// ends.
+static PRESENTED: AtomicBool = AtomicBool::new(false);
 
 /// Fullscreen windows must not be covered by the taskbar; a few pixels of
 /// slack avoid classifying maximized windows as fullscreen.
@@ -40,13 +46,10 @@ pub fn present() {
         return;
     }
     unsafe {
-        let was_topmost = GetWindowLongPtrW(taskbar, GWL_EXSTYLE) as u32 & WS_EX_TOPMOST.0 != 0;
-        // Preserve ownership across duplicate presentation requests. Otherwise
-        // a second call observes our own topmost change, clears this flag, and
-        // prevents `release` from restoring the taskbar afterward.
-        if !was_topmost {
-            MADE_TOPMOST.store(true, Ordering::Release);
-        }
+        // Preserve ownership across duplicate presentation requests. The
+        // taskbar may already be topmost before Prism opens, but this call
+        // still creates a temporary lease that must be released afterward.
+        PRESENTED.store(true, Ordering::Release);
         let mut appbar = APPBARDATA {
             cbSize: std::mem::size_of::<APPBARDATA>() as u32,
             hWnd: taskbar,
@@ -64,9 +67,7 @@ pub fn present() {
             0,
             SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW,
         );
-        if MADE_TOPMOST.load(Ordering::Acquire) {
-            write_marker(true);
-        }
+        write_marker(true);
     }
 }
 
@@ -98,10 +99,11 @@ fn foreground_is_fullscreen() -> bool {
 
 pub fn release() {
     let Some(taskbar) = taskbar_window() else {
-        MADE_TOPMOST.store(false, Ordering::Release);
+        PRESENTED.store(false, Ordering::Release);
         write_marker(false);
         return;
     };
+    let fullscreen_foreground = foreground_is_fullscreen();
     unsafe {
         let mut appbar = APPBARDATA {
             cbSize: std::mem::size_of::<APPBARDATA>() as u32,
@@ -110,10 +112,21 @@ pub fn release() {
             ..Default::default()
         };
         let _ = SHAppBarMessage(ABM_ACTIVATE, &mut appbar);
-        if MADE_TOPMOST.swap(false, Ordering::AcqRel) {
+        // Release even when Explorer had the taskbar in the topmost band
+        // before Prism opened. `present()` owns the temporary presentation,
+        // not only the transition from a non-topmost style. HWND_NOTOPMOST
+        // alone would leave the taskbar at the top of the normal z-order,
+        // still above a borderless fullscreen game, so put it at the bottom
+        // while that game is foreground.
+        if PRESENTED.swap(false, Ordering::AcqRel) || marker_present() {
+            let insert_after = if fullscreen_foreground {
+                HWND_BOTTOM
+            } else {
+                HWND_NOTOPMOST
+            };
             let _ = SetWindowPos(
                 taskbar,
-                Some(HWND_NOTOPMOST),
+                Some(insert_after),
                 0,
                 0,
                 0,
