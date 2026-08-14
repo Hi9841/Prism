@@ -42,8 +42,10 @@ pub fn apps_light() -> Option<bool> {
             if result.is_ok() {
                 return Some(value != 0);
             }
+            #[cfg(debug_assertions)]
             eprintln!("[theme] query failed: {result:?} size={size}");
         } else {
+            #[cfg(debug_assertions)]
             eprintln!("[theme] open failed: {open:?}");
         }
         None

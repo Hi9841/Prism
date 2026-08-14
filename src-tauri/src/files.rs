@@ -532,9 +532,9 @@ fn indexed_file_entry(entry: &SearchEntry) -> Option<FileEntry> {
             .map(|value| value.to_string_lossy().into_owned())
             .unwrap_or_default(),
         is_directory: metadata.is_dir(),
-        thumbnail: (!metadata.is_dir())
-            .then(|| image_thumbnail(path))
-            .flatten(),
+        // Indexed search stays metadata-only. Thumbnails are requested after
+        // the row is visible so image decoding never delays search results.
+        thumbnail: None,
     })
 }
 
@@ -565,6 +565,19 @@ fn image_thumbnail(path: &Path) -> Option<String> {
         "data:image/png;base64,{}",
         base64::engine::general_purpose::STANDARD.encode(bytes.into_inner())
     ))
+}
+
+/// Loads a thumbnail for an absolute, existing file on demand.
+pub fn file_thumbnail(path: &str) -> Option<String> {
+    let path = Path::new(path);
+    if !path.is_absolute() {
+        return None;
+    }
+    let metadata = std::fs::metadata(path).ok()?;
+    if metadata.is_dir() {
+        return None;
+    }
+    image_thumbnail(path)
 }
 
 fn is_false(value: &bool) -> bool {
@@ -804,6 +817,35 @@ mod tests {
         assert_eq!(index.search("vanishing", Some(5)).items.len(), 1);
         std::fs::remove_file(&path).expect("delete indexed test file");
         assert!(index.search("vanishing", Some(5)).items.is_empty());
+    }
+
+    #[test]
+    fn indexed_results_defer_thumbnail_loading() {
+        let path = std::env::temp_dir().join(format!(
+            "prism-lazy-preview-{}.png",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        image::RgbaImage::new(1, 1)
+            .save(&path)
+            .expect("create preview test image");
+        let path_text = path.to_string_lossy().into_owned();
+        let index = FileIndex::default();
+        index.replace(
+            vec![CachedEntry {
+                path: path_text.clone(),
+                is_directory: false,
+            }],
+            false,
+        );
+
+        let result = index.search("prism-lazy", Some(5));
+        assert_eq!(result.items.len(), 1);
+        assert!(result.items[0].thumbnail.is_none());
+        assert!(file_thumbnail(&path_text).is_some());
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]

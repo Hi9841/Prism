@@ -227,6 +227,7 @@ pub fn run() {
             get_app_icons,
             refresh_apps,
             search_files,
+            get_file_thumbnail,
             get_quick_access,
             existing_paths,
             launch_app,
@@ -959,6 +960,14 @@ async fn search_files(
 }
 
 #[tauri::command]
+async fn get_file_thumbnail(path: String) -> Option<String> {
+    tauri::async_runtime::spawn_blocking(move || files::file_thumbnail(&path))
+        .await
+        .ok()
+        .flatten()
+}
+
+#[tauri::command]
 async fn get_quick_access() -> Vec<files::QuickAccessEntry> {
     // Known-folder resolution and is_dir checks can block on redirected or
     // network locations; keep the startup path off the main thread.
@@ -1034,10 +1043,12 @@ fn set_taskbar_alignment(app: tauri::AppHandle, alignment: String) -> Result<(),
 }
 
 #[tauri::command]
-fn get_taskbar_settings(
+async fn get_taskbar_settings(
     app: tauri::AppHandle,
 ) -> Result<taskbar_customization::TaskbarSettings, String> {
-    taskbar_customization::settings(&app)
+    tauri::async_runtime::spawn_blocking(move || taskbar_customization::settings(&app))
+        .await
+        .map_err(|error| format!("taskbar settings task failed: {error}"))?
 }
 
 #[tauri::command]
@@ -1075,18 +1086,30 @@ async fn set_custom_start_icon(app: tauri::AppHandle, base64_png: String) -> Res
 }
 
 #[tauri::command]
-fn select_custom_start_icon(app: tauri::AppHandle, id: String) -> Result<(), String> {
-    taskbar_customization::select_custom_start_icon(&app, &id)
+async fn select_custom_start_icon(app: tauri::AppHandle, id: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        taskbar_customization::select_custom_start_icon(&app, &id)
+    })
+    .await
+    .map_err(|error| format!("taskbar icon selection task failed: {error}"))?
 }
 
 #[tauri::command]
-fn remove_custom_start_icon(app: tauri::AppHandle, id: String) -> Result<(), String> {
-    taskbar_customization::remove_custom_start_icon(&app, &id)
+async fn remove_custom_start_icon(app: tauri::AppHandle, id: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        taskbar_customization::remove_custom_start_icon(&app, &id)
+    })
+    .await
+    .map_err(|error| format!("taskbar icon removal task failed: {error}"))?
 }
 
 #[tauri::command]
-fn set_taskbar_start_icon(app: tauri::AppHandle, value: String) -> Result<(), String> {
-    taskbar_customization::set_start_icon(&app, &value)
+async fn set_taskbar_start_icon(app: tauri::AppHandle, value: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        taskbar_customization::set_start_icon(&app, &value)
+    })
+    .await
+    .map_err(|error| format!("taskbar icon mode task failed: {error}"))?
 }
 
 fn is_animatable_window_width(width: u32) -> bool {

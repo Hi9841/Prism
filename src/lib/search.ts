@@ -99,7 +99,8 @@ export function fuzzyApps(
   if (q.length === 0) return [];
   const lower = q.toLowerCase();
   const tokens = lower.split(/\s+/).filter((t) => t.length > 0);
-  const significantLength = normalizeText(lower).length;
+  const normalizedQuery = normalizeText(lower);
+  const significantLength = normalizedQuery.length;
   const minimumScore = significantLength >= 3 ? Math.min(24, significantLength * 3) : -Infinity;
 
   // Callers that already deduplicated (memoized) the list skip the map build
@@ -107,7 +108,7 @@ export function fuzzyApps(
   const pool = opts.preDeduped ? apps : dedupeApps(apps);
   const results: FuzzyHit<AppEntry>[] = [];
   for (const app of pool) {
-    const score = appScore(app, lower, tokens);
+    const score = appScore(app, lower, tokens, normalizedQuery);
     if (score !== null && score >= minimumScore) results.push({ item: app, score });
   }
   results.sort((a, b) => b.score - a.score || sourcePriority(b.item.source) - sourcePriority(a.item.source));
@@ -149,12 +150,17 @@ function sourcePriority(source?: string): number {
   }
 }
 
-function appScore(app: AppEntry, lowerQuery: string, tokens: string[]): number | null {
+function appScore(
+  app: AppEntry,
+  lowerQuery: string,
+  tokens: string[],
+  normalizedQuery: string,
+): number | null {
   const lowerName = app.name.toLowerCase();
 
   // Punctuation-insensitive exact match: "visualstudiocode" matches
   // "Visual Studio Code" no matter how the user typed it.
-  if (app.normalizedName && normalizeText(lowerQuery) === app.normalizedName) {
+  if (app.normalizedName && normalizedQuery === app.normalizedName) {
     return 100;
   }
 
