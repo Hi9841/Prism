@@ -60,6 +60,39 @@ pub struct VolumeInfo {
     pub fs_type: String,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NtfsNode {
+    pub frn: u64,
+    pub parent_frn: u64,
+    pub name: String,
+    pub lower_name: String,
+    pub extension: Option<String>,
+    pub is_directory: bool,
+    pub attributes: u32,
+    pub modified_at: i64,
+    pub size: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct JournalMetadata {
+    pub journal_id: u64,
+    pub first_usn: i64,
+    pub next_usn: i64,
+    pub lowest_valid_usn: i64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct JournalCheckpoint {
+    pub journal_id: u64,
+    pub next_usn: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum NtfsChange {
+    Upsert(NtfsNode),
+    Delete { frn: u64 },
+}
+
 #[derive(Clone, Debug)]
 pub struct ScannedItem {
     pub normalized_path: String,
