@@ -1,5 +1,5 @@
 import { check, type Update } from "@tauri-apps/plugin-updater";
-import { AlertCircle, ArrowDownToLine, LoaderCircle } from "lucide-react";
+import { AlertCircle, ArrowDownToLine, LoaderCircle, RefreshCw } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { inTauri, onToggleRequest } from "../../lib/bridge";
 import { useApp } from "../../state/app";
@@ -43,6 +43,7 @@ export function UpdateControl() {
 
     const pending = check({
       timeout: NETWORK_TIMEOUT_MS,
+      target: "windows-x86_64-nsis",
       headers: force ? { "Cache-Control": "no-cache", Pragma: "no-cache" } : undefined,
     })
       .then(async (availableUpdate) => {
@@ -62,9 +63,9 @@ export function UpdateControl() {
         if (previousUpdate) await previousUpdate.close().catch(() => {});
         setViewState({ phase: "available", version: availableUpdate.version });
       })
-      .catch(() => {
-        // Background checks are intentionally quiet. The next palette open or
-        // hourly retry handles temporary network and GitHub failures.
+      .catch((error) => {
+        console.error("Prism update check failed", error);
+        if (!disposedRef.current) setViewState({ phase: "failed", version: "latest" });
       })
       .finally(() => {
         checkInFlightRef.current = null;
@@ -96,6 +97,10 @@ export function UpdateControl() {
 
   const installUpdate = useCallback(async () => {
     const update = updateRef.current;
+    if (viewState.phase === "failed" && !update) {
+      checkForUpdate(true);
+      return;
+    }
     if (!update || viewState.phase === "downloading" || viewState.phase === "installing") return;
 
     let downloadedBytes = 0;
@@ -143,9 +148,21 @@ export function UpdateControl() {
     } finally {
       installInFlightRef.current = false;
     }
-  }, [showToast, viewState.phase]);
+  }, [checkForUpdate, showToast, viewState.phase]);
 
-  if (viewState.phase === "hidden") return null;
+  if (viewState.phase === "hidden") {
+    return (
+      <button
+        type="button"
+        title="Check for updates"
+        aria-label="Check for updates"
+        onClick={() => checkForUpdate(true)}
+        className="focus-ring press grid h-8 w-8 place-items-center rounded-[7px] text-fg-quiet hover:bg-surface-hover hover:text-fg"
+      >
+        <RefreshCw className="h-3.5 w-3.5" />
+      </button>
+    );
+  }
 
   const version = viewState.version.replace(/^v/i, "");
   const busy = viewState.phase === "downloading" || viewState.phase === "installing";

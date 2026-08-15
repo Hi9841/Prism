@@ -69,6 +69,7 @@ export interface PaletteSources {
   pinnedAppIds: readonly string[];
   history: HistoryEntry[];
   existingHistoryPaths: ReadonlySet<string>;
+  fileThumbnails?: ReadonlyMap<string, string | null>;
   appIcons: Readonly<Record<string, string>>;
   fileResults: FileEntry[];
   fileResultQuery: string;
@@ -85,6 +86,7 @@ const IDLE_QUICK_LIMIT = 6;
 const IDLE_APPS_LIMIT = 8;
 const SEARCH_QUICK_LIMIT = 3;
 const SEARCH_APPS_LIMIT = 6;
+const EMPTY_FILE_THUMBNAILS: ReadonlyMap<string, string | null> = new Map();
 
 export function buildSections(sources: PaletteSources): {
   sections: Section[];
@@ -101,6 +103,7 @@ export function buildSections(sources: PaletteSources): {
     pinnedAppIds,
     history,
     existingHistoryPaths,
+    fileThumbnails = EMPTY_FILE_THUMBNAILS,
     appIcons,
     fileResults,
     fileResultQuery,
@@ -125,7 +128,7 @@ export function buildSections(sources: PaletteSources): {
     const pinnedItemIds = new Set(pinnedItems.map((item) => item.id));
     const recentItems: PaletteItem[] = [];
     for (const entry of history) {
-      const item = rehydrate(entry, apps, existingHistoryPaths, appIcons);
+      const item = rehydrate(entry, apps, existingHistoryPaths, appIcons, fileThumbnails);
       if (item && pinnedItemIds.has(item.id)) continue;
       if (item) recentItems.push(item);
       if (recentItems.length >= RECENT_LIMIT) break;
@@ -383,6 +386,7 @@ function rehydrate(
   apps: AppEntry[],
   existingHistoryPaths: ReadonlySet<string>,
   icons: Readonly<Record<string, string>>,
+  fileThumbnails: ReadonlyMap<string, string | null>,
 ): PaletteItem | null {
   if (history.id.startsWith("app::")) {
     const appId = history.id.slice(5);
@@ -402,5 +406,6 @@ function rehydrate(
     path,
     parent: boundary > 0 ? path.slice(0, boundary) : path,
     isDirectory,
+    thumbnail: fileThumbnails.get(path) ?? undefined,
   });
 }

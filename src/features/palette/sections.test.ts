@@ -337,6 +337,23 @@ describe("buildSections - search layout", () => {
     });
   });
 
+  it("uses a cached image thumbnail when rehydrating Recent", () => {
+    const path = "C:\\Users\\You\\Pictures\\everything.png";
+    const result = buildSections(
+      sources({
+        history: [{ id: `file::f::${path}`, title: "everything.png", ts: 1 }],
+        existingHistoryPaths: new Set([path]),
+        fileThumbnails: new Map([[path, "data:image/png;base64,recent-preview"]]),
+      }),
+    );
+
+    expect(result.sections[0].items[0].icon).toEqual({
+      kind: "image",
+      src: "data:image/png;base64,recent-preview",
+      name: "everything.png",
+    });
+  });
+
   it("offers the copy fallback only when nothing else matches and nothing is loading or indexing", () => {
     const base = { query: "zzzznope", fileIndexReady: true, fileIndexing: false } as const;
     expect(ids(buildSections(sources(base)).sections)).toEqual(["fallback"]);
