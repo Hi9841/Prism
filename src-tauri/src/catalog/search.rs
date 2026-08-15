@@ -1,0 +1,281 @@
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+use super::db::Database;
+use super::types::{CandidateEntry, FileEntry, FileSearchResponse, VolumeCoverage};
+
+const DEFAULT_LIMIT: usize = 10;
+const MAX_LIMIT: usize = 20;
+
+#[allow(clippy::too_many_arguments)]
+pub fn search(
+    query: &str,
+    limit: Option<usize>,
+    db: &Database,
+    search_generation: &AtomicU64,
+    volumes: &[VolumeCoverage],
+    total_indexed: u64,
+    indexing: bool,
+    ready: bool,
+) -> FileSearchResponse {
+    let query_trimmed = query.trim();
+    let limit = limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT);
+
+    // Direct absolute path browsing
+    if let Some(items) = browse_path(query_trimmed, limit) {
+        return FileSearchResponse {
+            items,
+            ready,
+            indexing,
+            path_browse: true,
+            volumes: volumes.to_vec(),
+            total_indexed,
+        };
+    }
+
+    if query_trimmed.chars().count() < 2 {
+        return FileSearchResponse {
+            items: Vec::new(),
+            ready,
+            indexing,
+            path_browse: false,
+            volumes: volumes.to_vec(),
+            total_indexed,
+        };
+    }
+
+    let generation = search_generation.fetch_add(1, Ordering::AcqRel) + 1;
+
+    let candidate_limit = (limit * 15).max(150);
+    let candidates = match db.search_candidates(query_trimmed, candidate_limit) {
+        Ok(c) => c,
+        Err(_) => {
+            return FileSearchResponse {
+                items: Vec::new(),
+                ready,
+                indexing,
+                path_browse: false,
+                volumes: volumes.to_vec(),
+                total_indexed,
+            };
+        }
+    };
+
+    if search_generation.load(Ordering::Acquire) != generation {
+        return FileSearchResponse {
+            items: Vec::new(),
+            ready,
+            indexing,
+            path_browse: false,
+            volumes: volumes.to_vec(),
+            total_indexed,
+        };
+    }
+
+    let query_lower = query_trimmed.to_lowercase();
+    let tokens: Vec<&str> = query_lower.split_whitespace().collect();
+
+    let mut scored: Vec<(i32, CandidateEntry)> = Vec::with_capacity(candidates.len());
+
+    for candidate in candidates {
+        if let Some(score) = entry_score(&candidate, &tokens, &query_lower) {
+            // Verify path still exists on disk before presenting
+            if Path::new(&candidate.display_path).exists() {
+                scored.push((score, candidate));
+            }
+        }
+    }
+
+    scored.sort_by(|(score_a, item_a), (score_b, item_b)| {
+        score_b
+            .cmp(score_a)
+            .then_with(|| score_a.cmp(score_b))
+            .then_with(|| item_a.lower_name.len().cmp(&item_b.lower_name.len()))
+            .then_with(|| item_a.lower_name.cmp(&item_b.lower_name))
+    });
+
+    let items: Vec<FileEntry> = scored
+        .into_iter()
+        .take(limit)
+        .map(|(_, item)| {
+            let path = Path::new(&item.display_path);
+            let parent = path
+                .parent()
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let name = path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| item.lower_name.clone());
+
+            FileEntry {
+                name,
+                path: item.display_path,
+                parent,
+                is_directory: item.is_directory,
+                thumbnail: None,
+            }
+        })
+        .collect();
+
+    FileSearchResponse {
+        items,
+        ready,
+        indexing,
+        path_browse: false,
+        volumes: volumes.to_vec(),
+        total_indexed,
+    }
+}
+
+pub fn entry_score(entry: &CandidateEntry, tokens: &[&str], full_query: &str) -> Option<i32> {
+    let lower_name = &entry.lower_name;
+
+    // Highest priority: Exact filename match (e.g. "gemini_revisions_unverified.md")
+    if lower_name == full_query {
+        return Some(10_000 + if entry.is_directory { 20 } else { 0 });
+    }
+
+    // Exact filename without extension
+    if let Some(stem) = Path::new(lower_name).file_stem().and_then(|s| s.to_str()) {
+        if stem == full_query {
+            return Some(9_500 + if entry.is_directory { 20 } else { 0 });
+        }
+    }
+
+    let mut total = if entry.is_directory { 20 } else { 0 };
+
+    for token in tokens {
+        total += target_score(token, lower_name)?;
+    }
+
+    Some(total - lower_name.len().min(80) as i32)
+}
+
+pub fn target_score(query: &str, target: &str) -> Option<i32> {
+    if target == query {
+        return Some(5_000);
+    }
+    if target.starts_with(query) {
+        return Some(4_000);
+    }
+    if let Some(position) = target.find(query) {
+        let boundary = position == 0
+            || target
+                .as_bytes()
+                .get(position.wrapping_sub(1))
+                .is_some_and(|byte| matches!(*byte, b' ' | b'-' | b'_' | b'.' | b'\\' | b'/'));
+        return Some(3_000 - (position.min(100) as i32 * 2) + if boundary { 500 } else { 0 });
+    }
+
+    // Byte-level subsequence matching
+    let query_bytes = query.as_bytes();
+    let target_bytes = target.as_bytes();
+    let query_length = query_bytes.len() as i32;
+    let mut current = *query_bytes.first()?;
+    let mut matched = 0i32;
+    let mut gaps = 0i32;
+
+    for &byte in target_bytes {
+        if byte == current {
+            matched += 1;
+            if let Some(&next) = query_bytes.get(matched as usize) {
+                current = next;
+            } else {
+                if query_length >= 3 && gaps > (query_length * 2).max(6) {
+                    return None;
+                }
+                return Some(1_000 + matched * 8 - gaps.min(120));
+            }
+        } else if matched > 0 {
+            gaps += 1;
+        }
+    }
+
+    None
+}
+
+/// Absolute paths are browsed directly without waiting for index
+pub fn browse_path(query: &str, limit: usize) -> Option<Vec<FileEntry>> {
+    let requested = PathBuf::from(query);
+    if !requested.is_absolute() {
+        return None;
+    }
+
+    if requested.is_dir() {
+        return Some(list_directory(&requested, None, limit));
+    }
+    if requested.is_file() {
+        return Some(path_entry(&requested).into_iter().collect());
+    }
+
+    let parent = requested.parent()?;
+    if !parent.is_dir() {
+        return Some(Vec::new());
+    }
+    let needle = requested
+        .file_name()
+        .map(|name| name.to_string_lossy().trim().to_lowercase())
+        .unwrap_or_default();
+    Some(list_directory(parent, Some(&needle), limit))
+}
+
+fn list_directory(directory: &Path, needle: Option<&str>, limit: usize) -> Vec<FileEntry> {
+    let Ok(children) = std::fs::read_dir(directory) else {
+        return Vec::new();
+    };
+    let parent = directory.to_string_lossy().into_owned();
+    let mut entries: Vec<(i32, FileEntry)> = children
+        .flatten()
+        .filter_map(|child| {
+            let name = child.file_name().to_string_lossy().trim().to_string();
+            if name.is_empty() {
+                return None;
+            }
+            let is_directory = child.file_type().map(|kind| kind.is_dir()).unwrap_or(false);
+            let score = match needle {
+                Some(value) if !value.is_empty() => target_score(value, &name.to_lowercase())?,
+                _ => 0,
+            };
+            Some((
+                score,
+                FileEntry {
+                    name,
+                    path: child.path().to_string_lossy().into_owned(),
+                    parent: parent.clone(),
+                    is_directory,
+                    thumbnail: None,
+                },
+            ))
+        })
+        .collect();
+
+    entries.sort_by(|(left_score, left), (right_score, right)| {
+        right_score
+            .cmp(left_score)
+            .then_with(|| right.is_directory.cmp(&left.is_directory))
+            .then_with(|| left.name.to_lowercase().cmp(&right.name.to_lowercase()))
+    });
+    entries
+        .into_iter()
+        .take(limit)
+        .map(|(_, entry)| entry)
+        .collect()
+}
+
+fn path_entry(path: &Path) -> Option<FileEntry> {
+    let name = path.file_name()?.to_string_lossy().trim().to_string();
+    if name.is_empty() {
+        return None;
+    }
+    Some(FileEntry {
+        name,
+        path: path.to_string_lossy().into_owned(),
+        parent: path
+            .parent()
+            .map(|value| value.to_string_lossy().into_owned())
+            .unwrap_or_default(),
+        is_directory: path.is_dir(),
+        thumbnail: None,
+    })
+}

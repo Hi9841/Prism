@@ -185,9 +185,16 @@ export async function searchFiles(query: string, limit = 20): Promise<FileSearch
       ready: true,
       indexing: false,
       pathBrowse: false,
+      volumes: [{ drive: "C:\\", state: "ready", indexedCount: sample.length }],
+      totalIndexed: sample.length,
     };
   }
   return invoke<FileSearchResponse>("search_files", { query, limit });
+}
+
+export async function rebuildFileIndex(): Promise<void> {
+  if (!inTauri) return;
+  await invoke("rebuild_file_index");
 }
 
 export async function getFileThumbnail(path: string): Promise<string | null> {

@@ -1,4 +1,14 @@
-import { ChevronDown, GripVertical, Pin, PinOff, RefreshCw, Search, Settings2, X } from "lucide-react";
+import {
+  ChevronDown,
+  FolderSync,
+  GripVertical,
+  Pin,
+  PinOff,
+  RefreshCw,
+  Search,
+  Settings2,
+  X,
+} from "lucide-react";
 import { memo, useCallback, useEffect, useRef, useState } from "react";
 import { PowerMenu } from "../../components/PowerMenu";
 import { displayShortcut } from "../../components/SettingsSheet";
@@ -739,7 +749,16 @@ export function Palette() {
             </span>
           )}
           {palette.fileIndexing && palette.appsLoaded && (
-            <span className="flex items-center gap-1.5 text-[11px] text-fg-quiet">
+            <span
+              className="flex items-center gap-1.5 text-[11px] text-fg-quiet"
+              title={
+                palette.volumes.length > 0
+                  ? palette.volumes
+                      .map((v) => `${v.drive}: ${v.state} (${v.indexedCount.toLocaleString()} items)`)
+                      .join(", ")
+                  : "Indexing file catalog..."
+              }
+            >
               <RefreshCw className="h-3 w-3 animate-spin" />
               indexing files
             </span>
@@ -747,6 +766,13 @@ export function Palette() {
           {palette.appsError && palette.query === "" && (
             <span className="text-[11px] text-danger">apps failed to load</span>
           )}
+          <IconButton
+            label="Rebuild file index"
+            onClick={palette.rebuildIndex}
+            disabled={palette.fileIndexing}
+          >
+            <FolderSync className="h-3.5 w-3.5" />
+          </IconButton>
           <IconButton
             label="Refresh applications"
             onClick={palette.refreshApps}

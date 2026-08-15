@@ -1,6 +1,6 @@
 [package]
 name = "prism"
-version = "0.8.9"
+version = "0.9.0"
 description = "Prism - a keyboard-first command palette for Windows"
 edition = "2021"
 
@@ -19,6 +19,7 @@ tauri-plugin-clipboard-manager = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["sync", "time"] }
+rusqlite = { version = "0.33", features = ["bundled"] }
 webview2-com = "0.38"
 windows = { version = "0.61", features = [
   "Win32_Devices_HumanInterfaceDevice",
@@ -26,8 +27,10 @@ windows = { version = "0.61", features = [
   "Win32_Graphics_Gdi",
   "Win32_Storage_EnhancedStorage",
   "Win32_Storage_FileSystem",
+  "Win32_Security",
   "Win32_System_Com",
   "Win32_System_Com_StructuredStorage",
+  "Win32_System_IO",
   "Win32_System_Registry",
   "Win32_System_Shutdown",
   "Win32_System_LibraryLoader",
