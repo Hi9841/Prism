@@ -11,6 +11,9 @@ use windows::Win32::Storage::FileSystem::{
     FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT, FILE_ATTRIBUTE_SYSTEM,
     FIND_FIRST_EX_LARGE_FETCH, WIN32_FIND_DATAW,
 };
+use windows::Win32::System::Threading::{
+    GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_BELOW_NORMAL, THREAD_PRIORITY_NORMAL,
+};
 
 use super::db::Database;
 use super::types::ScannedItem;
@@ -76,6 +79,7 @@ pub fn scan_volume(
     cancel: Arc<AtomicBool>,
     progress_callback: impl Fn(u64),
 ) -> Result<u64, String> {
+    let _priority = ScanPriorityGuard::new();
     db.begin_bulk_load()?;
     let result = scan_volume_inner(
         root,
@@ -90,6 +94,28 @@ pub fn scan_volume(
     // bulk load guard makes this safe under parallel scans.
     let _ = db.end_bulk_load();
     result
+}
+
+/// File enumeration is background maintenance. Lower only the current worker
+/// for the duration of a scan so the palette, watcher, and other app work keep
+/// responsive CPU time without permanently changing the runtime thread pool.
+struct ScanPriorityGuard;
+
+impl ScanPriorityGuard {
+    fn new() -> Self {
+        unsafe {
+            let _ = SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+        }
+        Self
+    }
+}
+
+impl Drop for ScanPriorityGuard {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_NORMAL);
+        }
+    }
 }
 
 fn scan_volume_inner(
