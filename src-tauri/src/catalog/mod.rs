@@ -33,6 +33,11 @@ const VOLUME_POLL_INTERVAL: Duration = Duration::from_secs(5);
 // periodic reconcile catches watcher misses cheaply without the disk churn of
 // the old full re-index.
 const RECONCILIATION_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60); // 6 hours
+                                                                            // At startup the persisted index is served directly: volumes scanned within
+                                                                            // this window are not re-walked (the watcher keeps them fresh while running,
+                                                                            // and results are verified against disk before being shown). Only volumes
+                                                                            // that are new, never scanned, or stale get a sweep.
+const STARTUP_SWEEP_WINDOW: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// In-memory per-volume file counts. Seeded from the database at startup,
 /// updated by scan progress and watcher deltas, and re-seeded from
@@ -188,7 +193,7 @@ impl FileIndex {
             }
             this.counts.clear();
             this.ready.store(false, Ordering::SeqCst);
-            this.scan_all_volumes().await;
+            this.scan_all_volumes(false).await;
         });
     }
 
@@ -212,19 +217,39 @@ impl FileIndex {
     /// Incremental sweep of every connected volume. Volumes whose directory
     /// mtimes are unchanged are skipped entirely (O(1) per volume when idle),
     /// so this is cheap to run at startup and periodically.
-    async fn scan_all_volumes(&self) {
+    /// Sweep of every connected volume. With `fresh_ok`, volumes whose
+    /// persisted index is recent are served as-is (watcher only), so a normal
+    /// launch never shows an indexing phase - the index is already there.
+    async fn scan_all_volumes(&self, fresh_ok: bool) {
         let db_opt = self.db.read().unwrap().clone();
         let Some(ref db) = db_opt else { return };
-        self.indexing.store(true, Ordering::SeqCst);
-        self.emit_updated();
 
         let discovered = tauri::async_runtime::spawn_blocking(volume::discover_volumes)
             .await
             .unwrap_or_default();
 
+        // Decide which volumes need a walk BEFORE flipping the indexing flag,
+        // so a startup with a fresh persisted index reports ready immediately.
+        let mut any_scan = false;
         for vol in &discovered {
-            let _ = db.upsert_volume(vol, VolumeState::Indexing);
+            let fresh = fresh_ok
+                && db
+                    .is_volume_fresh(&vol.volume_id, STARTUP_SWEEP_WINDOW.as_secs())
+                    .unwrap_or(false);
+            let _ = db.upsert_volume(
+                vol,
+                if fresh {
+                    VolumeState::Ready
+                } else {
+                    VolumeState::Indexing
+                },
+            );
+            if !fresh {
+                any_scan = true;
+            }
         }
+        self.indexing.store(any_scan, Ordering::SeqCst);
+        self.emit_updated();
 
         // Volumes are scanned in parallel - a multi-drive setup used to pay
         // the full walk serially, one drive after another.
@@ -232,7 +257,7 @@ impl FileIndex {
         for vol in discovered {
             let this = self.clone();
             tasks.push(tauri::async_runtime::spawn_blocking(move || {
-                this.scan_one_volume_sync(&vol);
+                this.scan_one_volume_sync(&vol, fresh_ok);
             }));
         }
         for task in tasks {
@@ -249,7 +274,7 @@ impl FileIndex {
     /// it off the runtime threads. Keeping the overflow handler fully sync
     /// (spawn_blocking with no nested future) also avoids the type-level cycle
     /// of an async closure that awaits back into this module's own futures.
-    fn scan_one_volume_sync(&self, vol: &VolumeInfo) {
+    fn scan_one_volume_sync(&self, vol: &VolumeInfo, fresh_ok: bool) {
         let db_opt = self.db.read().unwrap().clone();
         let Some(db) = db_opt else { return };
 
@@ -260,7 +285,10 @@ impl FileIndex {
         };
         let drive = mount_path.to_string_lossy().into_owned();
 
-        self.update_volume_coverage(&drive, VolumeState::Indexing);
+        let skip_scan = fresh_ok
+            && db
+                .is_volume_fresh(&volume_id, STARTUP_SWEEP_WINDOW.as_secs())
+                .unwrap_or(false);
 
         // Overflow handler: re-sweep the volume that lost events, on the
         // blocking pool so the watcher thread is never stalled.
@@ -298,6 +326,19 @@ impl FileIndex {
                 w.set_buffering(true);
             }
         }
+
+        if skip_scan {
+            // The persisted index is fresh: serve it as-is and let the
+            // watcher apply events directly (it was just started in buffering
+            // mode above, which must be released).
+            let watchers = self.watchers.lock().unwrap();
+            if let Some(w) = watchers.get(&volume_id) {
+                w.set_buffering(false);
+            }
+            return;
+        }
+
+        self.update_volume_coverage(&drive, VolumeState::Indexing);
 
         let cancel = Arc::new(AtomicBool::new(false));
         {
@@ -371,7 +412,7 @@ impl FileIndex {
         let Some(vol) = volumes.into_iter().find(|v| v.volume_id == volume_id) else {
             return;
         };
-        self.scan_one_volume_sync(&vol);
+        self.scan_one_volume_sync(&vol, false);
     }
 
     fn update_progress(&self, drive: &str, count: u64) {
@@ -491,9 +532,10 @@ pub fn warm(index: FileIndex, app_data_dir: PathBuf, app: tauri::AppHandle) {
     index.try_migrate_legacy_cache(&legacy_cache_path);
 
     tauri::async_runtime::spawn(async move {
-        // Startup sweep: catches changes made while the app was closed. The
-        // sweep walks the tree but only writes rows that actually changed.
-        index.scan_all_volumes().await;
+        // Startup: serve the persisted index directly. Volumes whose index is
+        // fresh are not re-walked (the watcher keeps them live), so a normal
+        // launch has results immediately - no indexing phase.
+        index.scan_all_volumes(true).await;
 
         let mut last_reconcile = tokio::time::Instant::now();
         // Seed the known set so the first poll does not immediately re-sweep.
@@ -521,7 +563,7 @@ pub fn warm(index: FileIndex, app_data_dir: PathBuf, app: tauri::AppHandle) {
                 || last_reconcile.elapsed() >= RECONCILIATION_INTERVAL
             {
                 known_volume_ids = current_ids;
-                index.scan_all_volumes().await;
+                index.scan_all_volumes(false).await;
                 last_reconcile = tokio::time::Instant::now();
             }
         }

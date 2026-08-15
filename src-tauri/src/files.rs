@@ -36,7 +36,7 @@ mod tests {
     use crate::catalog::db::Database;
     use crate::catalog::scanner::scan_volume;
     use crate::catalog::search::search;
-    use crate::catalog::types::{CandidateEntry, ScannedItem};
+    use crate::catalog::types::{CandidateEntry, ScannedItem, VolumeInfo};
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicBool, AtomicU64};
     use std::sync::Arc;
@@ -435,10 +435,13 @@ mod tests {
             modified_at: 42,
             size: 7,
         };
-        db.insert_batch("vol1", 1, std::slice::from_ref(&item)).unwrap();
+        db.insert_batch("vol1", 1, std::slice::from_ref(&item))
+            .unwrap();
 
         // Identical row: filtered out.
-        let filtered = db.filter_changed("vol1", std::slice::from_ref(&item)).unwrap();
+        let filtered = db
+            .filter_changed("vol1", std::slice::from_ref(&item))
+            .unwrap();
         assert_eq!(filtered.len(), 0);
 
         // Same path, new mtime/size: kept for re-insert.
@@ -662,6 +665,35 @@ mod tests {
         // Database::open should detect corruption, remove it, and recreate cleanly
         let db = Database::open(&db_path).expect("open corrupt database should recover cleanly");
         assert_eq!(db.get_total_indexed_count().unwrap(), 0);
+
+        let _ = std::fs::remove_dir_all(temp_dir);
+    }
+
+    #[test]
+    fn volume_freshness_drives_startup_decision() {
+        let (db, temp_dir) = test_db();
+        let vol = VolumeInfo {
+            volume_id: "vol1".into(),
+            drive_letter: Some("C:".into()),
+            mount_paths: vec![std::path::PathBuf::from("C:\\")],
+            drive_type: 3,
+            label: String::new(),
+            fs_type: "NTFS".into(),
+        };
+        db.upsert_volume(&vol, VolumeState::Ready).unwrap();
+
+        // A volume that was never scanned is never fresh: startup must sweep it.
+        assert!(!db.is_volume_fresh("vol1", 86_400).unwrap());
+
+        // After a completed scan the persisted index is fresh: startup serves
+        // it directly and only runs the watcher.
+        db.finish_volume_scan("vol1", 1, 5).unwrap();
+        assert!(db.is_volume_fresh("vol1", 86_400).unwrap());
+
+        // With second resolution a one-second window stays fresh for up to two
+        // seconds; a zero window expires as soon as a second ticks over.
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        assert!(!db.is_volume_fresh("vol1", 0).unwrap());
 
         let _ = std::fs::remove_dir_all(temp_dir);
     }
