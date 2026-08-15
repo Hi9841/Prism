@@ -220,7 +220,10 @@ impl Database {
                     INSERT INTO file_fts(rowid, name) VALUES (new.id, new.name);
                  END;
                  INSERT INTO file_fts(file_fts) VALUES('rebuild');
-                 UPDATE meta SET value = '2' WHERE key = 'version';",
+                 UPDATE meta SET value = '2' WHERE key = 'version';
+                 -- Force one sweep so the new exclusions take effect (the
+                 -- walk is change-only, so this is cheap).
+                 UPDATE volumes SET last_scanned_at = 0;",
             )
             .map_err(|e| e.to_string())?;
         } else {
@@ -568,6 +571,27 @@ impl Database {
             )
             .unwrap_or(0);
         Ok(count.max(0) as u64)
+    }
+
+    /// True when the volume was fully scanned within `max_age_secs` - its
+    /// persisted index is considered ready and startup serves it as-is.
+    pub fn is_volume_fresh(&self, volume_id: &str, max_age_secs: u64) -> Result<bool, String> {
+        let conn = self.reader.lock().map_err(|e| e.to_string())?;
+        let last_scanned: i64 = conn
+            .query_row(
+                "SELECT last_scanned_at FROM volumes WHERE volume_id = ?1;",
+                params![volume_id],
+                |row| row.get(0),
+            )
+            .unwrap_or(0);
+        if last_scanned <= 0 {
+            return Ok(false);
+        }
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+        Ok(now - last_scanned <= max_age_secs as i64)
     }
 
     /// Upserts a single file (watcher path). Returns the row delta: +1 when a
