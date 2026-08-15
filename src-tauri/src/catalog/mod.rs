@@ -491,12 +491,19 @@ pub fn warm(index: FileIndex, app_data_dir: PathBuf, app: tauri::AppHandle) {
     index.try_migrate_legacy_cache(&legacy_cache_path);
 
     tauri::async_runtime::spawn(async move {
-        // Startup sweep: incremental, so a fully-scanned, untouched volume is
-        // skipped in O(1); volumes that were never scanned get a full walk.
+        // Startup sweep: catches changes made while the app was closed. The
+        // sweep walks the tree but only writes rows that actually changed.
         index.scan_all_volumes().await;
 
         let mut last_reconcile = tokio::time::Instant::now();
-        let mut known_volume_ids: Vec<String> = Vec::new();
+        // Seed the known set so the first poll does not immediately re-sweep.
+        let mut known_volume_ids: Vec<String> =
+            tauri::async_runtime::spawn_blocking(volume::discover_volumes)
+                .await
+                .unwrap_or_default()
+                .iter()
+                .map(|v| v.volume_id.clone())
+                .collect();
 
         loop {
             tokio::time::sleep(VOLUME_POLL_INTERVAL).await;
