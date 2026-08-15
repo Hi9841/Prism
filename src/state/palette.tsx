@@ -71,6 +71,7 @@ export function PaletteProvider({ children }: { children: ReactNode }) {
   const [fileIndexing, setFileIndexing] = useState(true);
   const [filePathBrowse, setFilePathBrowse] = useState(false);
   const [fileIndexTick, setFileIndexTick] = useState(0);
+  const [fileThumbnailRevision, setFileThumbnailRevision] = useState(0);
   const [existingHistoryPaths, setExistingHistoryPaths] = useState<ReadonlySet<string>>(() => new Set());
   const [appIcons, setAppIcons] = useState<Readonly<Record<string, string>>>({});
   const [selected, setSelected] = useState(0);
@@ -143,6 +144,36 @@ export function PaletteProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     validateHistoryPaths();
   }, [validateHistoryPaths]);
+
+  useEffect(() => {
+    const imagePaths = new Set<string>();
+    for (const entry of app.history) {
+      if (!entry.id.startsWith("file::f::")) continue;
+      const path = historyFilePath(entry.id);
+      if (!path || !existingHistoryPaths.has(path)) continue;
+      const extension = path
+        .split(/[\\/.]/)
+        .pop()
+        ?.toLowerCase();
+      if (extension && ["png", "jpg", "jpeg", "gif", "bmp", "webp"].includes(extension)) {
+        imagePaths.add(path);
+      }
+    }
+
+    const pending = [...imagePaths].filter(
+      (path) => !fileThumbnailCache.current.has(path) && !fileThumbnailInFlight.current.has(path),
+    );
+    if (pending.length === 0) return;
+
+    for (const path of pending) fileThumbnailInFlight.current.add(path);
+    void Promise.all(
+      pending.map(async (path) => {
+        const thumbnail = await getFileThumbnail(path).catch(() => null);
+        fileThumbnailCache.current.set(path, thumbnail);
+        fileThumbnailInFlight.current.delete(path);
+      }),
+    ).then(() => setFileThumbnailRevision((revision) => revision + 1));
+  }, [app.history, existingHistoryPaths]);
 
   useEffect(
     () =>
@@ -290,50 +321,51 @@ export function PaletteProvider({ children }: { children: ReactNode }) {
   }, [quickAccess, app.settings.quickAccess]);
   const filesBusy = filesSearching || (!filePathBrowse && !fileIndexReady && fileIndexing);
 
-  const { sections, flatItems } = useMemo(
-    () =>
-      buildSections({
-        query,
-        apps: visibleApps,
-        pinnedApps,
-        quickItems,
-        quickAccessCollapsed: app.settings.quickAccessCollapsed,
-        appGroups: app.settings.appGroups,
-        sectionOrder: app.settings.sectionOrder,
-        pinnedAppIds: app.settings.pinnedApps,
-        history: app.history,
-        existingHistoryPaths,
-        appIcons,
-        fileResults,
-        fileResultQuery,
-        filePathBrowse,
-        filesBusy,
-        filesError,
-        fileIndexing: fileIndexing || volumes.some((v) => v.state === "indexing"),
-        fileIndexReady: fileIndexReady || volumes.some((v) => v.state === "ready"),
-      }),
-    [
+  const { sections, flatItems } = useMemo(() => {
+    void fileThumbnailRevision;
+    return buildSections({
       query,
-      visibleApps,
+      apps: visibleApps,
       pinnedApps,
       quickItems,
-      app.settings.quickAccessCollapsed,
-      app.settings.appGroups,
-      app.settings.sectionOrder,
-      app.settings.pinnedApps,
-      app.history,
+      quickAccessCollapsed: app.settings.quickAccessCollapsed,
+      appGroups: app.settings.appGroups,
+      sectionOrder: app.settings.sectionOrder,
+      pinnedAppIds: app.settings.pinnedApps,
+      history: app.history,
       existingHistoryPaths,
+      fileThumbnails: fileThumbnailCache.current,
       appIcons,
       fileResults,
       fileResultQuery,
       filePathBrowse,
       filesBusy,
       filesError,
-      fileIndexing,
-      fileIndexReady,
-      volumes,
-    ],
-  );
+      fileIndexing: fileIndexing || volumes.some((v) => v.state === "indexing"),
+      fileIndexReady: fileIndexReady || volumes.some((v) => v.state === "ready"),
+    });
+  }, [
+    query,
+    visibleApps,
+    pinnedApps,
+    quickItems,
+    app.settings.quickAccessCollapsed,
+    app.settings.appGroups,
+    app.settings.sectionOrder,
+    app.settings.pinnedApps,
+    app.history,
+    existingHistoryPaths,
+    fileThumbnailRevision,
+    appIcons,
+    fileResults,
+    fileResultQuery,
+    filePathBrowse,
+    filesBusy,
+    filesError,
+    fileIndexing,
+    fileIndexReady,
+    volumes,
+  ]);
 
   // Lazily fill app icons for the rows that are actually rendered. The app
   // metadata list stays lean; one small batched IPC covers the visible set.
