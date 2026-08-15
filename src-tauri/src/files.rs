@@ -1,821 +1,17 @@
-//! Fast local file search backed by a compact, persistent fixed-drive index.
-
-use base64::Engine;
-use serde::{Deserialize, Serialize};
-use std::collections::{HashSet, VecDeque};
-use std::ffi::c_void;
-use std::io::Cursor;
 use std::os::windows::ffi::OsStrExt;
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, RwLock};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use tauri::Emitter;
-use windows::core::{GUID, PCWSTR};
+use std::path::Path;
+use windows::core::PCWSTR;
 use windows::Win32::Storage::FileSystem::{
-    GetDriveTypeW, GetLogicalDriveStringsW, MoveFileExW, MOVEFILE_REPLACE_EXISTING,
-    MOVEFILE_WRITE_THROUGH,
-};
-use windows::Win32::System::Com::CoTaskMemFree;
-use windows::Win32::System::WindowsProgramming::{DRIVE_FIXED, DRIVE_RAMDISK, DRIVE_REMOVABLE};
-use windows::Win32::UI::Shell::{
-    FOLDERID_Desktop, FOLDERID_Documents, FOLDERID_Downloads, FOLDERID_Music, FOLDERID_Pictures,
-    FOLDERID_Profile, FOLDERID_Videos, SHGetKnownFolderPath,
+    MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
 };
 
-const CACHE_VERSION: u32 = 4;
-const CACHE_TTL_SECONDS: u64 = 6 * 60 * 60;
-// The index is a bounded snapshot, not a filesystem watcher. Refreshing it
-// every minute causes a full recursive scan and an atomic cache write while
-// the launcher is usually hidden. Keep the snapshot reasonably fresh without
-// turning idle time into sustained disk I/O.
-const REFRESH_INTERVAL: Duration = Duration::from_secs(15 * 60);
-const DRIVE_POLL_INTERVAL: Duration = Duration::from_secs(5);
-const MAX_ENTRIES_PER_DRIVE: usize = 100_000;
-const MAX_DEPTH: usize = 16;
-const DEFAULT_LIMIT: usize = 10;
-const MAX_LIMIT: usize = 20;
-const SKIP_DIRS: &[&str] = &[
-    ".git",
-    ".hg",
-    ".svn",
-    ".cache",
-    ".gradle",
-    ".idea",
-    ".venv",
-    ".vscode",
-    "appdata",
-    "__pycache__",
-    "build",
-    "dist",
-    "node_modules",
-    "out",
-    "target",
-    "venv",
-    "$recycle.bin",
-    "system volume information",
-    "windowsapps",
-    "windows",
-    "program files",
-    "program files (x86)",
-    "programdata",
-    "users",
-    "recovery",
-    "perflogs",
-    "msocache",
-];
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct FileEntry {
-    pub name: String,
-    pub path: String,
-    pub parent: String,
-    pub is_directory: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub thumbnail: Option<String>,
-}
-
-#[derive(Clone, Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct QuickAccessEntry {
-    pub name: String,
-    pub path: String,
-    pub kind: String,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct FileSearchResponse {
-    pub items: Vec<FileEntry>,
-    pub ready: bool,
-    pub indexing: bool,
-    pub path_browse: bool,
-}
-
-/// How often a scan checks whether a newer search has superseded it.
-const SEARCH_ABORT_CHECK_INTERVAL: usize = 4_096;
-
-#[derive(Clone, Default)]
-pub struct FileIndex {
-    inner: Arc<RwLock<IndexData>>,
-    /// Latest search generation. A newer keystroke supersedes older scans;
-    /// superseded scans abort early instead of finishing useless work.
-    search_generation: Arc<AtomicU64>,
-}
-
-#[derive(Default)]
-struct IndexData {
-    entries: Vec<SearchEntry>,
-    drive_roots: Vec<String>,
-    ready: bool,
-    indexing: bool,
-}
-
-struct SearchEntry {
-    path: Box<str>,
-    lower_name: Box<str>,
-    is_directory: bool,
-}
-
-#[derive(Deserialize, Serialize)]
-struct CachedEntry {
-    #[serde(rename = "p")]
-    path: String,
-    #[serde(rename = "d", default, skip_serializing_if = "is_false")]
-    is_directory: bool,
-}
-
-#[derive(Deserialize, Serialize)]
-struct CacheFile {
-    version: u32,
-    generated_at: u64,
-    #[serde(default)]
-    drive_roots: Vec<String>,
-    entries: Vec<CachedEntry>,
-}
-
-#[derive(Serialize)]
-struct CacheFileRef<'a> {
-    version: u32,
-    generated_at: u64,
-    drive_roots: &'a [String],
-    entries: &'a [CachedEntry],
-}
-
-struct IndexSnapshot {
-    drive_roots: Vec<String>,
-    entries: Vec<CachedEntry>,
-}
-
-impl FileIndex {
-    pub fn search(&self, query: &str, limit: Option<usize>) -> FileSearchResponse {
-        let query = query.trim();
-        let limit = limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT);
-        let (ready, indexing) = self.status();
-
-        if let Some(items) = browse_path(query, limit) {
-            return FileSearchResponse {
-                items,
-                ready,
-                indexing,
-                path_browse: true,
-            };
-        }
-
-        let query = query.to_lowercase();
-        let Ok(data) = self.inner.read() else {
-            return FileSearchResponse {
-                items: Vec::new(),
-                ready: false,
-                indexing: false,
-                path_browse: false,
-            };
-        };
-        if query.chars().count() < 2 {
-            return FileSearchResponse {
-                items: Vec::new(),
-                ready: data.ready,
-                indexing: data.indexing,
-                path_browse: false,
-            };
-        }
-
-        // Claim this search. A newer search supersedes it, which lets the
-        // scan loop abort early when the user has already typed further.
-        let generation = self.search_generation.fetch_add(1, Ordering::AcqRel) + 1;
-
-        let tokens: Vec<&str> = query.split_whitespace().collect();
-        let mut best: Vec<(i32, &SearchEntry)> = Vec::with_capacity(limit);
-        for (index, entry) in data.entries.iter().enumerate() {
-            // Cheap cooperative cancellation: only check on a boundary and
-            // only when another search has started.
-            if index % SEARCH_ABORT_CHECK_INTERVAL == 0
-                && self.search_generation.load(Ordering::Acquire) != generation
-            {
-                return FileSearchResponse {
-                    items: Vec::new(),
-                    ready: data.ready,
-                    indexing: data.indexing,
-                    path_browse: false,
-                };
-            }
-            let Some(score) = entry_score(entry, &tokens) else {
-                continue;
-            };
-            let insert_at = best.partition_point(|(current, _)| *current >= score);
-            if insert_at < limit {
-                best.insert(insert_at, (score, entry));
-                best.truncate(limit);
-            }
-        }
-
-        FileSearchResponse {
-            items: best
-                .into_iter()
-                .filter_map(|(_, entry)| indexed_file_entry(entry))
-                .collect(),
-            ready: data.ready,
-            indexing: data.indexing,
-            path_browse: false,
-        }
-    }
-
-    fn status(&self) -> (bool, bool) {
-        self.inner
-            .read()
-            .map(|data| (data.ready, data.indexing))
-            .unwrap_or((false, false))
-    }
-
-    fn replace_snapshot(&self, snapshot: IndexSnapshot, indexing: bool) {
-        if let Ok(mut data) = self.inner.write() {
-            data.entries = prepare(snapshot.entries);
-            data.drive_roots = snapshot.drive_roots;
-            data.ready = true;
-            data.indexing = indexing;
-        }
-    }
-
-    /// Returns true when a fresh scan differs from the in-memory snapshot.
-    fn changed(&self, next: &IndexSnapshot) -> bool {
-        self.inner
-            .read()
-            .map(|data| {
-                data.drive_roots != next.drive_roots || !same_entries(&data.entries, &next.entries)
-            })
-            .unwrap_or(false)
-    }
-
-    #[cfg(test)]
-    fn replace(&self, entries: Vec<CachedEntry>, indexing: bool) {
-        self.replace_snapshot(
-            IndexSnapshot {
-                drive_roots: Vec::new(),
-                entries,
-            },
-            indexing,
-        );
-    }
-
-    fn set_indexing(&self, indexing: bool) {
-        if let Ok(mut data) = self.inner.write() {
-            data.indexing = indexing;
-        }
-    }
-}
-
-/// Absolute paths are browsed directly so opening a known folder never waits
-/// for (or depends on) the background index. A non-existent final component is
-/// treated as a partial filename within its existing parent directory.
-fn browse_path(query: &str, limit: usize) -> Option<Vec<FileEntry>> {
-    let requested = PathBuf::from(query);
-    if !requested.is_absolute() {
-        return None;
-    }
-
-    if requested.is_dir() {
-        return Some(list_directory(&requested, None, limit));
-    }
-    if requested.is_file() {
-        return Some(path_entry(&requested).into_iter().collect());
-    }
-
-    let parent = requested.parent()?;
-    if !parent.is_dir() {
-        return Some(Vec::new());
-    }
-    let needle = requested
-        .file_name()
-        .map(|name| name.to_string_lossy().trim().to_lowercase())
-        .unwrap_or_default();
-    Some(list_directory(parent, Some(&needle), limit))
-}
-
-fn list_directory(directory: &Path, needle: Option<&str>, limit: usize) -> Vec<FileEntry> {
-    let Ok(children) = std::fs::read_dir(directory) else {
-        return Vec::new();
-    };
-    let parent = directory.to_string_lossy().into_owned();
-    let mut entries: Vec<(i32, FileEntry)> = children
-        .flatten()
-        .filter_map(|child| {
-            let name = child.file_name().to_string_lossy().trim().to_string();
-            if name.is_empty() {
-                return None;
-            }
-            // DirEntry::file_type() comes free from the enumeration; a fresh
-            // stat per child would cost thousands of syscalls in big folders.
-            let is_directory = child.file_type().map(|kind| kind.is_dir()).unwrap_or(false);
-            let score = match needle {
-                Some(value) if !value.is_empty() => target_score(value, &name.to_lowercase())?,
-                _ => 0,
-            };
-            Some((
-                score,
-                FileEntry {
-                    name,
-                    path: child.path().to_string_lossy().into_owned(),
-                    parent: parent.clone(),
-                    is_directory,
-                    thumbnail: (!is_directory)
-                        .then(|| image_thumbnail(&child.path()))
-                        .flatten(),
-                },
-            ))
-        })
-        .collect();
-
-    entries.sort_by(|(left_score, left), (right_score, right)| {
-        right_score
-            .cmp(left_score)
-            .then_with(|| right.is_directory.cmp(&left.is_directory))
-            .then_with(|| left.name.to_lowercase().cmp(&right.name.to_lowercase()))
-    });
-    entries
-        .into_iter()
-        .take(limit)
-        .map(|(_, entry)| entry)
-        .collect()
-}
-
-fn path_entry(path: &Path) -> Option<FileEntry> {
-    let name = path.file_name()?.to_string_lossy().trim().to_string();
-    if name.is_empty() {
-        return None;
-    }
-    Some(FileEntry {
-        name,
-        path: path.to_string_lossy().into_owned(),
-        parent: path
-            .parent()
-            .map(|value| value.to_string_lossy().into_owned())
-            .unwrap_or_default(),
-        is_directory: path.is_dir(),
-        thumbnail: (!path.is_dir()).then(|| image_thumbnail(path)).flatten(),
-    })
-}
-
-pub fn warm(index: FileIndex, cache_path: PathBuf, app: tauri::AppHandle) {
-    index.set_indexing(true);
-    tauri::async_runtime::spawn(async move {
-        let mut refresh_now = true;
-        let mut indexed_drive_roots = Vec::new();
-        let cached_path = cache_path.clone();
-        if let Ok(Ok((snapshot, fresh))) =
-            tauri::async_runtime::spawn_blocking(move || load_cache(&cached_path)).await
-        {
-            indexed_drive_roots = snapshot.drive_roots.clone();
-            index.replace_snapshot(snapshot, !fresh);
-            let _ = app.emit("file-index-updated", ());
-            if fresh {
-                refresh_now = false;
-            }
-        }
-
-        if refresh_now {
-            if let Some(roots) = refresh_index(&index, &cache_path, &app).await {
-                indexed_drive_roots = roots;
-            }
-        }
-
-        let mut last_refresh = tokio::time::Instant::now();
-        loop {
-            tokio::time::sleep(DRIVE_POLL_INTERVAL).await;
-            let current_roots = tauri::async_runtime::spawn_blocking(local_drive_root_strings)
-                .await
-                .unwrap_or_default();
-            if current_roots != indexed_drive_roots || last_refresh.elapsed() >= REFRESH_INTERVAL {
-                if let Some(roots) = refresh_index(&index, &cache_path, &app).await {
-                    indexed_drive_roots = roots;
-                }
-                last_refresh = tokio::time::Instant::now();
-            }
-        }
-    });
-}
-
-fn same_entries(current: &[SearchEntry], next: &[CachedEntry]) -> bool {
-    current.len() == next.len()
-        && current.iter().zip(next).all(|(current, next)| {
-            current.path.as_ref() == next.path && current.is_directory == next.is_directory
-        })
-}
-
-async fn refresh_index(
-    index: &FileIndex,
-    cache_path: &Path,
-    app: &tauri::AppHandle,
-) -> Option<Vec<String>> {
-    index.set_indexing(true);
-    let scan_path = cache_path.to_path_buf();
-    let index_for_task = index.clone();
-    let result = tauri::async_runtime::spawn_blocking(move || {
-        let snapshot = scan_user_folders();
-        let drive_roots = snapshot.drive_roots.clone();
-        // Every successful scan refreshes the verification timestamp, so a
-        // boot shortly after a periodic refresh skips the startup rescan even
-        // when the unchanged snapshot was not rewritten.
-        let _ = write_verified_at(&scan_path);
-        // Identical scans skip the multi-MB cache rewrite entirely.
-        if !index_for_task.changed(&snapshot) {
-            return (drive_roots, false);
-        }
-        // A cache write failure must not discard a valid in-memory scan.
-        let _ = save_cache(&scan_path, &snapshot);
-        index_for_task.replace_snapshot(snapshot, false);
-        (drive_roots, true)
-    })
-    .await;
-
-    match result {
-        Ok((drive_roots, changed)) => {
-            if changed {
-                let _ = app.emit("file-index-updated", ());
-            } else {
-                index.set_indexing(false);
-            }
-            Some(drive_roots)
-        }
-        Err(_) => {
-            index.set_indexing(false);
-            None
-        }
-    }
-}
-
-pub fn quick_access() -> Vec<QuickAccessEntry> {
-    known_locations()
-        .into_iter()
-        .filter(|(_, path, _)| path.is_dir())
-        .map(|(name, path, kind)| QuickAccessEntry {
-            name: name.to_string(),
-            path: path.to_string_lossy().into_owned(),
-            kind: kind.to_string(),
-        })
-        .collect()
-}
-
-fn scan_user_folders() -> IndexSnapshot {
-    let drive_roots = local_drive_roots();
-    let known_roots: Vec<PathBuf> = known_locations()
-        .into_iter()
-        .filter(|(_, _, kind)| *kind != "home")
-        .map(|(_, path, _)| path)
-        .filter(|path| path.is_dir())
-        .collect();
-    scan_drive_roots(&drive_roots, &known_roots, MAX_ENTRIES_PER_DRIVE)
-}
-
-fn scan_drive_roots(
-    drive_roots: &[PathBuf],
-    known_roots: &[PathBuf],
-    max_entries_per_drive: usize,
-) -> IndexSnapshot {
-    let mut assigned_known_roots = HashSet::new();
-    let mut entries = Vec::with_capacity(16_384 * drive_roots.len().max(1));
-
-    // Give every local volume its own budget. A large C: drive must not use
-    // the entire index before a secondary or external drive is visited.
-    for drive_root in drive_roots {
-        let mut roots = vec![drive_root.clone()];
-        for (index, known_root) in known_roots.iter().enumerate() {
-            if known_root.starts_with(drive_root) {
-                roots.push(known_root.clone());
-                assigned_known_roots.insert(index);
-            }
-        }
-        entries.extend(scan_roots(&roots, max_entries_per_drive));
-    }
-
-    // Keep redirected known folders searchable even when their backing path
-    // is not represented by a normal drive letter.
-    let other_roots: Vec<PathBuf> = known_roots
-        .iter()
-        .enumerate()
-        .filter(|(index, _)| !assigned_known_roots.contains(index))
-        .map(|(_, path)| path.clone())
-        .collect();
-    entries.extend(scan_roots(&other_roots, max_entries_per_drive));
-
-    IndexSnapshot {
-        drive_roots: drive_roots
-            .iter()
-            .map(|root| root.to_string_lossy().into_owned())
-            .collect(),
-        entries,
-    }
-}
-
-fn scan_roots(roots: &[PathBuf], max_entries: usize) -> Vec<CachedEntry> {
-    let mut entries = Vec::with_capacity(16_384.min(max_entries));
-    let mut queue = VecDeque::new();
-    let mut queued_directories = HashSet::new();
-    for root in roots {
-        if queued_directories.insert(path_key(root)) {
-            queue.push_back((root.clone(), 0usize));
-        }
-    }
-
-    while let Some((dir, depth)) = queue.pop_front() {
-        if entries.len() >= max_entries || depth > MAX_DEPTH {
-            break;
-        }
-        let Ok(children) = std::fs::read_dir(&dir) else {
-            continue;
-        };
-        for child in children.flatten() {
-            if entries.len() >= max_entries {
-                break;
-            }
-            let path = child.path();
-            let Ok(file_type) = child.file_type() else {
-                continue;
-            };
-            if file_type.is_symlink() {
-                continue;
-            }
-            let name = child.file_name().to_string_lossy().trim().to_string();
-            if name.is_empty() {
-                continue;
-            }
-            let is_directory = file_type.is_dir();
-            if is_directory && should_skip_dir(&name) {
-                continue;
-            }
-            let path_text = path.to_string_lossy().into_owned();
-            entries.push(CachedEntry {
-                path: path_text,
-                is_directory,
-            });
-            if is_directory && depth < MAX_DEPTH && queued_directories.insert(path_key(&path)) {
-                queue.push_back((path, depth + 1));
-            }
-        }
-    }
-    entries
-}
-
-fn path_key(path: &Path) -> String {
-    path.to_string_lossy().to_lowercase()
-}
-
-fn local_drive_roots() -> Vec<PathBuf> {
-    let required = unsafe { GetLogicalDriveStringsW(None) };
-    if required == 0 {
-        return Vec::new();
-    }
-    let mut buffer = vec![0u16; required as usize + 1];
-    let written = unsafe { GetLogicalDriveStringsW(Some(&mut buffer)) } as usize;
-    if written == 0 || written > buffer.len() {
-        return Vec::new();
-    }
-
-    buffer[..written]
-        .split(|unit| *unit == 0)
-        .filter(|slice| !slice.is_empty())
-        .filter_map(|slice| {
-            let mut root = slice.to_vec();
-            root.push(0);
-            is_searchable_drive_type(unsafe { GetDriveTypeW(PCWSTR(root.as_ptr())) })
-                .then(|| PathBuf::from(String::from_utf16_lossy(slice)))
-        })
-        .collect()
-}
-
-fn local_drive_root_strings() -> Vec<String> {
-    local_drive_roots()
-        .into_iter()
-        .map(|root| root.to_string_lossy().into_owned())
-        .collect()
-}
-
-fn is_searchable_drive_type(drive_type: u32) -> bool {
-    matches!(drive_type, DRIVE_FIXED | DRIVE_REMOVABLE | DRIVE_RAMDISK)
-}
-
-fn should_skip_dir(name: &str) -> bool {
-    let lower = name.to_lowercase();
-    SKIP_DIRS.iter().any(|skip| lower == *skip)
-}
-
-fn prepare(entries: Vec<CachedEntry>) -> Vec<SearchEntry> {
-    entries
-        .into_iter()
-        .filter_map(|value| {
-            let lower_name = Path::new(&value.path)
-                .file_name()?
-                .to_string_lossy()
-                .trim()
-                .to_lowercase();
-            if lower_name.is_empty() {
-                return None;
-            }
-            Some(SearchEntry {
-                path: value.path.into_boxed_str(),
-                lower_name: lower_name.into_boxed_str(),
-                is_directory: value.is_directory,
-            })
-        })
-        .collect()
-}
-
-fn entry_score(entry: &SearchEntry, tokens: &[&str]) -> Option<i32> {
-    let mut total = if entry.is_directory { 20 } else { 0 };
-    for token in tokens {
-        total += target_score(token, &entry.lower_name)?;
-    }
-    Some(total - entry.lower_name.len().min(80) as i32)
-}
-
-fn indexed_file_entry(entry: &SearchEntry) -> Option<FileEntry> {
-    let path = Path::new(entry.path.as_ref());
-    let metadata = std::fs::metadata(path).ok()?;
-    let name = path.file_name()?.to_string_lossy().into_owned();
-    Some(FileEntry {
-        name,
-        path: entry.path.to_string(),
-        parent: path
-            .parent()
-            .map(|value| value.to_string_lossy().into_owned())
-            .unwrap_or_default(),
-        is_directory: metadata.is_dir(),
-        // Indexed search stays metadata-only. Thumbnails are requested after
-        // the row is visible so image decoding never delays search results.
-        thumbnail: None,
-    })
-}
-
-const THUMBNAIL_MAX_BYTES: u64 = 32 * 1024 * 1024;
-const THUMBNAIL_SIZE: u32 = 64;
-
-fn image_thumbnail(path: &Path) -> Option<String> {
-    let extension = path.extension()?.to_string_lossy().to_lowercase();
-    if !matches!(
-        extension.as_str(),
-        "png" | "jpg" | "jpeg" | "gif" | "bmp" | "webp"
-    ) {
-        return None;
-    }
-    if std::fs::metadata(path).ok()?.len() > THUMBNAIL_MAX_BYTES {
-        return None;
-    }
-    let image = image::ImageReader::open(path)
-        .ok()?
-        .with_guessed_format()
-        .ok()?
-        .decode()
-        .ok()?;
-    let preview = image.thumbnail(THUMBNAIL_SIZE, THUMBNAIL_SIZE);
-    let mut bytes = Cursor::new(Vec::new());
-    preview.write_to(&mut bytes, image::ImageFormat::Png).ok()?;
-    Some(format!(
-        "data:image/png;base64,{}",
-        base64::engine::general_purpose::STANDARD.encode(bytes.into_inner())
-    ))
-}
-
-/// Loads a thumbnail for an absolute, existing file on demand.
-pub fn file_thumbnail(path: &str) -> Option<String> {
-    let path = Path::new(path);
-    if !path.is_absolute() {
-        return None;
-    }
-    let metadata = std::fs::metadata(path).ok()?;
-    if metadata.is_dir() {
-        return None;
-    }
-    image_thumbnail(path)
-}
-
-fn is_false(value: &bool) -> bool {
-    !*value
-}
-
-fn target_score(query: &str, target: &str) -> Option<i32> {
-    if target == query {
-        return Some(1_000);
-    }
-    if target.starts_with(query) {
-        return Some(800);
-    }
-    if let Some(position) = target.find(query) {
-        let boundary = position == 0
-            || target
-                .as_bytes()
-                .get(position.wrapping_sub(1))
-                .is_some_and(|byte| matches!(*byte, b' ' | b'-' | b'_' | b'.' | b'\\' | b'/'));
-        return Some(620 - position.min(100) as i32 * 2 + if boundary { 80 } else { 0 });
-    }
-
-    // Byte-level subsequence matching: in UTF-8 a byte subsequence matches
-    // exactly the same strings as the char subsequence (each char's bytes are
-    // contiguous), which keeps the hottest loop allocation- and decode-free.
-    let query_bytes = query.as_bytes();
-    let target_bytes = target.as_bytes();
-    let query_length = query_bytes.len() as i32;
-    let mut current = *query_bytes.first()?;
-    let mut matched = 0i32;
-    let mut gaps = 0i32;
-    for &byte in target_bytes {
-        if byte == current {
-            matched += 1;
-            if let Some(&next) = query_bytes.get(matched as usize) {
-                current = next;
-            } else {
-                if query_length >= 3 && gaps > (query_length * 2).max(6) {
-                    return None;
-                }
-                return Some(300 + matched * 8 - gaps.min(120));
-            }
-        } else if matched > 0 {
-            gaps += 1;
-        }
-    }
-    None
-}
-
-fn load_cache(path: &Path) -> Result<(IndexSnapshot, bool), String> {
-    let text = std::fs::read_to_string(path).map_err(|error| error.to_string())?;
-    let cache: CacheFile = serde_json::from_str(&text).map_err(|error| error.to_string())?;
-    if cache.version != CACHE_VERSION {
-        return Err("stale file index".to_string());
-    }
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    // A recent verification pass (sidecar timestamp) also counts as fresh,
-    // since it rescanned the same unchanged snapshot.
-    let fresh = cache_is_fresh(
-        &cache,
-        now,
-        read_verified_at(path),
-        &local_drive_root_strings(),
-    );
-    Ok((
-        IndexSnapshot {
-            drive_roots: cache.drive_roots,
-            entries: cache.entries,
-        },
-        fresh,
-    ))
-}
-
-fn cache_is_fresh(
-    cache: &CacheFile,
-    now: u64,
-    verified_at: Option<u64>,
-    current_drive_roots: &[String],
-) -> bool {
-    if cache.drive_roots != current_drive_roots {
-        return false;
-    }
-    let generated_fresh = now.saturating_sub(cache.generated_at) <= CACHE_TTL_SECONDS;
-    let verified_fresh = verified_at
-        .map(|verified| now.saturating_sub(verified) <= CACHE_TTL_SECONDS)
-        .unwrap_or(false);
-    generated_fresh || verified_fresh
-}
-
-fn verified_path(cache_path: &Path) -> PathBuf {
-    cache_path.with_extension("verified")
-}
-
-fn write_verified_at(cache_path: &Path) -> std::io::Result<()> {
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    let path = verified_path(cache_path);
-    let temp = path.with_extension("verified.tmp");
-    std::fs::write(&temp, now.to_string())?;
-    crate::files::replace_file(&temp, &path).map_err(std::io::Error::other)
-}
-
-fn read_verified_at(cache_path: &Path) -> Option<u64> {
-    let text = std::fs::read_to_string(verified_path(cache_path)).ok()?;
-    text.trim().parse().ok()
-}
-
-fn save_cache(path: &Path, snapshot: &IndexSnapshot) -> Result<(), String> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
-    }
-    let cache = CacheFileRef {
-        version: CACHE_VERSION,
-        generated_at: SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs(),
-        drive_roots: &snapshot.drive_roots,
-        entries: &snapshot.entries,
-    };
-    let text = serde_json::to_vec(&cache).map_err(|error| error.to_string())?;
-    let temp = path.with_extension("json.tmp");
-    std::fs::write(&temp, text).map_err(|error| error.to_string())?;
-    replace_file(&temp, path)
-}
+#[allow(unused_imports)]
+pub use crate::catalog::search::{browse_path, entry_score, target_score};
+#[allow(unused_imports)]
+pub use crate::catalog::types::{
+    FileEntry, FileSearchResponse, QuickAccessEntry, VolumeCoverage, VolumeState,
+};
+pub use crate::catalog::{file_thumbnail, quick_access, warm, FileIndex};
 
 pub(crate) fn replace_file(temp: &Path, destination: &Path) -> Result<(), String> {
     let from: Vec<u16> = temp.as_os_str().encode_wide().chain(Some(0)).collect();
@@ -834,151 +30,163 @@ pub(crate) fn replace_file(temp: &Path, destination: &Path) -> Result<(), String
     }
 }
 
-fn known_locations() -> Vec<(&'static str, PathBuf, &'static str)> {
-    [
-        ("Home", &FOLDERID_Profile, "home"),
-        ("Desktop", &FOLDERID_Desktop, "desktop"),
-        ("Downloads", &FOLDERID_Downloads, "downloads"),
-        ("Documents", &FOLDERID_Documents, "documents"),
-        ("Pictures", &FOLDERID_Pictures, "pictures"),
-        ("Music", &FOLDERID_Music, "music"),
-        ("Videos", &FOLDERID_Videos, "videos"),
-    ]
-    .into_iter()
-    .filter_map(|(name, id, kind)| known_folder(id).map(|path| (name, path, kind)))
-    .collect()
-}
-
-fn known_folder(id: &GUID) -> Option<PathBuf> {
-    unsafe {
-        let path = SHGetKnownFolderPath(id, Default::default(), None).ok()?;
-        let text = path.to_string().unwrap_or_default();
-        CoTaskMemFree(Some(path.as_ptr() as *const c_void));
-        if text.is_empty() {
-            None
-        } else {
-            Some(PathBuf::from(text))
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::catalog::db::Database;
+    use crate::catalog::scanner::scan_volume;
+    use crate::catalog::search::search;
+    use crate::catalog::types::{CandidateEntry, ScannedItem};
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicBool, AtomicU64};
+    use std::sync::Arc;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
-    fn entry(name: &str, path: &str, is_directory: bool) -> SearchEntry {
-        SearchEntry {
-            path: path.into(),
-            lower_name: name.to_lowercase().into(),
-            is_directory,
-        }
+    fn test_db() -> (Arc<Database>, PathBuf) {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "prism-test-db-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let db_path = temp_dir.join("catalog.db");
+        let db = Database::open(&db_path).expect("open test database");
+        (Arc::new(db), temp_dir)
     }
 
     #[test]
     fn exact_and_prefix_names_rank_first() {
-        let exact = entry("report.pdf", r"C:\Users\me\Documents\report.pdf", false);
-        let prefix = entry(
-            "report-final.pdf",
-            r"C:\Users\me\Downloads\report-final.pdf",
-            false,
-        );
-        let unrelated = entry("notes.txt", r"C:\Users\me\report\notes.txt", false);
+        let exact = CandidateEntry {
+            id: 1,
+            display_path: r"C:\Users\me\Documents\report.pdf".into(),
+            lower_name: "report.pdf".into(),
+            is_directory: false,
+            extension: Some("pdf".into()),
+        };
+        let prefix = CandidateEntry {
+            id: 2,
+            display_path: r"C:\Users\me\Downloads\report-final.pdf".into(),
+            lower_name: "report-final.pdf".into(),
+            is_directory: false,
+            extension: Some("pdf".into()),
+        };
+        let unrelated = CandidateEntry {
+            id: 3,
+            display_path: r"C:\Users\me\report\notes.txt".into(),
+            lower_name: "notes.txt".into(),
+            is_directory: false,
+            extension: Some("txt".into()),
+        };
+
         let tokens = ["report"];
-        assert!(entry_score(&exact, &tokens) > entry_score(&prefix, &tokens));
-        assert!(entry_score(&unrelated, &tokens).is_none());
+        let exact_score = entry_score(&exact, &tokens, "report").unwrap();
+        let prefix_score = entry_score(&prefix, &tokens, "report").unwrap();
+        assert!(exact_score > prefix_score);
+        assert!(entry_score(&unrelated, &tokens, "report").is_none());
+    }
+
+    #[test]
+    fn exact_underscore_containing_filename_ranks_first() {
+        let exact = CandidateEntry {
+            id: 1,
+            display_path: r"C:\Users\me\Documents\gemini_revisions_unverified.md".into(),
+            lower_name: "gemini_revisions_unverified.md".into(),
+            is_directory: false,
+            extension: Some("md".into()),
+        };
+        let partial = CandidateEntry {
+            id: 2,
+            display_path: r"C:\Users\me\Documents\gemini_revisions.md".into(),
+            lower_name: "gemini_revisions.md".into(),
+            is_directory: false,
+            extension: Some("md".into()),
+        };
+        let query = "gemini_revisions_unverified.md";
+        let tokens = ["gemini_revisions_unverified.md"];
+        let exact_score = entry_score(&exact, &tokens, query).unwrap();
+        let partial_score = entry_score(&partial, &tokens, query);
+        assert!(partial_score.is_none() || exact_score > partial_score.unwrap());
     }
 
     #[test]
     fn supports_fuzzy_and_multi_token_matches() {
-        let file = entry(
-            "Project Roadmap 2026.pdf",
-            r"C:\Users\me\Documents\Project Roadmap 2026.pdf",
-            false,
-        );
-        assert!(entry_score(&file, &["prjct"]).is_some());
-        assert!(entry_score(&file, &["road", "2026"]).is_some());
-        assert!(entry_score(&file, &["road", "missing"]).is_none());
+        let file = CandidateEntry {
+            id: 1,
+            display_path: r"C:\Users\me\Documents\Project Roadmap 2026.pdf".into(),
+            lower_name: "project roadmap 2026.pdf".into(),
+            is_directory: false,
+            extension: Some("pdf".into()),
+        };
+        assert!(entry_score(&file, &["prjct"], "prjct").is_some());
+        assert!(entry_score(&file, &["road", "2026"], "road 2026").is_some());
+        assert!(entry_score(&file, &["road", "missing"], "road missing").is_none());
         assert!(target_score("wez", "windows performance analyzer").is_none());
     }
 
     #[test]
     fn search_is_capped_and_requires_two_characters() {
-        let base = std::env::temp_dir().join(format!(
-            "prism-file-search-{}",
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&base).expect("create search test folder");
-        let entries = (0..30)
-            .map(|number| {
-                let path = base.join(format!("report-{number}.txt"));
-                std::fs::write(&path, "test").expect("create search test file");
-                CachedEntry {
-                    path: path.to_string_lossy().into_owned(),
-                    is_directory: false,
-                }
-            })
-            .collect();
-        let index = FileIndex::default();
-        index.replace(entries, false);
-        assert!(index.search("r", Some(5)).items.is_empty());
-        assert_eq!(index.search("report", Some(5)).items.len(), 5);
-        assert_eq!(index.search("report", Some(200)).items.len(), 20);
-        let _ = std::fs::remove_dir_all(base);
+        let (db, temp_dir) = test_db();
+        let mut items = Vec::new();
+        for i in 0..30 {
+            let file_path = temp_dir.join(format!("report-{i}.txt"));
+            std::fs::write(&file_path, "content").unwrap();
+            items.push(ScannedItem {
+                normalized_path: file_path.to_string_lossy().to_lowercase(),
+                display_path: file_path.to_string_lossy().into_owned(),
+                name: format!("report-{i}.txt"),
+                lower_name: format!("report-{i}.txt"),
+                parent: temp_dir.to_string_lossy().into_owned(),
+                is_directory: false,
+                extension: Some("txt".into()),
+                modified_at: 0,
+                size: 7,
+            });
+        }
+        db.insert_batch("vol1", 1, &items).unwrap();
+        let gen = AtomicU64::new(0);
+
+        let res1 = search("r", Some(5), &db, &gen, &[], 30, false, true);
+        assert!(res1.items.is_empty());
+
+        let res5 = search("report", Some(5), &db, &gen, &[], 30, false, true);
+        assert_eq!(res5.items.len(), 5);
+
+        let res20 = search("report", Some(200), &db, &gen, &[], 30, false, true);
+        assert_eq!(res20.items.len(), 20);
+
+        let _ = std::fs::remove_dir_all(temp_dir);
     }
 
     #[test]
     fn deleted_index_entry_is_never_returned() {
-        let path = std::env::temp_dir().join(format!(
-            "prism-vanishing-note-{}.txt",
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos()
-        ));
-        std::fs::write(&path, "test").expect("create indexed test file");
-        let index = FileIndex::default();
-        index.replace(
-            vec![CachedEntry {
-                path: path.to_string_lossy().into_owned(),
-                is_directory: false,
-            }],
-            false,
-        );
-        assert_eq!(index.search("vanishing", Some(5)).items.len(), 1);
-        std::fs::remove_file(&path).expect("delete indexed test file");
-        assert!(index.search("vanishing", Some(5)).items.is_empty());
-    }
+        let (db, temp_dir) = test_db();
+        let file_path = temp_dir.join("prism-vanishing-note.txt");
+        std::fs::write(&file_path, "content").unwrap();
 
-    #[test]
-    fn indexed_results_defer_thumbnail_loading() {
-        let path = std::env::temp_dir().join(format!(
-            "prism-lazy-preview-{}.png",
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos()
-        ));
-        image::RgbaImage::new(1, 1)
-            .save(&path)
-            .expect("create preview test image");
-        let path_text = path.to_string_lossy().into_owned();
-        let index = FileIndex::default();
-        index.replace(
-            vec![CachedEntry {
-                path: path_text.clone(),
-                is_directory: false,
-            }],
-            false,
-        );
+        let item = ScannedItem {
+            normalized_path: file_path.to_string_lossy().to_lowercase(),
+            display_path: file_path.to_string_lossy().into_owned(),
+            name: "prism-vanishing-note.txt".into(),
+            lower_name: "prism-vanishing-note.txt".into(),
+            parent: temp_dir.to_string_lossy().into_owned(),
+            is_directory: false,
+            extension: Some("txt".into()),
+            modified_at: 0,
+            size: 7,
+        };
+        db.insert_batch("vol1", 1, &[item]).unwrap();
+        let gen = AtomicU64::new(0);
 
-        let result = index.search("prism-lazy", Some(5));
-        assert_eq!(result.items.len(), 1);
-        assert!(result.items[0].thumbnail.is_none());
-        assert!(file_thumbnail(&path_text).is_some());
-        let _ = std::fs::remove_file(path);
+        let res = search("vanishing", Some(5), &db, &gen, &[], 1, false, true);
+        assert_eq!(res.items.len(), 1);
+
+        std::fs::remove_file(&file_path).unwrap();
+        let res_after = search("vanishing", Some(5), &db, &gen, &[], 1, false, true);
+        assert!(res_after.items.is_empty());
+
+        let _ = std::fs::remove_dir_all(temp_dir);
     }
 
     #[test]
@@ -994,155 +202,256 @@ mod tests {
         std::fs::create_dir_all(&folder).expect("create test folder");
         std::fs::write(base.join("notes.txt"), "test").expect("create test file");
 
-        let response = FileIndex::default().search(&base.to_string_lossy(), Some(8));
-        assert!(response.path_browse);
-        assert!(!response.ready);
-        assert_eq!(response.items.len(), 2);
-        assert_eq!(response.items[0].name, "Saved");
-        assert!(response.items[0].is_directory);
+        let response = browse_path(&base.to_string_lossy(), 8).unwrap();
+        assert_eq!(response.len(), 2);
+        assert_eq!(response[0].name, "Saved");
+        assert!(response[0].is_directory);
 
         let partial = base.join("sav");
-        let response = FileIndex::default().search(&partial.to_string_lossy(), Some(8));
-        assert!(response.path_browse);
-        assert_eq!(response.items.len(), 1);
-        assert_eq!(response.items[0].name, "Saved");
+        let response = browse_path(&partial.to_string_lossy(), 8).unwrap();
+        assert_eq!(response.len(), 1);
+        assert_eq!(response[0].name, "Saved");
 
         let _ = std::fs::remove_dir_all(base);
     }
 
     #[test]
-    fn cache_replace_overwrites_an_existing_file() {
+    fn scanner_includes_appdata_nodemodules_and_deep_trees() {
         let base = std::env::temp_dir().join(format!(
-            "prism-file-replace-{}",
+            "prism-scan-deep-{}",
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_nanos()
         ));
-        let destination = base.with_extension("json");
-        let temp = base.with_extension("tmp");
-        std::fs::write(&destination, "old").expect("write old file");
-        std::fs::write(&temp, "new").expect("write replacement");
-        replace_file(&temp, &destination).expect("replace existing file");
-        assert_eq!(std::fs::read_to_string(&destination).unwrap(), "new");
-        let _ = std::fs::remove_file(destination);
-    }
 
-    #[test]
-    fn generated_directories_are_excluded() {
-        for name in [
-            "build",
-            "dist",
-            "out",
-            ".venv",
-            "__pycache__",
-            "Windows",
-            "Program Files",
-            "ProgramData",
-            "Users",
-        ] {
-            assert!(should_skip_dir(name), "should skip {name}");
+        // Create deep folder > 16 levels
+        let mut deep = base.clone();
+        for i in 1..=18 {
+            deep = deep.join(format!("level{i}"));
         }
-        assert!(!should_skip_dir("Projects"));
-    }
+        std::fs::create_dir_all(&deep).unwrap();
+        let deep_file = deep.join("deep_target.txt");
+        std::fs::write(&deep_file, "deep content").unwrap();
 
-    #[test]
-    fn external_local_drive_types_are_searchable() {
-        assert!(is_searchable_drive_type(DRIVE_FIXED));
-        assert!(is_searchable_drive_type(DRIVE_REMOVABLE));
-        assert!(is_searchable_drive_type(DRIVE_RAMDISK));
-        assert!(!is_searchable_drive_type(0));
-    }
+        // Create AppData and node_modules folders
+        let appdata_folder = base.join("AppData").join("Local");
+        std::fs::create_dir_all(&appdata_folder).unwrap();
+        let appdata_file = appdata_folder.join("appdata_target.txt");
+        std::fs::write(&appdata_file, "appdata content").unwrap();
 
-    #[test]
-    fn each_drive_gets_its_own_entry_budget() {
-        let base = std::env::temp_dir().join(format!(
-            "prism-multi-drive-scan-{}",
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos()
-        ));
-        let first = base.join("first");
-        let second = base.join("second");
-        std::fs::create_dir_all(&first).expect("create first drive root");
-        std::fs::create_dir_all(&second).expect("create second drive root");
-        for root in [&first, &second] {
-            for number in 0..4 {
-                std::fs::write(root.join(format!("file-{number}.txt")), "test")
-                    .expect("create drive test file");
-            }
-        }
+        let node_modules_folder = base.join("node_modules").join("pkg");
+        std::fs::create_dir_all(&node_modules_folder).unwrap();
+        let nodemodules_file = node_modules_folder.join("nodemodules_target.txt");
+        std::fs::write(&nodemodules_file, "nodemodules content").unwrap();
 
-        let snapshot = scan_drive_roots(&[first.clone(), second.clone()], &[], 2);
-        assert_eq!(snapshot.entries.len(), 4);
-        assert_eq!(
-            snapshot
-                .entries
-                .iter()
-                .filter(|entry| Path::new(&entry.path).starts_with(&first))
-                .count(),
-            2
+        let (db, db_dir) = test_db();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let total = scan_volume(&base, "test_vol", 1, db.clone(), &db_dir, cancel, |_| {}).unwrap();
+        assert!(total >= 20);
+
+        let gen = AtomicU64::new(0);
+        let r1 = search("deep_target", Some(5), &db, &gen, &[], total, false, true);
+        assert_eq!(r1.items.len(), 1);
+        assert_eq!(r1.items[0].name, "deep_target.txt");
+
+        let r2 = search(
+            "appdata_target",
+            Some(5),
+            &db,
+            &gen,
+            &[],
+            total,
+            false,
+            true,
         );
-        assert_eq!(
-            snapshot
-                .entries
-                .iter()
-                .filter(|entry| Path::new(&entry.path).starts_with(&second))
-                .count(),
-            2
+        assert_eq!(r2.items.len(), 1);
+
+        let r3 = search(
+            "nodemodules_target",
+            Some(5),
+            &db,
+            &gen,
+            &[],
+            total,
+            false,
+            true,
         );
+        assert_eq!(r3.items.len(), 1);
+
         let _ = std::fs::remove_dir_all(base);
+        let _ = std::fs::remove_dir_all(db_dir);
     }
 
     #[test]
-    fn mounted_drive_change_invalidates_a_fresh_cache() {
-        let cache = CacheFile {
-            version: CACHE_VERSION,
-            generated_at: 10_000,
-            drive_roots: vec![r"C:\".to_string()],
-            entries: Vec::new(),
+    fn watcher_add_rename_delete_operations() {
+        let (db, temp_dir) = test_db();
+        let file_path = temp_dir.join("live_file.txt");
+        std::fs::write(&file_path, "test").unwrap();
+
+        let item = ScannedItem {
+            normalized_path: file_path.to_string_lossy().to_lowercase(),
+            display_path: file_path.to_string_lossy().into_owned(),
+            name: "live_file.txt".into(),
+            lower_name: "live_file.txt".into(),
+            parent: temp_dir.to_string_lossy().into_owned(),
+            is_directory: false,
+            extension: Some("txt".into()),
+            modified_at: 0,
+            size: 4,
         };
-        assert!(cache_is_fresh(&cache, 10_001, None, &[r"C:\".to_string()]));
-        assert!(!cache_is_fresh(
-            &cache,
-            10_001,
-            None,
-            &[r"C:\".to_string(), r"E:\".to_string()]
-        ));
+
+        // Add
+        db.add_or_update_file("vol1", &item).unwrap();
+        let gen = AtomicU64::new(0);
+        assert_eq!(
+            search("live_file", Some(5), &db, &gen, &[], 1, false, true)
+                .items
+                .len(),
+            1
+        );
+
+        // Rename
+        let renamed_path = temp_dir.join("renamed_file.txt");
+        std::fs::rename(&file_path, &renamed_path).unwrap();
+        let renamed_item = ScannedItem {
+            normalized_path: renamed_path.to_string_lossy().to_lowercase(),
+            display_path: renamed_path.to_string_lossy().into_owned(),
+            name: "renamed_file.txt".into(),
+            lower_name: "renamed_file.txt".into(),
+            parent: temp_dir.to_string_lossy().into_owned(),
+            is_directory: false,
+            extension: Some("txt".into()),
+            modified_at: 0,
+            size: 4,
+        };
+        db.rename_file("vol1", &item.normalized_path, &renamed_item)
+            .unwrap();
+        assert_eq!(
+            search("live_file", Some(5), &db, &gen, &[], 1, false, true)
+                .items
+                .len(),
+            0
+        );
+        assert_eq!(
+            search("renamed_file", Some(5), &db, &gen, &[], 1, false, true)
+                .items
+                .len(),
+            1
+        );
+
+        // Delete
+        std::fs::remove_file(&renamed_path).unwrap();
+        db.remove_file("vol1", &renamed_item.normalized_path, false)
+            .unwrap();
+        assert_eq!(
+            search("renamed_file", Some(5), &db, &gen, &[], 0, false, true)
+                .items
+                .len(),
+            0
+        );
+
+        let _ = std::fs::remove_dir_all(temp_dir);
     }
 
-    /// Manual hot-path benchmark: per-search cost against a full 100k index.
+    #[test]
+    fn corrupt_database_recreates_cleanly() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "prism-corrupt-db-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let db_path = temp_dir.join("catalog.db");
+        std::fs::write(&db_path, "not a valid sqlite header").unwrap();
+
+        // Database::open should detect corruption, remove it, and recreate cleanly
+        let db = Database::open(&db_path).expect("open corrupt database should recover cleanly");
+        assert_eq!(db.get_total_indexed_count().unwrap(), 0);
+
+        let _ = std::fs::remove_dir_all(temp_dir);
+    }
+
+    /// Benchmark against 2 million synthetic entries to ensure < 50ms p95.
     #[test]
     #[ignore]
-    fn search_bench() {
+    fn benchmark_two_million_entries() {
         use std::time::Instant;
 
-        let entries = (0..100_000)
-            .map(|number| CachedEntry {
-                path: format!(
-                    r"C:\Users\bench\Documents\folder-{}\file-{}-report-{}.txt",
-                    number % 200,
-                    number,
-                    number % 50
-                ),
-                is_directory: number % 10 == 0,
-            })
-            .collect();
-        let index = FileIndex::default();
-        index.replace(entries, false);
+        let (db, temp_dir) = test_db();
+        eprintln!("Inserting 2,000,000 synthetic entries into SQLite catalog...");
+        let start_insert = Instant::now();
 
-        for query in ["report", "rep", "report 7", "zzz", "folder-19 file"] {
-            let started = Instant::now();
-            let mut hits = 0;
-            for _ in 0..50 {
-                hits = index.search(query, Some(8)).items.len();
+        let batch_size = 20_000;
+        for batch_idx in 0..100 {
+            let mut batch = Vec::with_capacity(batch_size);
+            for i in 0..batch_size {
+                let num = batch_idx * batch_size + i;
+                batch.push(ScannedItem {
+                    normalized_path: format!(
+                        r"c:\users\bench\documents\project_{}\file_{}_report_{}.txt",
+                        num % 500,
+                        num,
+                        num % 100
+                    ),
+                    display_path: format!(
+                        r"C:\Users\bench\Documents\Project_{}\File_{}_Report_{}.txt",
+                        num % 500,
+                        num,
+                        num % 100
+                    ),
+                    name: format!("File_{}_Report_{}.txt", num, num % 100),
+                    lower_name: format!("file_{}_report_{}.txt", num, num % 100),
+                    parent: format!(r"C:\Users\bench\Documents\Project_{}", num % 500),
+                    is_directory: num % 20 == 0,
+                    extension: Some("txt".into()),
+                    modified_at: 1700000000 + (num as u64 % 10000),
+                    size: (num as u64 * 37) % 1_000_000,
+                });
             }
+            db.insert_batch("C", 1, &batch).unwrap();
+        }
+        db.finish_volume_scan("C", 1, 2_000_000).unwrap();
+        eprintln!(
+            "Inserted 2M entries in {:.2}s. Total count: {}",
+            start_insert.elapsed().as_secs_f64(),
+            db.get_total_indexed_count().unwrap()
+        );
+
+        let _gen = AtomicU64::new(0);
+        let queries = [
+            "report",
+            "file_12345",
+            "project_499",
+            "file_999999_report_99",
+            "re",
+            "zz",
+            "nonexistent_file_name_query",
+        ];
+
+        for query in queries {
+            let mut durations = Vec::with_capacity(50);
+            let mut hit_count = 0;
+            for _ in 0..50 {
+                let t0 = Instant::now();
+                let candidates = db.search_candidates(query, 200).unwrap();
+                hit_count = candidates.len();
+                durations.push(t0.elapsed());
+            }
+            durations.sort();
+            let p50 = durations[durations.len() / 2].as_secs_f64() * 1000.0;
+            let p95 = durations[(durations.len() as f64 * 0.95) as usize].as_secs_f64() * 1000.0;
             eprintln!(
-                "search {query:?}: {:.2} ms/search ({} hits)",
-                started.elapsed().as_secs_f64() * 1000.0 / 50.0,
-                hits
+                "Query '{query}': {hit_count} hits | p50: {p50:.2}ms, p95: {p95:.2}ms (target < 50ms)"
+            );
+            assert!(
+                p95 < 50.0,
+                "p95 search time was {p95:.2}ms, expected < 50ms"
             );
         }
+
+        let _ = std::fs::remove_dir_all(temp_dir);
     }
 }

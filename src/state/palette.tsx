@@ -17,11 +17,12 @@ import {
   hidePaletteWindow,
   onFileIndexUpdated,
   onWindowFocused,
+  rebuildFileIndex,
   searchFiles,
 } from "../lib/bridge";
 import { appIconRetryDelay, selectAppIconRequestIds } from "../lib/iconLoading";
 import { dedupeApps } from "../lib/search";
-import type { AppEntry, FileEntry, PaletteItem, QuickAccessEntry } from "../lib/types";
+import type { AppEntry, FileEntry, PaletteItem, QuickAccessEntry, VolumeCoverage } from "../lib/types";
 import { useApp } from "./app";
 
 export type { Section } from "../features/palette/sections";
@@ -44,6 +45,9 @@ interface PaletteCtx {
   filesError: boolean;
   fileIndexing: boolean;
   pathBrowsing: boolean;
+  volumes: VolumeCoverage[];
+  totalIndexed: number;
+  rebuildIndex: () => void;
   refreshApps: () => void;
   reset: () => void;
 }
@@ -58,6 +62,8 @@ export function PaletteProvider({ children }: { children: ReactNode }) {
   const [appsError, setAppsError] = useState(false);
   const [quickAccess, setQuickAccess] = useState<QuickAccessEntry[]>([]);
   const [fileResults, setFileResults] = useState<FileEntry[]>([]);
+  const [volumes, setVolumes] = useState<VolumeCoverage[]>([]);
+  const [totalIndexed, setTotalIndexed] = useState<number>(0);
   const [fileResultQuery, setFileResultQuery] = useState("");
   const [filesSearching, setFilesSearching] = useState(false);
   const [filesError, setFilesError] = useState(false);
@@ -173,6 +179,8 @@ export function PaletteProvider({ children }: { children: ReactNode }) {
           indexStatusRef.current = { ready: response.ready, indexing: response.indexing };
           setFileIndexReady(response.ready);
           setFileIndexing(response.indexing);
+          setVolumes(response.volumes ?? []);
+          setTotalIndexed(response.totalIndexed ?? 0);
         })
         .catch(() => {});
       return;
@@ -194,6 +202,8 @@ export function PaletteProvider({ children }: { children: ReactNode }) {
           setFileResultQuery(normalized);
           setFileIndexReady(response.ready);
           setFileIndexing(response.indexing);
+          setVolumes(response.volumes ?? []);
+          setTotalIndexed(response.totalIndexed ?? 0);
           setFilePathBrowse(response.pathBrowse);
           setFilesError(!response.pathBrowse && !response.ready && !response.indexing);
 
@@ -299,6 +309,8 @@ export function PaletteProvider({ children }: { children: ReactNode }) {
         filePathBrowse,
         filesBusy,
         filesError,
+        fileIndexing: fileIndexing || volumes.some((v) => v.state === "indexing"),
+        fileIndexReady: fileIndexReady || volumes.some((v) => v.state === "ready"),
       }),
     [
       query,
@@ -317,6 +329,9 @@ export function PaletteProvider({ children }: { children: ReactNode }) {
       filePathBrowse,
       filesBusy,
       filesError,
+      fileIndexing,
+      fileIndexReady,
+      volumes,
     ],
   );
 
@@ -430,6 +445,11 @@ export function PaletteProvider({ children }: { children: ReactNode }) {
     [app],
   );
 
+  const rebuildIndex = useCallback(() => {
+    setFileIndexing(true);
+    rebuildFileIndex().catch(() => {});
+  }, []);
+
   const reset = useCallback(() => {
     setQuery("");
     setSelected(0);
@@ -454,6 +474,9 @@ export function PaletteProvider({ children }: { children: ReactNode }) {
       filesError,
       fileIndexing,
       pathBrowsing: filePathBrowse,
+      volumes,
+      totalIndexed,
+      rebuildIndex,
       refreshApps,
       reset,
     }),
@@ -474,6 +497,9 @@ export function PaletteProvider({ children }: { children: ReactNode }) {
       filesError,
       fileIndexing,
       filePathBrowse,
+      volumes,
+      totalIndexed,
+      rebuildIndex,
       refreshApps,
       reset,
     ],

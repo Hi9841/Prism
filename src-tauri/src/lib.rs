@@ -1,4 +1,5 @@
 mod apps;
+mod catalog;
 mod files;
 mod perf;
 mod power;
@@ -160,14 +161,13 @@ pub fn run() {
                 taskbar_customization::init(customization_app);
             });
             theme::watch(app.handle().clone());
-            let file_cache = app
+            let app_data_dir = app
                 .path()
                 .app_data_dir()
-                .unwrap_or_else(|_| PathBuf::from("."))
-                .join("files.json");
+                .unwrap_or_else(|_| PathBuf::from("."));
             files::warm(
                 app.state::<AppState>().file_index.clone(),
-                file_cache,
+                app_data_dir,
                 app.handle().clone(),
             );
             if let Some(window) = app.get_webview_window("main") {
@@ -227,6 +227,7 @@ pub fn run() {
             get_app_icons,
             refresh_apps,
             search_files,
+            rebuild_file_index,
             get_file_thumbnail,
             get_quick_access,
             existing_paths,
@@ -957,6 +958,12 @@ async fn search_files(
         Err(_) => format!("queryLength={query_length};error=true"),
     });
     result
+}
+
+#[tauri::command]
+async fn rebuild_file_index(state: tauri::State<'_, AppState>) -> Result<(), String> {
+    state.file_index.rebuild();
+    Ok(())
 }
 
 #[tauri::command]

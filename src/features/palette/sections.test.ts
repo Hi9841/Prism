@@ -337,13 +337,34 @@ describe("buildSections - search layout", () => {
     });
   });
 
-  it("offers the copy fallback only when nothing else matches and nothing is loading", () => {
-    const base = { query: "zzzznope" } as const;
+  it("offers the copy fallback only when nothing else matches and nothing is loading or indexing", () => {
+    const base = { query: "zzzznope", fileIndexReady: true, fileIndexing: false } as const;
     expect(ids(buildSections(sources(base)).sections)).toEqual(["fallback"]);
     expect(buildSections(sources(base)).sections[0].items[0].id.startsWith("copy::")).toBe(true);
     expect(buildSections(sources({ ...base, filesBusy: true })).sections).toEqual([]);
+    expect(buildSections(sources({ ...base, fileIndexing: true })).sections).toEqual([]);
+    expect(buildSections(sources({ ...base, fileIndexReady: false })).sections).toEqual([]);
     expect(buildSections(sources({ ...base, filesError: true })).sections).toEqual([]);
     expect(buildSections(sources({ ...base, filePathBrowse: true })).sections).toEqual([]);
+  });
+
+  it("deduplicates file results when an app hit points to the exact same file path", () => {
+    const appTarget = "C:\\Program Files\\Blender\\blender.exe";
+    const blenderApp = app("Blender", { path: appTarget });
+    const fileHit = file("blender.exe", appTarget);
+
+    const result = buildSections(
+      sources({
+        query: "blender",
+        apps: [blenderApp],
+        fileResults: [fileHit],
+        fileResultQuery: "blender",
+      }),
+    );
+
+    // Should only have the Apps section, not a duplicate Files section for blender.exe
+    expect(ids(result.sections)).toEqual(["apps"]);
+    expect(result.sections[0].items[0].title).toBe("Blender");
   });
 });
 

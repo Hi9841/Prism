@@ -75,6 +75,8 @@ export interface PaletteSources {
   filePathBrowse: boolean;
   filesBusy: boolean;
   filesError: boolean;
+  fileIndexing?: boolean;
+  fileIndexReady?: boolean;
 }
 
 /** Caps on the idle view; matching the displayed rows, not the data limits. */
@@ -105,6 +107,8 @@ export function buildSections(sources: PaletteSources): {
     filePathBrowse,
     filesBusy,
     filesError,
+    fileIndexing,
+    fileIndexReady,
   } = sources;
   const normalized = query.trim();
   const searchQuery = normalized.toLowerCase();
@@ -162,8 +166,13 @@ export function buildSections(sources: PaletteSources): {
     }
 
     const appHits = fuzzyApps(apps, normalized, SEARCH_APPS_LIMIT, { preDeduped: true });
+    const appPaths = new Set(
+      appHits.map((app) => app.path?.toLowerCase()).filter((p): p is string => Boolean(p)),
+    );
+
+    const dedupedFiles = fileResults.filter((entry) => !appPaths.has(entry.path.toLowerCase()));
     const fileItems =
-      fileResultQuery === searchQuery && fileResults.length > 0 ? fileResults.map(filePaletteItem) : [];
+      fileResultQuery === searchQuery && dedupedFiles.length > 0 ? dedupedFiles.map(filePaletteItem) : [];
 
     if (filePathBrowse && fileItems.length > 0) {
       out.push({ id: "files", label: "Folder Contents", items: fileItems });
@@ -176,7 +185,8 @@ export function buildSections(sources: PaletteSources): {
       out.push({ id: "files", label: "Files & Folders", items: fileItems });
     }
 
-    if (out.length === 0 && !filesBusy && !filesError && !filePathBrowse) {
+    const indexingOrBusy = filesBusy || Boolean(fileIndexing) || fileIndexReady === false;
+    if (out.length === 0 && !indexingOrBusy && !filesError && !filePathBrowse) {
       out.push({ id: "fallback", label: "No Local Matches", items: [copyItem(normalized)] });
     }
   }

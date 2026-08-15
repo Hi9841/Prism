@@ -183,11 +183,22 @@ export interface QuickAccessEntry {
   kind: QuickAccessKind;
 }
 
+export type VolumeState = "ready" | "indexing" | "offline" | "error";
+
+export interface VolumeCoverage {
+  drive: string;
+  state: VolumeState;
+  indexedCount: number;
+  totalProgress?: number;
+}
+
 export interface FileSearchResponse {
   items: FileEntry[];
   ready: boolean;
   indexing: boolean;
   pathBrowse: boolean;
+  volumes: VolumeCoverage[];
+  totalIndexed: number;
 }
 
 export type AccentId = "iris" | "azure" | "mint" | "amber" | "rose";
