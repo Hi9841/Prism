@@ -1,4 +1,6 @@
+pub mod backend;
 pub mod db;
+pub mod ntfs;
 pub mod scanner;
 pub mod search;
 pub mod types;
@@ -25,7 +27,9 @@ use windows::Win32::UI::Shell::{
 
 pub use types::{FileSearchResponse, QuickAccessEntry, VolumeCoverage, VolumeInfo, VolumeState};
 
+use self::backend::{select_backend, BackendKind};
 use self::db::Database;
+use self::ntfs::NtfsBackend;
 use self::watcher::VolumeWatcher;
 
 const VOLUME_POLL_INTERVAL: Duration = Duration::from_secs(5);
@@ -214,12 +218,10 @@ impl FileIndex {
         }
     }
 
-    /// Incremental sweep of every connected volume. Volumes whose directory
-    /// mtimes are unchanged are skipped entirely (O(1) per volume when idle),
-    /// so this is cheap to run at startup and periodically.
-    /// Sweep of every connected volume. With `fresh_ok`, volumes whose
-    /// persisted index is recent are served as-is (watcher only), so a normal
-    /// launch never shows an indexing phase - the index is already there.
+    /// Synchronizes every connected volume. Local fixed NTFS volumes use the
+    /// persisted FRN catalog and USN cursor; all other volumes retain the
+    /// recursive scanner/watcher fallback. `fresh_ok` only short-circuits the
+    /// fallback path.
     async fn scan_all_volumes(&self, fresh_ok: bool) {
         let db_opt = self.db.read().unwrap().clone();
         let Some(ref db) = db_opt else { return };
@@ -251,8 +253,9 @@ impl FileIndex {
             }
         }
 
-        // Decide which volumes need a walk BEFORE flipping the indexing flag,
-        // so a startup with a fresh persisted index reports ready immediately.
+        // Decide which volumes need a fallback walk BEFORE flipping the
+        // indexing flag, so a startup with a persisted NTFS index reports
+        // ready immediately while its cursor catches up in the background.
         let mut any_scan = false;
         for vol in &discovered {
             let fresh = fresh_ok
@@ -274,10 +277,9 @@ impl FileIndex {
         self.indexing.store(any_scan, Ordering::SeqCst);
         self.emit_updated();
 
-        // Scan volumes one at a time. Directory enumeration is I/O-heavy and
-        // every scan shares the same SQLite writer, so launching one blocking
-        // task per drive only makes the machine contend with itself. Each
-        // volume's watcher starts when its scan turn begins.
+        // Synchronize volumes one at a time. Both MFT ingestion and directory
+        // fallback share the SQLite writer, so launching one blocking task per
+        // drive only makes the machine contend with itself.
         for vol in discovered {
             let this = self.clone();
             let _ = tauri::async_runtime::spawn_blocking(move || {
@@ -306,6 +308,45 @@ impl FileIndex {
             None => return,
         };
         let drive = mount_path.to_string_lossy().into_owned();
+
+        // A watcher means this volume already selected the directory backend
+        // for the current process. Do not race it with an NTFS generation
+        // swap; raw access will be probed again on the next launch.
+        let fallback_active = self.watchers.lock().unwrap().contains_key(&volume_id);
+        if !fallback_active && select_backend(vol, true) == BackendKind::Ntfs {
+            match NtfsBackend::open(vol) {
+                Ok(mut backend) => {
+                    self.update_volume_coverage(&drive, VolumeState::Indexing);
+                    match backend.synchronize(vol, &db) {
+                        Ok(_) => {
+                            if let Ok(exact) = db.get_scanned_entries(&volume_id) {
+                                self.counts.set(&drive, exact);
+                            }
+                            self.update_volume_coverage(&drive, VolumeState::Ready);
+                            self.emit_updated();
+                            return;
+                        }
+                        Err(error) => {
+                            eprintln!(
+                                "[Prism Catalog] NTFS backend failed for {volume_id}; using directory fallback: {error}"
+                            );
+                        }
+                    }
+                }
+                Err(_) => {
+                    // Raw access can be denied to a normal user. The directory
+                    // backend remains fully functional and the UI never needs
+                    // to run elevated.
+                }
+            }
+        }
+
+        if select_backend(vol, true) == BackendKind::Directory {
+            // A volume replacement can leave old NTFS rows under the same
+            // stable database key. Hide them before the fallback walk starts;
+            // the walk then repopulates the path-keyed catalog transactionally.
+            let _ = db.mark_directory_backend(&volume_id);
+        }
 
         let skip_scan = fresh_ok
             && db
@@ -424,6 +465,40 @@ impl FileIndex {
 
         self.scan_cancels.lock().unwrap().remove(&volume_id);
         self.emit_updated();
+    }
+
+    async fn catch_up_ntfs_volumes(&self, volumes: Vec<VolumeInfo>) {
+        for volume in volumes {
+            if select_backend(&volume, true) != BackendKind::Ntfs
+                || self
+                    .watchers
+                    .lock()
+                    .unwrap()
+                    .contains_key(&volume.volume_id)
+            {
+                continue;
+            }
+            let this = self.clone();
+            let _ = tauri::async_runtime::spawn_blocking(move || {
+                let Some(db) = this.db.read().unwrap().clone() else {
+                    return;
+                };
+                let mount = volume
+                    .mount_paths
+                    .first()
+                    .map(|path| path.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                if let Ok(mut backend) = NtfsBackend::open(&volume) {
+                    if backend.synchronize(&volume, &db).is_ok() {
+                        if let Ok(count) = db.get_scanned_entries(&volume.volume_id) {
+                            this.counts.set(&mount, count);
+                        }
+                    }
+                }
+            })
+            .await;
+        }
+        self.refresh_totals_and_status();
     }
 
     /// Incremental sweep of a single volume after a watcher overflow. Runs on
@@ -585,12 +660,17 @@ pub fn warm(index: FileIndex, app_data_dir: PathBuf, app: tauri::AppHandle) {
             if volume_set_changed || reconcile_due {
                 known_volume_ids = current_ids;
                 // A mount change only needs newly discovered or stale volumes;
-                // the persisted index and live watchers cover existing fresh
-                // volumes. The periodic reconcile remains a full sweep.
+                // healthy NTFS volumes catch up from USN and live fallback
+                // watchers cover existing directory-backed volumes.
                 index
                     .scan_all_volumes(volume_set_changed && !reconcile_due)
                     .await;
                 last_reconcile = tokio::time::Instant::now();
+            } else {
+                // Healthy NTFS volumes never receive periodic recursive
+                // reconciliation. Their persisted cursor advances from the
+                // journal every poll while directory backends stay watcher-led.
+                index.catch_up_ntfs_volumes(current_volumes).await;
             }
         }
     });
