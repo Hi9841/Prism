@@ -274,17 +274,16 @@ impl FileIndex {
         self.indexing.store(any_scan, Ordering::SeqCst);
         self.emit_updated();
 
-        // Volumes are scanned in parallel - a multi-drive setup used to pay
-        // the full walk serially, one drive after another.
-        let mut tasks = Vec::with_capacity(discovered.len());
+        // Scan volumes one at a time. Directory enumeration is I/O-heavy and
+        // every scan shares the same SQLite writer, so launching one blocking
+        // task per drive only makes the machine contend with itself. Each
+        // volume's watcher starts when its scan turn begins.
         for vol in discovered {
             let this = self.clone();
-            tasks.push(tauri::async_runtime::spawn_blocking(move || {
+            let _ = tauri::async_runtime::spawn_blocking(move || {
                 this.scan_one_volume_sync(&vol, fresh_ok);
-            }));
-        }
-        for task in tasks {
-            let _ = task.await;
+            })
+            .await;
         }
 
         self.refresh_totals_and_status();
