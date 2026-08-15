@@ -150,7 +150,7 @@ impl FileIndex {
 
         let db = self.db.read().unwrap().clone();
         let Some(ref db) = db else {
-            return search::browse_path(query.trim(), limit.unwrap_or(10))
+            return search::browse_path(query.trim(), search::clamp_limit(limit))
                 .map(|items| FileSearchResponse {
                     items,
                     ready: false,
@@ -227,6 +227,29 @@ impl FileIndex {
         let discovered = tauri::async_runtime::spawn_blocking(volume::discover_volumes)
             .await
             .unwrap_or_default();
+
+        // Drop duplicate volume identities left by earlier builds (the same
+        // mount path discovered under a GUID id and a serial id): their rows
+        // duplicate the real volume's files.
+        if let Ok(known) = db.get_volume_ids() {
+            for (db_id, db_mount) in known {
+                let claimed = discovered.iter().find(|v| {
+                    v.mount_paths
+                        .first()
+                        .map(|p| p.to_string_lossy().to_lowercase())
+                        == Some(db_mount.to_lowercase())
+                });
+                if let Some(vol) = claimed {
+                    if vol.volume_id != db_id {
+                        eprintln!(
+                            "[Prism Catalog] Removing duplicate volume identity {db_id} (claimed by {})",
+                            vol.volume_id
+                        );
+                        let _ = db.remove_volume(&db_id);
+                    }
+                }
+            }
+        }
 
         // Decide which volumes need a walk BEFORE flipping the indexing flag,
         // so a startup with a fresh persisted index reports ready immediately.
@@ -330,10 +353,11 @@ impl FileIndex {
         if skip_scan {
             // The persisted index is fresh: serve it as-is and let the
             // watcher apply events directly (it was just started in buffering
-            // mode above, which must be released).
+            // mode above). Drain events captured between the last scan and the
+            // watcher becoming live before releasing the buffer.
             let watchers = self.watchers.lock().unwrap();
             if let Some(w) = watchers.get(&volume_id) {
-                w.set_buffering(false);
+                w.flush_queue(&db);
             }
             return;
         }
@@ -366,8 +390,7 @@ impl FileIndex {
         );
 
         match scan_result {
-            Ok(count) => {
-                let _ = db.finish_volume_scan(&volume_id, gen, count);
+            Ok(_) => {
                 self.update_volume_coverage(&drive, VolumeState::Ready);
             }
             Err(e) => {
@@ -528,6 +551,10 @@ impl FileIndex {
 
 pub fn warm(index: FileIndex, app_data_dir: PathBuf, app: tauri::AppHandle) {
     index.set_app_handle(app.clone());
+    // Open the persisted catalog. This was previously only reachable through
+    // the dead `FileIndex::new` helper - without it the index is never loaded
+    // or built and filename searches return nothing.
+    index.init(&app_data_dir);
     let legacy_cache_path = app_data_dir.join("files.json");
     index.try_migrate_legacy_cache(&legacy_cache_path);
 
@@ -539,13 +566,11 @@ pub fn warm(index: FileIndex, app_data_dir: PathBuf, app: tauri::AppHandle) {
 
         let mut last_reconcile = tokio::time::Instant::now();
         // Seed the known set so the first poll does not immediately re-sweep.
-        let mut known_volume_ids: Vec<String> =
-            tauri::async_runtime::spawn_blocking(volume::discover_volumes)
+        let mut known_volume_ids = volume_ids(
+            &tauri::async_runtime::spawn_blocking(volume::discover_volumes)
                 .await
-                .unwrap_or_default()
-                .iter()
-                .map(|v| v.volume_id.clone())
-                .collect();
+                .unwrap_or_default(),
+        );
 
         loop {
             tokio::time::sleep(VOLUME_POLL_INTERVAL).await;
@@ -554,20 +579,32 @@ pub fn warm(index: FileIndex, app_data_dir: PathBuf, app: tauri::AppHandle) {
                 .await
                 .unwrap_or_default();
 
-            let current_ids: Vec<String> = current_volumes
-                .iter()
-                .map(|v| v.volume_id.clone())
-                .collect();
+            let current_ids = volume_ids(&current_volumes);
 
-            if current_ids != known_volume_ids
-                || last_reconcile.elapsed() >= RECONCILIATION_INTERVAL
-            {
+            let volume_set_changed = current_ids != known_volume_ids;
+            let reconcile_due = last_reconcile.elapsed() >= RECONCILIATION_INTERVAL;
+            if volume_set_changed || reconcile_due {
                 known_volume_ids = current_ids;
-                index.scan_all_volumes(false).await;
+                // A mount change only needs newly discovered or stale volumes;
+                // the persisted index and live watchers cover existing fresh
+                // volumes. The periodic reconcile remains a full sweep.
+                index
+                    .scan_all_volumes(volume_set_changed && !reconcile_due)
+                    .await;
                 last_reconcile = tokio::time::Instant::now();
             }
         }
     });
+}
+
+fn volume_ids(volumes: &[VolumeInfo]) -> Vec<String> {
+    let mut ids: Vec<String> = volumes
+        .iter()
+        .map(|volume| volume.volume_id.clone())
+        .collect();
+    ids.sort_unstable();
+    ids.dedup();
+    ids
 }
 
 pub fn quick_access() -> Vec<QuickAccessEntry> {

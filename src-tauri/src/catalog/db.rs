@@ -8,7 +8,7 @@ use rusqlite::{params, params_from_iter, Connection, OpenFlags};
 use super::types::{CandidateEntry, ScannedItem, VolumeCoverage, VolumeInfo, VolumeState};
 
 #[allow(dead_code)]
-const SCHEMA_VERSION: u32 = 2;
+const SCHEMA_VERSION: u32 = 4;
 
 /// One-time purge patterns for rows created by the 0.9.0 catalog, which indexed
 /// everything including high-noise directories. Kept in sync with the scanner's
@@ -39,6 +39,10 @@ const EXCLUDED_PURGE_PATTERNS: &[&str] = &[
     "%\\perflogs\\%",
     "%\\windowsapps",
     "%\\windowsapps\\%",
+    "%\\postgres_data",
+    "%\\postgres_data\\%",
+    "%\\pgdata",
+    "%\\pgdata\\%",
     "_:\\windows",
     "_:\\windows\\%",
     "%\\appdata\\local\\temp",
@@ -179,9 +183,9 @@ impl Database {
         Ok(())
     }
 
-    /// Schema migrations. v1 -> v2: the first catalog indexed every directory
-    /// (node_modules, .git, C:\Windows, ...). Purge those rows once and let the
-    /// incremental scanner keep them out from now on.
+    /// Schema migrations. Older catalogs need the exclusion purge and one full
+    /// sweep so the directory-row and offline-placeholder behavior is applied
+    /// to existing indexes as well.
     fn migrate(&self) -> Result<(), String> {
         let conn = self.writer.lock().map_err(|e| e.to_string())?;
         let version: i64 = conn
@@ -194,8 +198,10 @@ impl Database {
             return Ok(());
         }
 
-        if version == 1 {
-            eprintln!("[Prism Catalog] Migrating catalog schema v1 -> v2 (purging excluded paths)");
+        if version == 1 || version == 2 || version == 3 {
+            eprintln!(
+                "[Prism Catalog] Migrating catalog schema v{version} -> v{SCHEMA_VERSION} (purging excluded paths)"
+            );
             conn.execute_batch(
                 "DROP TRIGGER IF EXISTS files_ai;
                  DROP TRIGGER IF EXISTS files_ad;
@@ -220,9 +226,9 @@ impl Database {
                     INSERT INTO file_fts(rowid, name) VALUES (new.id, new.name);
                  END;
                  INSERT INTO file_fts(file_fts) VALUES('rebuild');
-                 UPDATE meta SET value = '2' WHERE key = 'version';
-                 -- Force one sweep so the new exclusions take effect (the
-                 -- walk is change-only, so this is cheap).
+                 UPDATE meta SET value = '4' WHERE key = 'version';
+                 -- Force one sweep so directory rows and offline placeholders
+                 -- are reconciled into the persisted catalog.
                  UPDATE volumes SET last_scanned_at = 0;",
             )
             .map_err(|e| e.to_string())?;
@@ -510,9 +516,9 @@ impl Database {
         let tx = conn.transaction().map_err(|e| e.to_string())?;
         for (path, is_dir) in &missing {
             if *is_dir {
-                let prefix = format!("{path}\\");
+                let prefix = escape_like_pattern(&format!("{path}\\"));
                 tx.execute(
-                    "DELETE FROM files WHERE volume_id = ?1 AND (normalized_path = ?2 OR normalized_path LIKE ?3 || '%');",
+                    "DELETE FROM files WHERE volume_id = ?1 AND (normalized_path = ?2 OR normalized_path LIKE ?3 || '%' ESCAPE '!');",
                     params![volume_id, path, prefix],
                 )
                 .map_err(|e| e.to_string())?;
@@ -594,6 +600,41 @@ impl Database {
         Ok(now - last_scanned <= max_age_secs as i64)
     }
 
+    /// All persisted (volume_id, mount_path) pairs.
+    pub fn get_volume_ids(&self) -> Result<Vec<(String, String)>, String> {
+        let conn = self.reader.lock().map_err(|e| e.to_string())?;
+        let mut stmt = conn
+            .prepare("SELECT volume_id, mount_path FROM volumes;")
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(|e| e.to_string())?;
+        let mut out = Vec::new();
+        for row in rows.flatten() {
+            out.push(row);
+        }
+        Ok(out)
+    }
+
+    /// Removes a volume and all of its indexed rows (used to drop duplicate
+    /// volume identities from earlier builds).
+    pub fn remove_volume(&self, volume_id: &str) -> Result<(), String> {
+        let conn = self.writer.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "DELETE FROM files WHERE volume_id = ?1;",
+            params![volume_id],
+        )
+        .map_err(|e| e.to_string())?;
+        conn.execute(
+            "DELETE FROM volumes WHERE volume_id = ?1;",
+            params![volume_id],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
     /// Upserts a single file (watcher path). Returns the row delta: +1 when a
     /// row was inserted or changed, 0 when the stored values already match.
     pub fn add_or_update_file(&self, volume_id: &str, item: &ScannedItem) -> Result<i64, String> {
@@ -640,9 +681,9 @@ impl Database {
     ) -> Result<i64, String> {
         let conn = self.writer.lock().map_err(|e| e.to_string())?;
         let removed = if is_dir {
-            let prefix = format!("{normalized_path}\\");
+            let prefix = escape_like_pattern(&format!("{normalized_path}\\"));
             conn.execute(
-                "DELETE FROM files WHERE volume_id = ?1 AND (normalized_path = ?2 OR normalized_path LIKE ?3 || '%');",
+                "DELETE FROM files WHERE volume_id = ?1 AND (normalized_path = ?2 OR normalized_path LIKE ?3 || '%' ESCAPE '!');",
                 params![volume_id, normalized_path, prefix],
             )
             .map_err(|e| e.to_string())?
@@ -669,6 +710,7 @@ impl Database {
 
         if new_item.is_directory {
             let old_prefix = format!("{old_normalized}\\");
+            let old_prefix_like = escape_like_pattern(&old_prefix);
             let new_prefix = format!("{}\\", new_item.normalized_path);
             let old_display_prefix = format!("{}\\", old_normalized);
             let new_display_prefix = format!("{}\\", new_item.display_path);
@@ -679,14 +721,14 @@ impl Database {
                     normalized_path = ?1 || SUBSTR(normalized_path, ?2),
                     display_path = ?3 || SUBSTR(display_path, ?4),
                     parent = ?3 || SUBSTR(parent, ?4)
-                 WHERE volume_id = ?5 AND normalized_path LIKE ?6 || '%';",
+                 WHERE volume_id = ?5 AND normalized_path LIKE ?6 || '%' ESCAPE '!';",
                 params![
                     new_prefix,
                     (old_prefix.len() + 1) as i64,
                     new_display_prefix,
                     (old_display_prefix.len() + 1) as i64,
                     volume_id,
-                    old_prefix,
+                    old_prefix_like,
                 ],
             )
             .map_err(|e| e.to_string())?;
@@ -925,6 +967,13 @@ impl Database {
 
         Ok(candidates)
     }
+}
+
+fn escape_like_pattern(value: &str) -> String {
+    value
+        .replace('!', "!!")
+        .replace('%', "!%")
+        .replace('_', "!_")
 }
 
 /// Safely formats and escapes tokens for FTS5 trigram queries.

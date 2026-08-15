@@ -8,8 +8,8 @@ use std::sync::Arc;
 use windows::core::PCWSTR;
 use windows::Win32::Storage::FileSystem::{
     FindClose, FindExInfoBasic, FindExSearchNameMatch, FindFirstFileExW, FindNextFileW,
-    FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_OFFLINE, FILE_ATTRIBUTE_REPARSE_POINT,
-    FILE_ATTRIBUTE_SYSTEM, FIND_FIRST_EX_LARGE_FETCH, WIN32_FIND_DATAW,
+    FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT, FILE_ATTRIBUTE_SYSTEM,
+    FIND_FIRST_EX_LARGE_FETCH, WIN32_FIND_DATAW,
 };
 
 use super::db::Database;
@@ -37,7 +37,9 @@ fn is_excluded_dir(name_lower: &str, parent_normalized: &str, root_normalized: &
         | "$windows.~ws"
         | "recovery"
         | "perflogs"
-        | "windowsapps" => true,
+        | "windowsapps"
+        | "postgres_data"
+        | "pgdata" => true,
         // The Windows directory only at the volume root: it is hundreds of
         // thousands of entries of system noise.
         "windows" => parent_normalized == root_normalized,
@@ -49,9 +51,10 @@ fn is_excluded_dir(name_lower: &str, parent_normalized: &str, root_normalized: &
 }
 
 fn is_noise_entry(attributes: u32) -> bool {
-    // System files (desktop.ini, thumbs.db, ...) and offline cloud placeholders
-    // are never useful search results.
-    (attributes & (FILE_ATTRIBUTE_SYSTEM.0 | FILE_ATTRIBUTE_OFFLINE.0)) != 0
+    // System files (desktop.ini, thumbs.db, ...) are not useful search results.
+    // Offline cloud placeholders are retained: their names are searchable and
+    // opening them can hydrate the file through the user's configured provider.
+    (attributes & FILE_ATTRIBUTE_SYSTEM.0) != 0
 }
 
 /// Walks a volume and reconciles the index with what is on disk.
@@ -145,9 +148,38 @@ fn scan_volume_inner(
         let parent_display = dir.to_string_lossy().into_owned();
         let mut seen: HashSet<String> = HashSet::new();
 
+        // NTFS enumeration can return the same entry repeatedly when the
+        // directory is being modified concurrently (Postgres data dirs,
+        // browser caches, temp churn). Detect the stall and stop enumerating
+        // this directory instead of spinning forever. The prune below is
+        // skipped for an incomplete enumeration so existing rows survive.
+        let mut complete = true;
+        let mut repeats = 0u32;
+        let mut last_name = String::new();
+
         loop {
             let filename = wide_filename_to_string(&find_data.cFileName);
             if !filename.is_empty() && filename != "." && filename != ".." {
+                if filename == last_name {
+                    repeats += 1;
+                    if repeats >= 4 {
+                        eprintln!(
+                            "[Prism Catalog] enumeration stalled on '{}' in {}; stopping this directory",
+                            filename, parent_display
+                        );
+                        complete = false;
+                        break;
+                    }
+                    // Skip re-processing the stalled entry; the first
+                    // occurrence already recorded it.
+                    let next_ok = unsafe { FindNextFileW(handle, &mut find_data).is_ok() };
+                    if !next_ok {
+                        break;
+                    }
+                    continue;
+                }
+                repeats = 0;
+                last_name = filename.clone();
                 let attributes = find_data.dwFileAttributes;
                 let is_dir = (attributes & FILE_ATTRIBUTE_DIRECTORY.0) != 0;
                 let is_reparse = (attributes & FILE_ATTRIBUTE_REPARSE_POINT.0) != 0;
@@ -167,6 +199,23 @@ fn scan_volume_inner(
                 total_scanned += 1;
 
                 if is_dir {
+                    batch.push(ScannedItem {
+                        normalized_path: child_normalized.clone(),
+                        display_path: child_display.clone(),
+                        name: filename.clone(),
+                        lower_name: lower_name.clone(),
+                        parent: parent_display.clone(),
+                        is_directory: true,
+                        extension: None,
+                        modified_at: filetime_ticks,
+                        size: 0,
+                    });
+
+                    if batch.len() >= BATCH_SIZE {
+                        flush_file_batch(db, volume_id, generation, &mut batch)?;
+                        progress_callback(total_scanned);
+                    }
+
                     if !is_reparse
                         && !is_excluded_dir(&lower_name, &dir_normalized, &root_normalized)
                     {
@@ -206,8 +255,11 @@ fn scan_volume_inner(
         let _ = unsafe { FindClose(handle) };
 
         // Children that disappeared since the last scan are removed here - the
-        // directory was walked, so everything current is in `seen`.
-        db.prune_removed_children(volume_id, &parent_display, &seen)?;
+        // directory was walked, so everything current is in `seen`. Skipped
+        // when the enumeration stalled (partial `seen` would prune live rows).
+        if complete {
+            db.prune_removed_children(volume_id, &parent_display, &seen)?;
+        }
     }
 
     if cancel.load(Ordering::Relaxed) {
@@ -254,4 +306,16 @@ fn wide_filename_to_string(wide: &[u16]) -> String {
     OsString::from_wide(&wide[..end])
         .to_string_lossy()
         .into_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use windows::Win32::Storage::FileSystem::FILE_ATTRIBUTE_OFFLINE;
+
+    #[test]
+    fn offline_placeholders_remain_searchable() {
+        assert!(!is_noise_entry(FILE_ATTRIBUTE_OFFLINE.0));
+        assert!(is_noise_entry(FILE_ATTRIBUTE_SYSTEM.0));
+    }
 }

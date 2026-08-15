@@ -1,11 +1,16 @@
+use std::cmp::Ordering;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 
 use super::db::Database;
 use super::types::{CandidateEntry, FileEntry, FileSearchResponse, VolumeCoverage};
 
 const DEFAULT_LIMIT: usize = 10;
 const MAX_LIMIT: usize = 20;
+
+pub(crate) fn clamp_limit(limit: Option<usize>) -> usize {
+    limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT)
+}
 
 #[allow(clippy::too_many_arguments)]
 pub fn search(
@@ -19,7 +24,7 @@ pub fn search(
     ready: bool,
 ) -> FileSearchResponse {
     let query_trimmed = query.trim();
-    let limit = limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT);
+    let limit = clamp_limit(limit);
 
     // Direct absolute path browsing
     if let Some(items) = browse_path(query_trimmed, limit) {
@@ -44,7 +49,7 @@ pub fn search(
         };
     }
 
-    let generation = search_generation.fetch_add(1, Ordering::AcqRel) + 1;
+    let generation = search_generation.fetch_add(1, AtomicOrdering::AcqRel) + 1;
 
     let candidate_limit = (limit * 15).max(150);
     let candidates = match db.search_candidates(query_trimmed, candidate_limit) {
@@ -61,7 +66,7 @@ pub fn search(
         }
     };
 
-    if search_generation.load(Ordering::Acquire) != generation {
+    if search_generation.load(AtomicOrdering::Acquire) != generation {
         return FileSearchResponse {
             items: Vec::new(),
             ready,
@@ -202,7 +207,8 @@ pub fn target_score(query: &str, target: &str) -> Option<i32> {
 
 /// Absolute paths are browsed directly without waiting for index
 pub fn browse_path(query: &str, limit: usize) -> Option<Vec<FileEntry>> {
-    let requested = PathBuf::from(query);
+    let limit = limit.clamp(1, MAX_LIMIT);
+    let requested = expand_path_input(query)?;
     if !requested.is_absolute() {
         return None;
     }
@@ -230,42 +236,92 @@ fn list_directory(directory: &Path, needle: Option<&str>, limit: usize) -> Vec<F
         return Vec::new();
     };
     let parent = directory.to_string_lossy().into_owned();
-    let mut entries: Vec<(i32, FileEntry)> = children
-        .flatten()
-        .filter_map(|child| {
-            let name = child.file_name().to_string_lossy().trim().to_string();
-            if name.is_empty() {
-                return None;
-            }
-            let is_directory = child.file_type().map(|kind| kind.is_dir()).unwrap_or(false);
-            let score = match needle {
-                Some(value) if !value.is_empty() => target_score(value, &name.to_lowercase())?,
-                _ => 0,
-            };
-            Some((
-                score,
-                FileEntry {
-                    name,
-                    path: child.path().to_string_lossy().into_owned(),
-                    parent: parent.clone(),
-                    is_directory,
-                    thumbnail: None,
-                },
-            ))
-        })
-        .collect();
+    let mut entries: Vec<BrowseCandidate> = Vec::with_capacity(limit);
 
-    entries.sort_by(|(left_score, left), (right_score, right)| {
-        right_score
-            .cmp(left_score)
-            .then_with(|| right.is_directory.cmp(&left.is_directory))
-            .then_with(|| left.name.to_lowercase().cmp(&right.name.to_lowercase()))
-    });
+    for child in children.flatten() {
+        let name = child.file_name().to_string_lossy().trim().to_string();
+        if name.is_empty() {
+            continue;
+        }
+        let lower_name = name.to_lowercase();
+        let is_directory = child.file_type().map(|kind| kind.is_dir()).unwrap_or(false);
+        let score = match needle {
+            Some(value) if !value.is_empty() => match target_score(value, &lower_name) {
+                Some(score) => score,
+                None => continue,
+            },
+            _ => 0,
+        };
+        let candidate = BrowseCandidate {
+            score,
+            lower_name,
+            entry: FileEntry {
+                name,
+                path: child.path().to_string_lossy().into_owned(),
+                parent: parent.clone(),
+                is_directory,
+                thumbnail: None,
+            },
+        };
+
+        // Keep only the best `limit` entries while walking. This avoids
+        // materializing/sorting millions of children in a large or remote
+        // directory just to return twenty rows.
+        let insertion =
+            entries.partition_point(|existing| browse_cmp(existing, &candidate) == Ordering::Less);
+        if insertion < entries.len() || entries.len() < limit {
+            entries.insert(insertion, candidate);
+            if entries.len() > limit {
+                entries.pop();
+            }
+        }
+    }
+
     entries
         .into_iter()
-        .take(limit)
-        .map(|(_, entry)| entry)
+        .map(|candidate| candidate.entry)
         .collect()
+}
+
+struct BrowseCandidate {
+    score: i32,
+    lower_name: String,
+    entry: FileEntry,
+}
+
+fn browse_cmp(left: &BrowseCandidate, right: &BrowseCandidate) -> Ordering {
+    right
+        .score
+        .cmp(&left.score)
+        .then_with(|| right.entry.is_directory.cmp(&left.entry.is_directory))
+        .then_with(|| left.lower_name.cmp(&right.lower_name))
+        .then_with(|| left.entry.path.cmp(&right.entry.path))
+}
+
+fn expand_path_input(query: &str) -> Option<PathBuf> {
+    let trimmed = query.trim();
+    if trimmed.is_empty() || trimmed.contains('\0') {
+        return None;
+    }
+
+    let expanded = if let Some(rest) = trimmed.strip_prefix('%') {
+        rest.find('%')
+            .and_then(|end| {
+                std::env::var(&rest[..end])
+                    .ok()
+                    .map(|value| format!("{value}{}", &rest[end + 1..]))
+            })
+            .unwrap_or_else(|| trimmed.to_string())
+    } else if trimmed == "~" || trimmed.starts_with("~\\") || trimmed.starts_with("~/") {
+        std::env::var("USERPROFILE")
+            .ok()
+            .map(|profile| format!("{profile}{}", &trimmed[1..]))
+            .unwrap_or_else(|| trimmed.to_string())
+    } else {
+        trimmed.to_string()
+    };
+
+    Some(PathBuf::from(expanded))
 }
 
 fn path_entry(path: &Path) -> Option<FileEntry> {
