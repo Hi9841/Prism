@@ -216,6 +216,30 @@ mod tests {
     }
 
     #[test]
+    fn uninitialized_direct_browse_obeys_result_limits() {
+        let base = std::env::temp_dir().join(format!(
+            "prism-file-browse-limit-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&base).expect("create test folder");
+        for i in 0..30 {
+            std::fs::write(base.join(format!("entry-{i:02}.txt")), "test")
+                .expect("create test file");
+        }
+
+        let index = FileIndex::default();
+        let path = base.to_string_lossy().into_owned();
+        assert_eq!(index.search(&path, Some(0)).items.len(), 1);
+        assert_eq!(index.search(&path, None).items.len(), 10);
+        assert_eq!(index.search(&path, Some(usize::MAX)).items.len(), 20);
+
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
     fn scanner_skips_excluded_dirs_but_scans_deep_trees() {
         let base = std::env::temp_dir().join(format!(
             "prism-scan-deep-{}",
@@ -321,6 +345,10 @@ mod tests {
         let r6 = search("nested_target", Some(5), &db, &gen, &[], total, false, true);
         assert_eq!(r6.items.len(), 1, "non-root 'windows' folders stay indexed");
 
+        let r7 = search("project", Some(5), &db, &gen, &[], total, false, true);
+        assert_eq!(r7.items.len(), 1, "initial scans must index directories");
+        assert!(r7.items[0].is_directory);
+
         let _ = std::fs::remove_dir_all(base);
         let _ = std::fs::remove_dir_all(db_dir);
     }
@@ -341,8 +369,7 @@ mod tests {
         let (db, db_dir) = test_db();
         let cancel = Arc::new(AtomicBool::new(false));
 
-        // First scan indexes the whole tree (docs dir + first.txt; only files
-        // become rows).
+        // First scan indexes the whole tree (docs dir + first.txt).
         let total = scan_volume(
             &base,
             "test_vol",
@@ -354,7 +381,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(total, 2);
-        assert_eq!(db.get_total_indexed_count().unwrap(), 1);
+        assert_eq!(db.get_total_indexed_count().unwrap(), 2);
 
         std::thread::sleep(std::time::Duration::from_millis(50));
 
@@ -373,7 +400,7 @@ mod tests {
         assert_eq!(total, 2);
         assert_eq!(
             db.get_total_indexed_count().unwrap(),
-            1,
+            2,
             "no rows should be added"
         );
 
@@ -393,7 +420,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(total, 3);
-        assert_eq!(db.get_total_indexed_count().unwrap(), 2);
+        assert_eq!(db.get_total_indexed_count().unwrap(), 3);
 
         let gen = AtomicU64::new(0);
         let r = search("second", Some(5), &db, &gen, &[], total, false, true);
@@ -405,7 +432,7 @@ mod tests {
         std::fs::remove_file(&first).unwrap();
         let total = scan_volume(&base, "test_vol", 4, db.clone(), &db_dir, cancel, |_| {}).unwrap();
         assert_eq!(total, 2);
-        assert_eq!(db.get_total_indexed_count().unwrap(), 1);
+        assert_eq!(db.get_total_indexed_count().unwrap(), 2);
 
         let r = search("first", Some(5), &db, &gen, &[], total, false, true);
         assert!(

@@ -16,7 +16,6 @@ use super::types::VolumeInfo;
 
 pub fn discover_volumes() -> Vec<VolumeInfo> {
     let mut volumes = Vec::new();
-    let mut seen_identities = HashSet::new();
 
     // 1. Enumerate volumes via FindFirstVolumeW to get volume GUID paths
     let mut volume_name_buf = [0u16; 512];
@@ -25,9 +24,7 @@ pub fn discover_volumes() -> Vec<VolumeInfo> {
             let volume_guid_path = wide_to_string(&volume_name_buf);
             if !volume_guid_path.is_empty() {
                 if let Some(vol) = inspect_volume(&volume_guid_path) {
-                    if seen_identities.insert(vol.volume_id.clone()) {
-                        volumes.push(vol);
-                    }
+                    volumes.push(vol);
                 }
             }
 
@@ -42,17 +39,40 @@ pub fn discover_volumes() -> Vec<VolumeInfo> {
     // 2. Also check standard logical drive strings (covers mapped network drives and any missed letters)
     let logical_drives = get_logical_drives();
     for drive in logical_drives {
-        let drive_root = format!("{}:\\", drive);
+        let drive_root = format!("{drive}:\\");
         if let Some(vol) = inspect_volume(&drive_root) {
-            if seen_identities.insert(vol.volume_id.clone()) {
-                volumes.push(vol);
-            }
+            volumes.push(vol);
         }
     }
 
-    volumes
+    dedupe_by_mount(volumes)
 }
 
+/// The same drive is enumerated both as a volume GUID (FindFirstVolumeW) and
+/// as a drive letter (GetLogicalDriveStringsW), each producing a different
+/// volume_id. Deduplicate by mount path so a drive is never scanned twice or
+/// stored under two identities.
+fn dedupe_by_mount(volumes: Vec<VolumeInfo>) -> Vec<VolumeInfo> {
+    let mut seen = HashSet::new();
+    let mut volumes = volumes;
+    // Windows does not guarantee enumeration order. Stable ordering prevents
+    // a harmless drive-order change from looking like a topology change to the
+    // background poller.
+    volumes.sort_by_key(mount_key);
+    volumes
+        .into_iter()
+        .filter(|vol| seen.insert(mount_key(vol)))
+        .collect()
+}
+
+/// Canonical identity of a volume for deduplication: its first mount path,
+/// lowercased (falling back to the volume id).
+fn mount_key(vol: &VolumeInfo) -> String {
+    vol.mount_paths
+        .first()
+        .map(|p| p.to_string_lossy().to_lowercase())
+        .unwrap_or_else(|| vol.volume_id.clone())
+}
 fn inspect_volume(root_path: &str) -> Option<VolumeInfo> {
     let wide_root: Vec<u16> = root_path.encode_utf16().chain(Some(0)).collect();
     let drive_type = unsafe { GetDriveTypeW(PCWSTR(wide_root.as_ptr())) };
@@ -204,4 +224,43 @@ fn wide_to_string(wide: &[u16]) -> String {
     OsString::from_wide(&wide[..end])
         .to_string_lossy()
         .into_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn vol(id: &str, mount: &str) -> VolumeInfo {
+        VolumeInfo {
+            volume_id: id.into(),
+            drive_letter: Some(mount.into()),
+            mount_paths: vec![PathBuf::from(mount)],
+            drive_type: 3,
+            label: String::new(),
+            fs_type: "NTFS".into(),
+        }
+    }
+
+    #[test]
+    fn same_drive_under_two_identities_is_deduplicated_by_mount_path() {
+        let volumes = vec![
+            vol("guid-1f8ab82f", "C:\\"),
+            vol("vol_3a48e069", "C:\\"),
+            vol("guid-other", "D:\\"),
+        ];
+        let deduped = dedupe_by_mount(volumes);
+        assert_eq!(deduped.len(), 2);
+        assert!(deduped
+            .iter()
+            .any(|v| v.drive_letter.as_deref() == Some("C:\\")));
+        assert!(deduped
+            .iter()
+            .any(|v| v.drive_letter.as_deref() == Some("D:\\")));
+    }
+
+    #[test]
+    fn mount_paths_are_case_insensitive() {
+        let volumes = vec![vol("a", "C:\\"), vol("b", "c:\\")];
+        assert_eq!(dedupe_by_mount(volumes).len(), 1);
+    }
 }
