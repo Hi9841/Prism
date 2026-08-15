@@ -79,10 +79,7 @@ pub fn search(
 
     for candidate in candidates {
         if let Some(score) = entry_score(&candidate, &tokens, &query_lower) {
-            // Verify path still exists on disk before presenting
-            if Path::new(&candidate.display_path).exists() {
-                scored.push((score, candidate));
-            }
+            scored.push((score, candidate));
         }
     }
 
@@ -94,29 +91,37 @@ pub fn search(
             .then_with(|| item_a.lower_name.cmp(&item_b.lower_name))
     });
 
-    let items: Vec<FileEntry> = scored
-        .into_iter()
-        .take(limit)
-        .map(|(_, item)| {
-            let path = Path::new(&item.display_path);
-            let parent = path
-                .parent()
-                .map(|p| p.to_string_lossy().into_owned())
-                .unwrap_or_default();
-            let name = path
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_else(|| item.lower_name.clone());
+    // Verify disk existence only for the items we are about to return. A row
+    // can briefly outlive its file (the watcher removes it within seconds),
+    // so the guarantee stays: results never point at missing files. Checking
+    // every candidate instead cost one stat syscall per candidate (up to 300)
+    // per keystroke.
+    let mut items: Vec<FileEntry> = Vec::with_capacity(limit);
+    for (_, item) in scored {
+        if items.len() >= limit {
+            break;
+        }
+        let path = Path::new(&item.display_path);
+        if !path.exists() {
+            continue;
+        }
+        let parent = path
+            .parent()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| item.lower_name.clone());
 
-            FileEntry {
-                name,
-                path: item.display_path,
-                parent,
-                is_directory: item.is_directory,
-                thumbnail: None,
-            }
-        })
-        .collect();
+        items.push(FileEntry {
+            name,
+            path: item.display_path,
+            parent,
+            is_directory: item.is_directory,
+            thumbnail: None,
+        });
+    }
 
     FileSearchResponse {
         items,

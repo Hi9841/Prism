@@ -23,13 +23,58 @@ use windows::Win32::UI::Shell::{
     FOLDERID_Profile, FOLDERID_Videos, SHGetKnownFolderPath,
 };
 
-pub use types::{FileSearchResponse, QuickAccessEntry, VolumeCoverage, VolumeState};
+pub use types::{FileSearchResponse, QuickAccessEntry, VolumeCoverage, VolumeInfo, VolumeState};
 
 use self::db::Database;
 use self::watcher::VolumeWatcher;
 
 const VOLUME_POLL_INTERVAL: Duration = Duration::from_secs(5);
-const RECONCILIATION_INTERVAL: Duration = Duration::from_secs(30 * 60); // 30 mins
+// Sweeps walk the tree but write only rows that actually changed, so the
+// periodic reconcile catches watcher misses cheaply without the disk churn of
+// the old full re-index.
+const RECONCILIATION_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60); // 6 hours
+
+/// In-memory per-volume file counts. Seeded from the database at startup,
+/// updated by scan progress and watcher deltas, and re-seeded from
+/// `scanned_entries` after every completed scan. Keeps every status path O(1)
+/// - counting millions of rows on every palette open was a major stall.
+#[derive(Clone, Default)]
+pub struct IndexCounts {
+    inner: Arc<Mutex<HashMap<String, u64>>>,
+}
+
+impl IndexCounts {
+    pub fn set(&self, drive: &str, count: u64) {
+        if let Ok(mut inner) = self.inner.lock() {
+            inner.insert(drive.to_string(), count);
+        }
+    }
+
+    pub fn adjust(&self, drive: &str, delta: i64) {
+        if let Ok(mut inner) = self.inner.lock() {
+            let entry = inner.entry(drive.to_string()).or_insert(0);
+            *entry = (*entry as i64 + delta).max(0) as u64;
+        }
+    }
+
+    pub fn get(&self, drive: &str) -> u64 {
+        self.inner
+            .lock()
+            .ok()
+            .and_then(|m| m.get(drive).copied())
+            .unwrap_or(0)
+    }
+
+    pub fn total(&self) -> u64 {
+        self.inner.lock().map(|m| m.values().sum()).unwrap_or(0)
+    }
+
+    pub fn clear(&self) {
+        if let Ok(mut inner) = self.inner.lock() {
+            inner.clear();
+        }
+    }
+}
 
 #[derive(Clone)]
 pub struct FileIndex {
@@ -38,7 +83,7 @@ pub struct FileIndex {
     volumes: Arc<RwLock<Vec<VolumeCoverage>>>,
     indexing: Arc<AtomicBool>,
     ready: Arc<AtomicBool>,
-    total_indexed: Arc<AtomicU64>,
+    counts: IndexCounts,
     watchers: Arc<Mutex<HashMap<String, VolumeWatcher>>>,
     scan_cancels: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>,
     app_data_dir: Arc<RwLock<PathBuf>>,
@@ -54,7 +99,7 @@ impl Default for FileIndex {
             volumes: Arc::new(RwLock::new(Vec::new())),
             indexing: Arc::new(AtomicBool::new(false)),
             ready: Arc::new(AtomicBool::new(false)),
-            total_indexed: Arc::new(AtomicU64::new(0)),
+            counts: IndexCounts::default(),
             watchers: Arc::new(Mutex::new(HashMap::new())),
             scan_cancels: Arc::new(Mutex::new(HashMap::new())),
             app_data_dir: Arc::new(RwLock::new(PathBuf::from("."))),
@@ -77,15 +122,15 @@ impl FileIndex {
         if let Ok(d) = Database::open(&db_path) {
             let db_arc = Arc::new(d);
             if let Ok(covs) = db_arc.get_volume_coverages() {
+                for cov in &covs {
+                    self.counts.set(&cov.drive, cov.indexed_count);
+                }
                 if let Ok(mut vols) = self.volumes.write() {
                     *vols = covs;
                 }
             }
-            if let Ok(total) = db_arc.get_total_indexed_count() {
-                self.total_indexed.store(total, Ordering::SeqCst);
-                if total > 0 {
-                    self.ready.store(true, Ordering::SeqCst);
-                }
+            if self.counts.total() > 0 {
+                self.ready.store(true, Ordering::SeqCst);
             }
             *self.db.write().unwrap() = Some(db_arc);
         }
@@ -94,7 +139,7 @@ impl FileIndex {
 
     pub fn search(&self, query: &str, limit: Option<usize>) -> FileSearchResponse {
         let volumes = self.volumes.read().unwrap().clone();
-        let total_indexed = self.total_indexed.load(Ordering::Relaxed);
+        let total_indexed = self.counts.total();
         let indexing = self.indexing.load(Ordering::Relaxed);
         let ready = self.ready.load(Ordering::Relaxed);
 
@@ -131,17 +176,19 @@ impl FileIndex {
         )
     }
 
+    /// Wipes the catalog and rebuilds it from scratch (used by the UI's
+    /// "rebuild index" action).
     pub fn rebuild(&self) {
         let this = self.clone();
         tauri::async_runtime::spawn(async move {
             this.cancel_all_scans();
             let db = this.db.read().unwrap().clone();
             if let Some(ref db) = db {
-                let _ = db.finish_volume_scan("", 0, 0);
+                let _ = db.clear_catalog();
             }
-            this.total_indexed.store(0, Ordering::SeqCst);
+            this.counts.clear();
             this.ready.store(false, Ordering::SeqCst);
-            this.rescan_all_volumes().await;
+            this.scan_all_volumes().await;
         });
     }
 
@@ -162,7 +209,10 @@ impl FileIndex {
         }
     }
 
-    async fn rescan_all_volumes(&self) {
+    /// Incremental sweep of every connected volume. Volumes whose directory
+    /// mtimes are unchanged are skipped entirely (O(1) per volume when idle),
+    /// so this is cheap to run at startup and periodically.
+    async fn scan_all_volumes(&self) {
         let db_opt = self.db.read().unwrap().clone();
         let Some(ref db) = db_opt else { return };
         self.indexing.store(true, Ordering::SeqCst);
@@ -172,104 +222,21 @@ impl FileIndex {
             .await
             .unwrap_or_default();
 
-        let app_data = self.app_data_dir.read().unwrap().clone();
+        for vol in &discovered {
+            let _ = db.upsert_volume(vol, VolumeState::Indexing);
+        }
 
+        // Volumes are scanned in parallel - a multi-drive setup used to pay
+        // the full walk serially, one drive after another.
+        let mut tasks = Vec::with_capacity(discovered.len());
         for vol in discovered {
-            let volume_id = vol.volume_id.clone();
-            let mount_path = match vol.mount_paths.first() {
-                Some(p) => p.clone(),
-                None => continue,
-            };
-
-            let _ = db.upsert_volume(&vol, VolumeState::Indexing);
-            self.update_volume_coverage(&mount_path.to_string_lossy(), VolumeState::Indexing);
-
-            // Start watcher if not running
-            {
-                let mut watchers = self.watchers.lock().unwrap();
-                if !watchers.contains_key(&volume_id) {
-                    let db_clone = db.clone();
-                    let app_data_clone = app_data.clone();
-                    let index_clone = self.clone();
-                    let vol_id_overflow = volume_id.clone();
-                    if let Some(w) = VolumeWatcher::start(
-                        mount_path.clone(),
-                        volume_id.clone(),
-                        db_clone,
-                        app_data_clone,
-                        move |_| {
-                            let idx = index_clone.clone();
-                            let v_id = vol_id_overflow.clone();
-                            tauri::async_runtime::spawn(async move {
-                                idx.reconcile_volume(&v_id).await;
-                            });
-                        },
-                    ) {
-                        watchers.insert(volume_id.clone(), w);
-                    }
-                } else if let Some(w) = watchers.get(&volume_id) {
-                    w.set_buffering(true);
-                }
-            }
-
-            let cancel = Arc::new(AtomicBool::new(false));
-            {
-                self.scan_cancels
-                    .lock()
-                    .unwrap()
-                    .insert(volume_id.clone(), cancel.clone());
-            }
-
-            let db_for_scan = db.clone();
-            let gen = self.scan_generation.fetch_add(1, Ordering::SeqCst);
-            let app_data_scan = app_data.clone();
-            let index_for_progress = self.clone();
-            let mount_str = mount_path.to_string_lossy().into_owned();
-            let vol_id_scan = volume_id.clone();
-
-            let scan_result = tauri::async_runtime::spawn_blocking(move || {
-                scanner::scan_volume(
-                    &mount_path,
-                    &vol_id_scan,
-                    gen,
-                    db_for_scan,
-                    &app_data_scan,
-                    cancel,
-                    move |count| {
-                        index_for_progress.update_progress(&mount_str, count);
-                    },
-                )
-            })
-            .await;
-
-            // Flush buffered watcher events
-            {
-                let watchers = self.watchers.lock().unwrap();
-                if let Some(w) = watchers.get(&volume_id) {
-                    w.flush_queue(db);
-                }
-            }
-
-            match scan_result {
-                Ok(Ok(count)) => {
-                    let _ = db.finish_volume_scan(&volume_id, gen, count);
-                    self.update_volume_coverage(
-                        &vol.mount_paths[0].to_string_lossy(),
-                        VolumeState::Ready,
-                    );
-                }
-                Ok(Err(e)) => {
-                    eprintln!("[Prism Catalog] Scan for volume {volume_id} error: {e}");
-                    let _ = db.set_volume_state(&volume_id, VolumeState::Error);
-                    self.update_volume_coverage(
-                        &vol.mount_paths[0].to_string_lossy(),
-                        VolumeState::Error,
-                    );
-                }
-                Err(_) => {
-                    let _ = db.set_volume_state(&volume_id, VolumeState::Error);
-                }
-            }
+            let this = self.clone();
+            tasks.push(tauri::async_runtime::spawn_blocking(move || {
+                this.scan_one_volume_sync(&vol);
+            }));
+        }
+        for task in tasks {
+            let _ = task.await;
         }
 
         self.refresh_totals_and_status();
@@ -278,57 +245,147 @@ impl FileIndex {
         self.emit_updated();
     }
 
-    async fn reconcile_volume(&self, volume_id: &str) {
+    /// The whole per-volume scan is synchronous; the async wrappers only move
+    /// it off the runtime threads. Keeping the overflow handler fully sync
+    /// (spawn_blocking with no nested future) also avoids the type-level cycle
+    /// of an async closure that awaits back into this module's own futures.
+    fn scan_one_volume_sync(&self, vol: &VolumeInfo) {
         let db_opt = self.db.read().unwrap().clone();
-        let Some(ref db) = db_opt else { return };
-        let app_data = self.app_data_dir.read().unwrap().clone();
-        let volumes = tauri::async_runtime::spawn_blocking(volume::discover_volumes)
-            .await
-            .unwrap_or_default();
+        let Some(db) = db_opt else { return };
 
-        let Some(vol) = volumes.into_iter().find(|v| v.volume_id == volume_id) else {
-            return;
-        };
-
+        let volume_id = vol.volume_id.clone();
         let mount_path = match vol.mount_paths.first() {
             Some(p) => p.clone(),
             None => return,
         };
+        let drive = mount_path.to_string_lossy().into_owned();
+
+        self.update_volume_coverage(&drive, VolumeState::Indexing);
+
+        // Overflow handler: re-sweep the volume that lost events, on the
+        // blocking pool so the watcher thread is never stalled.
+        let overflow_index = self.clone();
+        let overflow_volume = volume_id.clone();
+        let overflow_cb: Arc<dyn Fn(String) + Send + Sync> = Arc::new(move |_| {
+            let idx = overflow_index.clone();
+            let v_id = overflow_volume.clone();
+            tauri::async_runtime::spawn_blocking(move || {
+                idx.reconcile_volume_sync(&v_id);
+            });
+        });
+
+        // Start the watcher if needed, otherwise buffer its events so the scan
+        // and the watcher never race on the same rows.
+        {
+            let mut watchers = self.watchers.lock().unwrap();
+            if !watchers.contains_key(&volume_id) {
+                let db_clone = db.clone();
+                let app_data_clone = self.app_data_dir.read().unwrap().clone();
+                let counts_clone = self.counts.clone();
+                let drive_clone = drive.clone();
+                if let Some(w) = VolumeWatcher::start(
+                    mount_path.clone(),
+                    volume_id.clone(),
+                    db_clone,
+                    app_data_clone,
+                    counts_clone,
+                    drive_clone,
+                    overflow_cb,
+                ) {
+                    watchers.insert(volume_id.clone(), w);
+                }
+            } else if let Some(w) = watchers.get(&volume_id) {
+                w.set_buffering(true);
+            }
+        }
 
         let cancel = Arc::new(AtomicBool::new(false));
         {
             self.scan_cancels
                 .lock()
                 .unwrap()
-                .insert(volume_id.to_string(), cancel.clone());
+                .insert(volume_id.clone(), cancel.clone());
         }
 
-        let db_for_scan = db.clone();
         let gen = self.scan_generation.fetch_add(1, Ordering::SeqCst);
-        let vol_id = volume_id.to_string();
+        let app_data_scan = self.app_data_dir.read().unwrap().clone();
+        let index_for_progress = self.clone();
+        let drive_progress = drive.clone();
 
-        let _ = tauri::async_runtime::spawn_blocking(move || {
-            let _ = scanner::scan_volume(
-                &mount_path,
-                &vol_id,
-                gen,
-                db_for_scan,
-                &app_data,
-                cancel,
-                |_| {},
-            );
-        })
-        .await;
+        let scan_result = scanner::scan_volume(
+            &mount_path,
+            &volume_id,
+            gen,
+            db.clone(),
+            &app_data_scan,
+            cancel,
+            move |count| {
+                index_for_progress.update_progress(&drive_progress, count);
+            },
+        );
 
-        self.refresh_totals_and_status();
+        match scan_result {
+            Ok(count) => {
+                let _ = db.finish_volume_scan(&volume_id, gen, count);
+                self.update_volume_coverage(&drive, VolumeState::Ready);
+            }
+            Err(e) => {
+                eprintln!("[Prism Catalog] Scan for volume {volume_id} error: {e}");
+                let _ = db.set_volume_state(&volume_id, VolumeState::Error);
+                self.update_volume_coverage(&drive, VolumeState::Error);
+            }
+        }
+
+        // Exact count as scanned, then apply buffered watcher deltas on top.
+        if let Ok(exact) = db.get_scanned_entries(&volume_id) {
+            self.counts.set(&drive, exact);
+        }
+
+        // Flush buffered watcher events (also releases buffering); deltas are
+        // applied on top of the exact scanned count.
+        {
+            let watchers = self.watchers.lock().unwrap();
+            if let Some(w) = watchers.get(&volume_id) {
+                w.flush_queue(&db);
+            }
+        }
+
+        if let Ok(mut vols) = self.volumes.write() {
+            if let Some(v) = vols
+                .iter_mut()
+                .find(|v| v.drive.eq_ignore_ascii_case(&drive))
+            {
+                v.indexed_count = self.counts.get(&drive);
+            }
+        }
+
+        self.scan_cancels.lock().unwrap().remove(&volume_id);
         self.emit_updated();
     }
 
+    /// Incremental sweep of a single volume after a watcher overflow. Runs on
+    /// the blocking pool via the overflow callback - never on a runtime thread.
+    fn reconcile_volume_sync(&self, volume_id: &str) {
+        let volumes = volume::discover_volumes();
+
+        let Some(vol) = volumes.into_iter().find(|v| v.volume_id == volume_id) else {
+            return;
+        };
+        self.scan_one_volume_sync(&vol);
+    }
+
     fn update_progress(&self, drive: &str, count: u64) {
+        // Progress only ever grows here; a sweep of a few changed directories
+        // must not knock the displayed count back down. The exact count is
+        // restored from the database when the scan finishes.
+        let current = self.counts.get(drive);
+        if count > current {
+            self.counts.set(drive, count);
+        }
         if let Ok(mut vols) = self.volumes.write() {
             for v in vols.iter_mut() {
                 if v.drive.eq_ignore_ascii_case(drive) {
-                    v.indexed_count = count;
+                    v.indexed_count = v.indexed_count.max(count);
                 }
             }
         }
@@ -345,7 +402,7 @@ impl FileIndex {
                 vols.push(VolumeCoverage {
                     drive: drive.to_string(),
                     state,
-                    indexed_count: 0,
+                    indexed_count: self.counts.get(drive),
                     total_progress: None,
                 });
             }
@@ -358,12 +415,6 @@ impl FileIndex {
             if let Ok(covs) = db.get_volume_coverages() {
                 if let Ok(mut vols) = self.volumes.write() {
                     *vols = covs;
-                }
-            }
-            if let Ok(total) = db.get_total_indexed_count() {
-                self.total_indexed.store(total, Ordering::SeqCst);
-                if total > 0 {
-                    self.ready.store(true, Ordering::SeqCst);
                 }
             }
         }
@@ -429,7 +480,6 @@ impl FileIndex {
                     .collect();
 
                 let _ = db.insert_batch("C", 0, &items);
-                self.refresh_totals_and_status();
             }
         }
     }
@@ -441,7 +491,9 @@ pub fn warm(index: FileIndex, app_data_dir: PathBuf, app: tauri::AppHandle) {
     index.try_migrate_legacy_cache(&legacy_cache_path);
 
     tauri::async_runtime::spawn(async move {
-        index.rescan_all_volumes().await;
+        // Startup sweep: incremental, so a fully-scanned, untouched volume is
+        // skipped in O(1); volumes that were never scanned get a full walk.
+        index.scan_all_volumes().await;
 
         let mut last_reconcile = tokio::time::Instant::now();
         let mut known_volume_ids: Vec<String> = Vec::new();
@@ -462,7 +514,7 @@ pub fn warm(index: FileIndex, app_data_dir: PathBuf, app: tauri::AppHandle) {
                 || last_reconcile.elapsed() >= RECONCILIATION_INTERVAL
             {
                 known_volume_ids = current_ids;
-                index.rescan_all_volumes().await;
+                index.scan_all_volumes().await;
                 last_reconcile = tokio::time::Instant::now();
             }
         }

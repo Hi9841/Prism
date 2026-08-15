@@ -1,19 +1,56 @@
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use rusqlite::{params, Connection, OpenFlags};
+use rusqlite::{params, params_from_iter, Connection, OpenFlags};
 
 use super::types::{CandidateEntry, ScannedItem, VolumeCoverage, VolumeInfo, VolumeState};
 
 #[allow(dead_code)]
-const SCHEMA_VERSION: u32 = 1;
+const SCHEMA_VERSION: u32 = 2;
+
+/// One-time purge patterns for rows created by the 0.9.0 catalog, which indexed
+/// everything including high-noise directories. Kept in sync with the scanner's
+/// exclusion list (see `scanner::is_excluded_dir`). Patterns are lowercase
+/// because `normalized_path` is stored lowercase.
+const EXCLUDED_PURGE_PATTERNS: &[&str] = &[
+    "%\\node_modules",
+    "%\\node_modules\\%",
+    "%\\.git",
+    "%\\.git\\%",
+    "%\\.svn",
+    "%\\.svn\\%",
+    "%\\.hg",
+    "%\\.hg\\%",
+    "%\\$recycle.bin",
+    "%\\$recycle.bin\\%",
+    "%\\system volume information",
+    "%\\system volume information\\%",
+    "%\\windows.old",
+    "%\\windows.old\\%",
+    "%\\$windows.~bt",
+    "%\\$windows.~bt\\%",
+    "%\\$windows.~ws",
+    "%\\$windows.~ws\\%",
+    "%\\recovery",
+    "%\\recovery\\%",
+    "%\\perflogs",
+    "%\\perflogs\\%",
+    "%\\windowsapps",
+    "%\\windowsapps\\%",
+    "_:\\windows",
+    "_:\\windows\\%",
+    "%\\appdata\\local\\temp",
+    "%\\appdata\\local\\temp\\%",
+];
 
 pub struct Database {
     #[allow(dead_code)]
     db_path: PathBuf,
     writer: Arc<Mutex<Connection>>,
     reader: Arc<Mutex<Connection>>,
+    bulk_load_depth: Mutex<u32>,
 }
 
 impl Database {
@@ -53,11 +90,14 @@ impl Database {
         .map_err(|e| e.to_string())?;
         Self::configure_pragmas(&reader)?;
 
-        Ok(Self {
+        let db = Self {
             db_path: db_path.to_path_buf(),
             writer: Arc::new(Mutex::new(writer)),
             reader: Arc::new(Mutex::new(reader)),
-        })
+            bulk_load_depth: Mutex::new(0),
+        };
+        db.migrate()?;
+        Ok(db)
     }
 
     fn configure_pragmas(conn: &Connection) -> Result<(), String> {
@@ -112,6 +152,7 @@ impl Database {
              CREATE INDEX IF NOT EXISTS idx_files_vol_gen ON files(volume_id, scan_generation);
              CREATE INDEX IF NOT EXISTS idx_files_lower_name ON files(lower_name, is_directory);
              CREATE INDEX IF NOT EXISTS idx_files_parent ON files(parent);
+             CREATE INDEX IF NOT EXISTS idx_files_vol_parent ON files(volume_id, parent);
 
              CREATE VIRTUAL TABLE IF NOT EXISTS file_fts USING fts5(
                 name,
@@ -135,6 +176,130 @@ impl Database {
         ))
         .map_err(|e| e.to_string())?;
 
+        Ok(())
+    }
+
+    /// Schema migrations. v1 -> v2: the first catalog indexed every directory
+    /// (node_modules, .git, C:\Windows, ...). Purge those rows once and let the
+    /// incremental scanner keep them out from now on.
+    fn migrate(&self) -> Result<(), String> {
+        let conn = self.writer.lock().map_err(|e| e.to_string())?;
+        let version: i64 = conn
+            .query_row("SELECT value FROM meta WHERE key = 'version';", [], |row| {
+                row.get(0)
+            })
+            .unwrap_or(0);
+
+        if version >= SCHEMA_VERSION as i64 {
+            return Ok(());
+        }
+
+        if version == 1 {
+            eprintln!("[Prism Catalog] Migrating catalog schema v1 -> v2 (purging excluded paths)");
+            conn.execute_batch(
+                "DROP TRIGGER IF EXISTS files_ai;
+                 DROP TRIGGER IF EXISTS files_ad;
+                 DROP TRIGGER IF EXISTS files_au;",
+            )
+            .map_err(|e| e.to_string())?;
+            drop(conn);
+
+            let purged = self.purge_excluded_rows()?;
+            eprintln!("[Prism Catalog] Purged {purged} excluded rows");
+
+            let conn = self.writer.lock().map_err(|e| e.to_string())?;
+            conn.execute_batch(
+                "CREATE TRIGGER IF NOT EXISTS files_ai AFTER INSERT ON files BEGIN
+                    INSERT INTO file_fts(rowid, name) VALUES (new.id, new.name);
+                 END;
+                 CREATE TRIGGER IF NOT EXISTS files_ad AFTER DELETE ON files BEGIN
+                    INSERT INTO file_fts(file_fts, rowid, name) VALUES ('delete', old.id, old.name);
+                 END;
+                 CREATE TRIGGER IF NOT EXISTS files_au AFTER UPDATE OF name ON files BEGIN
+                    INSERT INTO file_fts(file_fts, rowid, name) VALUES ('delete', old.id, old.name);
+                    INSERT INTO file_fts(rowid, name) VALUES (new.id, new.name);
+                 END;
+                 INSERT INTO file_fts(file_fts) VALUES('rebuild');
+                 UPDATE meta SET value = '2' WHERE key = 'version';",
+            )
+            .map_err(|e| e.to_string())?;
+        } else {
+            conn.execute(
+                "UPDATE meta SET value = ?1 WHERE key = 'version';",
+                params![SCHEMA_VERSION],
+            )
+            .map_err(|e| e.to_string())?;
+        }
+
+        Ok(())
+    }
+
+    /// Deletes index rows that the scanner now excludes (see
+    /// `scanner::is_excluded_dir`). Returns the number of rows purged. Callers
+    /// that dropped the FTS triggers must follow with an FTS rebuild.
+    pub fn purge_excluded_rows(&self) -> Result<u64, String> {
+        let conn = self.writer.lock().map_err(|e| e.to_string())?;
+        let patterns: Vec<&str> = EXCLUDED_PURGE_PATTERNS.to_vec();
+        let placeholders: Vec<String> = patterns
+            .iter()
+            .map(|_| "normalized_path LIKE ?".to_string())
+            .collect();
+        let sql = format!("DELETE FROM files WHERE {};", placeholders.join(" OR "));
+        let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+        let mut params: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(patterns.len());
+        for p in &patterns {
+            params.push(p);
+        }
+        let purged = stmt
+            .execute(params_from_iter(params.iter().copied()))
+            .map_err(|e| e.to_string())?;
+        Ok(purged as u64)
+    }
+
+    /// Bulk-load mode: the FTS triggers are dropped so mass inserts skip the
+    /// per-row trigram indexing; `end_bulk_load` restores them and rebuilds the
+    /// FTS index in one efficient pass. Reference-counted so parallel volume
+    /// scans can nest safely - the rebuild happens only when the last scan
+    /// finishes. Watcher events are buffered while scans run, so nothing writes
+    /// through the FTS triggers in the meantime.
+    pub fn begin_bulk_load(&self) -> Result<(), String> {
+        let mut depth = self.bulk_load_depth.lock().map_err(|e| e.to_string())?;
+        if *depth == 0 {
+            let conn = self.writer.lock().map_err(|e| e.to_string())?;
+            conn.execute_batch(
+                "DROP TRIGGER IF EXISTS files_ai;
+                 DROP TRIGGER IF EXISTS files_ad;
+                 DROP TRIGGER IF EXISTS files_au;",
+            )
+            .map_err(|e| e.to_string())?;
+        }
+        *depth += 1;
+        Ok(())
+    }
+
+    pub fn end_bulk_load(&self) -> Result<(), String> {
+        let mut depth = self.bulk_load_depth.lock().map_err(|e| e.to_string())?;
+        if *depth == 0 {
+            return Ok(());
+        }
+        *depth -= 1;
+        if *depth == 0 {
+            let conn = self.writer.lock().map_err(|e| e.to_string())?;
+            conn.execute_batch(
+                "CREATE TRIGGER IF NOT EXISTS files_ai AFTER INSERT ON files BEGIN
+                    INSERT INTO file_fts(rowid, name) VALUES (new.id, new.name);
+                 END;
+                 CREATE TRIGGER IF NOT EXISTS files_ad AFTER DELETE ON files BEGIN
+                    INSERT INTO file_fts(file_fts, rowid, name) VALUES ('delete', old.id, old.name);
+                 END;
+                 CREATE TRIGGER IF NOT EXISTS files_au AFTER UPDATE OF name ON files BEGIN
+                    INSERT INTO file_fts(file_fts, rowid, name) VALUES ('delete', old.id, old.name);
+                    INSERT INTO file_fts(rowid, name) VALUES (new.id, new.name);
+                 END;
+                 INSERT INTO file_fts(file_fts) VALUES('rebuild');",
+            )
+            .map_err(|e| e.to_string())?;
+        }
         Ok(())
     }
 
@@ -191,17 +356,21 @@ impl Database {
         Ok(())
     }
 
+    /// Upserts a batch of scanned files. Returns the number of rows actually
+    /// changed (inserts + modified updates), which callers use to keep
+    /// in-memory counters accurate without ever scanning the table.
     pub fn insert_batch(
         &self,
         volume_id: &str,
         generation: u64,
         items: &[ScannedItem],
-    ) -> Result<(), String> {
+    ) -> Result<u64, String> {
         if items.is_empty() {
-            return Ok(());
+            return Ok(0);
         }
         let mut conn = self.writer.lock().map_err(|e| e.to_string())?;
         let tx = conn.transaction().map_err(|e| e.to_string())?;
+        let mut changed = 0u64;
         {
             let mut stmt = tx
                 .prepare_cached(
@@ -223,19 +392,132 @@ impl Database {
                 .map_err(|e| e.to_string())?;
 
             for item in items {
-                stmt.execute(params![
-                    volume_id,
-                    item.normalized_path,
-                    item.display_path,
-                    item.name,
-                    item.lower_name,
-                    item.parent,
-                    item.is_directory as i32,
-                    item.extension,
-                    generation as i64,
+                let rows = stmt
+                    .execute(params![
+                        volume_id,
+                        item.normalized_path,
+                        item.display_path,
+                        item.name,
+                        item.lower_name,
+                        item.parent,
+                        item.is_directory as i32,
+                        item.extension,
+                        generation as i64,
+                        item.modified_at as i64,
+                        item.size as i64,
+                    ])
+                    .map_err(|e| e.to_string())?;
+                changed += rows as u64;
+            }
+        }
+        tx.commit().map_err(|e| e.to_string())?;
+        Ok(changed)
+    }
+
+    /// Drops items whose (mtime, size) already match the index, so sweeps only
+    /// write rows that actually changed. One indexed lookup per batch.
+    pub fn filter_changed(
+        &self,
+        volume_id: &str,
+        items: &[ScannedItem],
+    ) -> Result<Vec<ScannedItem>, String> {
+        if items.is_empty() {
+            return Ok(Vec::new());
+        }
+        let conn = self.reader.lock().map_err(|e| e.to_string())?;
+        let mut existing: HashSet<(String, i64, i64)> = HashSet::with_capacity(items.len());
+
+        for chunk in items.chunks(500) {
+            let placeholders = vec!["?"; chunk.len()].join(",");
+            let sql = format!(
+                "SELECT normalized_path, modified_at, size FROM files
+                 WHERE volume_id = ?1 AND normalized_path IN ({placeholders});"
+            );
+            let mut stmt = conn.prepare_cached(&sql).map_err(|e| e.to_string())?;
+            let mut params: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(chunk.len() + 1);
+            params.push(&volume_id);
+            for item in chunk {
+                params.push(&item.normalized_path);
+            }
+            let rows = stmt
+                .query_map(params_from_iter(params.iter().copied()), |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, i64>(2)?,
+                    ))
+                })
+                .map_err(|e| e.to_string())?;
+            for row in rows.flatten() {
+                existing.insert(row);
+            }
+        }
+
+        Ok(items
+            .iter()
+            .filter(|item| {
+                !existing.contains(&(
+                    item.normalized_path.clone(),
                     item.modified_at as i64,
                     item.size as i64,
-                ])
+                ))
+            })
+            .cloned()
+            .collect())
+    }
+
+    /// Removes index rows for children of `dir` that no longer exist on disk.
+    /// Directories are deleted with their whole subtree. Runs for every walked
+    /// directory, which is what keeps deletions out of the index.
+    pub fn prune_removed_children(
+        &self,
+        volume_id: &str,
+        dir_display: &str,
+        seen: &HashSet<String>,
+    ) -> Result<(), String> {
+        let conn = self.reader.lock().map_err(|e| e.to_string())?;
+        let mut existing: Vec<(String, bool)> = Vec::new();
+        {
+            let mut stmt = conn
+                .prepare_cached(
+                    "SELECT normalized_path, is_directory FROM files
+                     WHERE volume_id = ?1 AND parent = ?2;",
+                )
+                .map_err(|e| e.to_string())?;
+            let rows = stmt
+                .query_map(params![volume_id, dir_display], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, i32>(1)? != 0))
+                })
+                .map_err(|e| e.to_string())?;
+            for row in rows.flatten() {
+                existing.push(row);
+            }
+        }
+        drop(conn);
+
+        let missing: Vec<(String, bool)> = existing
+            .into_iter()
+            .filter(|(path, _)| !seen.contains(path))
+            .collect();
+        if missing.is_empty() {
+            return Ok(());
+        }
+
+        let mut conn = self.writer.lock().map_err(|e| e.to_string())?;
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
+        for (path, is_dir) in &missing {
+            if *is_dir {
+                let prefix = format!("{path}\\");
+                tx.execute(
+                    "DELETE FROM files WHERE volume_id = ?1 AND (normalized_path = ?2 OR normalized_path LIKE ?3 || '%');",
+                    params![volume_id, path, prefix],
+                )
+                .map_err(|e| e.to_string())?;
+            } else {
+                tx.execute(
+                    "DELETE FROM files WHERE volume_id = ?1 AND normalized_path = ?2;",
+                    params![volume_id, path],
+                )
                 .map_err(|e| e.to_string())?;
             }
         }
@@ -243,28 +525,22 @@ impl Database {
         Ok(())
     }
 
+    /// Marks a volume scan complete. Removed entries are handled incrementally
+    /// by `prune_removed_children` during the walk, so there is no generation
+    /// sweep here.
     pub fn finish_volume_scan(
         &self,
         volume_id: &str,
         generation: u64,
         total_scanned: u64,
     ) -> Result<(), String> {
-        let mut conn = self.writer.lock().map_err(|e| e.to_string())?;
-        let tx = conn.transaction().map_err(|e| e.to_string())?;
-
-        // Delete records from previous generations for this volume that were not seen
-        tx.execute(
-            "DELETE FROM files WHERE volume_id = ?1 AND scan_generation != ?2;",
-            params![volume_id, generation as i64],
-        )
-        .map_err(|e| e.to_string())?;
-
+        let conn = self.writer.lock().map_err(|e| e.to_string())?;
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
 
-        tx.execute(
+        conn.execute(
             "UPDATE volumes SET
                 state = 'ready',
                 scanned_entries = ?1,
@@ -279,74 +555,91 @@ impl Database {
             ],
         )
         .map_err(|e| e.to_string())?;
-
-        tx.commit().map_err(|e| e.to_string())?;
         Ok(())
     }
 
-    pub fn add_or_update_file(&self, volume_id: &str, item: &ScannedItem) -> Result<(), String> {
+    pub fn get_scanned_entries(&self, volume_id: &str) -> Result<u64, String> {
+        let conn = self.reader.lock().map_err(|e| e.to_string())?;
+        let count: i64 = conn
+            .query_row(
+                "SELECT scanned_entries FROM volumes WHERE volume_id = ?1;",
+                params![volume_id],
+                |row| row.get(0),
+            )
+            .unwrap_or(0);
+        Ok(count.max(0) as u64)
+    }
+
+    /// Upserts a single file (watcher path). Returns the row delta: +1 when a
+    /// row was inserted or changed, 0 when the stored values already match.
+    pub fn add_or_update_file(&self, volume_id: &str, item: &ScannedItem) -> Result<i64, String> {
         let conn = self.writer.lock().map_err(|e| e.to_string())?;
-        conn.execute(
-            "INSERT INTO files(
-                volume_id, normalized_path, display_path, name, lower_name, parent,
-                is_directory, extension, scan_generation, modified_at, size
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 0, ?9, ?10)
-            ON CONFLICT(volume_id, normalized_path) DO UPDATE SET
-                display_path = excluded.display_path,
-                name = excluded.name,
-                lower_name = excluded.lower_name,
-                parent = excluded.parent,
-                is_directory = excluded.is_directory,
-                extension = excluded.extension,
-                modified_at = excluded.modified_at,
-                size = excluded.size;",
-            params![
-                volume_id,
-                item.normalized_path,
-                item.display_path,
-                item.name,
-                item.lower_name,
-                item.parent,
-                item.is_directory as i32,
-                item.extension,
-                item.modified_at as i64,
-                item.size as i64,
-            ],
-        )
-        .map_err(|e| e.to_string())?;
-        Ok(())
+        let changed = conn
+            .execute(
+                "INSERT INTO files(
+                    volume_id, normalized_path, display_path, name, lower_name, parent,
+                    is_directory, extension, scan_generation, modified_at, size
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 0, ?9, ?10)
+                ON CONFLICT(volume_id, normalized_path) DO UPDATE SET
+                    display_path = excluded.display_path,
+                    name = excluded.name,
+                    lower_name = excluded.lower_name,
+                    parent = excluded.parent,
+                    is_directory = excluded.is_directory,
+                    extension = excluded.extension,
+                    modified_at = excluded.modified_at,
+                    size = excluded.size;",
+                params![
+                    volume_id,
+                    item.normalized_path,
+                    item.display_path,
+                    item.name,
+                    item.lower_name,
+                    item.parent,
+                    item.is_directory as i32,
+                    item.extension,
+                    item.modified_at as i64,
+                    item.size as i64,
+                ],
+            )
+            .map_err(|e| e.to_string())?;
+        Ok(changed as i64)
     }
 
+    /// Removes a file or a directory subtree. Returns the number of rows
+    /// removed (negative delta for counters).
     pub fn remove_file(
         &self,
         volume_id: &str,
         normalized_path: &str,
         is_dir: bool,
-    ) -> Result<(), String> {
+    ) -> Result<i64, String> {
         let conn = self.writer.lock().map_err(|e| e.to_string())?;
-        if is_dir {
+        let removed = if is_dir {
             let prefix = format!("{normalized_path}\\");
             conn.execute(
                 "DELETE FROM files WHERE volume_id = ?1 AND (normalized_path = ?2 OR normalized_path LIKE ?3 || '%');",
                 params![volume_id, normalized_path, prefix],
             )
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| e.to_string())?
         } else {
             conn.execute(
                 "DELETE FROM files WHERE volume_id = ?1 AND normalized_path = ?2;",
                 params![volume_id, normalized_path],
             )
-            .map_err(|e| e.to_string())?;
-        }
-        Ok(())
+            .map_err(|e| e.to_string())?
+        };
+        Ok(removed as i64)
     }
 
+    /// Renames a file or directory subtree (watcher path). Returns the net row
+    /// delta for counters.
     pub fn rename_file(
         &self,
         volume_id: &str,
         old_normalized: &str,
         new_item: &ScannedItem,
-    ) -> Result<(), String> {
+    ) -> Result<i64, String> {
         let mut conn = self.writer.lock().map_err(|e| e.to_string())?;
         let tx = conn.transaction().map_err(|e| e.to_string())?;
 
@@ -376,54 +669,54 @@ impl Database {
         }
 
         // Delete old entry
-        tx.execute(
-            "DELETE FROM files WHERE volume_id = ?1 AND normalized_path = ?2;",
-            params![volume_id, old_normalized],
-        )
-        .map_err(|e| e.to_string())?;
+        let removed = tx
+            .execute(
+                "DELETE FROM files WHERE volume_id = ?1 AND normalized_path = ?2;",
+                params![volume_id, old_normalized],
+            )
+            .map_err(|e| e.to_string())?;
 
         // Insert new entry
-        tx.execute(
-            "INSERT INTO files(
-                volume_id, normalized_path, display_path, name, lower_name, parent,
-                is_directory, extension, scan_generation, modified_at, size
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 0, ?9, ?10)
-            ON CONFLICT(volume_id, normalized_path) DO UPDATE SET
-                display_path = excluded.display_path,
-                name = excluded.name,
-                lower_name = excluded.lower_name,
-                parent = excluded.parent,
-                is_directory = excluded.is_directory,
-                extension = excluded.extension,
-                modified_at = excluded.modified_at,
-                size = excluded.size;",
-            params![
-                volume_id,
-                new_item.normalized_path,
-                new_item.display_path,
-                new_item.name,
-                new_item.lower_name,
-                new_item.parent,
-                new_item.is_directory as i32,
-                new_item.extension,
-                new_item.modified_at as i64,
-                new_item.size as i64,
-            ],
-        )
-        .map_err(|e| e.to_string())?;
+        let inserted = tx
+            .execute(
+                "INSERT INTO files(
+                    volume_id, normalized_path, display_path, name, lower_name, parent,
+                    is_directory, extension, scan_generation, modified_at, size
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 0, ?9, ?10)
+                ON CONFLICT(volume_id, normalized_path) DO UPDATE SET
+                    display_path = excluded.display_path,
+                    name = excluded.name,
+                    lower_name = excluded.lower_name,
+                    parent = excluded.parent,
+                    is_directory = excluded.is_directory,
+                    extension = excluded.extension,
+                    modified_at = excluded.modified_at,
+                    size = excluded.size;",
+                params![
+                    volume_id,
+                    new_item.normalized_path,
+                    new_item.display_path,
+                    new_item.name,
+                    new_item.lower_name,
+                    new_item.parent,
+                    new_item.is_directory as i32,
+                    new_item.extension,
+                    new_item.modified_at as i64,
+                    new_item.size as i64,
+                ],
+            )
+            .map_err(|e| e.to_string())?;
 
         tx.commit().map_err(|e| e.to_string())?;
-        Ok(())
+        Ok(inserted as i64 - removed as i64)
     }
 
     pub fn get_volume_coverages(&self) -> Result<Vec<VolumeCoverage>, String> {
         let conn = self.reader.lock().map_err(|e| e.to_string())?;
         let mut stmt = conn
             .prepare(
-                "SELECT v.mount_path, v.state, COALESCE(COUNT(f.id), v.scanned_entries) as cnt
-                 FROM volumes v
-                 LEFT JOIN files f ON f.volume_id = v.volume_id
-                 GROUP BY v.volume_id;",
+                "SELECT mount_path, state, scanned_entries
+                 FROM volumes;",
             )
             .map_err(|e| e.to_string())?;
 
@@ -460,6 +753,22 @@ impl Database {
             .query_row("SELECT COUNT(*) FROM files;", [], |row| row.get(0))
             .unwrap_or(0);
         Ok(count.max(0) as u64)
+    }
+
+    /// Drops every indexed row and resets volumes so a rebuild starts clean.
+    /// FTS is repopulated by `end_bulk_load`'s rebuild pass.
+    pub fn clear_catalog(&self) -> Result<(), String> {
+        self.begin_bulk_load()?;
+        let result = (|| {
+            let conn = self.writer.lock().map_err(|e| e.to_string())?;
+            conn.execute_batch(
+                "DELETE FROM files;
+                 UPDATE volumes SET scanned_entries = 0, state = 'error', last_scanned_at = 0;",
+            )
+            .map_err(|e| e.to_string())
+        })();
+        self.end_bulk_load()?;
+        result
     }
 
     pub fn search_candidates(

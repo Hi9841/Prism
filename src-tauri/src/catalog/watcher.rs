@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
+use std::time::UNIX_EPOCH;
 
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::CloseHandle;
@@ -18,8 +19,9 @@ use windows::Win32::Storage::FileSystem::{
 
 use super::db::Database;
 use super::types::ScannedItem;
+use super::IndexCounts;
 
-const BUFFER_SIZE: usize = 64 * 1024; // 64 KB buffer
+const BUFFER_SIZE: usize = 256 * 1024; // 256 KB buffer
 
 #[derive(Clone, Debug)]
 pub enum WatcherEvent {
@@ -31,6 +33,7 @@ pub enum WatcherEvent {
 }
 
 pub struct VolumeWatcher {
+    #[allow(dead_code)]
     root: PathBuf,
     volume_id: String,
     #[allow(dead_code)]
@@ -39,25 +42,35 @@ pub struct VolumeWatcher {
     handle: Option<JoinHandle<()>>,
     event_queue: Arc<Mutex<Vec<WatcherEvent>>>,
     buffering: Arc<AtomicBool>,
+    counts: IndexCounts,
+    drive: String,
+    on_overflow: Arc<dyn Fn(String) + Send + Sync>,
 }
 
 impl VolumeWatcher {
+    #[allow(clippy::too_many_arguments)]
     pub fn start(
         root: PathBuf,
         volume_id: String,
         db: Arc<Database>,
         app_data_dir: PathBuf,
-        on_overflow: impl Fn(String) + Send + Sync + 'static,
+        counts: IndexCounts,
+        drive: String,
+        on_overflow: Arc<dyn Fn(String) + Send + Sync>,
     ) -> Option<Self> {
         let stop = Arc::new(AtomicBool::new(false));
         let event_queue = Arc::new(Mutex::new(Vec::new()));
         let buffering = Arc::new(AtomicBool::new(true));
+        let on_overflow: Arc<dyn Fn(String) + Send + Sync> = on_overflow;
 
         let stop_clone = stop.clone();
         let queue_clone = event_queue.clone();
         let buffering_clone = buffering.clone();
         let root_clone = root.clone();
         let vol_id_clone = volume_id.clone();
+        let counts_clone = counts.clone();
+        let drive_clone = drive.clone();
+        let overflow_clone = on_overflow.clone();
 
         let handle = std::thread::Builder::new()
             .name(format!("prism-watch-{}", volume_id))
@@ -70,7 +83,9 @@ impl VolumeWatcher {
                     stop_clone,
                     queue_clone,
                     buffering_clone,
-                    on_overflow,
+                    counts_clone,
+                    drive_clone,
+                    overflow_clone,
                 );
             })
             .ok()?;
@@ -82,6 +97,9 @@ impl VolumeWatcher {
             handle: Some(handle),
             event_queue,
             buffering,
+            counts,
+            drive,
+            on_overflow,
         })
     }
 
@@ -89,6 +107,10 @@ impl VolumeWatcher {
         self.buffering.store(buffering, Ordering::SeqCst);
     }
 
+    /// Applies queued events as a single batched write: events are folded to
+    /// one final state per path, renames are paired, and removals win over
+    /// earlier upserts. An overflow observed while buffering schedules a
+    /// reconcile, because the events it would have contained were lost.
     pub fn flush_queue(&self, db: &Database) {
         self.buffering.store(false, Ordering::SeqCst);
         let events: Vec<WatcherEvent> = {
@@ -96,8 +118,63 @@ impl VolumeWatcher {
             q.drain(..).collect()
         };
 
+        let mut overflow = false;
+        let mut renames: Vec<(PathBuf, PathBuf)> = Vec::new();
+        let mut touched: Vec<PathBuf> = Vec::new();
+        let mut removed: Vec<PathBuf> = Vec::new();
+
         for event in events {
-            apply_watcher_event(&self.volume_id, &self.root, db, event);
+            match event {
+                WatcherEvent::Overflow => overflow = true,
+                WatcherEvent::Renamed { from, to } => renames.push((from, to)),
+                WatcherEvent::Removed(path) => {
+                    touched.retain(|t| t != &path);
+                    if !removed.contains(&path) {
+                        removed.push(path);
+                    }
+                }
+                WatcherEvent::Added(path) | WatcherEvent::Modified(path) => {
+                    removed.retain(|r| r != &path);
+                    if !touched.contains(&path) {
+                        touched.push(path);
+                    }
+                }
+            }
+        }
+
+        let mut delta = 0i64;
+
+        for (from, to) in &renames {
+            let old_normalized = from.to_string_lossy().to_lowercase();
+            if let Some(item) = inspect_single_path(to) {
+                delta += db
+                    .rename_file(&self.volume_id, &old_normalized, &item)
+                    .unwrap_or(0);
+            } else {
+                // Target vanished before it could be inspected; treat as removal.
+                delta -= db
+                    .remove_file(&self.volume_id, &old_normalized, true)
+                    .unwrap_or(0);
+            }
+        }
+
+        let items: Vec<ScannedItem> = touched
+            .iter()
+            .filter_map(|path| inspect_single_path(path))
+            .collect();
+        delta += db.insert_batch(&self.volume_id, 0, &items).unwrap_or(0) as i64;
+
+        for path in &removed {
+            let normalized = path.to_string_lossy().to_lowercase();
+            delta -= db
+                .remove_file(&self.volume_id, &normalized, true)
+                .unwrap_or(0);
+        }
+
+        self.counts.adjust(&self.drive, delta);
+
+        if overflow {
+            (self.on_overflow)(self.volume_id.clone());
         }
     }
 
@@ -119,7 +196,9 @@ fn run_watcher_loop(
     stop: Arc<AtomicBool>,
     event_queue: Arc<Mutex<Vec<WatcherEvent>>>,
     buffering: Arc<AtomicBool>,
-    on_overflow: impl Fn(String) + Send + Sync + 'static,
+    counts: IndexCounts,
+    drive: String,
+    on_overflow: Arc<dyn Fn(String) + Send + Sync>,
 ) {
     let wide_root: Vec<u16> = root
         .to_string_lossy()
@@ -202,15 +281,39 @@ fn run_watcher_loop(
                 match info.Action {
                     FILE_ACTION_ADDED => {
                         let event = WatcherEvent::Added(target_path);
-                        dispatch_event(&volume_id, &root, &db, &event_queue, &buffering, event);
+                        dispatch_event(
+                            &volume_id,
+                            &db,
+                            &event_queue,
+                            &buffering,
+                            &counts,
+                            &drive,
+                            event,
+                        );
                     }
                     FILE_ACTION_REMOVED => {
                         let event = WatcherEvent::Removed(target_path);
-                        dispatch_event(&volume_id, &root, &db, &event_queue, &buffering, event);
+                        dispatch_event(
+                            &volume_id,
+                            &db,
+                            &event_queue,
+                            &buffering,
+                            &counts,
+                            &drive,
+                            event,
+                        );
                     }
                     FILE_ACTION_MODIFIED => {
                         let event = WatcherEvent::Modified(target_path);
-                        dispatch_event(&volume_id, &root, &db, &event_queue, &buffering, event);
+                        dispatch_event(
+                            &volume_id,
+                            &db,
+                            &event_queue,
+                            &buffering,
+                            &counts,
+                            &drive,
+                            event,
+                        );
                     }
                     FILE_ACTION_RENAMED_OLD_NAME => {
                         pending_rename_old = Some(target_path);
@@ -221,10 +324,26 @@ fn run_watcher_loop(
                                 from: old_path,
                                 to: target_path,
                             };
-                            dispatch_event(&volume_id, &root, &db, &event_queue, &buffering, event);
+                            dispatch_event(
+                                &volume_id,
+                                &db,
+                                &event_queue,
+                                &buffering,
+                                &counts,
+                                &drive,
+                                event,
+                            );
                         } else {
                             let event = WatcherEvent::Added(target_path);
-                            dispatch_event(&volume_id, &root, &db, &event_queue, &buffering, event);
+                            dispatch_event(
+                                &volume_id,
+                                &db,
+                                &event_queue,
+                                &buffering,
+                                &counts,
+                                &drive,
+                                event,
+                            );
                         }
                     }
                     _ => {}
@@ -241,39 +360,55 @@ fn run_watcher_loop(
     let _ = unsafe { CloseHandle(dir_handle) };
 }
 
+#[allow(clippy::too_many_arguments)]
 fn dispatch_event(
     volume_id: &str,
-    root: &Path,
     db: &Database,
     queue: &Mutex<Vec<WatcherEvent>>,
     buffering: &AtomicBool,
+    counts: &IndexCounts,
+    drive: &str,
     event: WatcherEvent,
 ) {
     if buffering.load(Ordering::SeqCst) {
         queue.lock().unwrap().push(event);
     } else {
-        apply_watcher_event(volume_id, root, db, event);
+        apply_watcher_event(volume_id, db, counts, drive, event);
     }
 }
 
-fn apply_watcher_event(volume_id: &str, _root: &Path, db: &Database, event: WatcherEvent) {
+fn apply_watcher_event(
+    volume_id: &str,
+    db: &Database,
+    counts: &IndexCounts,
+    drive: &str,
+    event: WatcherEvent,
+) {
     match event {
         WatcherEvent::Added(path) | WatcherEvent::Modified(path) => {
             if let Some(item) = inspect_single_path(&path) {
-                let _ = db.add_or_update_file(volume_id, &item);
+                let delta = db.add_or_update_file(volume_id, &item).unwrap_or(0);
+                counts.adjust(drive, delta);
             }
         }
         WatcherEvent::Removed(path) => {
             let normalized = path.to_string_lossy().to_lowercase();
             // Assume directory true to clean up children as well
-            let _ = db.remove_file(volume_id, &normalized, true);
+            let delta = db.remove_file(volume_id, &normalized, true).unwrap_or(0);
+            counts.adjust(drive, -delta);
         }
         WatcherEvent::Renamed { from, to } => {
             let old_normalized = from.to_string_lossy().to_lowercase();
             if let Some(item) = inspect_single_path(&to) {
-                let _ = db.rename_file(volume_id, &old_normalized, &item);
+                let delta = db
+                    .rename_file(volume_id, &old_normalized, &item)
+                    .unwrap_or(0);
+                counts.adjust(drive, delta);
             } else {
-                let _ = db.remove_file(volume_id, &old_normalized, true);
+                let delta = db
+                    .remove_file(volume_id, &old_normalized, true)
+                    .unwrap_or(0);
+                counts.adjust(drive, -delta);
             }
         }
         WatcherEvent::Overflow => {}
@@ -296,6 +431,17 @@ fn inspect_single_path(path: &Path) -> Option<ScannedItem> {
     } else {
         path.extension().map(|e| e.to_string_lossy().to_lowercase())
     };
+    let modified_at = metadata
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+        .map(|duration| {
+            duration.as_secs() * 10_000_000
+                + u64::from(duration.subsec_nanos()) / 100
+                + 116_444_736_000_000_000
+        })
+        .unwrap_or(0);
+    let size = if is_dir { 0 } else { metadata.len() };
 
     Some(ScannedItem {
         normalized_path,
@@ -305,7 +451,7 @@ fn inspect_single_path(path: &Path) -> Option<ScannedItem> {
         parent,
         is_directory: is_dir,
         extension,
-        modified_at: 0,
-        size: metadata.len(),
+        modified_at,
+        size,
     })
 }
