@@ -1,9 +1,10 @@
 use windows::Win32::Foundation::{ERROR_HANDLE_EOF, ERROR_MORE_DATA};
+use windows::Win32::Storage::FileSystem::FILE_ATTRIBUTE_DIRECTORY;
 use windows::Win32::System::Ioctl::{FSCTL_ENUM_USN_DATA, MFT_ENUM_DATA_V0};
 
 use crate::catalog::types::NtfsNode;
 
-use super::usn::{parse_record, read_u64, ParsedUsnRecord};
+use super::usn::{is_root_system_node, parse_record, read_u64, ParsedUsnRecord};
 use super::volume::{win32_error_code, NtfsVolume};
 
 const ENUM_BUFFER_SIZE: usize = 1024 * 1024;
@@ -15,6 +16,10 @@ pub(super) fn enumerate(
 ) -> Result<(), String> {
     let mut start_frn = 0u64;
     let mut output = vec![0u8; ENUM_BUFFER_SIZE];
+    // FRNs of skipped root-level system directories ($Extend, $RECYCLE.BIN,
+    // System Volume Information): their descendants are skipped too.
+    // FSCTL_ENUM_USN_DATA walks in FRN order, so parents are seen first.
+    let mut system_subtrees: Vec<u64> = Vec::new();
 
     loop {
         let input = MFT_ENUM_DATA_V0 {
@@ -45,7 +50,17 @@ pub(super) fn enumerate(
         while offset < returned {
             let (record, length) = parse_record(&output[offset..returned])?;
             match record {
-                ParsedUsnRecord::V2(record) => consume(record.into_node())?,
+                ParsedUsnRecord::V2(record) => {
+                    if is_root_system_node(&record.name, record.parent_frn)
+                        || system_subtrees.contains(&record.parent_frn)
+                    {
+                        if record.attributes & FILE_ATTRIBUTE_DIRECTORY.0 != 0 {
+                            system_subtrees.push(record.frn);
+                        }
+                    } else {
+                        consume(record.into_node())?;
+                    }
+                }
                 ParsedUsnRecord::Unsupported { major_version } => {
                     return Err(format!(
                         "unsupported USN record major version {major_version} during MFT enumeration"

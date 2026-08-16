@@ -1962,6 +1962,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "scans the real machine (shortcut roots, AppsFolder, icon extraction); run explicitly with cargo test -- --ignored"]
     fn scan_produces_valid_cached_entries() {
         let tmp =
             std::env::temp_dir().join(format!("prism-test-apps-cache-{}.json", std::process::id()));

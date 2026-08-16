@@ -23,6 +23,18 @@ use super::IndexCounts;
 
 const BUFFER_SIZE: usize = 256 * 1024; // 256 KB buffer
 
+/// True when the event's path starts under a root the scanner excludes
+/// (`$RECYCLE.BIN`, System Volume Information). The watcher root is a volume
+/// root, so checking the first path component matches the scanner's rule.
+fn is_unsearchable_top_level(relative_name: &str) -> bool {
+    let first = relative_name
+        .split(['\\', '/'])
+        .next()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    matches!(first.as_str(), "$recycle.bin" | "system volume information")
+}
+
 #[derive(Clone, Debug)]
 pub enum WatcherEvent {
     Added(PathBuf),
@@ -276,8 +288,12 @@ fn run_watcher_loop(
             let target_path = root.join(&relative_name);
             let target_normalized = target_path.to_string_lossy().to_lowercase();
 
-            // Exclude Prism's own app data directory
-            if !target_normalized.starts_with(&app_data_normalized) {
+            // Exclude Prism's own app data directory and the unsearchable
+            // roots the scanner skips (recycle-bin hash churn must not leak
+            // rows into the index between sweeps).
+            if !target_normalized.starts_with(&app_data_normalized)
+                && !is_unsearchable_top_level(&relative_name)
+            {
                 match info.Action {
                     FILE_ACTION_ADDED => {
                         let event = WatcherEvent::Added(target_path);

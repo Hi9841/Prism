@@ -229,6 +229,7 @@ pub fn run() {
             search_files,
             rebuild_file_index,
             get_file_thumbnail,
+            get_file_thumbnails,
             get_quick_access,
             existing_paths,
             launch_app,
@@ -972,6 +973,13 @@ async fn get_file_thumbnail(path: String) -> Option<String> {
         .await
         .ok()
         .flatten()
+}
+
+#[tauri::command]
+async fn get_file_thumbnails(paths: Vec<String>) -> Vec<Option<String>> {
+    tauri::async_runtime::spawn_blocking(move || files::file_thumbnails(paths))
+        .await
+        .unwrap_or_default()
 }
 
 #[tauri::command]

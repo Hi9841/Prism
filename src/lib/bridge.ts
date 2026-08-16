@@ -202,6 +202,17 @@ export async function getFileThumbnail(path: string): Promise<string | null> {
   return invoke<string | null>("get_file_thumbnail", { path });
 }
 
+/**
+ * Thumbnails for many paths in one IPC round trip, returned in input order.
+ * A result page is up to 20 image files; batching replaces a per-file
+ * request storm (and its per-response re-renders) with a single exchange.
+ */
+export async function getFileThumbnails(paths: string[]): Promise<(string | null)[]> {
+  if (!inTauri) return paths.map(() => null);
+  const thumbnails = await invoke<(string | null)[]>("get_file_thumbnails", { paths });
+  return paths.map((_, index) => thumbnails[index] ?? null);
+}
+
 export async function getQuickAccess(): Promise<QuickAccessEntry[]> {
   if (!inTauri) {
     return [

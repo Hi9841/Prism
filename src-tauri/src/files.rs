@@ -11,7 +11,7 @@ pub use crate::catalog::search::{browse_path, entry_score, target_score};
 pub use crate::catalog::types::{
     FileEntry, FileSearchResponse, QuickAccessEntry, VolumeCoverage, VolumeState,
 };
-pub use crate::catalog::{file_thumbnail, quick_access, warm, FileIndex};
+pub use crate::catalog::{file_thumbnail, file_thumbnails, quick_access, warm, FileIndex};
 
 pub(crate) fn replace_file(temp: &Path, destination: &Path) -> Result<(), String> {
     let from: Vec<u16> = temp.as_os_str().encode_wide().chain(Some(0)).collect();
@@ -41,6 +41,8 @@ mod tests {
     use std::sync::atomic::{AtomicBool, AtomicU64};
     use std::sync::Arc;
     use std::time::{SystemTime, UNIX_EPOCH};
+    use windows::core::PCWSTR;
+    use windows::Win32::Storage::FileSystem::{SetFileAttributesW, FILE_ATTRIBUTE_SYSTEM};
 
     fn test_db() -> (Arc<Database>, PathBuf) {
         let temp_dir = std::env::temp_dir().join(format!(
@@ -240,9 +242,9 @@ mod tests {
     }
 
     #[test]
-    fn scanner_skips_excluded_dirs_but_scans_deep_trees() {
+    fn scanner_walks_full_trees_but_skips_unsearchable_roots() {
         let base = std::env::temp_dir().join(format!(
-            "prism-scan-deep-{}",
+            "prism-scan-full-{}",
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or_default()
@@ -258,13 +260,14 @@ mod tests {
         let deep_file = deep.join("deep_target.txt");
         std::fs::write(&deep_file, "deep content").unwrap();
 
-        // AppData is indexed (only Local\Temp is excluded)
+        // AppData is indexed (Local\Temp included - full coverage now)
         let appdata_folder = base.join("AppData").join("Local");
         std::fs::create_dir_all(&appdata_folder).unwrap();
         let appdata_file = appdata_folder.join("appdata_target.txt");
         std::fs::write(&appdata_file, "appdata content").unwrap();
 
-        // node_modules and root-level Windows are excluded
+        // Dependency trees, system directories, VCS metadata, and temp
+        // folders are all indexed - they rank lower at query time.
         let node_modules_folder = base.join("node_modules").join("pkg");
         std::fs::create_dir_all(&node_modules_folder).unwrap();
         let nodemodules_file = node_modules_folder.join("nodemodules_target.txt");
@@ -275,82 +278,185 @@ mod tests {
         let windows_file = windows_folder.join("windows_target.txt");
         std::fs::write(&windows_file, "windows content").unwrap();
 
-        // Temp under AppData\Local is excluded
         let temp_folder = appdata_folder.join("Temp");
         std::fs::create_dir_all(&temp_folder).unwrap();
         let temp_file = temp_folder.join("temp_target.txt");
         std::fs::write(&temp_file, "temp content").unwrap();
 
-        // A non-root "windows" folder is still indexed
-        let nested_windows = base.join("project").join("windows");
+        let git_folder = base.join("project").join(".git");
+        std::fs::create_dir_all(&git_folder).unwrap();
+        let git_file = git_folder.join("git_target.txt");
+        std::fs::write(&git_file, "git content").unwrap();
+
+        // A "windows" folder anywhere is indexed
+        let nested_windows = base.join("other").join("windows");
         std::fs::create_dir_all(&nested_windows).unwrap();
         let nested_windows_file = nested_windows.join("nested_target.txt");
         std::fs::write(&nested_windows_file, "nested content").unwrap();
 
+        // Unsearchable roots stay excluded: the recycle bin keeps hashed
+        // $R/$I names and System Volume Information holds restore blobs.
+        let recycle_folder = base.join("$RECYCLE.BIN").join("S-1-5-21");
+        std::fs::create_dir_all(&recycle_folder).unwrap();
+        let recycle_file = recycle_folder.join("recycle_target.txt");
+        std::fs::write(&recycle_file, "recycle content").unwrap();
+
+        let svi_folder = base.join("System Volume Information");
+        std::fs::create_dir_all(&svi_folder).unwrap();
+        let svi_file = svi_folder.join("svi_target.txt");
+        std::fs::write(&svi_file, "svi content").unwrap();
+
         let (db, db_dir) = test_db();
         let cancel = Arc::new(AtomicBool::new(false));
         let total = scan_volume(&base, "test_vol", 1, db.clone(), &db_dir, cancel, |_| {}).unwrap();
-        assert!(total >= 20);
+        assert!(total >= 14);
 
         let gen = AtomicU64::new(0);
-        let r1 = search("deep_target", Some(5), &db, &gen, &[], total, false, true);
-        assert_eq!(r1.items.len(), 1);
-        assert_eq!(r1.items[0].name, "deep_target.txt");
+        let hits = |query: &str| {
+            search(query, Some(5), &db, &gen, &[], total, false, true)
+                .items
+                .len()
+        };
 
-        let r2 = search(
-            "appdata_target",
-            Some(5),
-            &db,
-            &gen,
-            &[],
-            total,
-            false,
-            true,
+        assert_eq!(hits("deep_target"), 1);
+        assert_eq!(hits("appdata_target"), 1);
+        assert_eq!(
+            hits("nodemodules_target"),
+            1,
+            "dependency trees must be indexed"
         );
-        assert_eq!(r2.items.len(), 1);
-
-        let r3 = search(
-            "nodemodules_target",
-            Some(5),
-            &db,
-            &gen,
-            &[],
-            total,
-            false,
-            true,
+        assert_eq!(
+            hits("windows_target"),
+            1,
+            "system directories must be indexed"
         );
-        assert!(r3.items.is_empty(), "node_modules must not be indexed");
-
-        let r4 = search(
-            "windows_target",
-            Some(5),
-            &db,
-            &gen,
-            &[],
-            total,
-            false,
-            true,
+        assert_eq!(hits("temp_target"), 1, "temp folders must be indexed");
+        assert_eq!(hits("git_target"), 1, "VCS metadata must be indexed");
+        assert_eq!(hits("nested_target"), 1);
+        assert_eq!(
+            hits("recycle_target"),
+            0,
+            "recycle bin hash names stay unindexed"
         );
-        assert!(
-            r4.items.is_empty(),
-            "root-level Windows must not be indexed"
+        assert_eq!(
+            hits("svi_target"),
+            0,
+            "System Volume Information stays unindexed"
         );
 
-        let r5 = search("temp_target", Some(5), &db, &gen, &[], total, false, true);
-        assert!(
-            r5.items.is_empty(),
-            "AppData\\Local\\Temp must not be indexed"
+        let projects = search("project", Some(5), &db, &gen, &[], total, false, true);
+        assert_eq!(
+            projects.items.len(),
+            1,
+            "initial scans must index directories"
         );
-
-        let r6 = search("nested_target", Some(5), &db, &gen, &[], total, false, true);
-        assert_eq!(r6.items.len(), 1, "non-root 'windows' folders stay indexed");
-
-        let r7 = search("project", Some(5), &db, &gen, &[], total, false, true);
-        assert_eq!(r7.items.len(), 1, "initial scans must index directories");
-        assert!(r7.items[0].is_directory);
+        assert!(projects.items[0].is_directory);
 
         let _ = std::fs::remove_dir_all(base);
         let _ = std::fs::remove_dir_all(db_dir);
+    }
+
+    #[test]
+    fn system_attribute_files_are_indexed() {
+        let base = std::env::temp_dir().join(format!(
+            "prism-scan-system-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&base).unwrap();
+        let file_path = base.join("prism-shell-view.ini");
+        std::fs::write(&file_path, "[shell]").unwrap();
+        let wide: Vec<u16> = file_path.as_os_str().encode_wide().chain(Some(0)).collect();
+        unsafe { SetFileAttributesW(PCWSTR(wide.as_ptr()), FILE_ATTRIBUTE_SYSTEM) }.unwrap();
+
+        let (db, db_dir) = test_db();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let total = scan_volume(&base, "test_vol", 1, db.clone(), &db_dir, cancel, |_| {}).unwrap();
+
+        let gen = AtomicU64::new(0);
+        let found = search(
+            "prism-shell-view",
+            Some(5),
+            &db,
+            &gen,
+            &[],
+            total,
+            false,
+            true,
+        );
+        assert_eq!(
+            found.items.len(),
+            1,
+            "system-attributed files stay findable"
+        );
+
+        let _ = std::fs::remove_dir_all(base);
+        let _ = std::fs::remove_dir_all(db_dir);
+    }
+
+    #[test]
+    fn noisy_locations_rank_below_user_paths() {
+        let user = CandidateEntry {
+            id: 1,
+            display_path: r"C:\Users\me\Documents\notes.txt".into(),
+            lower_name: "notes.txt".into(),
+            is_directory: false,
+            extension: Some("txt".into()),
+        };
+        let windows = CandidateEntry {
+            id: 2,
+            display_path: r"C:\Windows\notes.txt".into(),
+            lower_name: "notes.txt".into(),
+            is_directory: false,
+            extension: Some("txt".into()),
+        };
+        let dependency = CandidateEntry {
+            id: 3,
+            display_path: r"C:\proj\app\node_modules\lib\notes.txt".into(),
+            lower_name: "notes.txt".into(),
+            is_directory: false,
+            extension: Some("txt".into()),
+        };
+        let recycle = CandidateEntry {
+            id: 4,
+            display_path: r"C:\$RECYCLE.BIN\S-1-5-21\$R7K2N.txt".into(),
+            lower_name: "$r7k2n.txt".into(),
+            is_directory: false,
+            extension: Some("txt".into()),
+        };
+
+        let tokens = ["notes"];
+        let user_score = entry_score(&user, &tokens, "notes").unwrap();
+        let windows_score = entry_score(&windows, &tokens, "notes").unwrap();
+        let dependency_score = entry_score(&dependency, &tokens, "notes").unwrap();
+
+        assert!(
+            user_score > windows_score,
+            "user paths outrank system paths"
+        );
+        assert!(dependency_score < user_score);
+        // Noise penalties never hide a hit - the match still resolves. (The
+        // recycle entry needs a query its hashed name can actually match.)
+        assert!(entry_score(&recycle, &["r7k2n"], "r7k2n").is_some());
+
+        // Exact-name matches keep their tier but still respect penalties, so
+        // a user copy beats an identically named system file.
+        let exact_user = entry_score(&user, &["notes.txt"], "notes.txt").unwrap();
+        let exact_windows = entry_score(&windows, &["notes.txt"], "notes.txt").unwrap();
+        assert!(exact_user > exact_windows);
+
+        // Known per-file noise (desktop.ini, ...) ranks at the very bottom.
+        let view_file = CandidateEntry {
+            id: 5,
+            display_path: r"C:\Users\me\Desktop\desktop.ini".into(),
+            lower_name: "desktop.ini".into(),
+            is_directory: false,
+            extension: Some("ini".into()),
+        };
+        let ini_score = entry_score(&view_file, &["desktop"], "desktop").unwrap();
+        assert!(ini_score < user_score);
     }
 
     #[test]

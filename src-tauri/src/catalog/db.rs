@@ -12,12 +12,14 @@ use super::types::{
 };
 
 #[allow(dead_code)]
-const SCHEMA_VERSION: u32 = 5;
+const SCHEMA_VERSION: u32 = 6;
 
 /// One-time purge patterns for rows created by the 0.9.0 catalog, which indexed
-/// everything including high-noise directories. Kept in sync with the scanner's
-/// exclusion list (see `scanner::is_excluded_dir`). Patterns are lowercase
-/// because `normalized_path` is stored lowercase.
+/// everything including high-noise directories. Historical artifact of the
+/// v1-v3 migrations only: the current policy is full coverage (system and
+/// dependency directories are indexed and down-ranked at query time - see
+/// `search::path_penalty`), so nothing purges these rows anymore. Patterns are
+/// lowercase because `normalized_path` is stored lowercase.
 const EXCLUDED_PURGE_PATTERNS: &[&str] = &[
     "%\\node_modules",
     "%\\node_modules\\%",
@@ -125,12 +127,15 @@ impl Database {
     }
 
     fn configure_pragmas(conn: &Connection) -> Result<(), String> {
+        // The reader and writer connections each cap at 32 MiB of page cache;
+        // hot lookups (B-tree roots, FTS postings) fit well below that, while
+        // mmap keeps larger scans off the process heap.
         conn.execute_batch(
             "PRAGMA journal_mode = WAL;
              PRAGMA synchronous = NORMAL;
              PRAGMA temp_store = MEMORY;
              PRAGMA busy_timeout = 5000;
-             PRAGMA cache_size = -64000;
+             PRAGMA cache_size = -32000;
              PRAGMA mmap_size = 268435456;",
         )
         .map_err(|e| e.to_string())?;
@@ -263,10 +268,16 @@ impl Database {
     /// to existing indexes as well.
     fn migrate(&self) -> Result<(), String> {
         let conn = self.writer.lock().map_err(|e| e.to_string())?;
+        // The version row is stored as TEXT; read it as a string and parse so
+        // a type mismatch can never masquerade as version 0 (which made every
+        // open replay the v5 ALTER TABLE, fail on the duplicate column, and
+        // drop into the recovery path that discards the whole catalog).
         let mut version: i64 = conn
             .query_row("SELECT value FROM meta WHERE key = 'version';", [], |row| {
-                row.get(0)
+                row.get::<_, String>(0)
             })
+            .ok()
+            .and_then(|text| text.trim().parse().ok())
             .unwrap_or(0);
 
         if version >= SCHEMA_VERSION as i64 {
@@ -326,6 +337,28 @@ impl Database {
                  ALTER TABLE volumes ADD COLUMN index_status TEXT NOT NULL DEFAULT 'needs_rebuild';
                  UPDATE volumes SET backend = 'fallback', index_status = 'needs_rebuild';
                  UPDATE meta SET value = '5' WHERE key = 'version';
+                 COMMIT;",
+            )
+            .map_err(|error| {
+                let _ = conn.execute_batch("ROLLBACK;");
+                error.to_string()
+            })?;
+        }
+
+        if version < 6 {
+            let conn = self.writer.lock().map_err(|e| e.to_string())?;
+            eprintln!(
+                "[Prism Catalog] Migrating catalog schema v{version} -> v6 (full-coverage resweep)"
+            );
+            // The scanner is full-coverage now: directories it used to skip
+            // (C:\Windows, node_modules, .git, temp, ...) must enter the
+            // catalog. NTFS generations already contain them - the MFT ingest
+            // was never exclusion-filtered - so only fallback volumes need
+            // their scan clock reset to trigger one resweep.
+            conn.execute_batch(
+                "BEGIN IMMEDIATE;
+                 UPDATE volumes SET last_scanned_at = 0 WHERE backend = 'fallback';
+                 UPDATE meta SET value = '6' WHERE key = 'version';
                  COMMIT;",
             )
             .map_err(|error| {
@@ -753,26 +786,30 @@ impl Database {
                     let mut doomed = vec![*frn];
                     let mut seen = HashSet::new();
                     let mut cursor = 0usize;
-                    while cursor < doomed.len() {
-                        let current = doomed[cursor];
-                        cursor += 1;
-                        if !seen.insert(current) {
-                            continue;
-                        }
+                    {
+                        // One prepared statement for the whole descent, not
+                        // one per visited node.
                         let mut children = tx
-                            .prepare(
+                            .prepare_cached(
                                 "SELECT frn FROM ntfs_nodes
                                  WHERE volume_id = ?1 AND parent_frn = ?2;",
                             )
                             .map_err(|e| e.to_string())?;
-                        let rows = children
-                            .query_map(params![volume_id, frn_blob(current)], |row| {
-                                let blob: Vec<u8> = row.get(0)?;
-                                Ok(blob_frn(&blob))
-                            })
-                            .map_err(|e| e.to_string())?;
-                        for child in rows.flatten().flatten() {
-                            doomed.push(child);
+                        while cursor < doomed.len() {
+                            let current = doomed[cursor];
+                            cursor += 1;
+                            if !seen.insert(current) {
+                                continue;
+                            }
+                            let rows = children
+                                .query_map(params![volume_id, frn_blob(current)], |row| {
+                                    let blob: Vec<u8> = row.get(0)?;
+                                    Ok(blob_frn(&blob))
+                                })
+                                .map_err(|e| e.to_string())?;
+                            for child in rows.flatten().flatten() {
+                                doomed.push(child);
+                            }
                         }
                     }
                     for doomed_frn in doomed {
@@ -800,9 +837,12 @@ impl Database {
 
     pub fn mark_ntfs_ready(&self, volume_id: &str) -> Result<(), String> {
         let conn = self.writer.lock().map_err(|e| e.to_string())?;
+        // The where clause keeps the steady-state poll (journal already
+        // current) a read-only no-op instead of a write per volume per tick.
         conn.execute(
             "UPDATE volumes SET state = 'ready', index_status = 'ready'
-             WHERE volume_id = ?1 AND backend = 'ntfs';",
+             WHERE volume_id = ?1 AND backend = 'ntfs'
+               AND (state <> 'ready' OR index_status <> 'ready');",
             params![volume_id],
         )
         .map_err(|e| e.to_string())?;
@@ -1338,6 +1378,15 @@ impl Database {
         let mut candidates = Vec::with_capacity(limit * 2);
         let mut seen_ids = std::collections::HashSet::new();
 
+        // Full coverage means common names (readme.md, config.json) have
+        // thousands of hits across system and dependency directories. The
+        // location-based ranking happens after fetch, so the candidate pools
+        // must be wide enough that a user's own file is among them before
+        // penalties can order it to the top.
+        let exact_limit = 40i64;
+        let prefix_limit = (limit.max(10) * 3) as i64;
+        let fts_limit = (limit.max(10) * 3) as i64;
+
         // 1. Exact match query
         {
             let mut stmt = conn
@@ -1346,11 +1395,11 @@ impl Database {
                      FROM files f WHERE lower_name = ?1
                        AND NOT EXISTS(SELECT 1 FROM volumes v
                                       WHERE v.volume_id = f.volume_id AND v.backend = 'ntfs')
-                     LIMIT 20;",
+                     LIMIT ?2;",
                 )
                 .map_err(|e| e.to_string())?;
             let rows = stmt
-                .query_map(params![lower], |row| {
+                .query_map(params![lower, exact_limit], |row| {
                     Ok(CandidateEntry {
                         id: row.get(0)?,
                         display_path: row.get(1)?,
@@ -1381,7 +1430,7 @@ impl Database {
                 )
                 .map_err(|e| e.to_string())?;
             let rows = stmt
-                .query_map(params![lower, prefix_end, limit as i64], |row| {
+                .query_map(params![lower, prefix_end, prefix_limit], |row| {
                     Ok(CandidateEntry {
                         id: row.get(0)?,
                         display_path: row.get(1)?,
@@ -1417,7 +1466,7 @@ impl Database {
                     .map_err(|e| e.to_string())?;
 
                 let rows = stmt
-                    .query_map(params![fts_query, (limit * 2) as i64], |row| {
+                    .query_map(params![fts_query, fts_limit], |row| {
                         Ok(CandidateEntry {
                             id: row.get(0)?,
                             display_path: row.get(1)?,
@@ -1448,7 +1497,7 @@ impl Database {
                 .map_err(|e| e.to_string())?;
 
             let rows = stmt
-                .query_map(params![lower, prefix_end, limit as i64], |row| {
+                .query_map(params![lower, prefix_end, prefix_limit], |row| {
                     Ok(CandidateEntry {
                         id: row.get(0)?,
                         display_path: row.get(1)?,
@@ -1494,7 +1543,8 @@ fn append_ntfs_candidates(
     let mut seen = HashSet::new();
 
     let mut collect = |sql: &str, values: &[&dyn rusqlite::ToSql]| -> Result<(), String> {
-        let mut stmt = conn.prepare(sql).map_err(|e| e.to_string())?;
+        // Cached: this runs on every keystroke-driven search.
+        let mut stmt = conn.prepare_cached(sql).map_err(|e| e.to_string())?;
         let mapped = stmt
             .query_map(params_from_iter(values.iter().copied()), |row| {
                 let blob: Vec<u8> = row.get(2)?;
@@ -1524,7 +1574,9 @@ fn append_ntfs_candidates(
         Ok(())
     };
 
-    let exact_limit = 20i64;
+    // Keep the NTFS candidate pools aligned with the fallback-table queries
+    // above: ranking happens after fetch, so both need the wider limits.
+    let exact_limit = 40i64;
     collect(
         "SELECT n.id, n.volume_id, n.frn, n.lower_name, n.is_directory, n.extension, v.mount_path
          FROM ntfs_nodes n JOIN volumes v ON v.volume_id = n.volume_id
@@ -1532,7 +1584,7 @@ fn append_ntfs_candidates(
         &[&lower, &exact_limit],
     )?;
     let prefix_end = format!("{lower}\u{FFFF}");
-    let sql_limit = limit as i64;
+    let sql_limit = (limit.max(10) * 3) as i64;
     collect(
         "SELECT n.id, n.volume_id, n.frn, n.lower_name, n.is_directory, n.extension, v.mount_path
          FROM ntfs_nodes n JOIN volumes v ON v.volume_id = n.volume_id
@@ -1542,7 +1594,7 @@ fn append_ntfs_candidates(
     if query_len >= 3 {
         let fts_query = sanitize_fts5_trigram_query(lower);
         if !fts_query.is_empty() {
-            let fts_limit = (limit * 2) as i64;
+            let fts_limit = (limit.max(10) * 3) as i64;
             collect(
                 "SELECT n.id, n.volume_id, n.frn, n.lower_name, n.is_directory, n.extension, v.mount_path
                  FROM ntfs_nodes n JOIN volumes v ON v.volume_id = n.volume_id
@@ -1824,6 +1876,52 @@ mod ntfs_tests {
     }
 
     #[test]
+    fn migrates_v5_resweeping_only_fallback_volumes() {
+        let path = temp_db_path("schema-v5-full-coverage");
+        {
+            // Build a current-shape catalog, then rewind its version marker to
+            // v5 with one fallback and one NTFS volume already scanned.
+            let db = Database::open(&path).unwrap();
+            db.upsert_volume(&volume(), VolumeState::Ready).unwrap();
+            db.finish_volume_scan("stable-volume", 1, 5).unwrap();
+
+            let mut ntfs_volume = volume();
+            ntfs_volume.volume_id = "ntfs-volume".into();
+            ntfs_volume.mount_paths = vec![PathBuf::from("D:\\")];
+            ntfs_volume.drive_letter = Some("D:".into());
+            db.upsert_volume(&ntfs_volume, VolumeState::Ready).unwrap();
+            let conn = db.writer.lock().unwrap();
+            conn.execute("UPDATE meta SET value = '5' WHERE key = 'version';", [])
+                .unwrap();
+            conn.execute(
+                "UPDATE volumes SET backend = 'ntfs', journal_id = '7', next_usn = 100,
+                    index_status = 'ready', last_scanned_at = CAST(strftime('%s','now') AS INTEGER) - 60
+                 WHERE volume_id = 'ntfs-volume';",
+                [],
+            )
+            .unwrap();
+        }
+
+        let db = Database::try_open(&path).unwrap();
+        let conn = db.reader.lock().unwrap();
+        let version: String = conn
+            .query_row("SELECT value FROM meta WHERE key = 'version';", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        drop(conn);
+        assert_eq!(version, "6");
+        // Full-coverage resweep: fallback volumes lose their freshness so the
+        // next startup re-walks them; NTFS generations already cover those
+        // directories through the MFT and keep their cursor.
+        assert!(!db.is_volume_fresh("stable-volume", 86_400 * 365).unwrap());
+        assert!(db.is_volume_fresh("ntfs-volume", 86_400 * 365).unwrap());
+
+        drop(db);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
     fn migrates_v4_without_destroying_path_catalog_rows() {
         let path = temp_db_path("schema-v4");
         {
@@ -1876,7 +1974,7 @@ mod ntfs_tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(version, "5");
+        assert_eq!(version, "6");
         assert_eq!(legacy_rows, 1);
         assert_eq!(backend, "fallback");
         drop(conn);

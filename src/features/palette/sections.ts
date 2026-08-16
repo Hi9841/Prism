@@ -126,9 +126,13 @@ export function buildSections(sources: PaletteSources): {
       out.push({ id: "pinned", label: "Pinned", items: pinnedItems });
     }
     const pinnedItemIds = new Set(pinnedItems.map((item) => item.id));
+    // One lookup map for the whole idle rebuild: history rehydration and the
+    // pinned filter below both need membership checks per row.
+    const appsById = new Map(apps.map((entry) => [entry.appId, entry]));
+    const pinnedAppIdSet = new Set(pinnedAppIds);
     const recentItems: PaletteItem[] = [];
     for (const entry of history) {
-      const item = rehydrate(entry, apps, existingHistoryPaths, appIcons, fileThumbnails);
+      const item = rehydrate(entry, appsById, existingHistoryPaths, appIcons, fileThumbnails);
       if (item && pinnedItemIds.has(item.id)) continue;
       if (item) recentItems.push(item);
       if (recentItems.length >= RECENT_LIMIT) break;
@@ -149,7 +153,7 @@ export function buildSections(sources: PaletteSources): {
     }
 
     const appsSection = buildAppsSection(
-      sortedApps.filter((entry) => !pinnedAppIds.includes(entry.appId)),
+      sortedApps.filter((entry) => !pinnedAppIdSet.has(entry.appId)),
       appIcons,
       appGroups,
       IDLE_APPS_LIMIT,
@@ -383,14 +387,14 @@ export function historyFilePath(id: string): string | null {
 
 function rehydrate(
   history: HistoryEntry,
-  apps: AppEntry[],
+  appsById: ReadonlyMap<string, AppEntry>,
   existingHistoryPaths: ReadonlySet<string>,
   icons: Readonly<Record<string, string>>,
   fileThumbnails: ReadonlyMap<string, string | null>,
 ): PaletteItem | null {
   if (history.id.startsWith("app::")) {
     const appId = history.id.slice(5);
-    const entry = apps.find((candidate) => candidate.appId === appId);
+    const entry = appsById.get(appId);
     return entry ? appPaletteItem(entry, icons) : null;
   }
   const directoryPrefix = "file::d::";

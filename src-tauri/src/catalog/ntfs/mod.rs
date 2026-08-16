@@ -35,11 +35,15 @@ impl NtfsBackend {
     pub fn synchronize(&mut self, info: &VolumeInfo, db: &Database) -> Result<SyncStats, String> {
         let query_started = Instant::now();
         let journal = self.transport.query_journal()?;
-        eprintln!(
-            "[Prism Catalog] ntfs_journal_query volume={} elapsed_ms={}",
-            info.volume_id,
-            query_started.elapsed().as_millis()
-        );
+        // synchronize runs on every poll; only surface journal queries slow
+        // enough to matter instead of logging each pass.
+        if query_started.elapsed().as_millis() > 50 {
+            eprintln!(
+                "[Prism Catalog] ntfs_journal_query volume={} elapsed_ms={}",
+                info.volume_id,
+                query_started.elapsed().as_millis()
+            );
+        }
 
         let checkpoint = db.get_ntfs_checkpoint(&info.volume_id)?;
         match journal_continuity(checkpoint, journal) {
