@@ -1,7 +1,8 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use rusqlite::{params, params_from_iter, Connection, OpenFlags};
 
@@ -61,6 +62,11 @@ pub struct Database {
     writer: Arc<Mutex<Connection>>,
     reader: Arc<Mutex<Connection>>,
     bulk_load_depth: Mutex<u32>,
+    /// Set by any write that lands while the FTS triggers are dropped. The
+    /// bulk-load teardown only rebuilds the FTS index when this is set, so a
+    /// sweep that changed nothing (the common overflow-reconcile case) does
+    /// not re-tokenize millions of names for nothing.
+    bulk_load_dirty: AtomicBool,
 }
 
 impl Database {
@@ -69,7 +75,7 @@ impl Database {
             let _ = std::fs::create_dir_all(parent);
         }
 
-        match Self::try_open(db_path) {
+        let database = match Self::try_open(db_path) {
             Ok(db) => Ok(db),
             Err(err) => {
                 let recovery_path = db_path.with_extension(format!(
@@ -94,7 +100,14 @@ impl Database {
                 let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
                 Self::try_open(db_path).map_err(|e| format!("database recreation failed: {e}"))
             }
+        }?;
+        // A preserved recovery copy is a full catalog snapshot (gigabytes on
+        // long-lived installs). Once the replacement opens cleanly, copies
+        // older than a week are dead weight; drop them opportunistically.
+        if let Some(parent) = db_path.parent() {
+            cleanup_stale_recovery_copies(parent);
         }
+        Ok(database)
     }
 
     fn try_open(db_path: &Path) -> Result<Self, String> {
@@ -121,6 +134,7 @@ impl Database {
             writer: Arc::new(Mutex::new(writer)),
             reader: Arc::new(Mutex::new(reader)),
             bulk_load_depth: Mutex::new(0),
+            bulk_load_dirty: AtomicBool::new(false),
         };
         db.migrate()?;
         Ok(db)
@@ -408,6 +422,7 @@ impl Database {
                  DROP TRIGGER IF EXISTS files_au;",
             )
             .map_err(|e| e.to_string())?;
+            self.bulk_load_dirty.store(false, Ordering::Relaxed);
         }
         *depth += 1;
         Ok(())
@@ -420,6 +435,7 @@ impl Database {
         }
         *depth -= 1;
         if *depth == 0 {
+            let rebuild_needed = self.bulk_load_dirty.swap(false, Ordering::Relaxed);
             let conn = self.writer.lock().map_err(|e| e.to_string())?;
             conn.execute_batch(
                 "CREATE TRIGGER IF NOT EXISTS files_ai AFTER INSERT ON files BEGIN
@@ -431,12 +447,32 @@ impl Database {
                  CREATE TRIGGER IF NOT EXISTS files_au AFTER UPDATE OF name ON files BEGIN
                     INSERT INTO file_fts(file_fts, rowid, name) VALUES ('delete', old.id, old.name);
                     INSERT INTO file_fts(rowid, name) VALUES (new.id, new.name);
-                 END;
-                 INSERT INTO file_fts(file_fts) VALUES('rebuild');",
+                 END;",
             )
             .map_err(|e| e.to_string())?;
+            if rebuild_needed {
+                conn.execute_batch("INSERT INTO file_fts(file_fts) VALUES('rebuild');")
+                    .map_err(|e| e.to_string())?;
+            }
         }
         Ok(())
+    }
+
+    /// Marks the FTS index as out of date: the row was written while the
+    /// maintenance triggers were dropped, so the bulk-load teardown must
+    /// rebuild it. Harmless outside bulk loads (nothing reads the flag then).
+    fn note_bulk_write(&self) {
+        self.bulk_load_dirty.store(true, Ordering::Relaxed);
+    }
+
+    /// Truncates the write-ahead log. A long sweep grows the WAL by hundreds
+    /// of megabytes, and every process start pays recovery for whatever was
+    /// left un-checkpointed - checkpointing after big writes keeps launches
+    /// cheap and the app data directory small.
+    pub fn checkpoint(&self) -> Result<(), String> {
+        let conn = self.writer.lock().map_err(|e| e.to_string())?;
+        conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+            .map_err(|e| e.to_string())
     }
 
     pub fn upsert_volume(&self, vol: &VolumeInfo, state: VolumeState) -> Result<(), String> {
@@ -916,6 +952,9 @@ impl Database {
             }
         }
         tx.commit().map_err(|e| e.to_string())?;
+        if changed > 0 {
+            self.note_bulk_write();
+        }
         Ok(changed)
     }
 
@@ -1027,6 +1066,7 @@ impl Database {
             }
         }
         tx.commit().map_err(|e| e.to_string())?;
+        self.note_bulk_write();
         Ok(())
     }
 
@@ -1148,42 +1188,6 @@ impl Database {
         Ok(())
     }
 
-    /// Upserts a single file (watcher path). Returns the row delta: +1 when a
-    /// row was inserted or changed, 0 when the stored values already match.
-    pub fn add_or_update_file(&self, volume_id: &str, item: &ScannedItem) -> Result<i64, String> {
-        let conn = self.writer.lock().map_err(|e| e.to_string())?;
-        let changed = conn
-            .execute(
-                "INSERT INTO files(
-                    volume_id, normalized_path, display_path, name, lower_name, parent,
-                    is_directory, extension, scan_generation, modified_at, size
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 0, ?9, ?10)
-                ON CONFLICT(volume_id, normalized_path) DO UPDATE SET
-                    display_path = excluded.display_path,
-                    name = excluded.name,
-                    lower_name = excluded.lower_name,
-                    parent = excluded.parent,
-                    is_directory = excluded.is_directory,
-                    extension = excluded.extension,
-                    modified_at = excluded.modified_at,
-                    size = excluded.size;",
-                params![
-                    volume_id,
-                    item.normalized_path,
-                    item.display_path,
-                    item.name,
-                    item.lower_name,
-                    item.parent,
-                    item.is_directory as i32,
-                    item.extension,
-                    item.modified_at as i64,
-                    item.size as i64,
-                ],
-            )
-            .map_err(|e| e.to_string())?;
-        Ok(changed as i64)
-    }
-
     /// Removes a file or a directory subtree. Returns the number of rows
     /// removed (negative delta for counters).
     pub fn remove_file(
@@ -1207,6 +1211,9 @@ impl Database {
             )
             .map_err(|e| e.to_string())?
         };
+        if removed != 0 {
+            self.note_bulk_write();
+        }
         Ok(removed as i64)
     }
 
@@ -1287,6 +1294,7 @@ impl Database {
             .map_err(|e| e.to_string())?;
 
         tx.commit().map_err(|e| e.to_string())?;
+        self.note_bulk_write();
         Ok(inserted as i64 - removed as i64)
     }
 
@@ -1361,7 +1369,9 @@ impl Database {
                     backend = 'fallback', journal_id = NULL, next_usn = NULL,
                     index_status = 'needs_rebuild';",
             )
-            .map_err(|e| e.to_string())
+            .map_err(|e| e.to_string())?;
+            self.note_bulk_write();
+            Ok(())
         })();
         self.end_bulk_load()?;
         result
@@ -1677,6 +1687,36 @@ fn escape_like_pattern(value: &str) -> String {
         .replace('_', "!_")
 }
 
+/// Removes `catalog.recovery-*.db{,-wal,-shm}` copies older than a week from
+/// the app data directory. Only files matching that exact prefix are touched.
+fn cleanup_stale_recovery_copies(parent: &Path) {
+    const MAX_AGE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
+    let Ok(entries) = std::fs::read_dir(parent) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        let is_recovery = name.starts_with("catalog.recovery-")
+            && (name.ends_with(".db") || name.ends_with(".db-wal") || name.ends_with(".db-shm"));
+        if !is_recovery {
+            continue;
+        }
+        let Ok(metadata) = entry.metadata() else {
+            continue;
+        };
+        let Ok(modified) = metadata.modified() else {
+            continue;
+        };
+        if SystemTime::now()
+            .duration_since(modified)
+            .is_ok_and(|age| age > MAX_AGE)
+        {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
 fn frn_blob(frn: u64) -> [u8; 8] {
     frn.to_le_bytes()
 }
@@ -1873,6 +1913,51 @@ mod ntfs_tests {
 
         drop(db);
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn stale_recovery_copies_are_cleaned_but_recent_ones_kept() {
+        let path = temp_db_path("recovery-cleanup");
+        let parent = path.parent().unwrap().to_path_buf();
+        {
+            let _db = Database::open(&path).unwrap();
+        }
+
+        let stale = parent.join("catalog.recovery-1786807317418544300.db");
+        std::fs::write(&stale, "old catalog snapshot").unwrap();
+        let stale_wal = parent.join("catalog.recovery-1786807317418544300.db-wal");
+        std::fs::write(&stale_wal, "wal").unwrap();
+        // Age the copy past the retention window (write access is required
+        // to set file times on Windows).
+        let ancient = SystemTime::now() - Duration::from_secs(8 * 24 * 60 * 60);
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&stale)
+            .unwrap()
+            .set_modified(ancient)
+            .unwrap();
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&stale_wal)
+            .unwrap()
+            .set_modified(ancient)
+            .unwrap();
+        let recent = parent.join("catalog.recovery-9999999999999999999.db");
+        std::fs::write(&recent, "recent snapshot").unwrap();
+        let unrelated = parent.join("otherfile-recovery-.db");
+        std::fs::write(&unrelated, "not a recovery copy").unwrap();
+
+        drop(Database::open(&path).unwrap());
+
+        assert!(!stale.exists(), "week-old recovery copies are removed");
+        assert!(!stale_wal.exists(), "their sidecar WAL files too");
+        assert!(recent.exists(), "recent recovery copies are retained");
+        assert!(
+            unrelated.exists(),
+            "only catalog recovery files are touched"
+        );
+
+        let _ = std::fs::remove_dir_all(parent);
     }
 
     #[test]

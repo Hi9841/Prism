@@ -13,7 +13,7 @@ use std::io::Cursor;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use base64::Engine;
 use serde::Deserialize;
@@ -48,6 +48,14 @@ const VOLUME_DISCOVERY_INTERVAL: Duration = Duration::from_secs(15);
 /// Long sleeps are sliced so a hidden -> visible transition resumes the fast
 /// cadence (and journal freshness) within a second of opening the palette.
 const POLL_WAKE_SLICE: Duration = Duration::from_secs(1);
+/// Watcher-overflow reconciles re-walk a whole volume - the single most
+/// expensive thing this app does. Overflows can arrive in bursts (churning
+/// builds, browser caches), so at most one reconcile per volume per window;
+/// the periodic 6-hour reconciliation catches anything the window defers.
+const OVERFLOW_RECONCILE_MIN_INTERVAL: Duration = Duration::from_secs(15 * 60);
+/// A volume that just finished a sweep does not need another: the sweep
+/// already reconciled the tree, so an overflow observed during it is stale.
+const OVERFLOW_RECONCILE_SCAN_GRACE: u64 = 120;
 // Sweeps walk the tree but write only rows that actually changed, so the
 // periodic reconcile catches watcher misses cheaply without the disk churn of
 // the old full re-index.
@@ -113,6 +121,7 @@ pub struct FileIndex {
     app_data_dir: Arc<RwLock<PathBuf>>,
     app_handle: Arc<Mutex<Option<tauri::AppHandle>>>,
     scan_generation: Arc<AtomicU64>,
+    last_overflow_reconcile: Arc<Mutex<HashMap<String, Instant>>>,
 }
 
 impl Default for FileIndex {
@@ -129,6 +138,7 @@ impl Default for FileIndex {
             app_data_dir: Arc::new(RwLock::new(PathBuf::from("."))),
             app_handle: Arc::new(Mutex::new(None)),
             scan_generation: Arc::new(AtomicU64::new(1)),
+            last_overflow_reconcile: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 }
@@ -350,6 +360,7 @@ impl FileIndex {
                             if let Ok(exact) = db.get_scanned_entries(&volume_id) {
                                 self.counts.set(&drive, exact);
                             }
+                            let _ = db.checkpoint();
                             self.update_volume_coverage(&drive, VolumeState::Ready);
                             self.emit_updated();
                             return;
@@ -491,6 +502,9 @@ impl FileIndex {
             }
         }
 
+        // The sweep (and its FTS rebuild) left most of the WAL behind; fold
+        // it back into the catalog so the next launch does not pay recovery.
+        let _ = db.checkpoint();
         self.scan_cancels.lock().unwrap().remove(&volume_id);
         self.emit_updated();
     }
@@ -534,7 +548,36 @@ impl FileIndex {
 
     /// Incremental sweep of a single volume after a watcher overflow. Runs on
     /// the blocking pool via the overflow callback - never on a runtime thread.
+    ///
+    /// Guarded three ways, because a full re-walk is minutes of CPU and the
+    /// whole point of the guards is that overflow bursts cannot chain
+    /// re-walks back to back: never while another scan of the volume is
+    /// already running, never more than once per
+    /// `OVERFLOW_RECONCILE_MIN_INTERVAL`, and never for a volume whose sweep
+    /// just completed (that sweep already reconciled the tree).
     fn reconcile_volume_sync(&self, volume_id: &str) {
+        let scan_active = self.scan_cancels.lock().unwrap().contains_key(volume_id);
+        let last = self
+            .last_overflow_reconcile
+            .lock()
+            .unwrap()
+            .get(volume_id)
+            .copied();
+        let recently_scanned = {
+            let db_opt = self.db.read().unwrap().clone();
+            db_opt.as_ref().is_some_and(|db| {
+                db.is_volume_fresh(volume_id, OVERFLOW_RECONCILE_SCAN_GRACE)
+                    .unwrap_or(false)
+            })
+        };
+        if !reconcile_eligible(last, Instant::now(), scan_active, recently_scanned) {
+            return;
+        }
+        self.last_overflow_reconcile
+            .lock()
+            .unwrap()
+            .insert(volume_id.to_string(), Instant::now());
+
         let volumes = volume::discover_volumes();
 
         let Some(vol) = volumes.into_iter().find(|v| v.volume_id == volume_id) else {
@@ -839,4 +882,42 @@ fn image_thumbnail(path: &Path, len: u64) -> Option<String> {
         "data:image/png;base64,{}",
         base64::engine::general_purpose::STANDARD.encode(bytes.into_inner())
     ))
+}
+
+/// Scheduling decision for a watcher-overflow reconcile: a full volume
+/// re-walk only ever runs when no sweep is active, the last sweep is older
+/// than the grace window, and the previous reconcile is outside the debounce
+/// window. Overflow bursts must not chain re-walks back to back.
+fn reconcile_eligible(
+    last: Option<Instant>,
+    now: Instant,
+    scan_active: bool,
+    recently_scanned: bool,
+) -> bool {
+    if scan_active || recently_scanned {
+        return false;
+    }
+    last.is_none_or(|previous| now.duration_since(previous) >= OVERFLOW_RECONCILE_MIN_INTERVAL)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn overflow_reconciles_are_debounced_and_scan_guarded() {
+        let now = Instant::now();
+        // First overflow after startup: eligible.
+        assert!(reconcile_eligible(None, now, false, false));
+        // A sweep just finished: never reconcile on top of it.
+        assert!(!reconcile_eligible(None, now, false, true));
+        // Another sweep is still running: never stack a second walk.
+        assert!(!reconcile_eligible(None, now, true, false));
+        // Within the debounce window: drop the burst.
+        let moments_ago = now - Duration::from_secs(30);
+        assert!(!reconcile_eligible(Some(moments_ago), now, false, false));
+        // Outside the debounce window: eligible again.
+        let long_ago = now - OVERFLOW_RECONCILE_MIN_INTERVAL - Duration::from_secs(1);
+        assert!(reconcile_eligible(Some(long_ago), now, false, false));
+    }
 }

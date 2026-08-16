@@ -13,7 +13,9 @@ use windows::Win32::Storage::FileSystem::{
 };
 use windows::Win32::System::SystemServices::{IO_REPARSE_TAG_CLOUD, IO_REPARSE_TAG_CLOUD_MASK};
 use windows::Win32::System::Threading::{
-    GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_BELOW_NORMAL, THREAD_PRIORITY_NORMAL,
+    GetCurrentThread, SetThreadInformation, SetThreadPriority, ThreadPowerThrottling,
+    THREAD_POWER_THROTTLING_CURRENT_VERSION, THREAD_POWER_THROTTLING_EXECUTION_SPEED,
+    THREAD_POWER_THROTTLING_STATE, THREAD_PRIORITY_BELOW_NORMAL, THREAD_PRIORITY_NORMAL,
 };
 
 use super::db::Database;
@@ -54,10 +56,12 @@ fn is_cloud_reparse_tag(tag: u32) -> bool {
 /// mtimes, so the whole tree is enumerated every sweep. Cost is contained
 /// three ways:
 /// - rows whose (mtime, size) are unchanged are never written again
-///   (`filter_changed`), so an idle sweep does almost no writes;
+///   (`filter_changed`), so an idle sweep does almost no writes - and a sweep
+///   that changed nothing also skips the FTS rebuild entirely;
 /// - junctions and symlinks stay leaves, so no subtree is walked twice;
 /// - FTS triggers are dropped during the walk and the index is rebuilt once
-///   at the end (`begin_bulk_load` / `end_bulk_load`).
+///   at the end (`begin_bulk_load` / `end_bulk_load`), but only when rows
+///   actually changed (bulk-load writes bypass the FTS triggers).
 pub fn scan_volume(
     root: &Path,
     volume_id: &str,
@@ -67,7 +71,7 @@ pub fn scan_volume(
     cancel: Arc<AtomicBool>,
     progress_callback: impl Fn(u64),
 ) -> Result<u64, String> {
-    let _priority = ScanPriorityGuard::new();
+    let _priority = ScanEfficiencyGuard::new();
     db.begin_bulk_load()?;
     let result = scan_volume_inner(
         root,
@@ -79,30 +83,62 @@ pub fn scan_volume(
         &progress_callback,
     );
     // Always restore the FTS triggers, even on cancel - the reference-counted
-    // bulk load guard makes this safe under parallel scans.
+    // bulk load guard makes this safe under parallel scans. The Database
+    // rebuilds the FTS index only if any row was actually written or pruned
+    // while the triggers were down; an unchanged re-walk (the common case for
+    // overflow reconciles) skips re-tokenizing millions of names for nothing.
     let _ = db.end_bulk_load();
     result
 }
 
-/// File enumeration is background maintenance. Lower only the current worker
-/// for the duration of a scan so the palette, watcher, and other app work keep
-/// responsive CPU time without permanently changing the runtime thread pool.
-struct ScanPriorityGuard;
+/// File enumeration is background maintenance. For its duration the worker
+/// thread runs at below-normal priority and under Windows power throttling
+/// (EcoQoS): the scheduler and frequency governor then run catalog work at
+/// efficiency speed. Without the throttle a multi-million-entry walk pins a
+/// core at full clock for minutes - priority alone only yields CPU time, it
+/// never lowers the power cost of the time it does get.
+pub(crate) struct ScanEfficiencyGuard;
 
-impl ScanPriorityGuard {
-    fn new() -> Self {
+impl ScanEfficiencyGuard {
+    pub(crate) fn new() -> Self {
         unsafe {
             let _ = SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+            let throttled = THREAD_POWER_THROTTLING_STATE {
+                Version: THREAD_POWER_THROTTLING_CURRENT_VERSION,
+                ControlMask: THREAD_POWER_THROTTLING_EXECUTION_SPEED,
+                StateMask: THREAD_POWER_THROTTLING_EXECUTION_SPEED,
+            };
+            let _ = SetThreadInformation(
+                GetCurrentThread(),
+                ThreadPowerThrottling,
+                &throttled as *const _ as *const core::ffi::c_void,
+                std::mem::size_of::<THREAD_POWER_THROTTLING_STATE>() as u32,
+            );
         }
         Self
     }
-}
 
-impl Drop for ScanPriorityGuard {
-    fn drop(&mut self) {
+    fn clear() {
         unsafe {
             let _ = SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_NORMAL);
+            let unthrottled = THREAD_POWER_THROTTLING_STATE {
+                Version: THREAD_POWER_THROTTLING_CURRENT_VERSION,
+                ControlMask: THREAD_POWER_THROTTLING_EXECUTION_SPEED,
+                StateMask: 0,
+            };
+            let _ = SetThreadInformation(
+                GetCurrentThread(),
+                ThreadPowerThrottling,
+                &unthrottled as *const _ as *const core::ffi::c_void,
+                std::mem::size_of::<THREAD_POWER_THROTTLING_STATE>() as u32,
+            );
         }
+    }
+}
+
+impl Drop for ScanEfficiencyGuard {
+    fn drop(&mut self) {
+        Self::clear();
     }
 }
 
