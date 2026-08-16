@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
+use std::time::Duration;
 use std::time::UNIX_EPOCH;
 
 use windows::core::PCWSTR;
@@ -21,19 +22,20 @@ use super::db::Database;
 use super::types::ScannedItem;
 use super::IndexCounts;
 
-const BUFFER_SIZE: usize = 256 * 1024; // 256 KB buffer
+/// ReadDirectoryChangesW on a synchronous handle accepts at most 64 KB -
+/// larger buffers fail instantly with an invalid-parameter error (which a
+/// naive retry loop turns into a hot spin). Bursts beyond 64 KB surface as
+/// overflow markers handled by the rate-limited reconcile instead.
+const BUFFER_SIZE: usize = 64 * 1024;
 
-/// True when the event's path starts under a root the scanner excludes
-/// (`$RECYCLE.BIN`, System Volume Information). The watcher root is a volume
-/// root, so checking the first path component matches the scanner's rule.
-fn is_unsearchable_top_level(relative_name: &str) -> bool {
-    let first = relative_name
-        .split(['\\', '/'])
-        .next()
-        .unwrap_or_default()
-        .to_ascii_lowercase();
-    matches!(first.as_str(), "$recycle.bin" | "system volume information")
-}
+/// How often queued events are folded and applied as one batched write.
+/// Sub-second latency for search freshness, but a bounded number of
+/// transactions per minute instead of one per filesystem event.
+const FLUSH_INTERVAL: Duration = Duration::from_millis(750);
+
+/// Backoff after a hard read error so a persistently failing handle can
+/// never become a busy loop.
+const READ_ERROR_BACKOFF: Duration = Duration::from_millis(250);
 
 #[derive(Clone, Debug)]
 pub enum WatcherEvent {
@@ -53,6 +55,8 @@ pub struct VolumeWatcher {
     #[allow(dead_code)]
     handle: Option<JoinHandle<()>>,
     event_queue: Arc<Mutex<Vec<WatcherEvent>>>,
+    /// Scan coordination: while a volume sweep runs, the periodic flusher
+    /// defers and the sweep's own `flush_queue` drains the queue at the end.
     buffering: Arc<AtomicBool>,
     counts: IndexCounts,
     drive: String,
@@ -72,33 +76,43 @@ impl VolumeWatcher {
     ) -> Option<Self> {
         let stop = Arc::new(AtomicBool::new(false));
         let event_queue = Arc::new(Mutex::new(Vec::new()));
+        // Start deferred: a scan is about to run (the watcher is started just
+        // before sweeps) and will flush the queue itself when it finishes.
         let buffering = Arc::new(AtomicBool::new(true));
-        let on_overflow: Arc<dyn Fn(String) + Send + Sync> = on_overflow;
 
-        let stop_clone = stop.clone();
-        let queue_clone = event_queue.clone();
-        let buffering_clone = buffering.clone();
-        let root_clone = root.clone();
-        let vol_id_clone = volume_id.clone();
-        let counts_clone = counts.clone();
-        let drive_clone = drive.clone();
-        let overflow_clone = on_overflow.clone();
+        let reader_handle = std::thread::Builder::new()
+            .name(format!("prism-watch-{volume_id}"))
+            .spawn({
+                let root = root.clone();
+                let stop = stop.clone();
+                let queue = event_queue.clone();
+                move || run_reader_loop(root, app_data_dir, stop, queue)
+            })
+            .ok()?;
 
-        let handle = std::thread::Builder::new()
-            .name(format!("prism-watch-{}", volume_id))
-            .spawn(move || {
-                run_watcher_loop(
-                    root_clone,
-                    vol_id_clone,
-                    db,
-                    app_data_dir,
-                    stop_clone,
-                    queue_clone,
-                    buffering_clone,
-                    counts_clone,
-                    drive_clone,
-                    overflow_clone,
-                );
+        std::thread::Builder::new()
+            .name(format!("prism-flush-{volume_id}"))
+            .spawn({
+                let db = db.clone();
+                let stop = stop.clone();
+                let queue = event_queue.clone();
+                let buffering = buffering.clone();
+                let counts = counts.clone();
+                let drive = drive.clone();
+                let on_overflow = on_overflow.clone();
+                let volume_id = volume_id.clone();
+                move || {
+                    run_flusher_loop(
+                        db,
+                        stop,
+                        queue,
+                        buffering,
+                        volume_id,
+                        counts,
+                        drive,
+                        on_overflow,
+                    )
+                }
             })
             .ok()?;
 
@@ -106,7 +120,7 @@ impl VolumeWatcher {
             root,
             volume_id,
             stop,
-            handle: Some(handle),
+            handle: Some(reader_handle),
             event_queue,
             buffering,
             counts,
@@ -119,72 +133,19 @@ impl VolumeWatcher {
         self.buffering.store(buffering, Ordering::SeqCst);
     }
 
-    /// Applies queued events as a single batched write: events are folded to
-    /// one final state per path, renames are paired, and removals win over
-    /// earlier upserts. An overflow observed while buffering schedules a
-    /// reconcile, because the events it would have contained were lost.
+    /// Drains queued events and applies them as batched writes. Called by a
+    /// finished volume sweep (which also releases the flush hold). An overflow
+    /// observed anywhere in the drained batch is reported to the callback; the
+    /// callback's reconcile decision is rate-limited and scan-guarded.
     pub fn flush_queue(&self, db: &Database) {
         self.buffering.store(false, Ordering::SeqCst);
-        let events: Vec<WatcherEvent> = {
-            let mut q = self.event_queue.lock().unwrap();
-            q.drain(..).collect()
-        };
-
-        let mut overflow = false;
-        let mut renames: Vec<(PathBuf, PathBuf)> = Vec::new();
-        let mut touched: Vec<PathBuf> = Vec::new();
-        let mut removed: Vec<PathBuf> = Vec::new();
-
-        for event in events {
-            match event {
-                WatcherEvent::Overflow => overflow = true,
-                WatcherEvent::Renamed { from, to } => renames.push((from, to)),
-                WatcherEvent::Removed(path) => {
-                    touched.retain(|t| t != &path);
-                    if !removed.contains(&path) {
-                        removed.push(path);
-                    }
-                }
-                WatcherEvent::Added(path) | WatcherEvent::Modified(path) => {
-                    removed.retain(|r| r != &path);
-                    if !touched.contains(&path) {
-                        touched.push(path);
-                    }
-                }
-            }
-        }
-
-        let mut delta = 0i64;
-
-        for (from, to) in &renames {
-            let old_normalized = from.to_string_lossy().to_lowercase();
-            if let Some(item) = inspect_single_path(to) {
-                delta += db
-                    .rename_file(&self.volume_id, &old_normalized, &item)
-                    .unwrap_or(0);
-            } else {
-                // Target vanished before it could be inspected; treat as removal.
-                delta -= db
-                    .remove_file(&self.volume_id, &old_normalized, true)
-                    .unwrap_or(0);
-            }
-        }
-
-        let items: Vec<ScannedItem> = touched
-            .iter()
-            .filter_map(|path| inspect_single_path(path))
-            .collect();
-        delta += db.insert_batch(&self.volume_id, 0, &items).unwrap_or(0) as i64;
-
-        for path in &removed {
-            let normalized = path.to_string_lossy().to_lowercase();
-            delta -= db
-                .remove_file(&self.volume_id, &normalized, true)
-                .unwrap_or(0);
-        }
-
-        self.counts.adjust(&self.drive, delta);
-
+        let overflow = apply_queued_events(
+            db,
+            &self.event_queue,
+            &self.volume_id,
+            &self.counts,
+            &self.drive,
+        );
         if overflow {
             (self.on_overflow)(self.volume_id.clone());
         }
@@ -199,18 +160,14 @@ impl VolumeWatcher {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn run_watcher_loop(
+/// The reader never applies events inline: it only pushes to the queue. That
+/// keeps the time between `ReadDirectoryChangesW` calls nanosecond-scale, so
+/// the kernel buffer rarely fills and bursts do not escalate into overflows.
+fn run_reader_loop(
     root: PathBuf,
-    volume_id: String,
-    db: Arc<Database>,
     app_data_dir: PathBuf,
     stop: Arc<AtomicBool>,
     event_queue: Arc<Mutex<Vec<WatcherEvent>>>,
-    buffering: Arc<AtomicBool>,
-    counts: IndexCounts,
-    drive: String,
-    on_overflow: Arc<dyn Fn(String) + Send + Sync>,
 ) {
     let wide_root: Vec<u16> = root
         .to_string_lossy()
@@ -260,15 +217,22 @@ fn run_watcher_loop(
         };
 
         if !success || bytes_returned == 0 {
+            // Buffer overflow or communication lost: events between the last
+            // read and now are gone. Queue a marker and keep reading - the
+            // handle stays valid and the flusher's rate-limited reconcile
+            // decides whether a re-walk is warranted. Never exit the loop:
+            // a dead reader silently took the volume off live updates before.
             if !stop.load(Ordering::Relaxed) {
-                // Buffer overflow or communication lost
-                if buffering.load(Ordering::SeqCst) {
-                    event_queue.lock().unwrap().push(WatcherEvent::Overflow);
-                } else {
-                    on_overflow(volume_id.clone());
-                }
+                event_queue.lock().unwrap().push(WatcherEvent::Overflow);
             }
-            break;
+            // A hard error returns immediately; back off so a failing
+            // handle cannot become a busy loop. A true overflow
+            // (bytes_returned == 0 with a successful call) blocks normally
+            // on the next read and needs no sleep.
+            if !success {
+                std::thread::sleep(READ_ERROR_BACKOFF);
+            }
+            continue;
         }
 
         let mut offset = 0;
@@ -294,75 +258,27 @@ fn run_watcher_loop(
             if !target_normalized.starts_with(&app_data_normalized)
                 && !is_unsearchable_top_level(&relative_name)
             {
-                match info.Action {
-                    FILE_ACTION_ADDED => {
-                        let event = WatcherEvent::Added(target_path);
-                        dispatch_event(
-                            &volume_id,
-                            &db,
-                            &event_queue,
-                            &buffering,
-                            &counts,
-                            &drive,
-                            event,
-                        );
+                let event = match info.Action {
+                    FILE_ACTION_ADDED | FILE_ACTION_MODIFIED => {
+                        Some(WatcherEvent::Modified(target_path))
                     }
-                    FILE_ACTION_REMOVED => {
-                        let event = WatcherEvent::Removed(target_path);
-                        dispatch_event(
-                            &volume_id,
-                            &db,
-                            &event_queue,
-                            &buffering,
-                            &counts,
-                            &drive,
-                            event,
-                        );
-                    }
-                    FILE_ACTION_MODIFIED => {
-                        let event = WatcherEvent::Modified(target_path);
-                        dispatch_event(
-                            &volume_id,
-                            &db,
-                            &event_queue,
-                            &buffering,
-                            &counts,
-                            &drive,
-                            event,
-                        );
-                    }
+                    FILE_ACTION_REMOVED => Some(WatcherEvent::Removed(target_path)),
                     FILE_ACTION_RENAMED_OLD_NAME => {
                         pending_rename_old = Some(target_path);
+                        None
                     }
-                    FILE_ACTION_RENAMED_NEW_NAME => {
-                        if let Some(old_path) = pending_rename_old.take() {
-                            let event = WatcherEvent::Renamed {
-                                from: old_path,
-                                to: target_path,
-                            };
-                            dispatch_event(
-                                &volume_id,
-                                &db,
-                                &event_queue,
-                                &buffering,
-                                &counts,
-                                &drive,
-                                event,
-                            );
-                        } else {
-                            let event = WatcherEvent::Added(target_path);
-                            dispatch_event(
-                                &volume_id,
-                                &db,
-                                &event_queue,
-                                &buffering,
-                                &counts,
-                                &drive,
-                                event,
-                            );
-                        }
-                    }
-                    _ => {}
+                    FILE_ACTION_RENAMED_NEW_NAME => match pending_rename_old.take() {
+                        Some(old_path) => Some(WatcherEvent::Renamed {
+                            from: old_path,
+                            to: target_path,
+                        }),
+                        // An unpaired new name is a plain addition.
+                        None => Some(WatcherEvent::Added(target_path)),
+                    },
+                    _ => None,
+                };
+                if let Some(event) = event {
+                    event_queue.lock().unwrap().push(event);
                 }
             }
 
@@ -376,59 +292,108 @@ fn run_watcher_loop(
     let _ = unsafe { CloseHandle(dir_handle) };
 }
 
-#[allow(clippy::too_many_arguments)]
-fn dispatch_event(
-    volume_id: &str,
+/// Folds queued events to a final state per path and applies them as a
+/// handful of batched writes. Returns whether an overflow marker was seen.
+fn apply_queued_events(
     db: &Database,
-    queue: &Mutex<Vec<WatcherEvent>>,
-    buffering: &AtomicBool,
+    event_queue: &Mutex<Vec<WatcherEvent>>,
+    volume_id: &str,
     counts: &IndexCounts,
     drive: &str,
-    event: WatcherEvent,
+) -> bool {
+    let events: Vec<WatcherEvent> = {
+        let mut q = event_queue.lock().unwrap();
+        q.drain(..).collect()
+    };
+
+    let mut overflow = false;
+    let mut renames: Vec<(PathBuf, PathBuf)> = Vec::new();
+    let mut touched: Vec<PathBuf> = Vec::new();
+    let mut removed: Vec<PathBuf> = Vec::new();
+
+    for event in events {
+        match event {
+            WatcherEvent::Overflow => overflow = true,
+            WatcherEvent::Renamed { from, to } => renames.push((from, to)),
+            WatcherEvent::Removed(path) => {
+                touched.retain(|t| t != &path);
+                if !removed.contains(&path) {
+                    removed.push(path);
+                }
+            }
+            WatcherEvent::Added(path) | WatcherEvent::Modified(path) => {
+                removed.retain(|r| r != &path);
+                if !touched.contains(&path) {
+                    touched.push(path);
+                }
+            }
+        }
+    }
+
+    let mut delta = 0i64;
+
+    for (from, to) in &renames {
+        let old_normalized = from.to_string_lossy().to_lowercase();
+        if let Some(item) = inspect_single_path(to) {
+            delta += db
+                .rename_file(volume_id, &old_normalized, &item)
+                .unwrap_or(0);
+        } else {
+            // Target vanished before it could be inspected; treat as removal.
+            delta -= db
+                .remove_file(volume_id, &old_normalized, true)
+                .unwrap_or(0);
+        }
+    }
+
+    let items: Vec<ScannedItem> = touched
+        .iter()
+        .filter_map(|path| inspect_single_path(path))
+        .collect();
+    delta += db.insert_batch(volume_id, 0, &items).unwrap_or(0) as i64;
+
+    for path in &removed {
+        let normalized = path.to_string_lossy().to_lowercase();
+        delta -= db.remove_file(volume_id, &normalized, true).unwrap_or(0);
+    }
+
+    counts.adjust(drive, delta);
+    overflow
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_flusher_loop(
+    db: Arc<Database>,
+    stop: Arc<AtomicBool>,
+    event_queue: Arc<Mutex<Vec<WatcherEvent>>>,
+    buffering: Arc<AtomicBool>,
+    volume_id: String,
+    counts: IndexCounts,
+    drive: String,
+    on_overflow: Arc<dyn Fn(String) + Send + Sync>,
 ) {
-    if buffering.load(Ordering::SeqCst) {
-        queue.lock().unwrap().push(event);
-    } else {
-        apply_watcher_event(volume_id, db, counts, drive, event);
+    while !stop.load(Ordering::Relaxed) {
+        std::thread::sleep(FLUSH_INTERVAL);
+        if buffering.load(Ordering::SeqCst) {
+            continue;
+        }
+        let overflow = apply_queued_events(&db, &event_queue, &volume_id, &counts, &drive);
+        if overflow {
+            on_overflow(volume_id.clone());
+        }
     }
 }
 
-fn apply_watcher_event(
-    volume_id: &str,
-    db: &Database,
-    counts: &IndexCounts,
-    drive: &str,
-    event: WatcherEvent,
-) {
-    match event {
-        WatcherEvent::Added(path) | WatcherEvent::Modified(path) => {
-            if let Some(item) = inspect_single_path(&path) {
-                let delta = db.add_or_update_file(volume_id, &item).unwrap_or(0);
-                counts.adjust(drive, delta);
-            }
-        }
-        WatcherEvent::Removed(path) => {
-            let normalized = path.to_string_lossy().to_lowercase();
-            // Assume directory true to clean up children as well
-            let delta = db.remove_file(volume_id, &normalized, true).unwrap_or(0);
-            counts.adjust(drive, -delta);
-        }
-        WatcherEvent::Renamed { from, to } => {
-            let old_normalized = from.to_string_lossy().to_lowercase();
-            if let Some(item) = inspect_single_path(&to) {
-                let delta = db
-                    .rename_file(volume_id, &old_normalized, &item)
-                    .unwrap_or(0);
-                counts.adjust(drive, delta);
-            } else {
-                let delta = db
-                    .remove_file(volume_id, &old_normalized, true)
-                    .unwrap_or(0);
-                counts.adjust(drive, -delta);
-            }
-        }
-        WatcherEvent::Overflow => {}
-    }
+/// True when the event's path starts under a root the scanner excludes
+/// (`$RECYCLE.BIN`, System Volume Information). The watcher root is a volume
+/// root, so checking the first path component matches the scanner's rule.
+fn is_unsearchable_top_level(relative_name: &str) -> bool {
+    let first = relative_name
+        .split(['\\', '/'])
+        .next()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    matches!(first.as_str(), "$recycle.bin" | "system volume information")
 }
 
 fn inspect_single_path(path: &Path) -> Option<ScannedItem> {
@@ -470,4 +435,58 @@ fn inspect_single_path(path: &Path) -> Option<ScannedItem> {
         modified_at,
         size,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::catalog::db::Database;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_db(name: &str) -> (Database, PathBuf) {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("prism-watch-{name}-{unique}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = Database::open(&dir.join("catalog.db")).unwrap();
+        (db, dir)
+    }
+
+    #[test]
+    fn queued_events_fold_to_a_final_state_and_report_overflow() {
+        let (db, dir) = temp_db("fold");
+        std::fs::write(dir.join("kept.txt"), "kept").unwrap();
+        std::fs::write(dir.join("gone.txt"), "gone").unwrap();
+        std::fs::write(dir.join("moved-new.txt"), "moved").unwrap();
+
+        let counts = IndexCounts::default();
+        let queue = Mutex::new(Vec::new());
+        {
+            let mut q = queue.lock().unwrap();
+            q.push(WatcherEvent::Modified(dir.join("kept.txt")));
+            q.push(WatcherEvent::Modified(dir.join("kept.txt")));
+            // Remove-then-add of the same path folds to a live upsert.
+            q.push(WatcherEvent::Removed(dir.join("gone.txt")));
+            q.push(WatcherEvent::Added(dir.join("gone.txt")));
+            q.push(WatcherEvent::Renamed {
+                from: dir.join("moved-old.txt"),
+                to: dir.join("moved-new.txt"),
+            });
+            q.push(WatcherEvent::Overflow);
+        }
+
+        let overflow = apply_queued_events(&db, &queue, "vol1", &counts, "C:\\");
+        assert!(overflow, "the overflow marker must reach the caller");
+        assert_eq!(counts.total(), 3, "kept + resurrected + renamed rows");
+        assert_eq!(db.get_total_indexed_count().unwrap(), 3);
+
+        // A second drain with nothing queued changes nothing and stays calm.
+        let overflow = apply_queued_events(&db, &queue, "vol1", &counts, "C:\\");
+        assert!(!overflow);
+        assert_eq!(counts.total(), 3);
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
 }

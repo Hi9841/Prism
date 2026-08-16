@@ -62,6 +62,9 @@ impl NtfsBackend {
         db: &Database,
         journal: super::types::JournalMetadata,
     ) -> Result<SyncStats, String> {
+        // An MFT rebuild enumerates every record on the volume and rewrites
+        // the catalog: same efficiency treatment as directory sweeps.
+        let _efficiency = crate::catalog::scanner::ScanEfficiencyGuard::new();
         let generation = db.begin_ntfs_rebuild(&info.volume_id)?;
         let started = Instant::now();
         let mut batch = Vec::with_capacity(INGEST_BATCH_SIZE);

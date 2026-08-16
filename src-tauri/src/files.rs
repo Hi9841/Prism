@@ -640,7 +640,8 @@ mod tests {
             modified_at: 1700000000,
             size: 4,
         };
-        db.add_or_update_file("vol1", &extra).unwrap();
+        db.insert_batch("vol1", 0, std::slice::from_ref(&extra))
+            .unwrap();
         let res = search("bulk-after", Some(5), &db, &gen, &[], 11, false, true);
         assert_eq!(res.items.len(), 1);
 
@@ -712,6 +713,71 @@ mod tests {
     }
 
     #[test]
+    fn unchanged_sweeps_skip_the_fts_rebuild_but_stay_correct() {
+        let base = std::env::temp_dir().join(format!(
+            "prism-scan-fts-skip-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&base).unwrap();
+        std::fs::write(base.join("alpha-report.txt"), "one").unwrap();
+
+        let (db, db_dir) = test_db();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let gen = AtomicU64::new(0);
+
+        // Infix queries only resolve through the trigram FTS index, so they
+        // prove whether a rebuild ran (or wrongly did not).
+        let infix_hits = |query: &str| {
+            search(query, Some(5), &db, &gen, &[], 1, false, true)
+                .items
+                .len()
+        };
+
+        scan_volume(
+            &base,
+            "test_vol",
+            1,
+            db.clone(),
+            &db_dir,
+            cancel.clone(),
+            |_| {},
+        )
+        .unwrap();
+        assert_eq!(infix_hits("lpha-rep"), 1, "fresh index finds the row");
+
+        std::thread::sleep(std::time::Duration::from_millis(60));
+        // Unchanged sweep: the FTS rebuild is skipped, the index stays intact.
+        scan_volume(
+            &base,
+            "test_vol",
+            2,
+            db.clone(),
+            &db_dir,
+            cancel.clone(),
+            |_| {},
+        )
+        .unwrap();
+        assert_eq!(
+            infix_hits("lpha-rep"),
+            1,
+            "skipping the rebuild keeps FTS correct"
+        );
+
+        std::thread::sleep(std::time::Duration::from_millis(60));
+        // A real change dirties the bulk load and triggers the rebuild again.
+        std::fs::write(base.join("beta-report.txt"), "two").unwrap();
+        scan_volume(&base, "test_vol", 3, db.clone(), &db_dir, cancel, |_| {}).unwrap();
+        assert_eq!(infix_hits("eta-rep"), 1, "the rebuilt index finds new rows");
+        assert_eq!(infix_hits("lpha-rep"), 1);
+
+        let _ = std::fs::remove_dir_all(base);
+        let _ = std::fs::remove_dir_all(db_dir);
+    }
+
+    #[test]
     fn watcher_add_rename_delete_operations() {
         let (db, temp_dir) = test_db();
         let file_path = temp_dir.join("live_file.txt");
@@ -729,8 +795,9 @@ mod tests {
             size: 4,
         };
 
-        // Add
-        db.add_or_update_file("vol1", &item).unwrap();
+        // Add (the watcher flush applies coalesced batches)
+        db.insert_batch("vol1", 0, std::slice::from_ref(&item))
+            .unwrap();
         let gen = AtomicU64::new(0);
         assert_eq!(
             search("live_file", Some(5), &db, &gen, &[], 1, false, true)
