@@ -8,6 +8,13 @@ edition = "2021"
 name = "prism_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
+[features]
+# Self-contained build with the frontend assets embedded (http://tauri.localhost).
+# Enabled by default so plain `cargo build`/`cargo run` also produce a working
+# binary; `tauri dev` strips it via --no-default-features to use the Vite server.
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
