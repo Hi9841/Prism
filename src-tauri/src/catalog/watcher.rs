@@ -1,5 +1,6 @@
 use std::ffi::OsString;
 use std::os::windows::ffi::OsStringExt;
+use std::os::windows::io::AsRawHandle;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -8,7 +9,7 @@ use std::time::Duration;
 use std::time::UNIX_EPOCH;
 
 use windows::core::PCWSTR;
-use windows::Win32::Foundation::CloseHandle;
+use windows::Win32::Foundation::{CloseHandle, HANDLE};
 use windows::Win32::Storage::FileSystem::{
     CreateFileW, ReadDirectoryChangesW, FILE_ACTION_ADDED, FILE_ACTION_MODIFIED,
     FILE_ACTION_REMOVED, FILE_ACTION_RENAMED_NEW_NAME, FILE_ACTION_RENAMED_OLD_NAME,
@@ -17,6 +18,7 @@ use windows::Win32::Storage::FileSystem::{
     FILE_NOTIFY_CHANGE_SIZE, FILE_NOTIFY_INFORMATION, FILE_SHARE_DELETE, FILE_SHARE_READ,
     FILE_SHARE_WRITE, OPEN_EXISTING,
 };
+use windows::Win32::System::IO::CancelSynchronousIo;
 
 use super::db::Database;
 use super::types::ScannedItem;
@@ -133,6 +135,18 @@ impl VolumeWatcher {
         self.buffering.store(buffering, Ordering::SeqCst);
     }
 
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    pub fn request_stop(&self) {
+        self.stop.store(true, Ordering::SeqCst);
+        if let Some(handle) = &self.handle {
+            let thread = HANDLE(handle.as_raw_handle());
+            let _ = unsafe { CancelSynchronousIo(thread) };
+        }
+    }
+
     /// Drains queued events and applies them as batched writes. Called by a
     /// finished volume sweep (which also releases the flush hold). An overflow
     /// observed anywhere in the drained batch is reported to the callback; the
@@ -153,11 +167,18 @@ impl VolumeWatcher {
 
     #[allow(dead_code)]
     pub fn stop(mut self) {
-        self.stop.store(true, Ordering::SeqCst);
+        self.request_stop();
         if let Some(handle) = self.handle.take() {
             let _ = handle.join();
         }
     }
+}
+
+pub(crate) fn watcher_root_changed(current: &Path, next: &Path) -> bool {
+    !current
+        .as_os_str()
+        .to_string_lossy()
+        .eq_ignore_ascii_case(&next.as_os_str().to_string_lossy())
 }
 
 /// The reader never applies events inline: it only pushes to the queue. That
@@ -215,6 +236,10 @@ fn run_reader_loop(
             )
             .is_ok()
         };
+
+        if stop.load(Ordering::Relaxed) {
+            break;
+        }
 
         if !success || bytes_returned == 0 {
             // Buffer overflow or communication lost: events between the last
@@ -488,5 +513,11 @@ mod tests {
         assert_eq!(counts.total(), 3);
 
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn canonical_root_change_requires_watcher_replacement() {
+        assert!(!watcher_root_changed(Path::new(r"D:\"), Path::new(r"d:\")));
+        assert!(watcher_root_changed(Path::new(r"D:\"), Path::new(r"E:\")));
     }
 }

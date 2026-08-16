@@ -34,11 +34,14 @@ mod tests {
     fn volume(fs_type: &str, drive_type: u32) -> VolumeInfo {
         VolumeInfo {
             volume_id: "stable-id".into(),
+            volume_guid_path: Some(r"\\?\Volume{stable-id}\".into()),
+            discovery_sources: vec!["test".into()],
             drive_letter: Some("C:".into()),
             mount_paths: vec![PathBuf::from("C:\\")],
             drive_type,
             label: String::new(),
             fs_type: fs_type.into(),
+            accessible: true,
         }
     }
 

@@ -84,6 +84,23 @@ mod tests {
     }
 
     #[test]
+    fn reconstructs_secondary_drive_paths() {
+        let nodes = HashMap::from([
+            (5, node(5, 5, ".")),
+            (10, node(10, 5, "Projects")),
+            (11, node(11, 10, "probe.txt")),
+        ]);
+        assert_eq!(
+            resolve_path(11, r"D:\", |id| nodes.get(&id).cloned()),
+            PathResolution::Resolved(PathBuf::from(r"D:\Projects\probe.txt"))
+        );
+        assert_eq!(
+            resolve_path(11, r"E:\", |id| nodes.get(&id).cloned()),
+            PathResolution::Resolved(PathBuf::from(r"E:\Projects\probe.txt"))
+        );
+    }
+
+    #[test]
     fn directory_rename_changes_descendant_path_without_touching_child() {
         let mut nodes = HashMap::from([
             (5, node(5, 5, ".")),
