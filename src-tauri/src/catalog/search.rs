@@ -102,12 +102,29 @@ pub fn search(
     // every candidate instead cost one stat syscall per candidate (up to 300)
     // per keystroke.
     let mut items: Vec<FileEntry> = Vec::with_capacity(limit);
+    let mut seen_paths = std::collections::HashSet::new();
     for (_, item) in scored {
         if items.len() >= limit {
             break;
         }
         let path = Path::new(&item.display_path);
-        if !path.exists() {
+        let exists = path.exists();
+        if super::catalog_debug_enabled() && item.lower_name == query_lower {
+            eprintln!(
+                "{}",
+                serde_json::json!({
+                    "event": "search_path_check",
+                    "query": query_trimmed,
+                    "display_path": item.display_path,
+                    "path_exists": exists,
+                    "accepted": exists,
+                })
+            );
+        }
+        if !exists {
+            continue;
+        }
+        if !seen_paths.insert(item.display_path.to_lowercase()) {
             continue;
         }
         let parent = path

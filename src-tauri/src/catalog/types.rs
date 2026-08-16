@@ -53,11 +53,14 @@ pub struct FileSearchResponse {
 #[derive(Clone, Debug)]
 pub struct VolumeInfo {
     pub volume_id: String,
+    pub volume_guid_path: Option<String>,
+    pub discovery_sources: Vec<String>,
     pub drive_letter: Option<String>,
     pub mount_paths: Vec<PathBuf>,
     pub drive_type: u32,
     pub label: String,
     pub fs_type: String,
+    pub accessible: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

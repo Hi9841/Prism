@@ -874,11 +874,14 @@ mod tests {
         let (db, temp_dir) = test_db();
         let vol = VolumeInfo {
             volume_id: "vol1".into(),
+            volume_guid_path: None,
+            discovery_sources: vec!["test".into()],
             drive_letter: Some("C:".into()),
             mount_paths: vec![std::path::PathBuf::from("C:\\")],
             drive_type: 3,
             label: String::new(),
             fs_type: "NTFS".into(),
+            accessible: true,
         };
         db.upsert_volume(&vol, VolumeState::Ready).unwrap();
 

@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use rusqlite::{params, params_from_iter, Connection, OpenFlags};
+use rusqlite::{params, params_from_iter, Connection, OpenFlags, OptionalExtension};
 
 use super::ntfs::{resolve_path, PathNode, PathResolution};
 use super::types::{
@@ -67,6 +67,20 @@ pub struct Database {
     /// sweep that changed nothing (the common overflow-reconcile case) does
     /// not re-tokenize millions of names for nothing.
     bulk_load_dirty: AtomicBool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VolumeChange {
+    New,
+    Unchanged,
+    MountChanged,
+    MetadataChanged,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VolumeUpdate {
+    pub change: VolumeChange,
+    pub previous_mount_path: Option<String>,
 }
 
 impl Database {
@@ -475,13 +489,15 @@ impl Database {
             .map_err(|e| e.to_string())
     }
 
-    pub fn upsert_volume(&self, vol: &VolumeInfo, state: VolumeState) -> Result<(), String> {
-        let conn = self.writer.lock().map_err(|e| e.to_string())?;
+    pub fn upsert_volume(
+        &self,
+        vol: &VolumeInfo,
+        state: VolumeState,
+    ) -> Result<VolumeUpdate, String> {
         let mount_str = vol
-            .mount_paths
-            .first()
-            .map(|p| p.to_string_lossy().into_owned())
-            .unwrap_or_else(|| vol.drive_letter.clone().unwrap_or_default());
+            .canonical_mount_path()
+            .map(|path| path.to_string_lossy().into_owned())
+            .ok_or_else(|| format!("volume {} has no canonical mount path", vol.volume_id))?;
         let state_str = match state {
             VolumeState::Ready => "ready",
             VolumeState::Indexing => "indexing",
@@ -489,7 +505,38 @@ impl Database {
             VolumeState::Error => "error",
         };
 
-        conn.execute(
+        let mut conn = self.writer.lock().map_err(|e| e.to_string())?;
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
+        let existing = tx
+            .query_row(
+                "SELECT mount_path, drive_type, label, file_system
+                 FROM volumes WHERE volume_id = ?1;",
+                params![vol.volume_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, u32>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(|e| e.to_string())?;
+        let change = match &existing {
+            None => VolumeChange::New,
+            Some((old_mount, _, _, _)) if !old_mount.eq_ignore_ascii_case(&mount_str) => {
+                VolumeChange::MountChanged
+            }
+            Some((_, old_type, _, old_fs))
+                if *old_type != vol.drive_type || !old_fs.eq_ignore_ascii_case(&vol.fs_type) =>
+            {
+                VolumeChange::MetadataChanged
+            }
+            Some(_) => VolumeChange::Unchanged,
+        };
+
+        tx.execute(
             "INSERT INTO volumes(volume_id, mount_path, drive_type, label, file_system, state)
              VALUES(?1, ?2, ?3, ?4, ?5, ?6)
              ON CONFLICT(volume_id) DO UPDATE SET
@@ -509,7 +556,58 @@ impl Database {
         )
         .map_err(|e| e.to_string())?;
 
-        Ok(())
+        if matches!(change, VolumeChange::MountChanged) {
+            // Directory rows embed the old absolute root. Remove only this
+            // volume's path-keyed rows and invalidate freshness immediately;
+            // an NTFS generation can remain available because its paths are
+            // reconstructed from the newly persisted mount prefix.
+            tx.execute(
+                "DELETE FROM files WHERE volume_id = ?1;",
+                params![vol.volume_id],
+            )
+            .map_err(|e| e.to_string())?;
+            tx.execute(
+                "UPDATE volumes SET last_scanned_at = 0,
+                    scanned_entries = CASE WHEN backend = 'fallback' THEN 0 ELSE scanned_entries END,
+                    index_status = CASE WHEN backend = 'fallback' THEN 'needs_rebuild' ELSE index_status END,
+                    state = 'indexing'
+                 WHERE volume_id = ?1;",
+                params![vol.volume_id],
+            )
+            .map_err(|e| e.to_string())?;
+        } else if matches!(change, VolumeChange::MetadataChanged) {
+            // A filesystem/type change can mean the volume was reformatted.
+            // Neither absolute directory rows nor the old FRN graph are valid.
+            tx.execute(
+                "DELETE FROM files WHERE volume_id = ?1;",
+                params![vol.volume_id],
+            )
+            .map_err(|e| e.to_string())?;
+            tx.execute(
+                "DELETE FROM ntfs_nodes WHERE volume_id = ?1;",
+                params![vol.volume_id],
+            )
+            .map_err(|e| e.to_string())?;
+            tx.execute(
+                "DELETE FROM ntfs_staging WHERE volume_id = ?1;",
+                params![vol.volume_id],
+            )
+            .map_err(|e| e.to_string())?;
+            tx.execute(
+                "UPDATE volumes SET last_scanned_at = 0, scanned_entries = 0,
+                    backend = 'fallback', journal_id = NULL, next_usn = NULL,
+                    index_status = 'needs_rebuild', state = 'indexing'
+                 WHERE volume_id = ?1;",
+                params![vol.volume_id],
+            )
+            .map_err(|e| e.to_string())?;
+        }
+        tx.commit().map_err(|e| e.to_string())?;
+
+        Ok(VolumeUpdate {
+            change,
+            previous_mount_path: existing.map(|value| value.0),
+        })
     }
 
     pub fn set_volume_state(&self, volume_id: &str, state: VolumeState) -> Result<(), String> {
@@ -888,8 +986,24 @@ impl Database {
     pub fn mark_directory_backend(&self, volume_id: &str) -> Result<(), String> {
         let conn = self.writer.lock().map_err(|e| e.to_string())?;
         conn.execute(
-            "UPDATE volumes SET backend = 'fallback', journal_id = NULL,
-                next_usn = NULL, index_status = 'needs_rebuild'
+            "UPDATE volumes SET
+                backend = CASE
+                    WHEN backend = 'ntfs' AND index_status = 'ready' THEN backend
+                    ELSE 'fallback'
+                END,
+                journal_id = CASE
+                    WHEN backend = 'ntfs' AND index_status = 'ready' THEN journal_id
+                    ELSE NULL
+                END,
+                next_usn = CASE
+                    WHEN backend = 'ntfs' AND index_status = 'ready' THEN next_usn
+                    ELSE NULL
+                END,
+                last_scanned_at = CASE WHEN backend = 'ntfs' THEN 0 ELSE last_scanned_at END,
+                index_status = CASE
+                    WHEN backend = 'ntfs' AND index_status = 'ready' THEN index_status
+                    ELSE 'needs_rebuild'
+                END
              WHERE volume_id = ?1;",
             params![volume_id],
         )
@@ -1122,16 +1236,29 @@ impl Database {
 
     /// True when the volume was fully scanned within `max_age_secs` - its
     /// persisted index is considered ready and startup serves it as-is.
-    pub fn is_volume_fresh(&self, volume_id: &str, max_age_secs: u64) -> Result<bool, String> {
+    pub fn is_volume_fresh_at_mount(
+        &self,
+        volume_id: &str,
+        mount_path: &Path,
+        max_age_secs: u64,
+    ) -> Result<bool, String> {
         let conn = self.reader.lock().map_err(|e| e.to_string())?;
-        let last_scanned: i64 = conn
+        let state: Option<(String, i64, String)> = conn
             .query_row(
-                "SELECT last_scanned_at FROM volumes WHERE volume_id = ?1;",
+                "SELECT mount_path, last_scanned_at, index_status
+                 FROM volumes WHERE volume_id = ?1;",
                 params![volume_id],
-                |row| row.get(0),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
-            .unwrap_or(0);
-        if last_scanned <= 0 {
+            .optional()
+            .map_err(|e| e.to_string())?;
+        let Some((persisted_mount, last_scanned, index_status)) = state else {
+            return Ok(false);
+        };
+        if !persisted_mount.eq_ignore_ascii_case(&mount_path.to_string_lossy())
+            || last_scanned <= 0
+            || index_status != "ready"
+        {
             return Ok(false);
         }
         let now = SystemTime::now()
@@ -1139,6 +1266,23 @@ impl Database {
             .unwrap_or_default()
             .as_secs() as i64;
         Ok(now - last_scanned <= max_age_secs as i64)
+    }
+
+    pub fn is_volume_fresh(&self, volume_id: &str, max_age_secs: u64) -> Result<bool, String> {
+        let conn = self.reader.lock().map_err(|e| e.to_string())?;
+        let mount: Option<String> = conn
+            .query_row(
+                "SELECT mount_path FROM volumes WHERE volume_id = ?1;",
+                params![volume_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|e| e.to_string())?;
+        drop(conn);
+        let Some(mount) = mount else {
+            return Ok(false);
+        };
+        self.is_volume_fresh_at_mount(volume_id, Path::new(&mount), max_age_secs)
     }
 
     /// All persisted (volume_id, mount_path) pairs.
@@ -1334,6 +1478,29 @@ impl Database {
         Ok(out)
     }
 
+    pub(crate) fn volume_debug_status(
+        &self,
+        volume_id: &str,
+    ) -> Result<(String, String, String, u64, i64, String), String> {
+        let conn = self.reader.lock().map_err(|e| e.to_string())?;
+        conn.query_row(
+            "SELECT mount_path, backend, state, scanned_entries, last_scanned_at, index_status
+             FROM volumes WHERE volume_id = ?1;",
+            params![volume_id],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get::<_, i64>(3)?.max(0) as u64,
+                    row.get(4)?,
+                    row.get(5)?,
+                ))
+            },
+        )
+        .map_err(|e| e.to_string())
+    }
+
     pub fn get_total_indexed_count(&self) -> Result<u64, String> {
         let conn = self.reader.lock().map_err(|e| e.to_string())?;
         let count: i64 = conn
@@ -1405,6 +1572,7 @@ impl Database {
                      FROM files f WHERE lower_name = ?1
                        AND NOT EXISTS(SELECT 1 FROM volumes v
                                       WHERE v.volume_id = f.volume_id AND v.backend = 'ntfs')
+                     ORDER BY f.display_path COLLATE NOCASE
                      LIMIT ?2;",
                 )
                 .map_err(|e| e.to_string())?;
@@ -1421,6 +1589,41 @@ impl Database {
                 .map_err(|e| e.to_string())?;
 
             for row in rows.flatten() {
+                if seen_ids.insert(row.id) {
+                    candidates.push(row);
+                }
+            }
+
+            // Reserve one exact candidate per volume in addition to the
+            // bounded global pool. A common filename with many C: rows can no
+            // longer make the same valid filename on D:/E: unreachable.
+            let mut fair_stmt = conn
+                .prepare_cached(
+                    "SELECT f.id, f.display_path, f.lower_name, f.is_directory, f.extension
+                     FROM files f
+                     JOIN (
+                         SELECT volume_id, MIN(id) AS id FROM files
+                         WHERE lower_name = ?1 GROUP BY volume_id
+                     ) fair ON fair.id = f.id
+                     WHERE f.lower_name = ?1
+                       AND NOT EXISTS(SELECT 1 FROM volumes v
+                                      WHERE v.volume_id = f.volume_id AND v.backend = 'ntfs')
+                     ORDER BY f.volume_id COLLATE NOCASE
+                     LIMIT ?2;",
+                )
+                .map_err(|e| e.to_string())?;
+            let fair_rows = fair_stmt
+                .query_map(params![lower, exact_limit], |row| {
+                    Ok(CandidateEntry {
+                        id: row.get(0)?,
+                        display_path: row.get(1)?,
+                        lower_name: row.get(2)?,
+                        is_directory: row.get::<_, i32>(3)? != 0,
+                        extension: row.get(4)?,
+                    })
+                })
+                .map_err(|e| e.to_string())?;
+            for row in fair_rows.flatten() {
                 if seen_ids.insert(row.id) {
                     candidates.push(row);
                 }
@@ -1527,7 +1730,63 @@ impl Database {
 
         append_ntfs_candidates(&conn, &lower, query_len, limit, &mut candidates)?;
 
+        if super::catalog_debug_enabled() {
+            Self::debug_search_probe(&conn, &lower, &candidates);
+        }
+
         Ok(candidates)
+    }
+
+    fn debug_search_probe(conn: &Connection, lower: &str, candidates: &[CandidateEntry]) {
+        let file_count = conn
+            .query_row(
+                "SELECT COUNT(*) FROM files WHERE lower_name = ?1;",
+                params![lower],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap_or(0);
+        let ntfs_count = conn
+            .query_row(
+                "SELECT COUNT(*) FROM ntfs_nodes WHERE lower_name = ?1;",
+                params![lower],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap_or(0);
+        let owners = conn
+            .prepare(
+                "SELECT f.volume_id, f.display_path, v.mount_path, v.backend
+                 FROM files f LEFT JOIN volumes v ON v.volume_id = f.volume_id
+                 WHERE f.lower_name = ?1
+                 UNION ALL
+                 SELECT n.volume_id, NULL, v.mount_path, v.backend
+                 FROM ntfs_nodes n JOIN volumes v ON v.volume_id = n.volume_id
+                 WHERE n.lower_name = ?1;",
+            )
+            .and_then(|mut statement| {
+                let rows = statement.query_map(params![lower], |row| {
+                    Ok(serde_json::json!({
+                        "volume_id": row.get::<_, String>(0)?,
+                        "stored_display_path": row.get::<_, Option<String>>(1)?,
+                        "database_mount_path": row.get::<_, Option<String>>(2)?,
+                        "backend": row.get::<_, Option<String>>(3)?,
+                    }))
+                })?;
+                Ok(rows.flatten().take(64).collect::<Vec<_>>())
+            })
+            .unwrap_or_default();
+        eprintln!(
+            "{}",
+            serde_json::json!({
+                "event": "search_probe",
+                "lower_name": lower,
+                "files_exact_count": file_count,
+                "ntfs_nodes_exact_count": ntfs_count,
+                "candidate_count": candidates.len(),
+                "exact_candidate_paths": candidates.iter().filter(|item| item.lower_name == lower).map(|item| item.display_path.as_str()).collect::<Vec<_>>(),
+                "sql_limit_prevented_exact_candidate": file_count + ntfs_count > 0 && !candidates.iter().any(|item| item.lower_name == lower),
+                "owners": owners,
+            })
+        );
     }
 }
 
@@ -1591,6 +1850,18 @@ fn append_ntfs_candidates(
         "SELECT n.id, n.volume_id, n.frn, n.lower_name, n.is_directory, n.extension, v.mount_path
          FROM ntfs_nodes n JOIN volumes v ON v.volume_id = n.volume_id
          WHERE v.backend = 'ntfs' AND n.lower_name = ?1 LIMIT ?2;",
+        &[&lower, &exact_limit],
+    )?;
+    collect(
+        "SELECT n.id, n.volume_id, n.frn, n.lower_name, n.is_directory, n.extension, v.mount_path
+         FROM ntfs_nodes n
+         JOIN (
+             SELECT volume_id, MIN(id) AS id FROM ntfs_nodes
+             WHERE lower_name = ?1 GROUP BY volume_id
+         ) fair ON fair.id = n.id
+         JOIN volumes v ON v.volume_id = n.volume_id
+         WHERE v.backend = 'ntfs' AND n.lower_name = ?1
+         ORDER BY n.volume_id COLLATE NOCASE LIMIT ?2;",
         &[&lower, &exact_limit],
     )?;
     let prefix_end = format!("{lower}\u{FFFF}");
@@ -1765,11 +2036,33 @@ mod ntfs_tests {
     fn volume() -> VolumeInfo {
         VolumeInfo {
             volume_id: "stable-volume".into(),
+            volume_guid_path: Some(r"\\?\Volume{stable-volume}\".into()),
+            discovery_sources: vec!["test".into()],
             drive_letter: Some("C:".into()),
             mount_paths: vec![PathBuf::from("C:\\")],
             drive_type: windows::Win32::System::WindowsProgramming::DRIVE_FIXED,
             label: String::new(),
             fs_type: "NTFS".into(),
+            accessible: true,
+        }
+    }
+
+    fn scanned_file(path: &str, name: &str) -> ScannedItem {
+        ScannedItem {
+            normalized_path: path.to_lowercase(),
+            display_path: path.into(),
+            name: name.into(),
+            lower_name: name.to_lowercase(),
+            parent: Path::new(path)
+                .parent()
+                .map(|parent| parent.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+            is_directory: false,
+            extension: Path::new(name)
+                .extension()
+                .map(|value| value.to_string_lossy().to_lowercase()),
+            modified_at: 1,
+            size: 1,
         }
     }
 
@@ -2063,6 +2356,108 @@ mod ntfs_tests {
         assert_eq!(legacy_rows, 1);
         assert_eq!(backend, "fallback");
         drop(conn);
+        drop(db);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn directory_mount_change_invalidates_only_that_volume() {
+        let path = temp_db_path("mount-change");
+        let db = Database::open(&path).unwrap();
+        let mut data = volume();
+        data.volume_id = "data-volume".into();
+        data.drive_letter = Some("D:".into());
+        data.mount_paths = vec![PathBuf::from(r"D:\")];
+        db.upsert_volume(&data, VolumeState::Indexing).unwrap();
+        db.insert_batch(
+            &data.volume_id,
+            1,
+            &[scanned_file(r"D:\Probe\mounted.txt", "mounted.txt")],
+        )
+        .unwrap();
+        db.finish_volume_scan(&data.volume_id, 1, 1).unwrap();
+        assert!(db
+            .is_volume_fresh_at_mount(&data.volume_id, Path::new(r"D:\"), 86_400)
+            .unwrap());
+
+        data.drive_letter = Some("E:".into());
+        data.mount_paths = vec![PathBuf::from(r"E:\")];
+        let update = db.upsert_volume(&data, VolumeState::Indexing).unwrap();
+        assert_eq!(update.change, VolumeChange::MountChanged);
+        assert!(!db
+            .is_volume_fresh_at_mount(&data.volume_id, Path::new(r"E:\"), 86_400)
+            .unwrap());
+        assert!(db.search_candidates("mounted.txt", 100).unwrap().is_empty());
+
+        drop(db);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn unchanged_mount_keeps_a_completed_directory_scan_fresh() {
+        let path = temp_db_path("mount-unchanged");
+        let db = Database::open(&path).unwrap();
+        let mut data = volume();
+        data.drive_letter = Some("D:".into());
+        data.mount_paths = vec![PathBuf::from(r"D:\")];
+        db.upsert_volume(&data, VolumeState::Indexing).unwrap();
+        db.finish_volume_scan(&data.volume_id, 1, 0).unwrap();
+
+        let update = db.upsert_volume(&data, VolumeState::Ready).unwrap();
+        assert_eq!(update.change, VolumeChange::Unchanged);
+        assert!(db
+            .is_volume_fresh_at_mount(&data.volume_id, Path::new(r"d:\"), 86_400)
+            .unwrap());
+
+        drop(db);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn exact_candidates_reserve_space_for_each_volume() {
+        let path = temp_db_path("candidate-fairness");
+        let db = Database::open(&path).unwrap();
+        let mut system = volume();
+        system.volume_id = "system-c".into();
+        let mut data = volume();
+        data.volume_id = "data-d".into();
+        data.drive_letter = Some("D:".into());
+        data.mount_paths = vec![PathBuf::from(r"D:\")];
+        db.upsert_volume(&system, VolumeState::Indexing).unwrap();
+        db.upsert_volume(&data, VolumeState::Indexing).unwrap();
+
+        let common = "shared_probe.txt";
+        let system_rows = (0..80)
+            .map(|number| scanned_file(&format!(r"C:\Many\{number}\{common}"), common))
+            .collect::<Vec<_>>();
+        db.insert_batch(&system.volume_id, 1, &system_rows).unwrap();
+        db.insert_batch(
+            &data.volume_id,
+            1,
+            &[scanned_file(&format!(r"D:\Probe\{common}"), common)],
+        )
+        .unwrap();
+        let candidates = db.search_candidates(common, 20).unwrap();
+        assert!(candidates
+            .iter()
+            .any(|candidate| candidate.display_path.starts_with(r"D:\")));
+
+        let unique = "unique_secondary_7f1c93.txt";
+        db.insert_batch(
+            &data.volume_id,
+            1,
+            &[scanned_file(&format!(r"D:\Probe\{unique}"), unique)],
+        )
+        .unwrap();
+        let candidates = db.search_candidates(unique, 20).unwrap();
+        assert_eq!(
+            candidates
+                .iter()
+                .filter(|candidate| candidate.display_path.ends_with(unique))
+                .count(),
+            1
+        );
+
         drop(db);
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }

@@ -12,7 +12,7 @@ use std::ffi::c_void;
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::time::{Duration, Instant};
 
 use base64::Engine;
@@ -31,7 +31,7 @@ pub use types::{FileSearchResponse, QuickAccessEntry, VolumeCoverage, VolumeInfo
 use self::backend::{select_backend, BackendKind};
 use self::db::Database;
 use self::ntfs::NtfsBackend;
-use self::watcher::VolumeWatcher;
+use self::watcher::{watcher_root_changed, VolumeWatcher};
 
 /// Journal catch-up cadence while the palette is visible. This is the
 /// freshness window for NTFS-backed file results while the user is searching.
@@ -65,6 +65,15 @@ const RECONCILIATION_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60); // 6
                                                                             // and results are verified against disk before being shown). Only volumes
                                                                             // that are new, never scanned, or stale get a sweep.
 const STARTUP_SWEEP_WINDOW: Duration = Duration::from_secs(24 * 60 * 60);
+
+pub(crate) fn catalog_debug_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("PRISM_CATALOG_DEBUG")
+            .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+            .unwrap_or(false)
+    })
+}
 
 /// In-memory per-volume file counts. Seeded from the database at startup,
 /// updated by scan progress and watcher deltas, and re-seeded from
@@ -274,10 +283,11 @@ impl FileIndex {
         if let Ok(known) = db.get_volume_ids() {
             for (db_id, db_mount) in known {
                 let claimed = discovered.iter().find(|v| {
-                    v.mount_paths
-                        .first()
-                        .map(|p| p.to_string_lossy().to_lowercase())
-                        == Some(db_mount.to_lowercase())
+                    v.normalized_mount_paths().iter().any(|path| {
+                        path.as_os_str()
+                            .to_string_lossy()
+                            .eq_ignore_ascii_case(&db_mount)
+                    })
                 });
                 if let Some(vol) = claimed {
                     if vol.volume_id != db_id {
@@ -296,34 +306,61 @@ impl FileIndex {
         // ready immediately while its cursor catches up in the background.
         let mut any_scan = false;
         for vol in &discovered {
-            let fresh = fresh_ok
+            let Some(mount_path) = vol.canonical_mount_path() else {
+                continue;
+            };
+            let initial_state = if vol.accessible {
+                VolumeState::Indexing
+            } else {
+                VolumeState::Offline
+            };
+            let update = db.upsert_volume(vol, initial_state);
+            let fresh = vol.accessible
+                && fresh_ok
                 && db
-                    .is_volume_fresh(&vol.volume_id, STARTUP_SWEEP_WINDOW.as_secs())
+                    .is_volume_fresh_at_mount(
+                        &vol.volume_id,
+                        &mount_path,
+                        STARTUP_SWEEP_WINDOW.as_secs(),
+                    )
                     .unwrap_or(false);
-            let _ = db.upsert_volume(
-                vol,
-                if fresh {
-                    VolumeState::Ready
-                } else {
-                    VolumeState::Indexing
-                },
-            );
+            if fresh {
+                let _ = db.set_volume_state(&vol.volume_id, VolumeState::Ready);
+            }
+            if let Ok(update) = &update {
+                if let Some(previous_mount) = &update.previous_mount_path {
+                    if !previous_mount.eq_ignore_ascii_case(&mount_path.to_string_lossy()) {
+                        if let Some(watcher) = self.watchers.lock().unwrap().remove(&vol.volume_id)
+                        {
+                            watcher.request_stop();
+                        }
+                    }
+                }
+            }
+            debug_volume_plan(db, vol, &mount_path, fresh, update.as_ref().ok());
             if !fresh {
-                any_scan = true;
+                any_scan |= vol.accessible;
             }
         }
         self.indexing.store(any_scan, Ordering::SeqCst);
         self.emit_updated();
 
-        // Synchronize volumes one at a time. Both MFT ingestion and directory
-        // fallback share the SQLite writer, so launching one blocking task per
-        // drive only makes the machine contend with itself.
-        for vol in discovered {
-            let this = self.clone();
-            let _ = tauri::async_runtime::spawn_blocking(move || {
-                this.scan_one_volume_sync(&vol, fresh_ok);
-            })
-            .await;
+        // A bounded pair lets a new secondary volume begin discovery even if a
+        // first recursive C: walk is long-running. SQLite writes remain
+        // serialized by Database while filesystem enumeration proceeds per
+        // volume; the bound prevents uncontrolled full-volume contention.
+        for pair in discovered.chunks(2) {
+            let mut tasks = Vec::with_capacity(pair.len());
+            for volume in pair.iter().filter(|volume| volume.accessible) {
+                let this = self.clone();
+                let volume = volume.clone();
+                tasks.push(tauri::async_runtime::spawn_blocking(move || {
+                    this.scan_one_volume_sync(&volume, fresh_ok);
+                }));
+            }
+            for task in tasks {
+                let _ = task.await;
+            }
         }
 
         self.refresh_totals_and_status();
@@ -341,7 +378,7 @@ impl FileIndex {
         let Some(db) = db_opt else { return };
 
         let volume_id = vol.volume_id.clone();
-        let mount_path = match vol.mount_paths.first() {
+        let mount_path = match vol.canonical_mount_path() {
             Some(p) => p.clone(),
             None => return,
         };
@@ -351,45 +388,70 @@ impl FileIndex {
         // for the current process. Do not race it with an NTFS generation
         // swap; raw access will be probed again on the next launch.
         let fallback_active = self.watchers.lock().unwrap().contains_key(&volume_id);
-        if !fallback_active && select_backend(vol, true) == BackendKind::Ntfs {
+        let mut directory_fallback = select_backend(vol, true) == BackendKind::Directory;
+        if !fallback_active && !directory_fallback {
+            let had_ready_generation = db.get_ntfs_checkpoint(&volume_id).ok().flatten().is_some();
             match NtfsBackend::open(vol) {
                 Ok(mut backend) => {
                     self.update_volume_coverage(&drive, VolumeState::Indexing);
                     match backend.synchronize(vol, &db) {
-                        Ok(_) => {
+                        Ok(stats) => {
                             if let Ok(exact) = db.get_scanned_entries(&volume_id) {
                                 self.counts.set(&drive, exact);
                             }
                             let _ = db.checkpoint();
                             self.update_volume_coverage(&drive, VolumeState::Ready);
+                            debug_ntfs_complete(&db, vol, &drive, stats.records, None);
                             self.emit_updated();
                             return;
                         }
                         Err(error) => {
+                            if had_ready_generation {
+                                eprintln!(
+                                    "[Prism Catalog] NTFS synchronization deferred for {volume_id}; preserving the ready generation: {error}"
+                                );
+                                let _ = db.mark_ntfs_ready(&volume_id);
+                                self.update_volume_coverage(&drive, VolumeState::Ready);
+                                debug_ntfs_complete(&db, vol, &drive, 0, Some(&error));
+                                return;
+                            }
                             eprintln!(
                                 "[Prism Catalog] NTFS backend failed for {volume_id}; using directory fallback: {error}"
                             );
+                            directory_fallback = true;
                         }
                     }
                 }
-                Err(_) => {
+                Err(error) => {
                     // Raw access can be denied to a normal user. The directory
                     // backend remains fully functional and the UI never needs
                     // to run elevated.
+                    if catalog_debug_enabled() {
+                        eprintln!(
+                            "{}",
+                            serde_json::json!({
+                                "event": "ntfs_open_failed",
+                                "volume_id": volume_id,
+                                "mount_path": drive,
+                                "error": error,
+                                "selected_backend": "directory",
+                            })
+                        );
+                    }
+                    directory_fallback = true;
                 }
             }
         }
 
-        if select_backend(vol, true) == BackendKind::Directory {
-            // A volume replacement can leave old NTFS rows under the same
-            // stable database key. Hide them before the fallback walk starts;
-            // the walk then repopulates the path-keyed catalog transactionally.
+        if directory_fallback {
+            // Preserve a valid NTFS generation while the fallback walk builds
+            // path rows. finish_volume_scan performs the atomic handover.
             let _ = db.mark_directory_backend(&volume_id);
         }
 
         let skip_scan = fresh_ok
             && db
-                .is_volume_fresh(&volume_id, STARTUP_SWEEP_WINDOW.as_secs())
+                .is_volume_fresh_at_mount(&volume_id, &mount_path, STARTUP_SWEEP_WINDOW.as_secs())
                 .unwrap_or(false);
 
         // Overflow handler: re-sweep the volume that lost events, on the
@@ -408,6 +470,14 @@ impl FileIndex {
         // and the watcher never race on the same rows.
         {
             let mut watchers = self.watchers.lock().unwrap();
+            let replace = watchers
+                .get(&volume_id)
+                .is_some_and(|watcher| watcher_root_changed(watcher.root(), &mount_path));
+            if replace {
+                if let Some(watcher) = watchers.remove(&volume_id) {
+                    watcher.request_stop();
+                }
+            }
             if !watchers.contains_key(&volume_id) {
                 let db_clone = db.clone();
                 let app_data_clone = self.app_data_dir.read().unwrap().clone();
@@ -441,6 +511,7 @@ impl FileIndex {
             return;
         }
 
+        self.indexing.store(true, Ordering::SeqCst);
         self.update_volume_coverage(&drive, VolumeState::Indexing);
 
         let cancel = Arc::new(AtomicBool::new(false));
@@ -468,7 +539,7 @@ impl FileIndex {
             },
         );
 
-        match scan_result {
+        match &scan_result {
             Ok(_) => {
                 self.update_volume_coverage(&drive, VolumeState::Ready);
             }
@@ -478,6 +549,8 @@ impl FileIndex {
                 self.update_volume_coverage(&drive, VolumeState::Error);
             }
         }
+
+        debug_scan_complete(&db, vol, &drive, &scan_result);
 
         // Exact count as scanned, then apply buffered watcher deltas on top.
         if let Ok(exact) = db.get_scanned_entries(&volume_id) {
@@ -529,8 +602,7 @@ impl FileIndex {
                     return;
                 };
                 let mount = volume
-                    .mount_paths
-                    .first()
+                    .canonical_mount_path()
                     .map(|path| path.to_string_lossy().into_owned())
                     .unwrap_or_default();
                 if let Ok(mut backend) = NtfsBackend::open(&volume) {
@@ -625,6 +697,10 @@ impl FileIndex {
         let db_opt = self.db.read().unwrap().clone();
         if let Some(ref db) = db_opt {
             if let Ok(covs) = db.get_volume_coverages() {
+                self.counts.clear();
+                for coverage in &covs {
+                    self.counts.set(&coverage.drive, coverage.indexed_count);
+                }
                 if let Ok(mut vols) = self.volumes.write() {
                     *vols = covs;
                 }
@@ -718,7 +794,7 @@ pub fn warm(index: FileIndex, app_data_dir: PathBuf, app: tauri::AppHandle) {
         let mut current_volumes = tauri::async_runtime::spawn_blocking(volume::discover_volumes)
             .await
             .unwrap_or_default();
-        let mut known_volume_ids = volume_ids(&current_volumes);
+        let mut known_topology = volume_topology_fingerprint(&current_volumes);
 
         loop {
             // Fast cadence while the palette is open (search freshness), slow
@@ -751,11 +827,11 @@ pub fn warm(index: FileIndex, app_data_dir: PathBuf, app: tauri::AppHandle) {
                     .await
                     .unwrap_or_default();
 
-                let current_ids = volume_ids(&current_volumes);
-                let volume_set_changed = current_ids != known_volume_ids;
+                let current_topology = volume_topology_fingerprint(&current_volumes);
+                let volume_set_changed = current_topology != known_topology;
                 let reconcile_due = last_reconcile.elapsed() >= RECONCILIATION_INTERVAL;
                 if volume_set_changed || reconcile_due {
-                    known_volume_ids = current_ids;
+                    known_topology = current_topology;
                     // A mount change only needs newly discovered or stale volumes;
                     // healthy NTFS volumes catch up from USN and live fallback
                     // watchers cover existing directory-backed volumes.
@@ -781,14 +857,133 @@ pub fn warm(index: FileIndex, app_data_dir: PathBuf, app: tauri::AppHandle) {
     });
 }
 
-fn volume_ids(volumes: &[VolumeInfo]) -> Vec<String> {
-    let mut ids: Vec<String> = volumes
+fn volume_topology_fingerprint(volumes: &[VolumeInfo]) -> Vec<String> {
+    let mut fingerprints: Vec<String> = volumes
         .iter()
-        .map(|volume| volume.volume_id.clone())
+        .map(|volume| {
+            let canonical = volume
+                .canonical_mount_path()
+                .map(|path| path.to_string_lossy().to_lowercase())
+                .unwrap_or_default();
+            let aliases = volume
+                .normalized_mount_paths()
+                .iter()
+                .map(|path| path.to_string_lossy().to_lowercase())
+                .collect::<Vec<_>>()
+                .join("|");
+            format!(
+                "{};{};{};{};{}",
+                volume.volume_id.to_lowercase(),
+                canonical,
+                aliases,
+                volume.fs_type.to_lowercase(),
+                volume.drive_type
+            )
+        })
         .collect();
-    ids.sort_unstable();
-    ids.dedup();
-    ids
+    fingerprints.sort_unstable();
+    fingerprints.dedup();
+    fingerprints
+}
+
+fn debug_volume_plan(
+    db: &Database,
+    volume: &VolumeInfo,
+    mount_path: &Path,
+    fresh: bool,
+    update: Option<&self::db::VolumeUpdate>,
+) {
+    if !catalog_debug_enabled() {
+        return;
+    }
+    let eligible_backend = match select_backend(volume, true) {
+        BackendKind::Ntfs => "ntfs-probe-pending",
+        BackendKind::Directory => "directory",
+    };
+    eprintln!(
+        "{}",
+        serde_json::json!({
+            "event": "volume_scan_plan",
+            "sources": volume.discovery_sources,
+            "raw_volume_guid_path": volume.volume_guid_path,
+            "volume_id": volume.volume_id,
+            "mount_paths": volume.normalized_mount_paths().iter().map(|p| p.to_string_lossy()).collect::<Vec<_>>(),
+            "canonical_mount_path": mount_path.to_string_lossy(),
+            "drive_letter": volume.drive_letter,
+            "drive_type": volume.drive_type,
+            "file_system": volume.fs_type,
+            "label": volume.label,
+            "accessible": volume.accessible,
+            "selected_backend": eligible_backend,
+            "existing_database_mount_path": update.and_then(|value| value.previous_mount_path.as_deref()),
+            "volume_change": update.map(|value| format!("{:?}", value.change)),
+            "fresh": fresh,
+            "scan_action": if !volume.accessible { "skipped-offline" } else if fresh { "backend-sync-or-watcher" } else { "started" },
+            "database_status": db.volume_debug_status(&volume.volume_id).ok().map(|status| serde_json::json!({
+                "mount_path": status.0,
+                "backend": status.1,
+                "state": status.2,
+                "scanned_entries": status.3,
+                "last_scanned_at": status.4,
+                "index_status": status.5,
+            })),
+        })
+    );
+}
+
+fn debug_scan_complete(
+    db: &Database,
+    volume: &VolumeInfo,
+    mount_path: &str,
+    result: &Result<u64, String>,
+) {
+    if !catalog_debug_enabled() {
+        return;
+    }
+    let status = db.volume_debug_status(&volume.volume_id).ok();
+    eprintln!(
+        "{}",
+        serde_json::json!({
+            "event": "volume_scan_complete",
+            "volume_id": volume.volume_id,
+            "mount_path": mount_path,
+            "scan_count": result.as_ref().ok(),
+            "scan_error": result.as_ref().err(),
+            "database_backend": status.as_ref().map(|value| value.1.as_str()),
+            "database_state": status.as_ref().map(|value| value.2.as_str()),
+            "database_scanned_entries": status.as_ref().map(|value| value.3),
+            "last_scanned_at": status.as_ref().map(|value| value.4),
+            "index_status": status.as_ref().map(|value| value.5.as_str()),
+        })
+    );
+}
+
+fn debug_ntfs_complete(
+    db: &Database,
+    volume: &VolumeInfo,
+    mount_path: &str,
+    records: u64,
+    deferred_error: Option<&str>,
+) {
+    if !catalog_debug_enabled() {
+        return;
+    }
+    let status = db.volume_debug_status(&volume.volume_id).ok();
+    eprintln!(
+        "{}",
+        serde_json::json!({
+            "event": "volume_ntfs_sync_complete",
+            "volume_id": volume.volume_id,
+            "mount_path": mount_path,
+            "records": records,
+            "deferred_error": deferred_error,
+            "database_backend": status.as_ref().map(|value| value.1.as_str()),
+            "database_state": status.as_ref().map(|value| value.2.as_str()),
+            "database_scanned_entries": status.as_ref().map(|value| value.3),
+            "last_scanned_at": status.as_ref().map(|value| value.4),
+            "index_status": status.as_ref().map(|value| value.5.as_str()),
+        })
+    );
 }
 
 pub fn quick_access() -> Vec<QuickAccessEntry> {
@@ -903,6 +1098,39 @@ fn reconcile_eligible(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn topology_volume(id: &str, mount: &str) -> VolumeInfo {
+        VolumeInfo {
+            volume_id: id.into(),
+            volume_guid_path: Some(format!(r"\\?\Volume{{{id}}}\")),
+            discovery_sources: vec!["test".into()],
+            drive_letter: volume::drive_letter_from_mount_path(Path::new(mount)),
+            mount_paths: vec![PathBuf::from(mount)],
+            drive_type: windows::Win32::System::WindowsProgramming::DRIVE_FIXED,
+            label: String::new(),
+            fs_type: "NTFS".into(),
+            accessible: true,
+        }
+    }
+
+    #[test]
+    fn topology_fingerprint_detects_mount_and_alias_changes() {
+        let d = topology_volume("same", r"D:\");
+        let e = topology_volume("same", r"E:\");
+        assert_ne!(
+            volume_topology_fingerprint(std::slice::from_ref(&d)),
+            volume_topology_fingerprint(&[e])
+        );
+
+        let mut alias_changed = d.clone();
+        alias_changed
+            .mount_paths
+            .push(PathBuf::from(r"C:\Mounts\Data"));
+        assert_ne!(
+            volume_topology_fingerprint(&[d]),
+            volume_topology_fingerprint(&[alias_changed])
+        );
+    }
 
     #[test]
     fn overflow_reconciles_are_debounced_and_scan_guarded() {
