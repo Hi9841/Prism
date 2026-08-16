@@ -17,6 +17,15 @@ export function nameToMonogram(name: string): string {
   return (words[0][0] + words[1][0]).toUpperCase();
 }
 
+// The localeCompare sort of the whole app list only has to run when the list
+// itself changes; the idle view is rebuilt on every icon batch, thumbnail, and
+// history validation, so cache the sorted copy against the input identity.
+const sortedAppsCache = new WeakMap<AppEntry[], AppEntry[]>();
+
 export function sortApps(apps: AppEntry[]): AppEntry[] {
-  return [...apps].sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
+  const cached = sortedAppsCache.get(apps);
+  if (cached) return cached;
+  const sorted = [...apps].sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
+  sortedAppsCache.set(apps, sorted);
+  return sorted;
 }

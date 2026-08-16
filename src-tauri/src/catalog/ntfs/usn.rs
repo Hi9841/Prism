@@ -16,6 +16,18 @@ use super::volume::{win32_error_code, NtfsVolume};
 
 const JOURNAL_BUFFER_SIZE: usize = 1024 * 1024;
 const USN_V2_MIN_LENGTH: usize = 60;
+/// File reference number of an NTFS volume's root directory.
+const NTFS_ROOT_FRN: u64 = 5;
+
+/// NTFS metadata files ($Mft, $LogFile, $Volume, $Extend, ...) live directly
+/// under the volume root and all start with '$'; the recycle bin keeps hashed
+/// $R/$I names and System Volume Information holds restore blobs. None are
+/// findable by filename, so the MFT catalog skips them and their subtrees -
+/// matching the directory scanner's exclusion rules (see `scanner::is_excluded_dir`).
+pub(super) fn is_root_system_node(name: &str, parent_frn: u64) -> bool {
+    parent_frn == NTFS_ROOT_FRN
+        && (name.starts_with('$') || name.eq_ignore_ascii_case("system volume information"))
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum JournalContinuity {
@@ -91,7 +103,12 @@ pub(super) fn read_journal(
 ) -> Result<JournalReadBatch, String> {
     let input = READ_USN_JOURNAL_DATA_V0 {
         StartUsn: start_usn,
-        ReasonMask: u32::MAX,
+        // Close-only records are the bulk of journal traffic (one per handle
+        // close after any write) and are discarded by fold_records anyway.
+        // Masking them out lets the kernel skip delivering them, which keeps
+        // catch-up reads small while the disk is busy. Records that combine
+        // CLOSE with a meaningful reason still match through the other bit.
+        ReasonMask: !USN_REASON_CLOSE,
         ReturnOnlyOnClose: 0,
         Timeout: 0,
         BytesToWaitFor: 0,
@@ -245,6 +262,9 @@ pub(super) fn parse_record(bytes: &[u8]) -> Result<(ParsedUsnRecord, usize), Str
 fn fold_records(records: Vec<UsnRecordV2>) -> Vec<NtfsChange> {
     let mut changes = HashMap::new();
     for record in records {
+        if is_root_system_node(&record.name, record.parent_frn) {
+            continue;
+        }
         if record.reason & USN_REASON_FILE_DELETE != 0 {
             changes.insert(record.frn, NtfsChange::Delete { frn: record.frn });
         } else if record.reason & USN_REASON_RENAME_OLD_NAME != 0 {
@@ -321,6 +341,59 @@ mod tests {
             journal_continuity(saved, metadata(1, 10, 101)),
             JournalContinuity::CatchUp
         );
+    }
+
+    #[test]
+    fn ntfs_metadata_and_unsearchable_roots_are_dropped() {
+        let metadata = UsnRecordV2 {
+            frn: 1,
+            parent_frn: 5,
+            usn: 1,
+            timestamp: 0,
+            reason: USN_REASON_FILE_CREATE,
+            attributes: 0,
+            name: "$LogFile".into(),
+        };
+        let restore_blobs = UsnRecordV2 {
+            frn: 2,
+            parent_frn: 5,
+            usn: 2,
+            timestamp: 0,
+            reason: USN_REASON_FILE_CREATE,
+            attributes: 0,
+            name: "System Volume Information".into(),
+        };
+        let user_file = UsnRecordV2 {
+            frn: 3,
+            parent_frn: 5,
+            usn: 3,
+            timestamp: 0,
+            reason: USN_REASON_FILE_CREATE,
+            attributes: 0,
+            name: "notes.txt".into(),
+        };
+        // A '$'-prefixed name away from the root is an ordinary user file.
+        let dollar_named = UsnRecordV2 {
+            frn: 4,
+            parent_frn: 100,
+            usn: 4,
+            timestamp: 0,
+            reason: USN_REASON_FILE_CREATE,
+            attributes: 0,
+            name: "$temp-notes.txt".into(),
+        };
+
+        let changes = fold_records(vec![metadata, restore_blobs, user_file, dollar_named]);
+        let mut names: Vec<&str> = changes
+            .iter()
+            .filter_map(|change| match change {
+                NtfsChange::Upsert(node) => Some(node.name.as_str()),
+                NtfsChange::Delete { .. } => None,
+            })
+            .collect();
+        // fold_records dedupes through a HashMap; only membership is defined.
+        names.sort_unstable();
+        assert_eq!(names, vec!["$temp-notes.txt", "notes.txt"]);
     }
 
     #[test]

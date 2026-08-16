@@ -140,16 +140,17 @@ pub fn search(
 
 pub fn entry_score(entry: &CandidateEntry, tokens: &[&str], full_query: &str) -> Option<i32> {
     let lower_name = &entry.lower_name;
+    let penalty = path_penalty(&entry.display_path, lower_name);
 
     // Highest priority: Exact filename match (e.g. "gemini_revisions_unverified.md")
     if lower_name == full_query {
-        return Some(10_000 + if entry.is_directory { 20 } else { 0 });
+        return Some(10_000 - penalty + if entry.is_directory { 20 } else { 0 });
     }
 
     // Exact filename without extension
     if let Some(stem) = Path::new(lower_name).file_stem().and_then(|s| s.to_str()) {
         if stem == full_query {
-            return Some(9_500 + if entry.is_directory { 20 } else { 0 });
+            return Some(9_500 - penalty + if entry.is_directory { 20 } else { 0 });
         }
     }
 
@@ -159,7 +160,68 @@ pub fn entry_score(entry: &CandidateEntry, tokens: &[&str], full_query: &str) ->
         total += target_score(token, lower_name)?;
     }
 
-    Some(total - lower_name.len().min(80) as i32)
+    Some(total - lower_name.len().min(80) as i32 - penalty)
+}
+
+/// High-noise locations and filenames. The catalog is full-coverage - system
+/// directories, dependency trees, and temp folders are all indexed - so these
+/// matches stay findable and merely rank below the same match in a
+/// user-authored location. Penalties are sized to sit well under the gaps
+/// between quality tiers (exact 10_000, stem 9_500, prefix 4_000, substring
+/// 3_000, subsequence 1_000): a great match in Windows still beats a weak
+/// match in Documents, but a same-quality match never does.
+const LOCATION_PENALTIES: &[(&str, i32)] = &[
+    ("\\$recycle.bin\\", 700),
+    ("\\system volume information\\", 700),
+    ("\\program files\\windowsapps\\", 600),
+    ("\\windows\\", 600),
+    ("\\windows.old\\", 500),
+    ("\\$windows.~bt\\", 500),
+    ("\\$windows.~ws\\", 500),
+    ("\\node_modules\\", 500),
+    ("\\.git\\", 400),
+    ("\\.svn\\", 400),
+    ("\\.hg\\", 400),
+    ("\\appdata\\local\\temp\\", 300),
+    ("\\recovery\\", 250),
+    ("\\perflogs\\", 250),
+    ("\\postgres_data\\", 200),
+    ("\\pgdata\\", 200),
+];
+
+/// Per-file noise that no location rule catches: shell view metadata, memory
+/// manager spill files, and the roaming profile backing store.
+const NOISE_FILE_NAMES: &[&str] = &[
+    "desktop.ini",
+    "thumbs.db",
+    "pagefile.sys",
+    "hiberfil.sys",
+    "swapfile.sys",
+];
+
+fn path_penalty(display_path: &str, lower_name: &str) -> i32 {
+    let mut penalty = 0i32;
+    for (needle, value) in LOCATION_PENALTIES {
+        if contains_ascii_ci(display_path, needle) {
+            penalty = penalty.max(*value);
+        }
+    }
+    if NOISE_FILE_NAMES.contains(&lower_name) || lower_name.starts_with("ntuser.dat") {
+        penalty = penalty.max(800);
+    }
+    penalty
+}
+
+/// ASCII case-insensitive substring probe without allocating a lowercase copy
+/// of the path - this runs for every candidate on every keystroke.
+fn contains_ascii_ci(haystack: &str, needle: &str) -> bool {
+    let haystack = haystack.as_bytes();
+    let needle = needle.as_bytes();
+    !needle.is_empty()
+        && haystack.len() >= needle.len()
+        && haystack
+            .windows(needle.len())
+            .any(|window| window.eq_ignore_ascii_case(needle))
 }
 
 pub fn target_score(query: &str, target: &str) -> Option<i32> {

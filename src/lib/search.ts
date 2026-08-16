@@ -17,8 +17,15 @@ function isWordSeparator(code: number): boolean {
  * boundaries, word starts and consecutive runs; penalizes gaps.
  */
 export function fuzzyScore(query: string, target: string): number | null {
-  const q = query.toLowerCase();
-  const t = target.toLowerCase();
+  return fuzzyScoreCore(query.toLowerCase(), target.toLowerCase(), target);
+}
+
+/**
+ * Core scorer over pre-lowercased inputs. `boundaryTarget` carries the
+ * original-case target for camelCase detection, or null when the target is
+ * already known lowercase and the check would be dead work.
+ */
+function fuzzyScoreCore(q: string, t: string, boundaryTarget: string | null): number | null {
   if (q.length === 0) return null;
   if (q.length > t.length) return null;
 
@@ -39,16 +46,19 @@ export function fuzzyScore(query: string, target: string): number | null {
       s -= Math.min(8, (ti - prev - 1) * 0.5);
     }
 
-    // Boundary bonuses: string start > camelCase > word start.
+    // Boundary bonuses: string start > camelCase > word start. Separators are
+    // case-agnostic, so the lowercase copy serves the word-start check.
     if (ti === 0) {
       s += 12;
-    } else {
-      const c = target[ti];
+    } else if (boundaryTarget !== null) {
+      const c = boundaryTarget[ti];
       if (c !== c.toLowerCase() && c === c.toUpperCase()) {
         s += 7; // camelCase boundary
-      } else if (isWordSeparator(target.charCodeAt(ti - 1))) {
+      } else if (isWordSeparator(t.charCodeAt(ti - 1))) {
         s += 6; // word start
       }
+    } else if (isWordSeparator(t.charCodeAt(ti - 1))) {
+      s += 6; // word start
     }
 
     score += s;
@@ -89,6 +99,60 @@ export function fuzzy<T extends { id: string; title: string; keywords?: string[]
   return results.slice(0, opts.limit);
 }
 
+/**
+ * Per-app search metadata, computed once per AppEntry object (WeakMap-keyed
+ * on entry identity). Lowercasing every name and keyword on every keystroke
+ * was the dominant allocation churn on the search hot path; entries replaced
+ * by a refresh drop out of the map automatically.
+ */
+interface PreparedApp {
+  lowerName: string;
+  lowerKeywords: readonly string[];
+  sourceRank: number;
+}
+
+const preparedApps = new WeakMap<AppEntry, PreparedApp>();
+
+function prepareApp(app: AppEntry): PreparedApp {
+  let prepared = preparedApps.get(app);
+  if (!prepared) {
+    prepared = {
+      lowerName: app.name.toLowerCase(),
+      lowerKeywords: (app.keywords ?? []).map((keyword) => keyword.toLowerCase()),
+      sourceRank: sourcePriority(app.source),
+    };
+    preparedApps.set(app, prepared);
+  }
+  return prepared;
+}
+
+interface RankedHit {
+  item: AppEntry;
+  score: number;
+  rank: number;
+}
+
+/**
+ * Keeps `top` sorted best-first (score desc, then source rank desc) and
+ * capped at `limit`. Bounded insertion avoids sorting the full match set,
+ * which for one- and two-character queries is most of the app pool.
+ */
+function insertTopK(top: RankedHit[], hit: RankedHit, limit: number): void {
+  let lo = 0;
+  let hi = top.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    const existing = top[mid];
+    const existingFirst =
+      existing.score > hit.score || (existing.score === hit.score && existing.rank >= hit.rank);
+    if (existingFirst) lo = mid + 1;
+    else hi = mid;
+  }
+  if (lo >= limit) return;
+  top.splice(lo, 0, hit);
+  if (top.length > limit) top.pop();
+}
+
 export function fuzzyApps(
   apps: AppEntry[],
   query: string,
@@ -106,13 +170,15 @@ export function fuzzyApps(
   // Callers that already deduplicated (memoized) the list skip the map build
   // on the per-keystroke hot path.
   const pool = opts.preDeduped ? apps : dedupeApps(apps);
-  const results: FuzzyHit<AppEntry>[] = [];
+  const top: RankedHit[] = [];
   for (const app of pool) {
-    const score = appScore(app, lower, tokens, normalizedQuery);
-    if (score !== null && score >= minimumScore) results.push({ item: app, score });
+    const prepared = prepareApp(app);
+    const score = appScore(app, prepared, lower, tokens, normalizedQuery);
+    if (score !== null && score >= minimumScore) {
+      insertTopK(top, { item: app, score, rank: prepared.sourceRank }, limit);
+    }
   }
-  results.sort((a, b) => b.score - a.score || sourcePriority(b.item.source) - sourcePriority(a.item.source));
-  return results.slice(0, limit).map((h) => h.item);
+  return top.map((hit) => hit.item);
 }
 
 /** Collapse aliases discovered through several Windows app registries. */
@@ -152,11 +218,12 @@ function sourcePriority(source?: string): number {
 
 function appScore(
   app: AppEntry,
+  prepared: PreparedApp,
   lowerQuery: string,
   tokens: string[],
   normalizedQuery: string,
 ): number | null {
-  const lowerName = app.name.toLowerCase();
+  const lowerName = prepared.lowerName;
 
   // Punctuation-insensitive exact match: "visualstudiocode" matches
   // "Visual Studio Code" no matter how the user typed it.
@@ -174,8 +241,8 @@ function appScore(
 
   // Fall back to metadata: exe names, folder names, publisher, aliases.
   let best: number | null = null;
-  for (const keyword of app.keywords ?? []) {
-    const score = matchTarget(keyword.toLowerCase(), tokens);
+  for (const keyword of prepared.lowerKeywords) {
+    const score = matchTarget(keyword, tokens);
     if (score !== null && (best === null || score > best)) best = score;
   }
   if (best !== null) return best - 4; // keyword-only matches rank below names
@@ -186,13 +253,14 @@ function appScore(
  * Whole-query subsequence match for single tokens; per-token summed
  * subsequence match for multi-word queries (every word must hit, which
  * gives partial-word matching like "shipping" in "FortniteClient-Win64-
- * Shipping" and "studio code" in "Visual Studio Code").
+ * Shipping" and "studio code" in "Visual Studio Code"). Tokens and targets
+ * arrive pre-lowercased by the callers.
  */
 function matchTarget(lowerTarget: string, tokens: string[]): number | null {
-  if (tokens.length === 1) return fuzzyScore(tokens[0], lowerTarget);
+  if (tokens.length === 1) return fuzzyScoreCore(tokens[0], lowerTarget, null);
   let total = 0;
   for (const token of tokens) {
-    const score = fuzzyScore(token, lowerTarget);
+    const score = fuzzyScoreCore(token, lowerTarget, null);
     if (score === null) return null;
     total += score;
   }

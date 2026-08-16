@@ -18,6 +18,7 @@ use std::time::Duration;
 use base64::Engine;
 use serde::Deserialize;
 use tauri::Emitter;
+use tauri::Manager;
 use windows::core::GUID;
 use windows::Win32::System::Com::CoTaskMemFree;
 use windows::Win32::UI::Shell::{
@@ -32,7 +33,21 @@ use self::db::Database;
 use self::ntfs::NtfsBackend;
 use self::watcher::VolumeWatcher;
 
-const VOLUME_POLL_INTERVAL: Duration = Duration::from_secs(5);
+/// Journal catch-up cadence while the palette is visible. This is the
+/// freshness window for NTFS-backed file results while the user is searching.
+const ACTIVE_POLL_INTERVAL: Duration = Duration::from_secs(5);
+/// Journal catch-up cadence while hidden - the launcher's normal state. The
+/// poll opens the raw volume device and issues an ioctl per NTFS drive, so the
+/// idle cadence dominates the app's steady-state background cost.
+const IDLE_POLL_INTERVAL: Duration = Duration::from_secs(30);
+/// Mount topology (usb plug, network mount) changes are rare; the discovery
+/// pass calls GetVolumeInformationW on every volume, which can block for
+/// seconds on disconnected network drives. Only re-enumerate this often and
+/// reuse the previous snapshot in between.
+const VOLUME_DISCOVERY_INTERVAL: Duration = Duration::from_secs(15);
+/// Long sleeps are sliced so a hidden -> visible transition resumes the fast
+/// cadence (and journal freshness) within a second of opening the palette.
+const POLL_WAKE_SLICE: Duration = Duration::from_secs(1);
 // Sweeps walk the tree but write only rows that actually changed, so the
 // periodic reconcile catches watcher misses cheaply without the disk churn of
 // the old full re-index.
@@ -210,6 +225,19 @@ impl FileIndex {
 
     pub fn set_app_handle(&self, app: tauri::AppHandle) {
         *self.app_handle.lock().unwrap() = Some(app);
+    }
+
+    /// True when the palette window is shown. The background poll loop uses
+    /// this to poll journal catch-up fast while the user is searching and
+    /// slowly while the launcher sits hidden.
+    fn palette_visible(&self) -> bool {
+        self.app_handle
+            .lock()
+            .unwrap()
+            .as_ref()
+            .and_then(|app| app.get_webview_window("main"))
+            .map(|window| window.is_visible().unwrap_or(true))
+            .unwrap_or(true)
     }
 
     fn emit_updated(&self) {
@@ -467,9 +495,9 @@ impl FileIndex {
         self.emit_updated();
     }
 
-    async fn catch_up_ntfs_volumes(&self, volumes: Vec<VolumeInfo>) {
+    async fn catch_up_ntfs_volumes(&self, volumes: &[VolumeInfo]) {
         for volume in volumes {
-            if select_backend(&volume, true) != BackendKind::Ntfs
+            if select_backend(volume, true) != BackendKind::Ntfs
                 || self
                     .watchers
                     .lock()
@@ -479,6 +507,9 @@ impl FileIndex {
                 continue;
             }
             let this = self.clone();
+            // The blocking task must own its volume (one small clone per NTFS
+            // drive per poll tick).
+            let volume = volume.clone();
             let _ = tauri::async_runtime::spawn_blocking(move || {
                 let Some(db) = this.db.read().unwrap().clone() else {
                     return;
@@ -639,39 +670,70 @@ pub fn warm(index: FileIndex, app_data_dir: PathBuf, app: tauri::AppHandle) {
         index.scan_all_volumes(true).await;
 
         let mut last_reconcile = tokio::time::Instant::now();
+        let mut last_discovery = tokio::time::Instant::now();
         // Seed the known set so the first poll does not immediately re-sweep.
-        let mut known_volume_ids = volume_ids(
-            &tauri::async_runtime::spawn_blocking(volume::discover_volumes)
-                .await
-                .unwrap_or_default(),
-        );
+        let mut current_volumes = tauri::async_runtime::spawn_blocking(volume::discover_volumes)
+            .await
+            .unwrap_or_default();
+        let mut known_volume_ids = volume_ids(&current_volumes);
 
         loop {
-            tokio::time::sleep(VOLUME_POLL_INTERVAL).await;
-
-            let current_volumes = tauri::async_runtime::spawn_blocking(volume::discover_volumes)
-                .await
-                .unwrap_or_default();
-
-            let current_ids = volume_ids(&current_volumes);
-
-            let volume_set_changed = current_ids != known_volume_ids;
-            let reconcile_due = last_reconcile.elapsed() >= RECONCILIATION_INTERVAL;
-            if volume_set_changed || reconcile_due {
-                known_volume_ids = current_ids;
-                // A mount change only needs newly discovered or stale volumes;
-                // healthy NTFS volumes catch up from USN and live fallback
-                // watchers cover existing directory-backed volumes.
-                index
-                    .scan_all_volumes(volume_set_changed && !reconcile_due)
-                    .await;
-                last_reconcile = tokio::time::Instant::now();
-            } else {
-                // Healthy NTFS volumes never receive periodic recursive
-                // reconciliation. Their persisted cursor advances from the
-                // journal every poll while directory backends stay watcher-led.
-                index.catch_up_ntfs_volumes(current_volumes).await;
+            // Fast cadence while the palette is open (search freshness), slow
+            // cadence while hidden (steady-state background cost). The sleep is
+            // sliced so showing the palette resumes the fast cadence within a
+            // second instead of after the full idle interval.
+            let visible = index.palette_visible();
+            let deadline = tokio::time::Instant::now()
+                + if visible {
+                    ACTIVE_POLL_INTERVAL
+                } else {
+                    IDLE_POLL_INTERVAL
+                };
+            while tokio::time::Instant::now() < deadline {
+                let slice = deadline
+                    .saturating_duration_since(tokio::time::Instant::now())
+                    .min(POLL_WAKE_SLICE);
+                if slice.is_zero() {
+                    break;
+                }
+                tokio::time::sleep(slice).await;
+                if index.palette_visible() != visible {
+                    break;
+                }
             }
+
+            if last_discovery.elapsed() >= VOLUME_DISCOVERY_INTERVAL {
+                last_discovery = tokio::time::Instant::now();
+                current_volumes = tauri::async_runtime::spawn_blocking(volume::discover_volumes)
+                    .await
+                    .unwrap_or_default();
+
+                let current_ids = volume_ids(&current_volumes);
+                let volume_set_changed = current_ids != known_volume_ids;
+                let reconcile_due = last_reconcile.elapsed() >= RECONCILIATION_INTERVAL;
+                if volume_set_changed || reconcile_due {
+                    known_volume_ids = current_ids;
+                    // A mount change only needs newly discovered or stale volumes;
+                    // healthy NTFS volumes catch up from USN and live fallback
+                    // watchers cover existing directory-backed volumes.
+                    index
+                        .scan_all_volumes(volume_set_changed && !reconcile_due)
+                        .await;
+                    last_reconcile = tokio::time::Instant::now();
+                    // scan_all_volumes discovers volumes itself; refresh the
+                    // snapshot so the next tick does not see a phantom change.
+                    current_volumes =
+                        tauri::async_runtime::spawn_blocking(volume::discover_volumes)
+                            .await
+                            .unwrap_or_default();
+                    continue;
+                }
+            }
+
+            // Healthy NTFS volumes never receive periodic recursive
+            // reconciliation. Their persisted cursor advances from the
+            // journal every poll while directory backends stay watcher-led.
+            index.catch_up_ntfs_volumes(&current_volumes).await;
         }
     });
 }
@@ -728,6 +790,8 @@ fn known_folder(id: &GUID) -> Option<PathBuf> {
 
 const THUMBNAIL_MAX_BYTES: u64 = 32 * 1024 * 1024;
 const THUMBNAIL_SIZE: u32 = 64;
+/// Bounds the per-request decode work; one result page is at most ~20 files.
+const THUMBNAIL_BATCH_CAP: usize = 64;
 
 pub fn file_thumbnail(path: &str) -> Option<String> {
     let path = Path::new(path);
@@ -738,10 +802,20 @@ pub fn file_thumbnail(path: &str) -> Option<String> {
     if metadata.is_dir() {
         return None;
     }
-    image_thumbnail(path)
+    image_thumbnail(path, metadata.len())
 }
 
-fn image_thumbnail(path: &Path) -> Option<String> {
+/// Thumbnails for a batch of paths, returned in input order. One IPC round
+/// trip per result page replaces a per-file request storm.
+pub fn file_thumbnails(paths: Vec<String>) -> Vec<Option<String>> {
+    paths
+        .into_iter()
+        .take(THUMBNAIL_BATCH_CAP)
+        .map(|path| file_thumbnail(&path))
+        .collect()
+}
+
+fn image_thumbnail(path: &Path, len: u64) -> Option<String> {
     let extension = path.extension()?.to_string_lossy().to_lowercase();
     if !matches!(
         extension.as_str(),
@@ -749,7 +823,7 @@ fn image_thumbnail(path: &Path) -> Option<String> {
     ) {
         return None;
     }
-    if std::fs::metadata(path).ok()?.len() > THUMBNAIL_MAX_BYTES {
+    if len > THUMBNAIL_MAX_BYTES {
         return None;
     }
     let image = image::ImageReader::open(path)

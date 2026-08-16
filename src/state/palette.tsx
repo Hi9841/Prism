@@ -12,7 +12,7 @@ import {
   refreshApps as forceRefresh,
   getAppIcons,
   getApps,
-  getFileThumbnail,
+  getFileThumbnails,
   getQuickAccess,
   hidePaletteWindow,
   onFileIndexUpdated,
@@ -53,6 +53,32 @@ interface PaletteCtx {
 }
 
 const Ctx = createContext<PaletteCtx | null>(null);
+
+/** Bounds the retained thumbnail data URLs; the palette lives for weeks. */
+const THUMBNAIL_CACHE_LIMIT = 128;
+
+function rememberThumbnail(cache: Map<string, string | null>, path: string, thumbnail: string | null): void {
+  // Refresh insertion order so recently shown images survive eviction; a
+  // cached null still counts - it marks known-iconless files.
+  cache.delete(path);
+  cache.set(path, thumbnail);
+  while (cache.size > THUMBNAIL_CACHE_LIMIT) {
+    const oldest = cache.keys().next();
+    if (oldest.done) break;
+    cache.delete(oldest.value);
+  }
+}
+
+/** Volume status fields that matter to the rendered UI. */
+function sameVolumeCoverage(current: readonly VolumeCoverage[], next: readonly VolumeCoverage[]): boolean {
+  if (current.length !== next.length) return false;
+  return current.every(
+    (volume, index) =>
+      volume.drive === next[index].drive &&
+      volume.state === next[index].state &&
+      volume.indexedCount === next[index].indexedCount,
+  );
+}
 
 export function PaletteProvider({ children }: { children: ReactNode }) {
   const app = useApp();
@@ -166,13 +192,17 @@ export function PaletteProvider({ children }: { children: ReactNode }) {
     if (pending.length === 0) return;
 
     for (const path of pending) fileThumbnailInFlight.current.add(path);
-    void Promise.all(
-      pending.map(async (path) => {
-        const thumbnail = await getFileThumbnail(path).catch(() => null);
-        fileThumbnailCache.current.set(path, thumbnail);
-        fileThumbnailInFlight.current.delete(path);
-      }),
-    ).then(() => setFileThumbnailRevision((revision) => revision + 1));
+    void getFileThumbnails(pending)
+      .then((thumbnails) => {
+        for (const [index, path] of pending.entries()) {
+          rememberThumbnail(fileThumbnailCache.current, path, thumbnails[index]);
+          fileThumbnailInFlight.current.delete(path);
+        }
+        setFileThumbnailRevision((revision) => revision + 1);
+      })
+      .catch(() => {
+        for (const path of pending) fileThumbnailInFlight.current.delete(path);
+      });
   }, [app.history, existingHistoryPaths]);
 
   useEffect(
@@ -210,8 +240,12 @@ export function PaletteProvider({ children }: { children: ReactNode }) {
           indexStatusRef.current = { ready: response.ready, indexing: response.indexing };
           setFileIndexReady(response.ready);
           setFileIndexing(response.indexing);
-          setVolumes(response.volumes ?? []);
-          setTotalIndexed(response.totalIndexed ?? 0);
+          setVolumes((current) =>
+            sameVolumeCoverage(current, response.volumes ?? []) ? current : (response.volumes ?? []),
+          );
+          setTotalIndexed((current) =>
+            current === (response.totalIndexed ?? 0) ? current : (response.totalIndexed ?? 0),
+          );
         })
         .catch(() => {});
       return;
@@ -233,8 +267,12 @@ export function PaletteProvider({ children }: { children: ReactNode }) {
           setFileResultQuery(normalized);
           setFileIndexReady(response.ready);
           setFileIndexing(response.indexing);
-          setVolumes(response.volumes ?? []);
-          setTotalIndexed(response.totalIndexed ?? 0);
+          setVolumes((current) =>
+            sameVolumeCoverage(current, response.volumes ?? []) ? current : (response.volumes ?? []),
+          );
+          setTotalIndexed((current) =>
+            current === (response.totalIndexed ?? 0) ? current : (response.totalIndexed ?? 0),
+          );
           setFilePathBrowse(response.pathBrowse);
           setFilesError(!response.pathBrowse && !response.ready && !response.indexing);
 
@@ -248,24 +286,29 @@ export function PaletteProvider({ children }: { children: ReactNode }) {
           });
           const pending = candidates.filter((entry) => !fileThumbnailInFlight.current.has(entry.path));
           if (pending.length > 0) {
-            for (const entry of pending) fileThumbnailInFlight.current.add(entry.path);
-            void Promise.all(
-              pending.map(async (entry) => {
-                const thumbnail = await getFileThumbnail(entry.path).catch(() => null);
-                fileThumbnailCache.current.set(entry.path, thumbnail);
-                fileThumbnailInFlight.current.delete(entry.path);
-                return [entry.path, thumbnail] as const;
-              }),
-            ).then((thumbnails) => {
-              const byPath = new Map(thumbnails);
-              setFileResults((current) =>
-                current.map((entry) => {
-                  if (entry.thumbnail) return entry;
-                  const thumbnail = byPath.get(entry.path);
-                  return thumbnail ? { ...entry, thumbnail } : entry;
-                }),
-              );
-            });
+            const paths = pending.map((entry) => entry.path);
+            for (const path of paths) fileThumbnailInFlight.current.add(path);
+            void getFileThumbnails(paths)
+              .then((thumbnails) => {
+                const byPath = new Map<string, string>();
+                for (const [index, path] of paths.entries()) {
+                  const thumbnail = thumbnails[index];
+                  rememberThumbnail(fileThumbnailCache.current, path, thumbnail);
+                  fileThumbnailInFlight.current.delete(path);
+                  if (thumbnail) byPath.set(path, thumbnail);
+                }
+                if (byPath.size === 0) return;
+                setFileResults((current) =>
+                  current.map((entry) => {
+                    if (entry.thumbnail) return entry;
+                    const thumbnail = byPath.get(entry.path);
+                    return thumbnail ? { ...entry, thumbnail } : entry;
+                  }),
+                );
+              })
+              .catch(() => {
+                for (const path of paths) fileThumbnailInFlight.current.delete(path);
+              });
           }
         })
         .catch(() => {
@@ -296,6 +339,9 @@ export function PaletteProvider({ children }: { children: ReactNode }) {
         }
         iconSettled.current.clear();
         iconAttempts.current.clear();
+        // Icons captured before the rescan can outlive their apps on disk;
+        // dropping them lets the icon effect re-request the visible set.
+        setAppIcons({});
         setApps(list);
         setAppsError(false);
         setIconRetryTick((tick) => tick + 1);

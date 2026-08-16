@@ -1,6 +1,6 @@
 [package]
 name = "prism"
-version = "0.9.5"
+version = "0.9.6"
 description = "Prism - a keyboard-first command palette for Windows"
 edition = "2021"
 
@@ -34,6 +34,7 @@ windows = { version = "0.61", features = [
   "Win32_System_Ioctl",
   "Win32_System_Registry",
   "Win32_System_Shutdown",
+  "Win32_System_SystemServices",
   "Win32_System_LibraryLoader",
   "Win32_System_Ole",
   "Win32_System_Threading",

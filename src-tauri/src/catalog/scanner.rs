@@ -8,9 +8,10 @@ use std::sync::Arc;
 use windows::core::PCWSTR;
 use windows::Win32::Storage::FileSystem::{
     FindClose, FindExInfoBasic, FindExSearchNameMatch, FindFirstFileExW, FindNextFileW,
-    FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT, FILE_ATTRIBUTE_SYSTEM,
-    FIND_FIRST_EX_LARGE_FETCH, WIN32_FIND_DATAW,
+    FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT, FIND_FIRST_EX_LARGE_FETCH,
+    WIN32_FIND_DATAW,
 };
+use windows::Win32::System::SystemServices::{IO_REPARSE_TAG_CLOUD, IO_REPARSE_TAG_CLOUD_MASK};
 use windows::Win32::System::Threading::{
     GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_BELOW_NORMAL, THREAD_PRIORITY_NORMAL,
 };
@@ -25,51 +26,38 @@ pub struct VolumeScanProgress {
     pub indexed_count: u64,
 }
 
-/// Directories that are pure noise for a file launcher. Kept in sync with the
-/// one-time purge patterns in `db::EXCLUDED_PURGE_PATTERNS`.
-fn is_excluded_dir(name_lower: &str, parent_normalized: &str, root_normalized: &str) -> bool {
-    match name_lower {
-        "node_modules"
-        | ".git"
-        | ".svn"
-        | ".hg"
-        | "$recycle.bin"
-        | "system volume information"
-        | "windows.old"
-        | "$windows.~bt"
-        | "$windows.~ws"
-        | "recovery"
-        | "perflogs"
-        | "windowsapps"
-        | "postgres_data"
-        | "pgdata" => true,
-        // The Windows directory only at the volume root: it is hundreds of
-        // thousands of entries of system noise.
-        "windows" => parent_normalized == root_normalized,
-        // Per-user temp cache; only under AppData\Local so project "temp"
-        // folders are untouched.
-        "temp" => parent_normalized.contains("\\appdata\\local"),
-        _ => false,
-    }
+/// Directories that never contain files a filename search can find: the
+/// recycle bin stores hashed names ($R... copies) and System Volume
+/// Information holds restore-point blobs. Everything else is indexed -
+/// C:\Windows, node_modules, .git, temp folders included - and merely ranks
+/// lower at query time (see `search::path_penalty`). Kept in sync with the
+/// NTFS backend's root-node filter in `catalog::ntfs::usn`.
+fn is_excluded_dir(name_lower: &str) -> bool {
+    matches!(name_lower, "$recycle.bin" | "system volume information")
 }
 
-fn is_noise_entry(attributes: u32) -> bool {
-    // System files (desktop.ini, thumbs.db, ...) are not useful search results.
-    // Offline cloud placeholders are retained: their names are searchable and
-    // opening them can hydrate the file through the user's configured provider.
-    (attributes & FILE_ATTRIBUTE_SYSTEM.0) != 0
+/// Cloud-sync placeholder roots (OneDrive and friends) surface as reparse
+/// points, but they hold the user's real files - they must be descended so
+/// their contents stay findable. Every other reparse directory (junctions,
+/// symlinks, mount points) stays a leaf: following those would loop through
+/// ancestor cycles and duplicate already-indexed subtrees.
+fn is_cloud_reparse_tag(tag: u32) -> bool {
+    (tag & !IO_REPARSE_TAG_CLOUD_MASK) == IO_REPARSE_TAG_CLOUD
 }
 
 /// Walks a volume and reconciles the index with what is on disk.
 ///
-/// The whole tree is enumerated every sweep - a nested change does not bump
-/// ancestor directory mtimes, so subtree pruning by mtime would miss changes.
-/// Cost is contained three ways:
+/// The walk is full-coverage - every directory except unsearchable roots
+/// (`$RECYCLE.BIN`, System Volume Information, Prism's own app data) is
+/// indexed, and noisy locations are down-ranked at query time instead of
+/// being dropped here. A nested change does not bump ancestor directory
+/// mtimes, so the whole tree is enumerated every sweep. Cost is contained
+/// three ways:
 /// - rows whose (mtime, size) are unchanged are never written again
 ///   (`filter_changed`), so an idle sweep does almost no writes;
-/// - high-noise directories (node_modules, .git, C:\Windows, ...) are skipped;
-/// - FTS triggers are dropped during the walk and the index is rebuilt once at
-///   the end (`begin_bulk_load` / `end_bulk_load`).
+/// - junctions and symlinks stay leaves, so no subtree is walked twice;
+/// - FTS triggers are dropped during the walk and the index is rebuilt once
+///   at the end (`begin_bulk_load` / `end_bulk_load`).
 pub fn scan_volume(
     root: &Path,
     volume_id: &str,
@@ -127,7 +115,6 @@ fn scan_volume_inner(
     cancel: &AtomicBool,
     progress_callback: &impl Fn(u64),
 ) -> Result<u64, String> {
-    let root_normalized = root.to_string_lossy().to_lowercase();
     let app_data_normalized = app_data_dir
         .to_string_lossy()
         .trim_end_matches(['\\', '/'])
@@ -217,9 +204,10 @@ fn scan_volume_inner(
                 let filetime_ticks = ((find_data.ftLastWriteTime.dwHighDateTime as u64) << 32)
                     | (find_data.ftLastWriteTime.dwLowDateTime as u64);
 
-                if is_noise_entry(attributes) {
-                    continue;
-                }
+                // System-attributed files (desktop.ini, pagefile.sys, ...) are
+                // indexed too - full coverage means rank-down at query time,
+                // never silent exclusion. Offline cloud placeholders stay
+                // searchable: opening one hydrates it through the provider.
 
                 seen.insert(child_normalized.clone());
                 total_scanned += 1;
@@ -242,9 +230,16 @@ fn scan_volume_inner(
                         progress_callback(total_scanned);
                     }
 
-                    if !is_reparse
-                        && !is_excluded_dir(&lower_name, &dir_normalized, &root_normalized)
-                    {
+                    // Full coverage: descend everywhere except the excluded
+                    // roots. Reparse directories are leaves unless they are
+                    // cloud placeholder roots (OneDrive) - see
+                    // `is_cloud_reparse_tag`.
+                    let descend = if is_reparse {
+                        is_cloud_reparse_tag(find_data.dwReserved0)
+                    } else {
+                        !is_excluded_dir(&lower_name)
+                    };
+                    if descend {
                         queue.push_back(child_path);
                     }
                 } else {
@@ -337,11 +332,27 @@ fn wide_filename_to_string(wide: &[u16]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use windows::Win32::Storage::FileSystem::FILE_ATTRIBUTE_OFFLINE;
+    use windows::Win32::System::SystemServices::{
+        IO_REPARSE_TAG_CLOUD_7, IO_REPARSE_TAG_MOUNT_POINT, IO_REPARSE_TAG_SYMLINK,
+    };
 
     #[test]
-    fn offline_placeholders_remain_searchable() {
-        assert!(!is_noise_entry(FILE_ATTRIBUTE_OFFLINE.0));
-        assert!(is_noise_entry(FILE_ATTRIBUTE_SYSTEM.0));
+    fn cloud_placeholder_roots_are_descended_but_not_other_reparse_points() {
+        assert!(is_cloud_reparse_tag(IO_REPARSE_TAG_CLOUD));
+        assert!(is_cloud_reparse_tag(IO_REPARSE_TAG_CLOUD_7));
+        assert!(!is_cloud_reparse_tag(IO_REPARSE_TAG_MOUNT_POINT));
+        assert!(!is_cloud_reparse_tag(IO_REPARSE_TAG_SYMLINK));
+        assert!(!is_cloud_reparse_tag(0));
+    }
+
+    #[test]
+    fn only_unsearchable_roots_are_excluded() {
+        assert!(is_excluded_dir("$recycle.bin"));
+        assert!(is_excluded_dir("system volume information"));
+        assert!(!is_excluded_dir("windows"));
+        assert!(!is_excluded_dir("node_modules"));
+        assert!(!is_excluded_dir(".git"));
+        assert!(!is_excluded_dir("temp"));
+        assert!(!is_excluded_dir("windowsapps"));
     }
 }
