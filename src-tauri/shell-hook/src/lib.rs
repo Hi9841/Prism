@@ -665,7 +665,12 @@ pub unsafe extern "system" fn PrismShellGetMessageHook(
         if message.message == message_id {
             match control {
                 CONTROL_DISABLE_WIN_HOTKEY => {
-                    let disabled = UnregisterHotKey(std::ptr::null_mut(), 1) != 0;
+                    let mut disabled = false;
+                    for id in 0..=16 {
+                        if UnregisterHotKey(std::ptr::null_mut(), id) != 0 {
+                            disabled = true;
+                        }
+                    }
                     let _ = notify_observer(message_id, EVENT_HOTKEY_DISABLED, disabled as isize);
                     message.message = WM_NULL;
                 }

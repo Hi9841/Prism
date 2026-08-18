@@ -608,6 +608,7 @@ struct ShellBridge {
     module: HMODULE,
     progman_hook: HHOOK,
     taskbar_message_hook: Option<HHOOK>,
+    app_manager_hook: Option<HHOOK>,
     taskbar_mouse_hook: HHOOK,
     taskbar_thread: u32,
     start_button_locator: StartButtonLocator,
@@ -788,6 +789,7 @@ impl ShellBridge {
                 module,
                 progman_hook,
                 taskbar_message_hook,
+                app_manager_hook: None,
                 taskbar_mouse_hook,
                 taskbar_thread,
                 start_button_locator,
@@ -872,10 +874,10 @@ impl ShellBridge {
         }
 
         let acknowledged = wait_for_ack(&SHELL_BRIDGE_ACK, Duration::from_secs(1));
-        if let Some(hook) = app_manager_hook {
-            let _ = UnhookWindowsHookEx(hook);
-        }
         if acknowledged == 0 {
+            if let Some(hook) = app_manager_hook {
+                let _ = UnhookWindowsHookEx(hook);
+            }
             let _ = UnhookWindowsHookEx(taskbar_mouse_hook);
             if let Some(hook) = taskbar_message_hook {
                 let _ = UnhookWindowsHookEx(hook);
@@ -897,6 +899,7 @@ impl ShellBridge {
             module,
             progman_hook,
             taskbar_message_hook,
+            app_manager_hook,
             taskbar_mouse_hook,
             taskbar_thread,
             start_button_locator,
@@ -1082,6 +1085,9 @@ impl Drop for ShellBridge {
         unsafe {
             let _ = UnhookWindowsHookEx(self.progman_hook);
             if let Some(hook) = self.taskbar_message_hook {
+                let _ = UnhookWindowsHookEx(hook);
+            }
+            if let Some(hook) = self.app_manager_hook {
                 let _ = UnhookWindowsHookEx(hook);
             }
             let _ = UnhookWindowsHookEx(self.taskbar_mouse_hook);
@@ -1329,11 +1335,7 @@ unsafe extern "system" fn raw_input_window_proc(
                     && RAW_OBSERVER_ACTIVE.load(Ordering::Acquire)
                     && SHELL_BRIDGE_ACTIVE.load(Ordering::Acquire) =>
             {
-                if matches!(lparam.0, -1 | 0) {
-                    queue_action(Action::ToggleWin(WinSide::Left));
-                } else {
-                    queue_action(Action::ToggleTaskbar(point_from_message(lparam.0)));
-                }
+                queue_action(Action::ToggleWin(WinSide::Left));
             }
             SHELL_EVENT_TASKBAR_START_CLICK_X => {
                 SHELL_START_CLICK_X.store(lparam.0 as i32, Ordering::Release);
@@ -1380,11 +1382,10 @@ unsafe extern "system" fn raw_input_window_proc(
                     .map(|mut machine| machine.feed(kind, is_down))
                     .unwrap_or(Decision::Pass);
                 match decision {
-                    Decision::Toggle(side) if PROVIDER_SUPPRESSES_START.load(Ordering::Acquire) => {
+                    Decision::Toggle(side) => {
                         queue_action(Action::ToggleWin(side));
                     }
-                    Decision::Mask | Decision::Toggle(_) => {}
-                    Decision::Pass => {}
+                    Decision::Mask | Decision::Pass => {}
                 }
             }
         }
@@ -1396,6 +1397,7 @@ fn toggle_clock_ms() -> u64 {
     TOGGLE_CLOCK.get_or_init(Instant::now).elapsed().as_millis() as u64 + 1
 }
 
+#[allow(dead_code)]
 fn point_from_message(detail: isize) -> POINT {
     let packed = detail as u32;
     POINT {
