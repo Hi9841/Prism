@@ -254,7 +254,7 @@ export function PaletteProvider({ children }: { children: ReactNode }) {
     setFilesSearching(true);
     setFilesError(false);
     const timer = window.setTimeout(() => {
-      searchFiles(searchText, 20)
+      searchFiles(searchText, 50)
         .then((response) => {
           if (request !== fileRequest.current) return;
           fileStatusKnown.current = true;

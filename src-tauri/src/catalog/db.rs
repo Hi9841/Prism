@@ -1560,9 +1560,10 @@ impl Database {
         // location-based ranking happens after fetch, so the candidate pools
         // must be wide enough that a user's own file is among them before
         // penalties can order it to the top.
-        let exact_limit = 40i64;
+        let exact_limit = (limit.max(50) * 3) as i64;
         let prefix_limit = (limit.max(10) * 3) as i64;
         let fts_limit = (limit.max(10) * 3) as i64;
+        let per_vol_limit = (exact_limit / 3).max(30);
 
         // 1. Exact match query
         {
@@ -1594,26 +1595,26 @@ impl Database {
                 }
             }
 
-            // Reserve one exact candidate per volume in addition to the
+            // Reserve exact candidates per volume in addition to the
             // bounded global pool. A common filename with many C: rows can no
             // longer make the same valid filename on D:/E: unreachable.
             let mut fair_stmt = conn
                 .prepare_cached(
                     "SELECT f.id, f.display_path, f.lower_name, f.is_directory, f.extension
-                     FROM files f
-                     JOIN (
-                         SELECT volume_id, MIN(id) AS id FROM files
-                         WHERE lower_name = ?1 GROUP BY volume_id
-                     ) fair ON fair.id = f.id
-                     WHERE f.lower_name = ?1
+                     FROM (
+                         SELECT id, display_path, lower_name, is_directory, extension, volume_id,
+                                ROW_NUMBER() OVER (PARTITION BY volume_id ORDER BY id) AS rn
+                         FROM files
+                         WHERE lower_name = ?1
+                     ) f
+                     WHERE f.rn <= ?2
                        AND NOT EXISTS(SELECT 1 FROM volumes v
                                       WHERE v.volume_id = f.volume_id AND v.backend = 'ntfs')
-                     ORDER BY f.volume_id COLLATE NOCASE
-                     LIMIT ?2;",
+                     ORDER BY f.volume_id COLLATE NOCASE;",
                 )
                 .map_err(|e| e.to_string())?;
             let fair_rows = fair_stmt
-                .query_map(params![lower, exact_limit], |row| {
+                .query_map(params![lower, per_vol_limit], |row| {
                     Ok(CandidateEntry {
                         id: row.get(0)?,
                         display_path: row.get(1)?,
@@ -1845,7 +1846,8 @@ fn append_ntfs_candidates(
 
     // Keep the NTFS candidate pools aligned with the fallback-table queries
     // above: ranking happens after fetch, so both need the wider limits.
-    let exact_limit = 40i64;
+    let exact_limit = (limit.max(50) * 3) as i64;
+    let per_vol_limit = (exact_limit / 3).max(30);
     collect(
         "SELECT n.id, n.volume_id, n.frn, n.lower_name, n.is_directory, n.extension, v.mount_path
          FROM ntfs_nodes n JOIN volumes v ON v.volume_id = n.volume_id
@@ -1854,15 +1856,16 @@ fn append_ntfs_candidates(
     )?;
     collect(
         "SELECT n.id, n.volume_id, n.frn, n.lower_name, n.is_directory, n.extension, v.mount_path
-         FROM ntfs_nodes n
-         JOIN (
-             SELECT volume_id, MIN(id) AS id FROM ntfs_nodes
-             WHERE lower_name = ?1 GROUP BY volume_id
-         ) fair ON fair.id = n.id
+         FROM (
+             SELECT id, volume_id, frn, lower_name, is_directory, extension,
+                    ROW_NUMBER() OVER (PARTITION BY volume_id ORDER BY id) AS rn
+             FROM ntfs_nodes
+             WHERE lower_name = ?1
+         ) n
          JOIN volumes v ON v.volume_id = n.volume_id
-         WHERE v.backend = 'ntfs' AND n.lower_name = ?1
-         ORDER BY n.volume_id COLLATE NOCASE LIMIT ?2;",
-        &[&lower, &exact_limit],
+         WHERE v.backend = 'ntfs' AND n.rn <= ?2
+         ORDER BY n.volume_id COLLATE NOCASE;",
+        &[&lower, &per_vol_limit],
     )?;
     let prefix_end = format!("{lower}\u{FFFF}");
     let sql_limit = (limit.max(10) * 3) as i64;
