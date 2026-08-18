@@ -247,6 +247,7 @@ pub fn run() {
             set_taskbar_combine_buttons,
             set_taskbar_task_view,
             set_taskbar_widgets,
+            set_taskbar_searchbox_mode,
             set_taskbar_start_icon,
             set_custom_start_icon,
             select_custom_start_icon,
@@ -1089,6 +1090,11 @@ fn set_taskbar_task_view(visible: bool) -> Result<(), String> {
 #[tauri::command]
 fn set_taskbar_widgets(visible: bool) -> Result<(), String> {
     taskbar_customization::set_widgets(visible)
+}
+
+#[tauri::command]
+fn set_taskbar_searchbox_mode(value: String) -> Result<(), String> {
+    taskbar_customization::set_searchbox_mode(&value)
 }
 
 #[tauri::command]

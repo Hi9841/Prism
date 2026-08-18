@@ -101,6 +101,11 @@ const CONTROL_START_ICON_REFRESH: usize = 11;
 const CONTROL_START_ICON_SHUTDOWN: usize = 12;
 const EVENT_START_ICON_SHUTDOWN: usize = 13;
 const EVENT_START_ICON_REFRESHED: usize = 14;
+const CONTROL_SEARCH_RECT_LEFT: usize = 15;
+const CONTROL_SEARCH_RECT_TOP: usize = 16;
+const CONTROL_SEARCH_RECT_RIGHT: usize = 17;
+const CONTROL_SEARCH_RECT_BOTTOM: usize = 18;
+const EVENT_SEARCH_RECT_CONFIGURED: usize = 19;
 const WS_POPUP: u32 = 0x8000_0000;
 const SS_BITMAP: u32 = 0x0000_000e;
 const WS_EX_TOOLWINDOW: u32 = 0x0000_0080;
@@ -123,6 +128,11 @@ static START_RECT_TOP: AtomicI32 = AtomicI32::new(0);
 static START_RECT_RIGHT: AtomicI32 = AtomicI32::new(0);
 static START_RECT_BOTTOM: AtomicI32 = AtomicI32::new(0);
 static START_RECT_READY: AtomicBool = AtomicBool::new(false);
+static SEARCH_RECT_LEFT: AtomicI32 = AtomicI32::new(0);
+static SEARCH_RECT_TOP: AtomicI32 = AtomicI32::new(0);
+static SEARCH_RECT_RIGHT: AtomicI32 = AtomicI32::new(0);
+static SEARCH_RECT_BOTTOM: AtomicI32 = AtomicI32::new(0);
+static SEARCH_RECT_READY: AtomicBool = AtomicBool::new(false);
 static START_PRESS_CAPTURED: AtomicBool = AtomicBool::new(false);
 static ICON_WINDOW: Mutex<usize> = Mutex::new(0);
 static ICON_BITMAP: Mutex<usize> = Mutex::new(0);
@@ -625,6 +635,14 @@ fn point_is_in_start_button(point: &Point) -> bool {
         && point.y < START_RECT_BOTTOM.load(Ordering::Relaxed)
 }
 
+fn point_is_in_search_button(point: &Point) -> bool {
+    SEARCH_RECT_READY.load(Ordering::Acquire)
+        && point.x >= SEARCH_RECT_LEFT.load(Ordering::Relaxed)
+        && point.x < SEARCH_RECT_RIGHT.load(Ordering::Relaxed)
+        && point.y >= SEARCH_RECT_TOP.load(Ordering::Relaxed)
+        && point.y < SEARCH_RECT_BOTTOM.load(Ordering::Relaxed)
+}
+
 fn has_active_icon() -> bool {
     ICON_BITMAP
         .lock()
@@ -723,6 +741,34 @@ pub unsafe extern "system" fn PrismShellGetMessageHook(
                     let _ = notify_observer(message_id, EVENT_START_ICON_SHUTDOWN, 1);
                     message.message = WM_NULL;
                 }
+                CONTROL_SEARCH_RECT_LEFT => {
+                    SEARCH_RECT_READY.store(false, Ordering::Release);
+                    START_PRESS_CAPTURED.store(false, Ordering::Release);
+                    SEARCH_RECT_LEFT.store(message.lparam as i32, Ordering::Relaxed);
+                    message.message = WM_NULL;
+                }
+                CONTROL_SEARCH_RECT_TOP => {
+                    SEARCH_RECT_TOP.store(message.lparam as i32, Ordering::Relaxed);
+                    message.message = WM_NULL;
+                }
+                CONTROL_SEARCH_RECT_RIGHT => {
+                    SEARCH_RECT_RIGHT.store(message.lparam as i32, Ordering::Relaxed);
+                    message.message = WM_NULL;
+                }
+                CONTROL_SEARCH_RECT_BOTTOM => {
+                    SEARCH_RECT_BOTTOM.store(message.lparam as i32, Ordering::Relaxed);
+                    let valid = SEARCH_RECT_RIGHT.load(Ordering::Relaxed)
+                        > SEARCH_RECT_LEFT.load(Ordering::Relaxed)
+                        && SEARCH_RECT_BOTTOM.load(Ordering::Relaxed)
+                            > SEARCH_RECT_TOP.load(Ordering::Relaxed);
+                    SEARCH_RECT_READY.store(valid, Ordering::Release);
+                    let _ = notify_observer(
+                        message_id,
+                        EVENT_SEARCH_RECT_CONFIGURED,
+                        valid as isize,
+                    );
+                    message.message = WM_NULL;
+                }
                 _ => {}
             }
         } else if message.message == WM_SYSCOMMAND
@@ -756,14 +802,16 @@ pub unsafe extern "system" fn PrismShellMouseHook(
 ) -> isize {
     if code >= HC_ACTION && lparam != 0 {
         let mouse = &*(lparam as *const MouseHookStruct);
+        let in_target = point_is_in_start_button(&mouse.point)
+            || point_is_in_search_button(&mouse.point);
         if wparam == WM_LBUTTONDOWN {
-            let capture = point_is_in_start_button(&mouse.point) && !observer_window().is_null();
+            let capture = in_target && !observer_window().is_null();
             START_PRESS_CAPTURED.store(capture, Ordering::Release);
             if capture {
                 return 1;
             }
         } else if wparam == WM_LBUTTONUP && START_PRESS_CAPTURED.swap(false, Ordering::AcqRel) {
-            if point_is_in_start_button(&mouse.point) {
+            if in_target {
                 let _ = notify_start_click(bridge_message_id(), &mouse.point);
             }
             // The matching down was consumed, so always consume its up as well.
