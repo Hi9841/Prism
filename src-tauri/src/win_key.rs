@@ -41,7 +41,9 @@ use windows::Win32::UI::Accessibility::{
     CUIAutomation, IUIAutomation, IUIAutomationCondition, IUIAutomationElement,
     TreeScope_Descendants, UIA_AutomationIdPropertyId, UIA_ProcessIdPropertyId,
 };
-use windows::Win32::UI::Input::KeyboardAndMouse::{VK_LWIN, VK_RWIN};
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    VK_CONTROL, VK_ESCAPE, VK_LCONTROL, VK_LWIN, VK_RCONTROL, VK_RWIN,
+};
 use windows::Win32::UI::Input::{
     GetRawInputData, RegisterRawInputDevices, HRAWINPUT, RAWINPUT, RAWINPUTDEVICE, RAWINPUTHEADER,
     RAWKEYBOARD, RIDEV_INPUTSINK, RIDEV_REMOVE, RID_INPUT, RIM_TYPEKEYBOARD,
@@ -112,12 +114,27 @@ struct Press {
     combo: bool,
 }
 
-/// Side-aware press tracking. Both Windows keys keep independent state so
-/// their identity and balanced down/up transitions are preserved.
+const VK_CONTROL_CODE: u16 = VK_CONTROL.0;
+const VK_LCONTROL_CODE: u16 = VK_LCONTROL.0;
+const VK_RCONTROL_CODE: u16 = VK_RCONTROL.0;
+const VK_ESCAPE_CODE: u16 = VK_ESCAPE.0;
+
+fn is_ctrl_key(key: u16) -> bool {
+    key == VK_CONTROL_CODE || key == VK_LCONTROL_CODE || key == VK_RCONTROL_CODE
+}
+
+fn is_escape_key(key: u16) -> bool {
+    key == VK_ESCAPE_CODE
+}
+
+/// Side-aware press tracking. Both Windows keys and Ctrl+Esc chords keep
+/// independent state so their identity and balanced down/up transitions are
+/// preserved.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct WinKeyMachine {
     left: Press,
     right: Press,
+    ctrl_esc: Press,
     non_win_down: [bool; 256],
 }
 
@@ -138,6 +155,10 @@ impl WinKeyMachine {
             down: false,
             combo: false,
         },
+        ctrl_esc: Press {
+            down: false,
+            combo: false,
+        },
         non_win_down: [false; 256],
     };
     /// Feeds one key event into the machine and returns the decision.
@@ -155,6 +176,9 @@ impl WinKeyMachine {
                         WinSide::Left => self.right.combo = true,
                         WinSide::Right => self.left.combo = true,
                     }
+                }
+                if is_down && self.ctrl_esc.down {
+                    self.ctrl_esc.combo = true;
                 }
                 let press = self.press_mut(side);
                 if is_down {
@@ -186,16 +210,62 @@ impl WinKeyMachine {
             KeyKind::Other(key) => {
                 let left_down = self.left.down;
                 let right_down = self.right.down;
+                let ctrl_esc_down = self.ctrl_esc.down;
                 if is_down && (left_down || right_down) {
                     // Win+key combo: remember it so the Win release is not
                     // mistaken for a standalone press.
                     self.left.combo |= left_down;
                     self.right.combo |= right_down;
                 }
-                if let Some(down) = self.non_win_down.get_mut(key as usize) {
-                    *down = is_down;
+                if is_down && ctrl_esc_down && !is_ctrl_key(key) && !is_escape_key(key) {
+                    // Another key pressed while Ctrl+Esc held: remember combo
+                    // so the Esc release is not mistaken for a standalone toggle.
+                    self.ctrl_esc.combo = true;
                 }
-                Decision::Pass
+
+                if is_escape_key(key) {
+                    let win_down = left_down || right_down;
+                    let other_down = self.has_other_non_win_down(&[
+                        VK_CONTROL_CODE,
+                        VK_LCONTROL_CODE,
+                        VK_RCONTROL_CODE,
+                        VK_ESCAPE_CODE,
+                    ]);
+                    let clean_ctrl_esc = self.is_ctrl_down() && !win_down && !other_down;
+
+                    if let Some(down) = self.non_win_down.get_mut(key as usize) {
+                        *down = is_down;
+                    }
+
+                    if is_down {
+                        if self.ctrl_esc.down {
+                            // Auto-repeat while already held.
+                            Decision::Pass
+                        } else if clean_ctrl_esc {
+                            self.ctrl_esc.down = true;
+                            self.ctrl_esc.combo = false;
+                            Decision::Mask
+                        } else {
+                            Decision::Pass
+                        }
+                    } else if self.ctrl_esc.down {
+                        let standalone = !self.ctrl_esc.combo;
+                        self.ctrl_esc.down = false;
+                        self.ctrl_esc.combo = false;
+                        if standalone {
+                            Decision::Toggle(WinSide::Left)
+                        } else {
+                            Decision::Pass
+                        }
+                    } else {
+                        Decision::Pass
+                    }
+                } else {
+                    if let Some(down) = self.non_win_down.get_mut(key as usize) {
+                        *down = is_down;
+                    }
+                    Decision::Pass
+                }
             }
         }
     }
@@ -204,6 +274,7 @@ impl WinKeyMachine {
     pub fn reset(&mut self) {
         self.left = Press::default();
         self.right = Press::default();
+        self.ctrl_esc = Press::default();
         self.non_win_down.fill(false);
     }
 
@@ -212,6 +283,18 @@ impl WinKeyMachine {
             WinSide::Left => &mut self.left,
             WinSide::Right => &mut self.right,
         }
+    }
+
+    fn is_ctrl_down(&self) -> bool {
+        self.non_win_down[VK_CONTROL_CODE as usize]
+            || self.non_win_down[VK_LCONTROL_CODE as usize]
+            || self.non_win_down[VK_RCONTROL_CODE as usize]
+    }
+
+    fn has_other_non_win_down(&self, excluded_keys: &[u16]) -> bool {
+        self.non_win_down.iter().enumerate().any(|(k, &down)| {
+            down && !excluded_keys.contains(&(k as u16))
+        })
     }
 }
 
@@ -1656,6 +1739,185 @@ mod tests {
             assert_eq!(m.feed(KeyKind::Other(key), true), Decision::Pass);
             assert_eq!(m.feed(KeyKind::Other(key), false), Decision::Pass);
         }
+    }
+
+    #[test]
+    fn standalone_ctrl_esc_left_ctrl_toggles() {
+        assert_eq!(
+            run(&[
+                (KeyKind::Other(VK_CONTROL_CODE), true),
+                (KeyKind::Other(VK_ESCAPE_CODE), true),
+                (KeyKind::Other(VK_ESCAPE_CODE), false),
+                (KeyKind::Other(VK_CONTROL_CODE), false),
+            ]),
+            vec![
+                Decision::Pass,
+                Decision::Mask,
+                Decision::Toggle(WinSide::Left),
+                Decision::Pass,
+            ]
+        );
+    }
+
+    #[test]
+    fn standalone_ctrl_esc_right_ctrl_toggles() {
+        assert_eq!(
+            run(&[
+                (KeyKind::Other(VK_RCONTROL_CODE), true),
+                (KeyKind::Other(VK_ESCAPE_CODE), true),
+                (KeyKind::Other(VK_ESCAPE_CODE), false),
+                (KeyKind::Other(VK_RCONTROL_CODE), false),
+            ]),
+            vec![
+                Decision::Pass,
+                Decision::Mask,
+                Decision::Toggle(WinSide::Left),
+                Decision::Pass,
+            ]
+        );
+    }
+
+    #[test]
+    fn held_ctrl_esc_repeats_pass_through_and_toggle_once() {
+        assert_eq!(
+            run(&[
+                (KeyKind::Other(VK_CONTROL_CODE), true),
+                (KeyKind::Other(VK_ESCAPE_CODE), true),
+                (KeyKind::Other(VK_ESCAPE_CODE), true), // auto-repeat
+                (KeyKind::Other(VK_ESCAPE_CODE), false),
+                (KeyKind::Other(VK_CONTROL_CODE), false),
+            ]),
+            vec![
+                Decision::Pass,
+                Decision::Mask,
+                Decision::Pass,
+                Decision::Toggle(WinSide::Left),
+                Decision::Pass,
+            ]
+        );
+    }
+
+    #[test]
+    fn rapid_ctrl_esc_taps_toggle_every_time() {
+        let mut m = WinKeyMachine::default();
+        assert_eq!(m.feed(KeyKind::Other(VK_CONTROL_CODE), true), Decision::Pass);
+        for _ in 0..3 {
+            assert_eq!(
+                m.feed(KeyKind::Other(VK_ESCAPE_CODE), true),
+                Decision::Mask
+            );
+            assert_eq!(
+                m.feed(KeyKind::Other(VK_ESCAPE_CODE), false),
+                Decision::Toggle(WinSide::Left)
+            );
+        }
+        assert_eq!(m.feed(KeyKind::Other(VK_CONTROL_CODE), false), Decision::Pass);
+        assert!(!m.left.down && !m.right.down && !m.ctrl_esc.down);
+    }
+
+    #[test]
+    fn ctrl_shift_esc_passes_through_without_toggle() {
+        assert_eq!(
+            run(&[
+                (KeyKind::Other(VK_CONTROL_CODE), true),
+                (KeyKind::Other(0x10), true), // Shift
+                (KeyKind::Other(VK_ESCAPE_CODE), true),
+                (KeyKind::Other(VK_ESCAPE_CODE), false),
+                (KeyKind::Other(0x10), false),
+                (KeyKind::Other(VK_CONTROL_CODE), false),
+            ]),
+            vec![
+                Decision::Pass,
+                Decision::Pass,
+                Decision::Pass,
+                Decision::Pass,
+                Decision::Pass,
+                Decision::Pass,
+            ]
+        );
+    }
+
+    #[test]
+    fn ctrl_esc_combo_with_other_key_passes_through() {
+        assert_eq!(
+            run(&[
+                (KeyKind::Other(VK_CONTROL_CODE), true),
+                (KeyKind::Other(VK_ESCAPE_CODE), true),
+                (KeyKind::Other(0x09), true), // Tab
+                (KeyKind::Other(0x09), false),
+                (KeyKind::Other(VK_ESCAPE_CODE), false),
+                (KeyKind::Other(VK_CONTROL_CODE), false),
+            ]),
+            vec![
+                Decision::Pass,
+                Decision::Mask,
+                Decision::Pass,
+                Decision::Pass,
+                Decision::Pass,
+                Decision::Pass,
+            ]
+        );
+    }
+
+    #[test]
+    fn ctrl_released_before_esc_still_toggles() {
+        assert_eq!(
+            run(&[
+                (KeyKind::Other(VK_CONTROL_CODE), true),
+                (KeyKind::Other(VK_ESCAPE_CODE), true),
+                (KeyKind::Other(VK_CONTROL_CODE), false),
+                (KeyKind::Other(VK_ESCAPE_CODE), false),
+            ]),
+            vec![
+                Decision::Pass,
+                Decision::Mask,
+                Decision::Pass,
+                Decision::Toggle(WinSide::Left),
+            ]
+        );
+    }
+
+    #[test]
+    fn esc_without_ctrl_never_toggles() {
+        assert_eq!(
+            run(&[
+                (KeyKind::Other(VK_ESCAPE_CODE), true),
+                (KeyKind::Other(VK_ESCAPE_CODE), false),
+            ]),
+            vec![
+                Decision::Pass,
+                Decision::Pass,
+            ]
+        );
+    }
+
+    #[test]
+    fn esc_then_ctrl_never_toggles() {
+        assert_eq!(
+            run(&[
+                (KeyKind::Other(VK_ESCAPE_CODE), true),
+                (KeyKind::Other(VK_CONTROL_CODE), true),
+                (KeyKind::Other(VK_ESCAPE_CODE), false),
+                (KeyKind::Other(VK_CONTROL_CODE), false),
+            ]),
+            vec![
+                Decision::Pass,
+                Decision::Pass,
+                Decision::Pass,
+                Decision::Pass,
+            ]
+        );
+    }
+
+    #[test]
+    fn ctrl_esc_reset_mid_press_never_toggles() {
+        let mut m = WinKeyMachine::default();
+        assert_eq!(m.feed(KeyKind::Other(VK_CONTROL_CODE), true), Decision::Pass);
+        assert_eq!(m.feed(KeyKind::Other(VK_ESCAPE_CODE), true), Decision::Mask);
+        m.reset();
+        assert!(!m.left.down && !m.right.down && !m.ctrl_esc.down);
+        assert_eq!(m.feed(KeyKind::Other(VK_ESCAPE_CODE), false), Decision::Pass);
+        assert_eq!(m.feed(KeyKind::Other(VK_CONTROL_CODE), false), Decision::Pass);
     }
 
     fn m_feed_single(kind: KeyKind, is_down: bool) -> Decision {
