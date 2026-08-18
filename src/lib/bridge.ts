@@ -9,6 +9,7 @@ import type { AppEntry, FileSearchResponse, PersistedState, QuickAccessEntry, Wi
 export type PowerAction = "lock" | "shutdown" | "restart";
 export type TaskbarThickness = "compact" | "default" | "adaptive";
 export type TaskbarCombineMode = "always" | "whenFull" | "never";
+export type TaskbarSearchMode = "hidden" | "icon" | "box" | "iconWithLabel";
 export type TaskbarStartIcon = "system" | "gem" | "diamond" | "custom";
 
 export interface CustomStartIcon {
@@ -23,6 +24,7 @@ export interface TaskbarSettings {
   combineButtons: TaskbarCombineMode;
   showTaskView: boolean;
   showWidgets: boolean;
+  searchboxMode: TaskbarSearchMode;
   startIcon: TaskbarStartIcon;
   selectedCustomIcon: string | null;
   customStartIcons: CustomStartIcon[];
@@ -269,6 +271,7 @@ export async function getTaskbarSettings(): Promise<TaskbarSettings> {
       combineButtons: "always",
       showTaskView: true,
       showWidgets: false,
+      searchboxMode: "icon",
       startIcon: "system",
       selectedCustomIcon: null,
       customStartIcons: [],
@@ -300,6 +303,11 @@ export async function setTaskbarTaskView(visible: boolean): Promise<void> {
 export async function setTaskbarWidgets(visible: boolean): Promise<void> {
   if (!inTauri) return;
   await invoke("set_taskbar_widgets", { visible });
+}
+
+export async function setTaskbarSearchboxMode(value: TaskbarSearchMode): Promise<void> {
+  if (!inTauri) return;
+  await invoke("set_taskbar_searchbox_mode", { value });
 }
 
 export async function setTaskbarStartIcon(value: TaskbarStartIcon): Promise<void> {

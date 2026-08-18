@@ -50,7 +50,7 @@ use windows::Win32::UI::Input::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, EnumChildWindows,
-    FindWindowW, GetClassNameW, GetWindowRect, GetWindowThreadProcessId,
+    FindWindowW, GetClassNameW, GetWindowRect, GetWindowThreadProcessId, IsWindowVisible,
     MsgWaitForMultipleObjectsEx, PeekMessageW, PostThreadMessageW, RegisterClassW,
     RegisterWindowMessageW, SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx, HHOOK,
     HWND_MESSAGE, MSG, PM_REMOVE, QS_ALLINPUT, RI_KEY_BREAK, WH_GETMESSAGE, WH_MOUSE,
@@ -78,6 +78,11 @@ const SHELL_CONTROL_START_ICON_REFRESH: usize = 11;
 const SHELL_CONTROL_START_ICON_SHUTDOWN: usize = 12;
 const SHELL_EVENT_START_ICON_SHUTDOWN: usize = 13;
 const SHELL_EVENT_START_ICON_REFRESHED: usize = 14;
+const SHELL_CONTROL_SEARCH_RECT_LEFT: usize = 15;
+const SHELL_CONTROL_SEARCH_RECT_TOP: usize = 16;
+const SHELL_CONTROL_SEARCH_RECT_RIGHT: usize = 17;
+const SHELL_CONTROL_SEARCH_RECT_BOTTOM: usize = 18;
+const SHELL_EVENT_SEARCH_RECT_CONFIGURED: usize = 19;
 
 /// Event the frontend receives when Win observation self-disables.
 pub const FAILED_EVENT: &str = "win-mode-failed";
@@ -318,6 +323,7 @@ static SHELL_BRIDGE_ACTIVE: AtomicBool = AtomicBool::new(false);
 static BRIDGE_MESSAGE_ID: OnceLock<Result<u32, String>> = OnceLock::new();
 static SHELL_BRIDGE_ACK: AtomicU32 = AtomicU32::new(0);
 static SHELL_START_RECT_ACK: AtomicU32 = AtomicU32::new(0);
+static SHELL_SEARCH_RECT_ACK: AtomicU32 = AtomicU32::new(0);
 static SHELL_START_CLICK_X: AtomicI32 = AtomicI32::new(0);
 static SHELL_TASKBAR_THREAD: AtomicU32 = AtomicU32::new(0);
 static SHELL_ICON_SHUTDOWN_ACK: AtomicU32 = AtomicU32::new(0);
@@ -613,6 +619,8 @@ struct ShellBridge {
     taskbar_thread: u32,
     start_button_locator: StartButtonLocator,
     start_rect: RECT,
+    search_button_locator: SearchButtonLocator,
+    search_rect: Option<RECT>,
     last_rect_refresh: Option<Instant>,
     library_path: PathBuf,
 }
@@ -738,6 +746,8 @@ impl ShellBridge {
                     return Err(error);
                 }
             };
+        let (search_button_locator, search_rect) =
+            SearchButtonLocator::new(taskbar, taskbar_process_id);
         let taskbar_mouse_hook = match SetWindowsHookExW(
             WH_MOUSE,
             Some(mouse_hook_proc),
@@ -782,6 +792,10 @@ impl ShellBridge {
             return Err("Explorer did not accept the Start-button rectangle".to_string());
         }
 
+        SHELL_SEARCH_RECT_ACK.store(0, Ordering::Release);
+        let _ = post_search_button_rect(taskbar_thread, bridge_message, search_rect);
+        let _ = wait_for_ack(&SHELL_SEARCH_RECT_ACK, Duration::from_millis(250));
+
         if !release_win_hotkey {
             #[cfg(debug_assertions)]
             eprintln!("[win-key] Explorer Start-command bridge active (Progman thread {progman_thread}, taskbar thread {taskbar_thread})");
@@ -794,6 +808,8 @@ impl ShellBridge {
                 taskbar_thread,
                 start_button_locator,
                 start_rect,
+                search_button_locator,
+                search_rect,
                 last_rect_refresh: None,
                 library_path,
             });
@@ -904,6 +920,8 @@ impl ShellBridge {
             taskbar_thread,
             start_button_locator,
             start_rect,
+            search_button_locator,
+            search_rect,
             last_rect_refresh: None,
             library_path,
         })
@@ -911,6 +929,11 @@ impl ShellBridge {
 
     fn start_rect(&self) -> Option<RECT> {
         valid_rect(self.start_rect).then_some(self.start_rect)
+    }
+
+    #[allow(dead_code)]
+    fn search_rect(&self) -> Option<RECT> {
+        self.search_rect.filter(|r| valid_rect(*r))
     }
 
     fn refresh_start_rect(&mut self) {
@@ -924,17 +947,29 @@ impl ShellBridge {
             return;
         }
         self.last_rect_refresh = Some(now);
-        let Some(rect) = self.start_button_locator.rect() else {
-            return;
-        };
-        if same_rect(rect, self.start_rect) {
-            return;
-        }
+
         let Ok(message) = shell_bridge_message() else {
             return;
         };
-        if post_start_button_rect(self.taskbar_thread, message, rect).is_ok() {
-            self.start_rect = rect;
+
+        if let Some(rect) = self.start_button_locator.rect() {
+            if !same_rect(rect, self.start_rect) {
+                if post_start_button_rect(self.taskbar_thread, message, rect).is_ok() {
+                    self.start_rect = rect;
+                }
+            }
+        }
+
+        let search_rect = self.search_button_locator.rect();
+        let search_changed = match (search_rect, self.search_rect) {
+            (Some(new_r), Some(old_r)) => !same_rect(new_r, old_r),
+            (None, None) => false,
+            _ => true,
+        };
+        if search_changed {
+            if post_search_button_rect(self.taskbar_thread, message, search_rect).is_ok() {
+                self.search_rect = search_rect;
+            }
         }
     }
 }
@@ -1023,6 +1058,9 @@ unsafe fn child_start_button_rect(taskbar: HWND) -> Option<RECT> {
 }
 
 unsafe extern "system" fn find_start_button_child(window: HWND, detail: LPARAM) -> BOOL {
+    if !IsWindowVisible(window).as_bool() {
+        return BOOL(1);
+    }
     let mut class_name = [0u16; 64];
     let length = GetClassNameW(window, &mut class_name);
     let class_name = &class_name[..length.max(0) as usize];
@@ -1077,6 +1115,183 @@ fn post_start_button_rect(thread: u32, message: u32, rect: RECT) -> Result<(), S
         }
     }
     Ok(())
+}
+
+fn post_search_button_rect(thread: u32, message: u32, rect: Option<RECT>) -> Result<(), String> {
+    let rect = rect.unwrap_or_default();
+    for (control, coordinate) in [
+        (SHELL_CONTROL_SEARCH_RECT_LEFT, rect.left),
+        (SHELL_CONTROL_SEARCH_RECT_TOP, rect.top),
+        (SHELL_CONTROL_SEARCH_RECT_RIGHT, rect.right),
+        (SHELL_CONTROL_SEARCH_RECT_BOTTOM, rect.bottom),
+    ] {
+        unsafe {
+            PostThreadMessageW(
+                thread,
+                message,
+                WPARAM(control),
+                LPARAM(coordinate as isize),
+            )
+            .map_err(|error| format!("configure Explorer Search-button rectangle: {error}"))?;
+        }
+    }
+    Ok(())
+}
+
+struct SearchButtonLocator {
+    taskbar: HWND,
+    automation: Option<AutomationSearchButton>,
+}
+
+struct AutomationSearchButton {
+    taskbar: IUIAutomationElement,
+    condition: IUIAutomationCondition,
+    cached: Option<IUIAutomationElement>,
+}
+
+impl SearchButtonLocator {
+    fn new(taskbar: HWND, process_id: u32) -> (Self, Option<RECT>) {
+        let automation = unsafe { create_automation_search_button(taskbar, process_id).ok() };
+        let mut locator = Self {
+            taskbar,
+            automation,
+        };
+        let rect = locator.rect();
+        (locator, rect)
+    }
+
+    fn rect(&mut self) -> Option<RECT> {
+        if let Some(automation) = self.automation.as_mut() {
+            let rect = if let Some(search) = automation.cached.as_ref() {
+                let rect = unsafe { search.CurrentBoundingRectangle() };
+                if let Ok(rect) = rect {
+                    if valid_rect(rect) {
+                        return Some(rect);
+                    }
+                }
+                // The element went stale (Explorer restarted). Re-resolve it.
+                automation.cached = None;
+                None
+            } else {
+                None
+            };
+            let rect = rect.or_else(|| unsafe {
+                automation
+                    .taskbar
+                    .FindFirst(TreeScope_Descendants, &automation.condition)
+                    .ok()
+                    .inspect(|search| automation.cached = Some(search.clone()))
+                    .and_then(|search| search.CurrentBoundingRectangle().ok())
+            });
+            if let Some(rect) = rect {
+                if valid_rect(rect) {
+                    return Some(rect);
+                }
+            }
+        }
+        unsafe { child_search_button_rect(self.taskbar) }
+    }
+}
+
+unsafe fn create_automation_search_button(
+    taskbar_window: HWND,
+    taskbar_process_id: u32,
+) -> Result<AutomationSearchButton, String> {
+    let uia: IUIAutomation = CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER)
+        .map_err(|error| format!("create UI Automation client: {error}"))?;
+    let taskbar = uia
+        .ElementFromHandle(taskbar_window)
+        .map_err(|error| format!("resolve Explorer taskbar automation root: {error}"))?;
+    let id_search_button: VARIANT = "SearchButton".into();
+    let cond_search_button = uia
+        .CreatePropertyCondition(UIA_AutomationIdPropertyId, &id_search_button)
+        .map_err(|error| format!("match SearchButton AutomationId: {error}"))?;
+    let id_search_box: VARIANT = "SearchBox".into();
+    let cond_search_box = uia
+        .CreatePropertyCondition(UIA_AutomationIdPropertyId, &id_search_box)
+        .map_err(|error| format!("match SearchBox AutomationId: {error}"))?;
+    let id_search_box_button: VARIANT = "SearchBoxButton".into();
+    let cond_search_box_button = uia
+        .CreatePropertyCondition(UIA_AutomationIdPropertyId, &id_search_box_button)
+        .map_err(|error| format!("match SearchBoxButton AutomationId: {error}"))?;
+    let id_search: VARIANT = "Search".into();
+    let cond_search = uia
+        .CreatePropertyCondition(UIA_AutomationIdPropertyId, &id_search)
+        .map_err(|error| format!("match Search AutomationId: {error}"))?;
+    let id_search_flyout: VARIANT = "SearchButtonFlyout".into();
+    let cond_search_flyout = uia
+        .CreatePropertyCondition(UIA_AutomationIdPropertyId, &id_search_flyout)
+        .map_err(|error| format!("match SearchButtonFlyout AutomationId: {error}"))?;
+    let id_taskbar_search: VARIANT = "TaskbarSearchButton".into();
+    let cond_taskbar_search = uia
+        .CreatePropertyCondition(UIA_AutomationIdPropertyId, &id_taskbar_search)
+        .map_err(|error| format!("match TaskbarSearchButton AutomationId: {error}"))?;
+
+    let id_or1 = uia
+        .CreateOrCondition(&cond_search_button, &cond_search_box)
+        .map_err(|error| format!("combine SearchButton or SearchBox: {error}"))?;
+    let id_or2 = uia
+        .CreateOrCondition(&id_or1, &cond_search_box_button)
+        .map_err(|error| format!("combine Search conditions: {error}"))?;
+    let id_or3 = uia
+        .CreateOrCondition(&id_or2, &cond_search)
+        .map_err(|error| format!("combine Search conditions: {error}"))?;
+    let id_or4 = uia
+        .CreateOrCondition(&id_or3, &cond_search_flyout)
+        .map_err(|error| format!("combine Search conditions: {error}"))?;
+    let id_condition = uia
+        .CreateOrCondition(&id_or4, &cond_taskbar_search)
+        .map_err(|error| format!("combine Search conditions: {error}"))?;
+
+    let process_id: VARIANT = (taskbar_process_id as i32).into();
+    let process_condition = uia
+        .CreatePropertyCondition(UIA_ProcessIdPropertyId, &process_id)
+        .map_err(|error| format!("match Explorer process: {error}"))?;
+    let condition = uia
+        .CreateAndCondition(&id_condition, &process_condition)
+        .map_err(|error| format!("combine SearchButton identity conditions: {error}"))?;
+    Ok(AutomationSearchButton {
+        taskbar,
+        condition,
+        cached: None,
+    })
+}
+
+unsafe fn child_search_button_rect(taskbar: HWND) -> Option<RECT> {
+    let mut rect = None;
+    let _ = EnumChildWindows(
+        Some(taskbar),
+        Some(find_search_button_child),
+        LPARAM((&mut rect as *mut Option<RECT>) as isize),
+    );
+    rect
+}
+
+unsafe extern "system" fn find_search_button_child(window: HWND, detail: LPARAM) -> BOOL {
+    if !IsWindowVisible(window).as_bool() {
+        return BOOL(1);
+    }
+    let mut class_name = [0u16; 64];
+    let length = GetClassNameW(window, &mut class_name);
+    let class_name = &class_name[..length.max(0) as usize];
+    if is_search_button_class(class_name) {
+        let mut rect = RECT::default();
+        if GetWindowRect(window, &mut rect).is_ok() && valid_rect(rect) {
+            *(detail.0 as *mut Option<RECT>) = Some(rect);
+            return BOOL(0);
+        }
+    }
+    BOOL(1)
+}
+
+fn is_search_button_class(class_name: &[u16]) -> bool {
+    ascii_class_eq(class_name, "TraySearch")
+        || ascii_class_eq(class_name, "TraySearchBox")
+        || ascii_class_eq(class_name, "TraySearchButton")
+        || ascii_class_eq(class_name, "SearchButton")
+        || ascii_class_eq(class_name, "SearchBox")
+        || ascii_class_eq(class_name, "UniversalSearchBand")
+        || ascii_class_eq(class_name, "SearchControl")
 }
 
 impl Drop for ShellBridge {
@@ -1324,6 +1539,9 @@ unsafe extern "system" fn raw_input_window_proc(
             SHELL_EVENT_START_RECT_CONFIGURED => {
                 SHELL_START_RECT_ACK.store(if lparam.0 != 0 { 2 } else { 1 }, Ordering::Release);
             }
+            SHELL_EVENT_SEARCH_RECT_CONFIGURED => {
+                SHELL_SEARCH_RECT_ACK.store(if lparam.0 != 0 { 2 } else { 1 }, Ordering::Release);
+            }
             SHELL_EVENT_START_ICON_SHUTDOWN => {
                 SHELL_ICON_SHUTDOWN_ACK.store(if lparam.0 != 0 { 2 } else { 1 }, Ordering::Release);
             }
@@ -1463,6 +1681,20 @@ mod tests {
         assert!(is_start_button_class(&wide("startbutton")[..11]));
         assert!(!is_start_button_class(&wide("Button")[..6]));
         assert!(!is_start_button_class(&wide("SearchButton")[..12]));
+    }
+
+    #[test]
+    fn search_button_child_fallback_uses_class_not_caption() {
+        assert!(is_search_button_class(&wide("TraySearch")[..10]));
+        assert!(is_search_button_class(&wide("traysearchbox")[..13]));
+        assert!(is_search_button_class(&wide("TraySearchButton")[..16]));
+        assert!(is_search_button_class(&wide("SearchButton")[..12]));
+        assert!(is_search_button_class(&wide("SearchBox")[..9]));
+        assert!(is_search_button_class(&wide("UniversalSearchBand")[..19]));
+        assert!(is_search_button_class(&wide("SearchControl")[..13]));
+        assert!(!is_search_button_class(&wide("Button")[..6]));
+        assert!(!is_search_button_class(&wide("Start")[..5]));
+        assert!(!is_search_button_class(&wide("StartButton")[..11]));
     }
 
     #[test]
