@@ -6,10 +6,14 @@ use super::db::Database;
 use super::types::{CandidateEntry, FileEntry, FileSearchResponse, VolumeCoverage};
 
 const DEFAULT_LIMIT: usize = 10;
-const MAX_LIMIT: usize = 20;
+const MAX_LIMIT: usize = 50;
 
 pub(crate) fn clamp_limit(limit: Option<usize>) -> usize {
     limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT)
+}
+
+fn path_depth(path: &str) -> usize {
+    path.chars().filter(|&c| c == '\\' || c == '/').count()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -91,9 +95,11 @@ pub fn search(
     scored.sort_by(|(score_a, item_a), (score_b, item_b)| {
         score_b
             .cmp(score_a)
-            .then_with(|| score_a.cmp(score_b))
             .then_with(|| item_a.lower_name.len().cmp(&item_b.lower_name.len()))
             .then_with(|| item_a.lower_name.cmp(&item_b.lower_name))
+            .then_with(|| path_depth(&item_a.display_path).cmp(&path_depth(&item_b.display_path)))
+            .then_with(|| item_a.display_path.len().cmp(&item_b.display_path.len()))
+            .then_with(|| item_a.display_path.to_lowercase().cmp(&item_b.display_path.to_lowercase()))
     });
 
     // Verify disk existence only for the items we are about to return. A row

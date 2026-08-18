@@ -155,8 +155,151 @@ mod tests {
         let res5 = search("report", Some(5), &db, &gen, &[], 30, false, true);
         assert_eq!(res5.items.len(), 5);
 
-        let res20 = search("report", Some(200), &db, &gen, &[], 30, false, true);
-        assert_eq!(res20.items.len(), 20);
+        let res30 = search("report", Some(200), &db, &gen, &[], 30, false, true);
+        assert_eq!(res30.items.len(), 30);
+
+        let _ = std::fs::remove_dir_all(temp_dir);
+    }
+
+    #[test]
+    fn secondary_drive_exact_match_ranks_before_deep_primary_drive_file() {
+        let deep_c = CandidateEntry {
+            id: 1,
+            display_path: r"C:\Users\hi\Desktop\Work\issueagent\agents.md".into(),
+            lower_name: "agents.md".into(),
+            is_directory: false,
+            extension: Some("md".into()),
+        };
+        let root_d = CandidateEntry {
+            id: 2,
+            display_path: r"D:\agents.md".into(),
+            lower_name: "agents.md".into(),
+            is_directory: false,
+            extension: Some("md".into()),
+        };
+        let sub_d = CandidateEntry {
+            id: 3,
+            display_path: r"D:\Work\agents.md".into(),
+            lower_name: "agents.md".into(),
+            is_directory: false,
+            extension: Some("md".into()),
+        };
+
+        let tokens = ["agents.md"];
+        let query = "agents.md";
+        let score_c = entry_score(&deep_c, &tokens, query).unwrap();
+        let score_root_d = entry_score(&root_d, &tokens, query).unwrap();
+        let score_sub_d = entry_score(&sub_d, &tokens, query).unwrap();
+        assert_eq!(score_c, score_root_d);
+        assert_eq!(score_c, score_sub_d);
+
+        let (db, temp_dir) = test_db();
+        let file_c = temp_dir.join("c_deep").join("agents.md");
+        let file_root_d = temp_dir.join("d_root.md");
+        let file_sub_d = temp_dir.join("d_sub").join("agents.md");
+        std::fs::create_dir_all(file_c.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(file_sub_d.parent().unwrap()).unwrap();
+        std::fs::write(&file_c, "content").unwrap();
+        std::fs::write(&file_root_d, "content").unwrap();
+        std::fs::write(&file_sub_d, "content").unwrap();
+
+        let items_c = [ScannedItem {
+            normalized_path: file_c.to_string_lossy().to_lowercase(),
+            display_path: file_c.to_string_lossy().into_owned(),
+            name: "agents.md".into(),
+            lower_name: "agents.md".into(),
+            parent: file_c.parent().unwrap().to_string_lossy().into_owned(),
+            is_directory: false,
+            extension: Some("md".into()),
+            modified_at: 0,
+            size: 7,
+        }];
+        let items_d = [
+            ScannedItem {
+                normalized_path: file_root_d.to_string_lossy().to_lowercase(),
+                display_path: file_root_d.to_string_lossy().into_owned(),
+                name: "agents.md".into(),
+                lower_name: "agents.md".into(),
+                parent: temp_dir.to_string_lossy().into_owned(),
+                is_directory: false,
+                extension: Some("md".into()),
+                modified_at: 0,
+                size: 7,
+            },
+            ScannedItem {
+                normalized_path: file_sub_d.to_string_lossy().to_lowercase(),
+                display_path: file_sub_d.to_string_lossy().into_owned(),
+                name: "agents.md".into(),
+                lower_name: "agents.md".into(),
+                parent: file_sub_d.parent().unwrap().to_string_lossy().into_owned(),
+                is_directory: false,
+                extension: Some("md".into()),
+                modified_at: 0,
+                size: 7,
+            },
+        ];
+
+        db.insert_batch("vol_c", 1, &items_c).unwrap();
+        db.insert_batch("vol_d", 1, &items_d).unwrap();
+
+        let gen = AtomicU64::new(0);
+        let res = search("agents.md", Some(10), &db, &gen, &[], 3, false, true);
+        assert_eq!(res.items.len(), 3);
+        // Shallower depth (root_d) must rank before deeper files
+        assert_eq!(res.items[0].path, file_root_d.to_string_lossy().into_owned());
+
+        let _ = std::fs::remove_dir_all(temp_dir);
+    }
+
+    #[test]
+    fn all_files_with_same_name_across_multiple_drives_are_returned() {
+        let (db, temp_dir) = test_db();
+        let mut items_c = Vec::new();
+        let mut items_d = Vec::new();
+
+        for i in 0..25 {
+            let path_c = temp_dir.join("c").join(format!("dir_{i}")).join("agents.md");
+            std::fs::create_dir_all(path_c.parent().unwrap()).unwrap();
+            std::fs::write(&path_c, "content").unwrap();
+            items_c.push(ScannedItem {
+                normalized_path: path_c.to_string_lossy().to_lowercase(),
+                display_path: path_c.to_string_lossy().into_owned(),
+                name: "agents.md".into(),
+                lower_name: "agents.md".into(),
+                parent: path_c.parent().unwrap().to_string_lossy().into_owned(),
+                is_directory: false,
+                extension: Some("md".into()),
+                modified_at: 0,
+                size: 7,
+            });
+        }
+
+        for i in 0..10 {
+            let path_d = temp_dir.join("d").join(format!("dir_{i}")).join("agents.md");
+            std::fs::create_dir_all(path_d.parent().unwrap()).unwrap();
+            std::fs::write(&path_d, "content").unwrap();
+            items_d.push(ScannedItem {
+                normalized_path: path_d.to_string_lossy().to_lowercase(),
+                display_path: path_d.to_string_lossy().into_owned(),
+                name: "agents.md".into(),
+                lower_name: "agents.md".into(),
+                parent: path_d.parent().unwrap().to_string_lossy().into_owned(),
+                is_directory: false,
+                extension: Some("md".into()),
+                modified_at: 0,
+                size: 7,
+            });
+        }
+
+        db.insert_batch("vol_c", 1, &items_c).unwrap();
+        db.insert_batch("vol_d", 1, &items_d).unwrap();
+
+        let candidates = db.search_candidates("agents.md", 100).unwrap();
+        assert_eq!(candidates.len(), 35);
+
+        let gen = AtomicU64::new(0);
+        let res = search("agents.md", Some(50), &db, &gen, &[], 35, false, true);
+        assert_eq!(res.items.len(), 35);
 
         let _ = std::fs::remove_dir_all(temp_dir);
     }
@@ -236,7 +379,7 @@ mod tests {
         let path = base.to_string_lossy().into_owned();
         assert_eq!(index.search(&path, Some(0)).items.len(), 1);
         assert_eq!(index.search(&path, None).items.len(), 10);
-        assert_eq!(index.search(&path, Some(usize::MAX)).items.len(), 20);
+        assert_eq!(index.search(&path, Some(usize::MAX)).items.len(), 30);
 
         let _ = std::fs::remove_dir_all(base);
     }
