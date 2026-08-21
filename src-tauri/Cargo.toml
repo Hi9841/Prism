@@ -31,6 +31,7 @@ webview2-com = "0.38"
 windows = { version = "0.61", features = [
   "Win32_Devices_HumanInterfaceDevice",
   "Win32_Foundation",
+  "Win32_Graphics_Dwm",
   "Win32_Graphics_Gdi",
   "Win32_Storage_EnhancedStorage",
   "Win32_Storage_FileSystem",
