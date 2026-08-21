@@ -22,6 +22,9 @@ use tauri::{
 };
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
 use windows::Win32::Foundation::{HWND, POINT, RECT};
+use windows::Win32::Graphics::Dwm::{
+    DwmSetWindowAttribute, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND,
+};
 use windows::Win32::Graphics::Gdi::{
     GetMonitorInfoW, MonitorFromPoint, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST,
 };
@@ -770,27 +773,61 @@ fn apply_window_look(
     };
     let attempt = |effect: Effect| window.set_effects(build(effect)).is_ok();
 
-    // Fall back down the material ladder when a blur type is unsupported.
-    match effect {
-        "acrylic" => {
-            if attempt(Effect::Acrylic) || attempt(mica) || attempt(Effect::Blur) {
-                Ok(())
-            } else {
-                window.set_effects(None).map_err(|e| e.to_string())
-            }
+    apply_window_look_with(
+        effect,
+        mica,
+        attempt,
+        || window.set_effects(None).map_err(|error| error.to_string()),
+        || schedule_rounded_window_corners(window),
+    )
+}
+
+fn apply_window_look_with(
+    effect: &str,
+    mica: Effect,
+    mut attempt: impl FnMut(Effect) -> bool,
+    mut clear: impl FnMut() -> Result<(), String>,
+    mut round_corners: impl FnMut(),
+) -> Result<(), String> {
+    let applied = match effect {
+        "acrylic" => attempt(Effect::Acrylic) || attempt(mica) || attempt(Effect::Blur),
+        "mica" => attempt(mica) || attempt(Effect::Acrylic) || attempt(Effect::Blur),
+        "solid" => {
+            clear()?;
+            true
         }
-        "mica" => {
-            if attempt(mica) || attempt(Effect::Acrylic) || attempt(Effect::Blur) {
-                Ok(())
-            } else {
-                window.set_effects(None).map_err(|e| e.to_string())
-            }
-        }
-        // `EffectsBuilder::clear_effects()` only empties a new config. Tauri
-        // interprets `None` as the instruction to remove the active native
-        // material from the HWND.
-        "solid" => window.set_effects(None).map_err(|e| e.to_string()),
-        _ => Err(format!("unknown effect '{effect}'")),
+        _ => return Err(format!("unknown effect '{effect}'")),
+    };
+
+    if !applied {
+        clear()?;
+    }
+    round_corners();
+    Ok(())
+}
+
+fn schedule_rounded_window_corners(window: &tauri::WebviewWindow) {
+    let window = window.clone();
+    let _ = window.clone().run_on_main_thread(move || {
+        set_rounded_window_corners(&window);
+    });
+}
+
+fn set_rounded_window_corners(window: &tauri::WebviewWindow) {
+    let Ok(hwnd) = window.hwnd() else {
+        return;
+    };
+    let preference = DWMWCP_ROUND;
+    // Clearing the native backdrop leaves this borderless HWND without DWM
+    // rounding. Run after Tauri's queued effect change so the window shape
+    // stays independent of material. Ignore the hint when unsupported.
+    unsafe {
+        let _ = DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_WINDOW_CORNER_PREFERENCE,
+            std::ptr::from_ref(&preference).cast(),
+            std::mem::size_of_val(&preference) as u32,
+        );
     }
 }
 
@@ -1627,6 +1664,59 @@ async fn quit_app(app: tauri::AppHandle) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_window_material_reasserts_rounded_corners() {
+        for effect in ["acrylic", "mica", "solid"] {
+            let rounded = std::cell::Cell::new(false);
+            apply_window_look_with(
+                effect,
+                Effect::MicaDark,
+                |_| true,
+                || Ok(()),
+                || rounded.set(true),
+            )
+            .unwrap();
+            assert!(rounded.get(), "{effect} should restore rounded corners");
+        }
+
+        let cleared = std::cell::Cell::new(false);
+        let rounded = std::cell::Cell::new(false);
+        apply_window_look_with(
+            "acrylic",
+            Effect::MicaDark,
+            |_| false,
+            || {
+                cleared.set(true);
+                Ok(())
+            },
+            || rounded.set(true),
+        )
+        .unwrap();
+        assert!(cleared.get());
+        assert!(rounded.get());
+
+        let attempts = std::cell::Cell::new(0);
+        let clears = std::cell::Cell::new(0);
+        let rounded = std::cell::Cell::new(false);
+        assert!(apply_window_look_with(
+            "hologram",
+            Effect::MicaDark,
+            |_| {
+                attempts.set(attempts.get() + 1);
+                true
+            },
+            || {
+                clears.set(clears.get() + 1);
+                Ok(())
+            },
+            || rounded.set(true),
+        )
+        .is_err());
+        assert_eq!(attempts.get(), 0);
+        assert_eq!(clears.get(), 0);
+        assert!(!rounded.get());
+    }
 
     #[test]
     fn allowed_shortcuts_parse_and_disallowed_are_rejected() {
