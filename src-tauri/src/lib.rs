@@ -23,7 +23,8 @@ use tauri::{
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
 use windows::Win32::Foundation::{HWND, POINT, RECT};
 use windows::Win32::Graphics::Dwm::{
-    DwmSetWindowAttribute, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND,
+    DwmSetWindowAttribute, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_DONOTROUND,
+    DWM_WINDOW_CORNER_PREFERENCE,
 };
 use windows::Win32::Graphics::Gdi::{
     GetMonitorInfoW, MonitorFromPoint, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST,
@@ -778,7 +779,7 @@ fn apply_window_look(
         mica,
         attempt,
         || window.set_effects(None).map_err(|error| error.to_string()),
-        || schedule_rounded_window_corners(window),
+        || schedule_square_window_corners(window),
     )
 }
 
@@ -787,7 +788,7 @@ fn apply_window_look_with(
     mica: Effect,
     mut attempt: impl FnMut(Effect) -> bool,
     mut clear: impl FnMut() -> Result<(), String>,
-    mut round_corners: impl FnMut(),
+    mut square_corners: impl FnMut(),
 ) -> Result<(), String> {
     let applied = match effect {
         "acrylic" => attempt(Effect::Acrylic) || attempt(mica) || attempt(Effect::Blur),
@@ -802,25 +803,29 @@ fn apply_window_look_with(
     if !applied {
         clear()?;
     }
-    round_corners();
+    square_corners();
     Ok(())
 }
 
-fn schedule_rounded_window_corners(window: &tauri::WebviewWindow) {
+fn schedule_square_window_corners(window: &tauri::WebviewWindow) {
     let window = window.clone();
     let _ = window.clone().run_on_main_thread(move || {
-        set_rounded_window_corners(&window);
+        set_square_window_corners(&window);
     });
 }
 
-fn set_rounded_window_corners(window: &tauri::WebviewWindow) {
+fn window_corner_preference() -> DWM_WINDOW_CORNER_PREFERENCE {
+    DWMWCP_DONOTROUND
+}
+
+fn set_square_window_corners(window: &tauri::WebviewWindow) {
     let Ok(hwnd) = window.hwnd() else {
         return;
     };
-    let preference = DWMWCP_ROUND;
-    // Clearing the native backdrop leaves this borderless HWND without DWM
-    // rounding. Run after Tauri's queued effect change so the window shape
-    // stays independent of material. Ignore the hint when unsupported.
+    let preference = window_corner_preference();
+    // Backdrop changes can restore DWM's default rounding. Run after Tauri's
+    // queued effect change so every material keeps the old Solid window shape.
+    // Ignore the hint when unsupported.
     unsafe {
         let _ = DwmSetWindowAttribute(
             hwnd,
@@ -1666,56 +1671,75 @@ mod tests {
     use super::*;
 
     #[test]
-    fn every_window_material_reasserts_rounded_corners() {
+    fn window_corner_preference_matches_old_solid_shape() {
+        assert_eq!(
+            window_corner_preference(),
+            windows::Win32::Graphics::Dwm::DWMWCP_DONOTROUND
+        );
+    }
+
+    #[test]
+    fn every_window_material_reasserts_square_corners() {
         for effect in ["acrylic", "mica", "solid"] {
-            let rounded = std::cell::Cell::new(false);
+            let events = std::cell::RefCell::new(Vec::new());
             apply_window_look_with(
                 effect,
                 Effect::MicaDark,
-                |_| true,
-                || Ok(()),
-                || rounded.set(true),
+                |_| {
+                    events.borrow_mut().push("attempt");
+                    true
+                },
+                || {
+                    events.borrow_mut().push("clear");
+                    Ok(())
+                },
+                || events.borrow_mut().push("square"),
             )
             .unwrap();
-            assert!(rounded.get(), "{effect} should restore rounded corners");
+            let expected = if effect == "solid" {
+                vec!["clear", "square"]
+            } else {
+                vec!["attempt", "square"]
+            };
+            assert_eq!(*events.borrow(), expected, "{effect} callback order");
         }
 
-        let cleared = std::cell::Cell::new(false);
-        let rounded = std::cell::Cell::new(false);
+        let events = std::cell::RefCell::new(Vec::new());
         apply_window_look_with(
             "acrylic",
             Effect::MicaDark,
-            |_| false,
+            |_| {
+                events.borrow_mut().push("attempt");
+                false
+            },
             || {
-                cleared.set(true);
+                events.borrow_mut().push("clear");
                 Ok(())
             },
-            || rounded.set(true),
+            || events.borrow_mut().push("square"),
         )
         .unwrap();
-        assert!(cleared.get());
-        assert!(rounded.get());
+        assert_eq!(
+            *events.borrow(),
+            ["attempt", "attempt", "attempt", "clear", "square"]
+        );
 
-        let attempts = std::cell::Cell::new(0);
-        let clears = std::cell::Cell::new(0);
-        let rounded = std::cell::Cell::new(false);
+        let events = std::cell::RefCell::new(Vec::new());
         assert!(apply_window_look_with(
             "hologram",
             Effect::MicaDark,
             |_| {
-                attempts.set(attempts.get() + 1);
+                events.borrow_mut().push("attempt");
                 true
             },
             || {
-                clears.set(clears.get() + 1);
+                events.borrow_mut().push("clear");
                 Ok(())
             },
-            || rounded.set(true),
+            || events.borrow_mut().push("square"),
         )
         .is_err());
-        assert_eq!(attempts.get(), 0);
-        assert_eq!(clears.get(), 0);
-        assert!(!rounded.get());
+        assert!(events.borrow().is_empty());
     }
 
     #[test]
