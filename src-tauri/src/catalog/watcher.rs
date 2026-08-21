@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::ffi::OsString;
 use std::os::windows::ffi::OsStringExt;
 use std::os::windows::io::AsRawHandle;
@@ -11,12 +12,10 @@ use std::time::UNIX_EPOCH;
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::{CloseHandle, HANDLE};
 use windows::Win32::Storage::FileSystem::{
-    CreateFileW, ReadDirectoryChangesW, FILE_ACTION_ADDED, FILE_ACTION_MODIFIED,
-    FILE_ACTION_REMOVED, FILE_ACTION_RENAMED_NEW_NAME, FILE_ACTION_RENAMED_OLD_NAME,
-    FILE_FLAG_BACKUP_SEMANTICS, FILE_LIST_DIRECTORY, FILE_NOTIFY_CHANGE_CREATION,
-    FILE_NOTIFY_CHANGE_DIR_NAME, FILE_NOTIFY_CHANGE_FILE_NAME, FILE_NOTIFY_CHANGE_LAST_WRITE,
-    FILE_NOTIFY_CHANGE_SIZE, FILE_NOTIFY_INFORMATION, FILE_SHARE_DELETE, FILE_SHARE_READ,
-    FILE_SHARE_WRITE, OPEN_EXISTING,
+    CreateFileW, ReadDirectoryChangesW, FILE_ACTION_ADDED, FILE_ACTION_REMOVED,
+    FILE_ACTION_RENAMED_NEW_NAME, FILE_ACTION_RENAMED_OLD_NAME, FILE_FLAG_BACKUP_SEMANTICS,
+    FILE_LIST_DIRECTORY, FILE_NOTIFY_CHANGE_DIR_NAME, FILE_NOTIFY_CHANGE_FILE_NAME,
+    FILE_NOTIFY_INFORMATION, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
 };
 use windows::Win32::System::IO::CancelSynchronousIo;
 
@@ -43,7 +42,6 @@ const READ_ERROR_BACKOFF: Duration = Duration::from_millis(250);
 pub enum WatcherEvent {
     Added(PathBuf),
     Removed(PathBuf),
-    Modified(PathBuf),
     Renamed { from: PathBuf, to: PathBuf },
     Overflow,
 }
@@ -212,11 +210,10 @@ fn run_reader_loop(
     };
 
     let mut buffer = vec![0u8; BUFFER_SIZE];
-    let notify_filter = FILE_NOTIFY_CHANGE_FILE_NAME
-        | FILE_NOTIFY_CHANGE_DIR_NAME
-        | FILE_NOTIFY_CHANGE_LAST_WRITE
-        | FILE_NOTIFY_CHANGE_CREATION
-        | FILE_NOTIFY_CHANGE_SIZE;
+    // Search membership changes only when a path is added, removed, or
+    // renamed. Content, timestamp, and size writes do not affect filename
+    // search and are far too noisy to mirror into the catalog.
+    let notify_filter = FILE_NOTIFY_CHANGE_FILE_NAME | FILE_NOTIFY_CHANGE_DIR_NAME;
 
     let app_data_normalized = app_data_dir.to_string_lossy().to_lowercase();
     let mut pending_rename_old: Option<PathBuf> = None;
@@ -284,9 +281,7 @@ fn run_reader_loop(
                 && !is_unsearchable_top_level(&relative_name)
             {
                 let event = match info.Action {
-                    FILE_ACTION_ADDED | FILE_ACTION_MODIFIED => {
-                        Some(WatcherEvent::Modified(target_path))
-                    }
+                    FILE_ACTION_ADDED => Some(WatcherEvent::Added(target_path)),
                     FILE_ACTION_REMOVED => Some(WatcherEvent::Removed(target_path)),
                     FILE_ACTION_RENAMED_OLD_NAME => {
                         pending_rename_old = Some(target_path);
@@ -333,24 +328,20 @@ fn apply_queued_events(
 
     let mut overflow = false;
     let mut renames: Vec<(PathBuf, PathBuf)> = Vec::new();
-    let mut touched: Vec<PathBuf> = Vec::new();
-    let mut removed: Vec<PathBuf> = Vec::new();
+    let mut touched: HashSet<PathBuf> = HashSet::new();
+    let mut removed: HashSet<PathBuf> = HashSet::new();
 
     for event in events {
         match event {
             WatcherEvent::Overflow => overflow = true,
             WatcherEvent::Renamed { from, to } => renames.push((from, to)),
             WatcherEvent::Removed(path) => {
-                touched.retain(|t| t != &path);
-                if !removed.contains(&path) {
-                    removed.push(path);
-                }
+                touched.remove(&path);
+                removed.insert(path);
             }
-            WatcherEvent::Added(path) | WatcherEvent::Modified(path) => {
-                removed.retain(|r| r != &path);
-                if !touched.contains(&path) {
-                    touched.push(path);
-                }
+            WatcherEvent::Added(path) => {
+                removed.remove(&path);
+                touched.insert(path);
             }
         }
     }
@@ -466,6 +457,8 @@ fn inspect_single_path(path: &Path) -> Option<ScannedItem> {
 mod tests {
     use super::*;
     use crate::catalog::db::Database;
+    use std::fs::OpenOptions;
+    use std::io::Write;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn temp_db(name: &str) -> (Database, PathBuf) {
@@ -490,8 +483,8 @@ mod tests {
         let queue = Mutex::new(Vec::new());
         {
             let mut q = queue.lock().unwrap();
-            q.push(WatcherEvent::Modified(dir.join("kept.txt")));
-            q.push(WatcherEvent::Modified(dir.join("kept.txt")));
+            q.push(WatcherEvent::Added(dir.join("kept.txt")));
+            q.push(WatcherEvent::Added(dir.join("kept.txt")));
             // Remove-then-add of the same path folds to a live upsert.
             q.push(WatcherEvent::Removed(dir.join("gone.txt")));
             q.push(WatcherEvent::Added(dir.join("gone.txt")));
@@ -519,5 +512,94 @@ mod tests {
     fn canonical_root_change_requires_watcher_replacement() {
         assert!(!watcher_root_changed(Path::new(r"D:\"), Path::new(r"d:\")));
         assert!(watcher_root_changed(Path::new(r"D:\"), Path::new(r"E:\")));
+    }
+
+    fn event_targets(event: &WatcherEvent, path: &Path) -> bool {
+        match event {
+            WatcherEvent::Added(target) | WatcherEvent::Removed(target) => target == path,
+            WatcherEvent::Renamed { from, to } => from == path || to == path,
+            WatcherEvent::Overflow => false,
+        }
+    }
+
+    fn wait_for_event(watcher: &VolumeWatcher, path: &Path) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while std::time::Instant::now() < deadline {
+            if watcher
+                .event_queue
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|event| event_targets(event, path))
+            {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        panic!("watcher did not report {}", path.display());
+    }
+
+    fn establish_watcher_ready(watcher: &VolumeWatcher, dir: &Path) {
+        for attempt in 0..20 {
+            let marker = dir.join(format!("ready-{attempt}.txt"));
+            std::fs::write(&marker, "ready").unwrap();
+            let deadline = std::time::Instant::now() + Duration::from_millis(100);
+            while std::time::Instant::now() < deadline {
+                if watcher
+                    .event_queue
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|event| event_targets(event, &marker))
+                {
+                    watcher.event_queue.lock().unwrap().clear();
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        }
+        panic!("watcher did not become ready");
+    }
+
+    #[test]
+    fn content_writes_do_not_enqueue_catalog_updates() {
+        let (db, dir) = temp_db("content-write");
+        let existing = dir.join("existing.txt");
+        std::fs::write(&existing, "before").unwrap();
+
+        let watcher = VolumeWatcher::start(
+            dir.clone(),
+            "vol1".into(),
+            Arc::new(db),
+            dir.join("prism-data"),
+            IndexCounts::default(),
+            r"C:\".into(),
+            Arc::new(|_| {}),
+        )
+        .expect("watcher should start");
+
+        // Establish that ReadDirectoryChangesW is waiting before changing the
+        // existing file, then use a second name event as an ordering barrier.
+        establish_watcher_ready(&watcher, &dir);
+
+        OpenOptions::new()
+            .append(true)
+            .open(&existing)
+            .unwrap()
+            .write_all(b" after")
+            .unwrap();
+        let barrier = dir.join("barrier.txt");
+        std::fs::write(&barrier, "barrier").unwrap();
+        wait_for_event(&watcher, &barrier);
+
+        let events = watcher.event_queue.lock().unwrap();
+        assert!(
+            !events.iter().any(|event| event_targets(event, &existing)),
+            "content-only writes do not change a filename index"
+        );
+        drop(events);
+
+        watcher.stop();
+        let _ = std::fs::remove_dir_all(dir);
     }
 }
