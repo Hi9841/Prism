@@ -1,6 +1,6 @@
 [package]
 name = "prism"
-version = "0.9.12"
+version = "0.9.13"
 description = "Prism - a keyboard-first command palette for Windows"
 edition = "2021"
 
