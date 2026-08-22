@@ -6,7 +6,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import type { AppEntry, FileSearchResponse, PersistedState, QuickAccessEntry } from "./types";
 
-export type PowerAction = "lock" | "shutdown" | "restart";
+export type PowerAction = "lock" | "sleep" | "shutdown" | "restart";
 export type TaskbarThickness = "compact" | "default" | "adaptive";
 export type TaskbarCombineMode = "always" | "whenFull" | "never";
 export type TaskbarStartIcon = "system" | "gem" | "diamond" | "custom";
