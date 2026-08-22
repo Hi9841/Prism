@@ -20,7 +20,6 @@ import type {
   QuickAccessKind,
   Settings,
   ThemeMode,
-  WindowEffect,
   WindowWidth,
 } from "../lib/types";
 import {
@@ -312,14 +311,13 @@ export function AppProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     if (!ready) return;
     document.documentElement.dataset.accent = settings.accent;
-    document.documentElement.dataset.surface = settings.effect === "solid" ? "solid" : "glass";
     document.documentElement.dataset.theme = effectiveTheme;
-  }, [ready, settings.accent, settings.effect, effectiveTheme]);
+  }, [ready, settings.accent, effectiveTheme]);
 
   useEffect(() => {
     if (!ready) return;
-    setWindowStyle(effectiveTheme, settings.effect).catch(() => {});
-  }, [ready, settings.effect, effectiveTheme]);
+    setWindowStyle(effectiveTheme).catch(() => {});
+  }, [ready, effectiveTheme]);
 
   useEffect(() => {
     if (!ready) return;
@@ -421,7 +419,6 @@ export function sanitizeSettings(raw: unknown): Settings {
     accent: pick(src.accent, ["iris", "azure", "mint", "amber", "rose"], DEFAULT_SETTINGS.accent),
     width: pick(src.width, [560, 640, 720], DEFAULT_SETTINGS.width),
     viewZoom: pick(src.viewZoom, VIEW_ZOOM_LEVELS, DEFAULT_SETTINGS.viewZoom),
-    effect: pick(src.effect, ["acrylic", "mica", "solid"], DEFAULT_SETTINGS.effect),
     shortcut: pick(
       src.shortcut,
       SHORTCUT_OPTIONS.map((o) => o.value),
@@ -560,4 +557,4 @@ export function sanitizeHistory(raw: unknown): HistoryEntry[] {
   return history;
 }
 
-export type { AccentId, WindowEffect, WindowWidth };
+export type { AccentId, WindowWidth };

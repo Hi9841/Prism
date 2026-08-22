@@ -1,6 +1,6 @@
 [package]
 name = "prism"
-version = "0.9.15"
+version = "0.9.16"
 description = "Prism - a keyboard-first command palette for Windows"
 edition = "2021"
 
@@ -31,7 +31,6 @@ webview2-com = "0.38"
 windows = { version = "0.61", features = [
   "Win32_Devices_HumanInterfaceDevice",
   "Win32_Foundation",
-  "Win32_Graphics_Dwm",
   "Win32_Graphics_Gdi",
   "Win32_Storage_EnhancedStorage",
   "Win32_Storage_FileSystem",
