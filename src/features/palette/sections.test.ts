@@ -270,6 +270,54 @@ describe("buildSections - search layout", () => {
     expect(result.sections[1].items[0].title).toBe("Downwell");
   });
 
+  it.each([
+    ["display settings", "Display", "settings::ms-settings:display"],
+    ["bluetooth", "Bluetooth", "settings::ms-settings:bluetooth"],
+    ["windows update", "Windows Update", "settings::ms-settings:windowsupdate"],
+    ["default apps", "Default apps", "settings::ms-settings:defaultapps"],
+    ["microphone", "Microphone privacy", "settings::ms-settings:privacy-microphone"],
+  ])("maps %s to the documented Windows Settings page", (query, title, id) => {
+    const result = buildSections(sources({ query, fileIndexReady: true }));
+
+    expect(result.sections).toMatchObject([{ id: "settings", label: "Settings" }]);
+    expect(result.sections[0].items[0]).toMatchObject({ title, id });
+  });
+
+  it.each(["screen", "monitor"])("matches Display through its %s alias", (query) => {
+    const result = buildSections(sources({ query, fileIndexReady: true }));
+
+    expect(result.sections[0].items[0].title).toBe("Display");
+  });
+
+  it("ranks Settings before app and file matches in keyboard order", () => {
+    const query = "display";
+    const result = buildSections(
+      sources({
+        query,
+        apps: [app("Display Manager")],
+        fileResults: [file("display-notes.txt", "C:\\Users\\You\\display-notes.txt")],
+        fileResultQuery: query,
+        fileIndexReady: true,
+      }),
+    );
+
+    expect(ids(result.sections)).toEqual(["settings", "apps", "files"]);
+    expect(result.flatItems.map((entry) => entry.title)).toEqual([
+      "Display",
+      "Display Manager",
+      "display-notes.txt",
+    ]);
+  });
+
+  it("does not offer the copy fallback when a Settings page matches", () => {
+    const result = buildSections(
+      sources({ query: "windows update", fileIndexReady: true, fileIndexing: false }),
+    );
+
+    expect(ids(result.sections)).toEqual(["settings"]);
+    expect(result.flatItems.some((entry) => entry.id.startsWith("copy::"))).toBe(false);
+  });
+
   it("matches quick access items through keywords only", () => {
     const result = buildSections(sources({ query: "audio", quickItems: quickItems() }));
     expect(result.sections[0].items[0].title).toBe("Music");

@@ -10,6 +10,7 @@ mod taskbar_customization;
 mod taskbar_icon_overlay;
 mod theme;
 mod win_key;
+mod windows_settings;
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -230,6 +231,7 @@ pub fn run() {
             existing_paths,
             launch_app,
             launch_app_as_admin,
+            open_windows_settings,
             open_path,
             run_path_as_admin,
             present_palette,
@@ -866,6 +868,13 @@ async fn launch_app_as_admin(id: String, state: tauri::State<'_, AppState>) -> R
     tauri::async_runtime::spawn_blocking(move || apps::launch_elevated(&entry))
         .await
         .map_err(|e| format!("elevated launch task failed: {e}"))?
+}
+
+#[tauri::command]
+async fn open_windows_settings(uri: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || windows_settings::open(&uri))
+        .await
+        .map_err(|error| format!("open Windows Settings task failed: {error}"))?
 }
 
 #[tauri::command]
