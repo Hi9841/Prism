@@ -4,12 +4,9 @@ import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
-import type { AppEntry, FileSearchResponse, PersistedState, QuickAccessEntry, WindowEffect } from "./types";
+import type { AppEntry, FileSearchResponse, PersistedState, QuickAccessEntry } from "./types";
 
 export type PowerAction = "lock" | "shutdown" | "restart";
-/** What the native side actually applied: the requested material, or a
- *  fallback ("blur" is the legacy Win10 accent ladder endpoint). */
-export type AppliedWindowEffect = WindowEffect | "blur";
 export type TaskbarThickness = "compact" | "default" | "adaptive";
 export type TaskbarCombineMode = "always" | "whenFull" | "never";
 export type TaskbarSearchMode = "hidden" | "icon" | "box" | "iconWithLabel";
@@ -251,12 +248,9 @@ export function onFileIndexUpdated(cb: () => void): () => void {
   };
 }
 
-export async function setWindowStyle(
-  theme: "light" | "dark",
-  effect: WindowEffect,
-): Promise<AppliedWindowEffect> {
-  if (!inTauri) return effect;
-  return invoke<AppliedWindowEffect>("set_window_style", { theme, effect });
+export async function setWindowStyle(theme: "light" | "dark"): Promise<void> {
+  if (!inTauri) return;
+  await invoke("set_window_style", { theme });
 }
 
 export async function setWindowWidth(width: number): Promise<void> {

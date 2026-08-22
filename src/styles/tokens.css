@@ -236,39 +236,12 @@ body {
     background:
       radial-gradient(
         120% 90% at 50% -20%,
-        color-mix(in oklab, var(--accent) 7%, transparent) 0%,
-        transparent 55%
-      ),
-      var(--t-bg);
-    /* DWM owns the window material; a second CSS backdrop blur repaints the
-       full launcher during every transition without improving clarity. */
-    backdrop-filter: none;
-    box-shadow:
-      inset 0 1px 0 var(--t-shell-hi),
-      inset 0 0 0 1px rgb(255 255 255 / 0.018),
-      inset 0 -1px 0 rgb(0 0 0 / 0.18);
-  }
-
-  /* Glass surface mode (native DWM backdrop active): DWM clips backdrop
-     materials at the Windows 11 corner radius (~8px), so the shell must
-     match that native curve. A larger CSS radius would let the raw material
-     show through every corner. Solid mode keeps the generous silhouette
-     because nothing native renders behind the window. */
-  :root[data-surface="glass"] .shell {
-    border-radius: 8px;
-  }
-
-  /* Solid surface mode (no native blur available): a slightly more opaque
-     glass so text stays readable without DWM blur behind the window. */
-  :root[data-surface="solid"] .shell {
-    border-radius: 24px 24px 8px 8px;
-    background:
-      radial-gradient(
-        120% 90% at 50% -20%,
         color-mix(in oklab, var(--accent) 8%, transparent) 0%,
         transparent 55%
       ),
       var(--t-shell-solid);
+    /* The window renders solid only; native DWM backdrop materials are
+       always cleared so they cannot paint behind the rounded corners. */
     backdrop-filter: none;
     box-shadow:
       inset 0 1px 0 var(--t-shell-hi),
