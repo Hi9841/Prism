@@ -168,12 +168,7 @@ pub fn run() {
                 app.handle().clone(),
             );
             if let Some(window) = app.get_webview_window("main") {
-                // Start from the persisted look instead of hardcoded defaults so
-                // light-theme or blur-material users never see a wrong flash
-                // before the frontend restyles the window.
-                let theme =
-                    startup_window_look(persisted.as_ref(), theme::apps_light() == Some(true));
-                let _ = apply_window_look_with(|| clear_window_material(&window));
+                let _ = clear_window_material(&window);
                 schedule_hidden_memory_trim(app.handle().clone());
             }
             warm_apps(app.handle().clone());
@@ -230,7 +225,6 @@ pub fn run() {
             refresh_apps,
             search_files,
             rebuild_file_index,
-            get_file_thumbnail,
             get_file_thumbnails,
             get_quick_access,
             existing_paths,
@@ -247,9 +241,6 @@ pub fn run() {
             set_taskbar_thickness,
             set_taskbar_auto_hide,
             set_taskbar_combine_buttons,
-            set_taskbar_task_view,
-            set_taskbar_widgets,
-            set_taskbar_searchbox_mode,
             set_taskbar_start_icon,
             set_custom_start_icon,
             select_custom_start_icon,
@@ -753,15 +744,6 @@ fn register_shortcut(app: &tauri::AppHandle, combo: &str) -> Result<(), String> 
     Ok(())
 }
 
-/// Prism renders one way: a solid CSS-painted surface over a transparent
-/// window. Native backdrop materials (acrylic/mica/blur) paint the full
-/// square HWND and fight that design at every corner, so they are always
-/// cleared - including whatever an older build or a hand-edited state file
-/// left active on the window.
-fn apply_window_look_with(mut clear: impl FnMut() -> Result<(), String>) -> Result<(), String> {
-    clear()
-}
-
 fn clear_window_material(window: &tauri::WebviewWindow) -> Result<(), String> {
     // `EffectsBuilder::clear_effects()` only empties a new config. Tauri
     // interprets `None` as the instruction to remove the active native
@@ -942,14 +924,6 @@ async fn rebuild_file_index(state: tauri::State<'_, AppState>) -> Result<(), Str
 }
 
 #[tauri::command]
-async fn get_file_thumbnail(path: String) -> Option<String> {
-    tauri::async_runtime::spawn_blocking(move || files::file_thumbnail(&path))
-        .await
-        .ok()
-        .flatten()
-}
-
-#[tauri::command]
 async fn get_file_thumbnails(paths: Vec<String>) -> Vec<Option<String>> {
     tauri::async_runtime::spawn_blocking(move || files::file_thumbnails(paths))
         .await
@@ -1056,21 +1030,6 @@ fn set_taskbar_combine_buttons(value: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn set_taskbar_task_view(visible: bool) -> Result<(), String> {
-    taskbar_customization::set_task_view(visible)
-}
-
-#[tauri::command]
-fn set_taskbar_widgets(visible: bool) -> Result<(), String> {
-    taskbar_customization::set_widgets(visible)
-}
-
-#[tauri::command]
-fn set_taskbar_searchbox_mode(value: String) -> Result<(), String> {
-    taskbar_customization::set_searchbox_mode(&value)
-}
-
-#[tauri::command]
 async fn set_custom_start_icon(app: tauri::AppHandle, base64_png: String) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || {
         taskbar_customization::set_custom_start_icon(&app, &base64_png)
@@ -1125,7 +1084,7 @@ fn set_window_style(app: tauri::AppHandle, theme: String) -> Result<(), String> 
     } else {
         Theme::Dark
     }));
-    apply_window_look_with(|| clear_window_material(&window))
+    clear_window_material(&window)
 }
 
 #[tauri::command]
@@ -1151,27 +1110,6 @@ fn validate_shortcut(combo: &str) -> Result<(), String> {
             .map_err(|_| format!("invalid shortcut '{combo}'"))?;
     }
     Ok(())
-}
-
-/// Resolves the (theme, effect) pair the window starts with, before the
-/// frontend loads. Persisted values win when valid; "system" resolves
-/// against the OS apps-light preference; anything else falls back to dark
-/// solid so startup never depends on frontend timing.
-fn startup_window_look(
-    state: Option<&serde_json::Value>,
-    system_prefers_light: bool,
-) -> &'static str {
-    let raw = state
-        .and_then(|value| value.get("settings"))
-        .and_then(|value| value.as_object())
-        .and_then(|settings| settings.get("theme"))
-        .and_then(|value| value.as_str());
-    match raw {
-        Some("light") => "light",
-        Some("dark") => "dark",
-        Some("system") if system_prefers_light => "light",
-        _ => "dark",
-    }
 }
 
 fn startup_shortcut(state: Option<&serde_json::Value>) -> String {
@@ -1619,22 +1557,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn window_materials_are_always_cleared_for_solid_rendering() {
-        // Prism renders solid only: whatever a legacy setting or an older
-        // build left on the HWND gets cleared before every style pass.
-        let cleared = std::cell::Cell::new(false);
-        apply_window_look_with(|| {
-            cleared.set(true);
-            Ok(())
-        })
-        .unwrap();
-        assert!(cleared.get());
-
-        // A failed clear fails the call so the frontend knows styling broke.
-        assert!(apply_window_look_with(|| Err("clear failed".to_string())).is_err());
-    }
-
-    #[test]
     fn allowed_shortcuts_parse_and_disallowed_are_rejected() {
         for combo in ALLOWED_SHORTCUTS {
             assert!(validate_shortcut(combo).is_ok(), "should allow {combo}");
@@ -1669,47 +1591,6 @@ mod tests {
                 "settings": { "shortcut": "Win+L" }
             }))),
             DEFAULT_SHORTCUT
-        );
-    }
-
-    #[test]
-    fn startup_window_look_follows_persisted_theme() {
-        // No persisted state: dark default.
-        assert_eq!(startup_window_look(None, false), "dark");
-        // Persisted value wins when valid.
-        assert_eq!(
-            startup_window_look(
-                Some(&serde_json::json!({ "settings": { "theme": "light" } })),
-                false
-            ),
-            "light"
-        );
-        // "system" resolves against the OS apps-light preference.
-        assert_eq!(
-            startup_window_look(
-                Some(&serde_json::json!({ "settings": { "theme": "system" } })),
-                true
-            ),
-            "light"
-        );
-        assert_eq!(
-            startup_window_look(
-                Some(&serde_json::json!({ "settings": { "theme": "system" } })),
-                false
-            ),
-            "dark"
-        );
-        // Invalid or missing values fall back instead of crashing startup.
-        assert_eq!(
-            startup_window_look(
-                Some(&serde_json::json!({ "settings": { "theme": "hologram" } })),
-                false
-            ),
-            "dark"
-        );
-        assert_eq!(
-            startup_window_look(Some(&serde_json::json!({ "version": 3 })), false),
-            "dark"
         );
     }
 

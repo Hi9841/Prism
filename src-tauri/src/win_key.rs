@@ -297,9 +297,10 @@ impl WinKeyMachine {
     }
 
     fn has_other_non_win_down(&self, excluded_keys: &[u16]) -> bool {
-        self.non_win_down.iter().enumerate().any(|(k, &down)| {
-            down && !excluded_keys.contains(&(k as u16))
-        })
+        self.non_win_down
+            .iter()
+            .enumerate()
+            .any(|(k, &down)| down && !excluded_keys.contains(&(k as u16)))
     }
 }
 
@@ -2034,18 +2035,21 @@ mod tests {
     #[test]
     fn rapid_ctrl_esc_taps_toggle_every_time() {
         let mut m = WinKeyMachine::default();
-        assert_eq!(m.feed(KeyKind::Other(VK_CONTROL_CODE), true), Decision::Pass);
+        assert_eq!(
+            m.feed(KeyKind::Other(VK_CONTROL_CODE), true),
+            Decision::Pass
+        );
         for _ in 0..3 {
-            assert_eq!(
-                m.feed(KeyKind::Other(VK_ESCAPE_CODE), true),
-                Decision::Mask
-            );
+            assert_eq!(m.feed(KeyKind::Other(VK_ESCAPE_CODE), true), Decision::Mask);
             assert_eq!(
                 m.feed(KeyKind::Other(VK_ESCAPE_CODE), false),
                 Decision::Toggle(WinSide::Left)
             );
         }
-        assert_eq!(m.feed(KeyKind::Other(VK_CONTROL_CODE), false), Decision::Pass);
+        assert_eq!(
+            m.feed(KeyKind::Other(VK_CONTROL_CODE), false),
+            Decision::Pass
+        );
         assert!(!m.left.down && !m.right.down && !m.ctrl_esc.down);
     }
 
@@ -2118,10 +2122,7 @@ mod tests {
                 (KeyKind::Other(VK_ESCAPE_CODE), true),
                 (KeyKind::Other(VK_ESCAPE_CODE), false),
             ]),
-            vec![
-                Decision::Pass,
-                Decision::Pass,
-            ]
+            vec![Decision::Pass, Decision::Pass,]
         );
     }
 
@@ -2146,12 +2147,21 @@ mod tests {
     #[test]
     fn ctrl_esc_reset_mid_press_never_toggles() {
         let mut m = WinKeyMachine::default();
-        assert_eq!(m.feed(KeyKind::Other(VK_CONTROL_CODE), true), Decision::Pass);
+        assert_eq!(
+            m.feed(KeyKind::Other(VK_CONTROL_CODE), true),
+            Decision::Pass
+        );
         assert_eq!(m.feed(KeyKind::Other(VK_ESCAPE_CODE), true), Decision::Mask);
         m.reset();
         assert!(!m.left.down && !m.right.down && !m.ctrl_esc.down);
-        assert_eq!(m.feed(KeyKind::Other(VK_ESCAPE_CODE), false), Decision::Pass);
-        assert_eq!(m.feed(KeyKind::Other(VK_CONTROL_CODE), false), Decision::Pass);
+        assert_eq!(
+            m.feed(KeyKind::Other(VK_ESCAPE_CODE), false),
+            Decision::Pass
+        );
+        assert_eq!(
+            m.feed(KeyKind::Other(VK_CONTROL_CODE), false),
+            Decision::Pass
+        );
     }
 
     fn m_feed_single(kind: KeyKind, is_down: bool) -> Decision {

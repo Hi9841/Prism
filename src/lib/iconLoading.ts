@@ -1,6 +1,6 @@
-export const APP_ICON_RETRY_DELAYS_MS = [200, 800] as const;
+const APP_ICON_RETRY_DELAYS_MS = [200, 800] as const;
 
-export interface AppIconRequestState {
+interface AppIconRequestState {
   appsLoaded: boolean;
   icons: Readonly<Record<string, string>>;
   settled: ReadonlySet<string>;

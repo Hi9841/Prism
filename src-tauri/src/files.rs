@@ -5,13 +5,12 @@ use windows::Win32::Storage::FileSystem::{
     MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
 };
 
-#[allow(unused_imports)]
-pub use crate::catalog::search::{browse_path, entry_score, target_score};
-#[allow(unused_imports)]
-pub use crate::catalog::types::{
-    FileEntry, FileSearchResponse, QuickAccessEntry, VolumeCoverage, VolumeState,
-};
-pub use crate::catalog::{file_thumbnail, file_thumbnails, quick_access, warm, FileIndex};
+#[cfg(test)]
+use crate::catalog::search::{browse_path, entry_score, target_score};
+#[cfg(test)]
+use crate::catalog::types::VolumeState;
+pub use crate::catalog::types::{FileSearchResponse, QuickAccessEntry};
+pub use crate::catalog::{file_thumbnails, quick_access, warm, FileIndex};
 
 pub(crate) fn replace_file(temp: &Path, destination: &Path) -> Result<(), String> {
     let from: Vec<u16> = temp.as_os_str().encode_wide().chain(Some(0)).collect();
@@ -246,7 +245,10 @@ mod tests {
         let res = search("agents.md", Some(10), &db, &gen, &[], 3, false, true);
         assert_eq!(res.items.len(), 3);
         // Shallower depth (root_d) must rank before deeper files
-        assert_eq!(res.items[0].path, file_root_d.to_string_lossy().into_owned());
+        assert_eq!(
+            res.items[0].path,
+            file_root_d.to_string_lossy().into_owned()
+        );
 
         let _ = std::fs::remove_dir_all(temp_dir);
     }
@@ -258,7 +260,10 @@ mod tests {
         let mut items_d = Vec::new();
 
         for i in 0..25 {
-            let path_c = temp_dir.join("c").join(format!("dir_{i}")).join("agents.md");
+            let path_c = temp_dir
+                .join("c")
+                .join(format!("dir_{i}"))
+                .join("agents.md");
             std::fs::create_dir_all(path_c.parent().unwrap()).unwrap();
             std::fs::write(&path_c, "content").unwrap();
             items_c.push(ScannedItem {
@@ -275,7 +280,10 @@ mod tests {
         }
 
         for i in 0..10 {
-            let path_d = temp_dir.join("d").join(format!("dir_{i}")).join("agents.md");
+            let path_d = temp_dir
+                .join("d")
+                .join(format!("dir_{i}"))
+                .join("agents.md");
             std::fs::create_dir_all(path_d.parent().unwrap()).unwrap();
             std::fs::write(&path_d, "content").unwrap();
             items_d.push(ScannedItem {

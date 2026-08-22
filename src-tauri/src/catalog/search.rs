@@ -99,7 +99,12 @@ pub fn search(
             .then_with(|| item_a.lower_name.cmp(&item_b.lower_name))
             .then_with(|| path_depth(&item_a.display_path).cmp(&path_depth(&item_b.display_path)))
             .then_with(|| item_a.display_path.len().cmp(&item_b.display_path.len()))
-            .then_with(|| item_a.display_path.to_lowercase().cmp(&item_b.display_path.to_lowercase()))
+            .then_with(|| {
+                item_a
+                    .display_path
+                    .to_lowercase()
+                    .cmp(&item_b.display_path.to_lowercase())
+            })
     });
 
     // Verify disk existence only for the items we are about to return. A row

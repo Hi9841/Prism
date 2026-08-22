@@ -9,10 +9,9 @@ import type { AppEntry, FileSearchResponse, PersistedState, QuickAccessEntry } f
 export type PowerAction = "lock" | "shutdown" | "restart";
 export type TaskbarThickness = "compact" | "default" | "adaptive";
 export type TaskbarCombineMode = "always" | "whenFull" | "never";
-export type TaskbarSearchMode = "hidden" | "icon" | "box" | "iconWithLabel";
 export type TaskbarStartIcon = "system" | "gem" | "diamond" | "custom";
 
-export interface CustomStartIcon {
+interface CustomStartIcon {
   id: string;
   /** Base64 PNG preview (96 x 96). */
   preview: string;
@@ -22,15 +21,12 @@ export interface TaskbarSettings {
   thickness: TaskbarThickness;
   autoHide: boolean;
   combineButtons: TaskbarCombineMode;
-  showTaskView: boolean;
-  showWidgets: boolean;
-  searchboxMode: TaskbarSearchMode;
   startIcon: TaskbarStartIcon;
   selectedCustomIcon: string | null;
   customStartIcons: CustomStartIcon[];
 }
 
-export interface PalettePresentation {
+interface PalettePresentation {
   open: boolean;
   source: string;
   anchor: {
@@ -75,11 +71,6 @@ export function hidePaletteWindow(): Promise<void> {
 export async function isWindowVisible(): Promise<boolean> {
   if (!inTauri) return false;
   return getCurrentWindow().isVisible();
-}
-
-export function centerPaletteWindow(): Promise<void> {
-  if (!inTauri) return Promise.resolve();
-  return getCurrentWindow().center();
 }
 
 export function setAlwaysOnTop(on: boolean): Promise<void> {
@@ -199,11 +190,6 @@ export async function rebuildFileIndex(): Promise<void> {
   await invoke("rebuild_file_index");
 }
 
-export async function getFileThumbnail(path: string): Promise<string | null> {
-  if (!inTauri) return null;
-  return invoke<string | null>("get_file_thumbnail", { path });
-}
-
 /**
  * Thumbnails for many paths in one IPC round trip, returned in input order.
  * A result page is up to 20 image files; batching replaces a per-file
@@ -269,9 +255,6 @@ export async function getTaskbarSettings(): Promise<TaskbarSettings> {
       thickness: "default",
       autoHide: false,
       combineButtons: "always",
-      showTaskView: true,
-      showWidgets: false,
-      searchboxMode: "icon",
       startIcon: "system",
       selectedCustomIcon: null,
       customStartIcons: [],
@@ -295,21 +278,6 @@ export async function setTaskbarCombineButtons(value: TaskbarCombineMode): Promi
   await invoke("set_taskbar_combine_buttons", { value });
 }
 
-export async function setTaskbarTaskView(visible: boolean): Promise<void> {
-  if (!inTauri) return;
-  await invoke("set_taskbar_task_view", { visible });
-}
-
-export async function setTaskbarWidgets(visible: boolean): Promise<void> {
-  if (!inTauri) return;
-  await invoke("set_taskbar_widgets", { visible });
-}
-
-export async function setTaskbarSearchboxMode(value: TaskbarSearchMode): Promise<void> {
-  if (!inTauri) return;
-  await invoke("set_taskbar_searchbox_mode", { value });
-}
-
 export async function setTaskbarStartIcon(value: TaskbarStartIcon): Promise<void> {
   if (!inTauri) return;
   await invoke("set_taskbar_start_icon", { value });
@@ -322,7 +290,7 @@ export async function setCustomStartIcon(png: Uint8Array): Promise<void> {
   await invoke("set_custom_start_icon", { base64Png: bytesToBase64(png) });
 }
 
-export function bytesToBase64(bytes: Uint8Array): string {
+function bytesToBase64(bytes: Uint8Array): string {
   let binary = "";
   const chunk = 0x8000;
   for (let offset = 0; offset < bytes.length; offset += chunk) {

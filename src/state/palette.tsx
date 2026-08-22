@@ -25,8 +25,6 @@ import { dedupeApps } from "../lib/search";
 import type { AppEntry, FileEntry, PaletteItem, QuickAccessEntry, VolumeCoverage } from "../lib/types";
 import { useApp } from "./app";
 
-export type { Section } from "../features/palette/sections";
-
 interface PaletteCtx {
   query: string;
   setQuery: (q: string) => void;

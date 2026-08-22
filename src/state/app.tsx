@@ -13,15 +13,7 @@ import {
   setWindowStyle,
   setWindowWidth,
 } from "../lib/bridge";
-import type {
-  AccentId,
-  AppGroup,
-  HistoryEntry,
-  QuickAccessKind,
-  Settings,
-  ThemeMode,
-  WindowWidth,
-} from "../lib/types";
+import type { AppGroup, HistoryEntry, QuickAccessKind, Settings, ThemeMode } from "../lib/types";
 import {
   APP_GROUP_APP_LIMIT,
   APP_GROUP_LIMIT,
@@ -36,7 +28,7 @@ import {
   VIEW_ZOOM_LEVELS,
 } from "../lib/types";
 
-export interface Toast {
+interface Toast {
   id: number;
   title: string;
   detail?: string;
@@ -474,7 +466,7 @@ function sanitizeAppGroups(raw: unknown): AppGroup[] {
     const id = typeof src.id === "string" ? src.id.trim() : "";
     const name = typeof src.name === "string" ? src.name.trim() : "";
     if (!id || id.length > 96 || seen.has(id) || !name || name.length > 64) continue;
-    const appIds = Array.isArray(src.appIds) ? sanitizeGroupAppIds(src.appIds) : [];
+    const appIds = sanitizeIds(src.appIds, APP_GROUP_APP_LIMIT);
     result.push({
       id,
       name,
@@ -487,19 +479,11 @@ function sanitizeAppGroups(raw: unknown): AppGroup[] {
   return result;
 }
 
-function sanitizeGroupAppIds(raw: unknown[]): string[] {
-  const seen = new Set<string>();
-  const result: string[] = [];
-  for (const value of raw) {
-    if (typeof value !== "string" || !value || value.length > 4096 || seen.has(value)) continue;
-    seen.add(value);
-    result.push(value);
-    if (result.length >= APP_GROUP_APP_LIMIT) break;
-  }
-  return result;
+function sanitizePinnedApps(raw: unknown): string[] {
+  return sanitizeIds(raw, PINNED_APP_LIMIT);
 }
 
-function sanitizePinnedApps(raw: unknown): string[] {
+function sanitizeIds(raw: unknown, limit: number): string[] {
   if (!Array.isArray(raw)) return [];
   const seen = new Set<string>();
   const result: string[] = [];
@@ -509,7 +493,7 @@ function sanitizePinnedApps(raw: unknown): string[] {
     }
     seen.add(value);
     result.push(value);
-    if (result.length === PINNED_APP_LIMIT) break;
+    if (result.length === limit) break;
   }
   return result;
 }
@@ -556,5 +540,3 @@ export function sanitizeHistory(raw: unknown): HistoryEntry[] {
   }
   return history;
 }
-
-export type { AccentId, WindowWidth };

@@ -1031,7 +1031,7 @@ const THUMBNAIL_SIZE: u32 = 64;
 /// Bounds the per-request decode work; one result page is at most ~20 files.
 const THUMBNAIL_BATCH_CAP: usize = 64;
 
-pub fn file_thumbnail(path: &str) -> Option<String> {
+fn file_thumbnail(path: &str) -> Option<String> {
     let path = Path::new(path);
     if !path.is_absolute() {
         return None;

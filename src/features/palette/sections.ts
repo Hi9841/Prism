@@ -44,7 +44,7 @@ export interface Section {
   groups?: AppGroupSection[];
 }
 
-export interface AppGroupSection {
+interface AppGroupSection {
   groupId: string;
   id: string;
   label: string;

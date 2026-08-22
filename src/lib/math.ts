@@ -4,7 +4,7 @@
  * functions/constants. Returns null when the expression isn't math.
  */
 
-export interface EvalResult {
+interface EvalResult {
   value: number;
   expr: string;
 }
