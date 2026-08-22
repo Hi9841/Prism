@@ -1,7 +1,6 @@
 import type { ReactNode } from "react";
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import {
-  type AppliedWindowEffect,
   getSystemTheme,
   loadState,
   onSystemThemeChange,
@@ -21,7 +20,6 @@ import type {
   QuickAccessKind,
   Settings,
   ThemeMode,
-  WindowEffect,
   WindowWidth,
 } from "../lib/types";
 import {
@@ -83,14 +81,6 @@ export const THEME_OPTIONS: { value: ThemeMode; label: string }[] = [
 
 const HISTORY_CAP = 20;
 
-/** Human-readable material names for fallback toasts. */
-const EFFECT_LABELS: Record<AppliedWindowEffect, string> = {
-  acrylic: "Acrylic",
-  mica: "Mica",
-  solid: "Solid",
-  blur: "Legacy blur",
-};
-
 let toastSeq = 1;
 
 export function AppProvider({ children }: { children: ReactNode }) {
@@ -111,7 +101,6 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const widthFrame = useRef<number | null>(null);
   const renderedWidth = useRef<number | null>(null);
   const toastTimers = useRef(new Map<number, ReturnType<typeof setTimeout>>());
-  const lastStyleReport = useRef("");
 
   // Initial load from disk: every value is sanitized against known sets so
   // a corrupt or hand-edited file degrades to defaults, never crashes.
@@ -322,31 +311,13 @@ export function AppProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     if (!ready) return;
     document.documentElement.dataset.accent = settings.accent;
-    document.documentElement.dataset.surface = settings.effect === "solid" ? "solid" : "glass";
     document.documentElement.dataset.theme = effectiveTheme;
-  }, [ready, settings.accent, settings.effect, effectiveTheme]);
+  }, [ready, settings.accent, effectiveTheme]);
 
   useEffect(() => {
     if (!ready) return;
-    // The native side reports what it actually applied. If the requested
-    // material is unsupported it falls back down the ladder; surface that
-    // once per distinct (requested, applied) pair instead of re-toasting on
-    // every system theme flip.
-    const requested = settings.effect;
-    let stale = false;
-    setWindowStyle(effectiveTheme, requested)
-      .then((applied) => {
-        if (stale || applied === requested) return;
-        const key = `${effectiveTheme}:${requested}>${applied}`;
-        if (lastStyleReport.current === key) return;
-        lastStyleReport.current = key;
-        showToast(`${EFFECT_LABELS[requested]} unavailable`, `Using ${EFFECT_LABELS[applied]} instead`);
-      })
-      .catch(() => {});
-    return () => {
-      stale = true;
-    };
-  }, [ready, settings.effect, effectiveTheme, showToast]);
+    setWindowStyle(effectiveTheme).catch(() => {});
+  }, [ready, effectiveTheme]);
 
   useEffect(() => {
     if (!ready) return;
@@ -448,7 +419,6 @@ export function sanitizeSettings(raw: unknown): Settings {
     accent: pick(src.accent, ["iris", "azure", "mint", "amber", "rose"], DEFAULT_SETTINGS.accent),
     width: pick(src.width, [560, 640, 720], DEFAULT_SETTINGS.width),
     viewZoom: pick(src.viewZoom, VIEW_ZOOM_LEVELS, DEFAULT_SETTINGS.viewZoom),
-    effect: pick(src.effect, ["acrylic", "mica", "solid"], DEFAULT_SETTINGS.effect),
     shortcut: pick(
       src.shortcut,
       SHORTCUT_OPTIONS.map((o) => o.value),
@@ -587,4 +557,4 @@ export function sanitizeHistory(raw: unknown): HistoryEntry[] {
   return history;
 }
 
-export type { AccentId, WindowEffect, WindowWidth };
+export type { AccentId, WindowWidth };

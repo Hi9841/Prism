@@ -202,7 +202,6 @@ export interface FileSearchResponse {
 }
 
 export type AccentId = "iris" | "azure" | "mint" | "amber" | "rose";
-export type WindowEffect = "acrylic" | "mica" | "solid";
 export type WindowWidth = 560 | 640 | 720;
 export type ThemeMode = "system" | "dark" | "light";
 export type TaskbarAlignment = "left" | "center" | "right";
@@ -219,7 +218,6 @@ export interface Settings {
   accent: AccentId;
   width: WindowWidth;
   viewZoom: ViewZoom;
-  effect: WindowEffect;
   shortcut: string;
   alwaysOnTop: boolean;
   taskbarAlignment: TaskbarAlignment;
@@ -235,7 +233,6 @@ export const DEFAULT_SETTINGS: Settings = {
   accent: "iris",
   width: 640,
   viewZoom: 100,
-  effect: "solid",
   shortcut: "Win",
   alwaysOnTop: true,
   taskbarAlignment: "center",
