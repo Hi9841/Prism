@@ -22,12 +22,9 @@ use tauri::{
 };
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
 use windows::Win32::Foundation::{HWND, POINT, RECT};
-use windows::Win32::Graphics::Dwm::{
-    DwmSetWindowAttribute, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_DONOTROUND,
-    DWM_WINDOW_CORNER_PREFERENCE,
-};
 use windows::Win32::Graphics::Gdi::{
-    GetMonitorInfoW, MonitorFromPoint, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST,
+    CreateRoundRectRgn, GetMonitorInfoW, MonitorFromPoint, MonitorFromWindow, SetWindowRgn,
+    MONITORINFO, MONITOR_DEFAULTTONEAREST,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     GetCursorPos, SetForegroundWindow, SetWindowPos, HWND_TOPMOST, SWP_NOMOVE, SWP_NOSIZE,
@@ -175,7 +172,12 @@ pub fn run() {
                 app.handle().clone(),
             );
             if let Some(window) = app.get_webview_window("main") {
-                let _ = apply_window_look(&window, "solid", "dark");
+                // Start from the persisted look instead of hardcoded defaults so
+                // light-theme or blur-material users never see a wrong flash
+                // before the frontend restyles the window.
+                let (theme, effect) =
+                    startup_window_look(persisted.as_ref(), theme::apps_light() == Some(true));
+                let _ = apply_window_look(&window, effect, theme);
                 schedule_hidden_memory_trim(app.handle().clone());
             }
             warm_apps(app.handle().clone());
@@ -759,19 +761,15 @@ fn apply_window_look(
     window: &tauri::WebviewWindow,
     effect: &str,
     theme: &str,
-) -> Result<(), String> {
+) -> Result<&'static str, String> {
     let (tint, mica) = if theme == "light" {
         (Color(238, 240, 244, 190), Effect::MicaLight)
     } else {
         (Color(20, 20, 26, 165), Effect::MicaDark)
     };
-    let build = |effect: Effect| {
-        EffectsBuilder::new()
-            .effect(effect)
-            .radius(12.0)
-            .color(tint)
-            .build()
-    };
+    // EffectsBuilder radius only applies on macOS; Windows ignores it. The
+    // corner shape is owned by the window region via claim below.
+    let build = |effect: Effect| EffectsBuilder::new().effect(effect).color(tint).build();
     let attempt = |effect: Effect| window.set_effects(build(effect)).is_ok();
 
     apply_window_look_with(
@@ -779,7 +777,7 @@ fn apply_window_look(
         mica,
         attempt,
         || window.set_effects(None).map_err(|error| error.to_string()),
-        || schedule_square_window_corners(window),
+        || apply_rounded_window_region(window),
     )
 }
 
@@ -788,52 +786,86 @@ fn apply_window_look_with(
     mica: Effect,
     mut attempt: impl FnMut(Effect) -> bool,
     mut clear: impl FnMut() -> Result<(), String>,
-    mut square_corners: impl FnMut(),
-) -> Result<(), String> {
+    mut claim_shape: impl FnMut() -> Result<(), String>,
+) -> Result<&'static str, String> {
     let applied = match effect {
-        "acrylic" => attempt(Effect::Acrylic) || attempt(mica) || attempt(Effect::Blur),
-        "mica" => attempt(mica) || attempt(Effect::Acrylic) || attempt(Effect::Blur),
+        "acrylic" | "mica" => {
+            let mut applied = "solid";
+            for candidate in material_candidates(effect, mica) {
+                if attempt(candidate) {
+                    applied = effect_report_name(candidate);
+                    break;
+                }
+            }
+            if applied == "solid" {
+                clear()?;
+            }
+            applied
+        }
         "solid" => {
+            // `EffectsBuilder::clear_effects()` only empties a new config. Tauri
+            // interprets `None` as the instruction to remove the active native
+            // material from the HWND.
             clear()?;
-            true
+            "solid"
         }
         _ => return Err(format!("unknown effect '{effect}'")),
     };
 
-    if !applied {
-        clear()?;
+    claim_shape()?;
+    Ok(applied)
+}
+
+/// Fallback ladder for blur materials, most-preferred first. Solid clears
+/// effects and has no ladder; unknown materials never fall back to a
+/// different material than the user picked.
+fn material_candidates(requested: &str, mica: Effect) -> Vec<Effect> {
+    match requested {
+        "acrylic" => vec![Effect::Acrylic, mica, Effect::Blur],
+        "mica" => vec![mica, Effect::Acrylic, Effect::Blur],
+        _ => Vec::new(),
     }
-    square_corners();
+}
+
+/// Maps an applied candidate back to the material name the frontend knows so
+/// it can surface fallbacks instead of silently diverging from the setting.
+fn effect_report_name(applied: Effect) -> &'static str {
+    match applied {
+        Effect::Acrylic => "acrylic",
+        Effect::Mica | Effect::MicaDark | Effect::MicaLight => "mica",
+        Effect::Blur => "blur",
+        _ => "solid",
+    }
+}
+
+/// The shell's CSS radius in CSS pixels; the physical clip must match it.
+const SHELL_CORNER_RADIUS_PX: f64 = 8.0;
+
+fn rounded_region_geometry(width: i32, height: i32, scale_factor: f64) -> (i32, i32, i32) {
+    let radius = (SHELL_CORNER_RADIUS_PX * scale_factor).round() as i32;
+    (width, height, radius)
+}
+
+/// Clips the whole window to a rounded rectangle matching the shell's 8px CSS
+/// radius. DWM ignores corner-preference rounding on Tauri's transparent
+/// (blur-behind) windows, and backdrop materials paint the full square HWND,
+/// so a window region is the only clip that also covers the native material.
+/// The system owns the region after a successful call.
+fn apply_rounded_window_region(window: &tauri::WebviewWindow) -> Result<(), String> {
+    let hwnd = window.hwnd().map_err(|e| e.to_string())?;
+    let scale_factor = window.scale_factor().map_err(|e| e.to_string())?;
+    let size = window.outer_size().map_err(|e| e.to_string())?;
+    let (width, height, radius) =
+        rounded_region_geometry(size.width as i32, size.height as i32, scale_factor);
+    let region = unsafe { CreateRoundRectRgn(0, 0, width, height, radius, radius) };
+    if region.is_invalid() {
+        return Err("failed to create rounded window region".to_string());
+    }
+    let result = unsafe { SetWindowRgn(HWND(hwnd.0), Some(region), true) };
+    if result == 0 {
+        return Err("failed to set rounded window region".to_string());
+    }
     Ok(())
-}
-
-fn schedule_square_window_corners(window: &tauri::WebviewWindow) {
-    let window = window.clone();
-    let _ = window.clone().run_on_main_thread(move || {
-        set_square_window_corners(&window);
-    });
-}
-
-fn window_corner_preference() -> DWM_WINDOW_CORNER_PREFERENCE {
-    DWMWCP_DONOTROUND
-}
-
-fn set_square_window_corners(window: &tauri::WebviewWindow) {
-    let Ok(hwnd) = window.hwnd() else {
-        return;
-    };
-    let preference = window_corner_preference();
-    // Backdrop changes can restore DWM's default rounding. Run after Tauri's
-    // queued effect change so every material keeps the old Solid window shape.
-    // Ignore the hint when unsupported.
-    unsafe {
-        let _ = DwmSetWindowAttribute(
-            hwnd,
-            DWMWA_WINDOW_CORNER_PREFERENCE,
-            std::ptr::from_ref(&preference).cast(),
-            std::mem::size_of_val(&preference) as u32,
-        );
-    }
 }
 
 /* ---------------- commands ---------------- */
@@ -1075,6 +1107,9 @@ fn set_window_width(app: tauri::AppHandle, width: u32) -> Result<(), String> {
     window
         .set_size(tauri::PhysicalSize::new(width, height))
         .map_err(|e| e.to_string())?;
+    // The region does not follow resizes; re-clip at the new size so the
+    // corners stay rounded during width animations.
+    apply_rounded_window_region(&window)?;
     let anchor = PRESENTATION_ANCHOR.lock().ok().and_then(|value| *value);
     position_palette(&window, anchor);
     Ok(())
@@ -1180,10 +1215,12 @@ fn is_animatable_window_width(width: u32) -> bool {
 }
 
 /// Applies the two coupled native style settings in one IPC round-trip and
-/// one window-style application. The frontend changes these together during
+/// one window-style application. Returns the material that is actually
+/// active (one of "acrylic" | "mica" | "blur" | "solid") so the frontend can
+/// surface unsupported-material fallbacks instead of silently diverging. The frontend changes these together during
 /// startup and when the user switches appearance settings.
 #[tauri::command]
-fn set_window_style(app: tauri::AppHandle, theme: String, effect: String) -> Result<(), String> {
+fn set_window_style(app: tauri::AppHandle, theme: String, effect: String) -> Result<String, String> {
     if !matches!(theme.as_str(), "light" | "dark") {
         return Err(format!("unknown theme '{theme}'"));
     }
@@ -1198,7 +1235,7 @@ fn set_window_style(app: tauri::AppHandle, theme: String, effect: String) -> Res
     } else {
         Theme::Dark
     }));
-    apply_window_look(&window, &effect, &theme)
+    apply_window_look(&window, &effect, &theme).map(String::from)
 }
 
 #[tauri::command]
@@ -1224,6 +1261,39 @@ fn validate_shortcut(combo: &str) -> Result<(), String> {
             .map_err(|_| format!("invalid shortcut '{combo}'"))?;
     }
     Ok(())
+}
+
+/// Resolves the (theme, effect) pair the window starts with, before the
+/// frontend loads. Persisted values win when valid; "system" resolves
+/// against the OS apps-light preference; anything else falls back to dark
+/// solid so startup never depends on frontend timing.
+fn startup_window_look(
+    state: Option<&serde_json::Value>,
+    system_prefers_light: bool,
+) -> (&'static str, &'static str) {
+    let setting = |key: &str| -> Option<&'static str> {
+        let raw = state
+            .and_then(|value| value.get("settings"))
+            .and_then(|value| value.as_object())
+            .and_then(|settings| settings.get(key))
+            .and_then(|value| value.as_str());
+        match raw {
+            Some("acrylic") => Some("acrylic"),
+            Some("mica") => Some("mica"),
+            Some("solid") => Some("solid"),
+            Some("light") => Some("light"),
+            Some("dark") => Some("dark"),
+            Some("system") => Some("system"),
+            _ => None,
+        }
+    };
+    let theme = match setting("theme") {
+        Some(theme @ ("light" | "dark")) => theme,
+        Some("system") if system_prefers_light => "light",
+        _ => "dark",
+    };
+    let effect = setting("effect").unwrap_or("solid");
+    (theme, effect)
 }
 
 fn startup_shortcut(state: Option<&serde_json::Value>) -> String {
@@ -1671,18 +1741,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn window_corner_preference_matches_old_solid_shape() {
-        assert_eq!(
-            window_corner_preference(),
-            windows::Win32::Graphics::Dwm::DWMWCP_DONOTROUND
-        );
-    }
-
-    #[test]
-    fn every_window_material_reasserts_square_corners() {
-        for effect in ["acrylic", "mica", "solid"] {
+    fn every_window_material_reports_what_actually_applied() {
+        // Each material claims the rounded region after its effect is set.
+        for (effect, expected) in [("acrylic", "acrylic"), ("mica", "mica"), ("solid", "solid")] {
             let events = std::cell::RefCell::new(Vec::new());
-            apply_window_look_with(
+            let applied = apply_window_look_with(
                 effect,
                 Effect::MicaDark,
                 |_| {
@@ -1693,19 +1756,24 @@ mod tests {
                     events.borrow_mut().push("clear");
                     Ok(())
                 },
-                || events.borrow_mut().push("square"),
+                || {
+                    events.borrow_mut().push("shape");
+                    Ok(())
+                },
             )
             .unwrap();
-            let expected = if effect == "solid" {
-                vec!["clear", "square"]
+            let expected_events = if effect == "solid" {
+                vec!["clear", "shape"]
             } else {
-                vec!["attempt", "square"]
+                vec!["attempt", "shape"]
             };
-            assert_eq!(*events.borrow(), expected, "{effect} callback order");
+            assert_eq!(*events.borrow(), expected_events, "{effect} callback order");
+            assert_eq!(applied, expected);
         }
 
+        // An exhausted ladder falls back to solid and reports it.
         let events = std::cell::RefCell::new(Vec::new());
-        apply_window_look_with(
+        let applied = apply_window_look_with(
             "acrylic",
             Effect::MicaDark,
             |_| {
@@ -1716,14 +1784,19 @@ mod tests {
                 events.borrow_mut().push("clear");
                 Ok(())
             },
-            || events.borrow_mut().push("square"),
+            || {
+                events.borrow_mut().push("shape");
+                Ok(())
+            },
         )
         .unwrap();
         assert_eq!(
             *events.borrow(),
-            ["attempt", "attempt", "attempt", "clear", "square"]
+            ["attempt", "attempt", "attempt", "clear", "shape"]
         );
+        assert_eq!(applied, "solid");
 
+        // Unknown materials error before touching the window.
         let events = std::cell::RefCell::new(Vec::new());
         assert!(apply_window_look_with(
             "hologram",
@@ -1736,10 +1809,35 @@ mod tests {
                 events.borrow_mut().push("clear");
                 Ok(())
             },
-            || events.borrow_mut().push("square"),
+            || {
+                events.borrow_mut().push("shape");
+                Ok(())
+            },
         )
         .is_err());
         assert!(events.borrow().is_empty());
+
+        // A failed shape claim fails the whole call so callers cannot treat
+        // an unclipped window as styled.
+        assert_eq!(
+            apply_window_look_with(
+                "mica",
+                Effect::MicaDark,
+                |_| true,
+                || Ok(()),
+                || Err("region failed".to_string()),
+            ),
+            Err("region failed".to_string())
+        );
+    }
+
+    #[test]
+    fn rounded_region_geometry_tracks_the_display_scale() {
+        // The shell uses an 8px CSS radius, so the physical clip must scale
+        // with DPI; width and height pass through unchanged.
+        assert_eq!(rounded_region_geometry(720, 620, 1.0), (720, 620, 8));
+        assert_eq!(rounded_region_geometry(560, 620, 1.25), (560, 620, 10));
+        assert_eq!(rounded_region_geometry(720, 620, 1.5), (720, 620, 12));
     }
 
     #[test]
@@ -1778,6 +1876,78 @@ mod tests {
             }))),
             DEFAULT_SHORTCUT
         );
+    }
+
+    #[test]
+    fn startup_window_look_follows_persisted_theme_and_effect() {
+        // No persisted state: dark solid defaults.
+        assert_eq!(startup_window_look(None, false), ("dark", "solid"));
+        // Persisted values win when valid.
+        assert_eq!(
+            startup_window_look(
+                Some(&serde_json::json!({
+                    "settings": { "theme": "light", "effect": "mica" }
+                })),
+                false
+            ),
+            ("light", "mica")
+        );
+        // "system" resolves against the OS apps-light preference.
+        assert_eq!(
+            startup_window_look(
+                Some(&serde_json::json!({
+                    "settings": { "theme": "system", "effect": "acrylic" }
+                })),
+                true
+            ),
+            ("light", "acrylic")
+        );
+        assert_eq!(
+            startup_window_look(
+                Some(&serde_json::json!({
+                    "settings": { "theme": "system", "effect": "acrylic" }
+                })),
+                false
+            ),
+            ("dark", "acrylic")
+        );
+        // Invalid or missing values fall back instead of crashing startup.
+        assert_eq!(
+            startup_window_look(
+                Some(&serde_json::json!({
+                    "settings": { "theme": "hologram", "effect": "hologram" }
+                })),
+                false
+            ),
+            ("dark", "solid")
+        );
+        assert_eq!(
+            startup_window_look(Some(&serde_json::json!({ "version": 3 })), false),
+            ("dark", "solid")
+        );
+    }
+
+    #[test]
+    fn material_ladder_orders_fallbacks_and_reports_names() {
+        // Acrylic prefers itself, then the theme's mica, then legacy blur.
+        assert_eq!(
+            material_candidates("acrylic", Effect::MicaDark),
+            vec![Effect::Acrylic, Effect::MicaDark, Effect::Blur]
+        );
+        // Mica likewise prefers its own variant first.
+        assert_eq!(
+            material_candidates("mica", Effect::MicaLight),
+            vec![Effect::MicaLight, Effect::Acrylic, Effect::Blur]
+        );
+        // Solid clears effects and has no ladder; unknown materials never
+        // fall back to something the user did not pick.
+        assert!(material_candidates("solid", Effect::MicaDark).is_empty());
+        assert!(material_candidates("hologram", Effect::MicaDark).is_empty());
+        // Each applied candidate reports the name the frontend knows.
+        assert_eq!(effect_report_name(Effect::Acrylic), "acrylic");
+        assert_eq!(effect_report_name(Effect::MicaDark), "mica");
+        assert_eq!(effect_report_name(Effect::MicaLight), "mica");
+        assert_eq!(effect_report_name(Effect::Blur), "blur");
     }
 
     #[test]

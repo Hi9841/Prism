@@ -1,6 +1,7 @@
 import type { ReactNode } from "react";
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import {
+  type AppliedWindowEffect,
   getSystemTheme,
   loadState,
   onSystemThemeChange,
@@ -82,6 +83,14 @@ export const THEME_OPTIONS: { value: ThemeMode; label: string }[] = [
 
 const HISTORY_CAP = 20;
 
+/** Human-readable material names for fallback toasts. */
+const EFFECT_LABELS: Record<AppliedWindowEffect, string> = {
+  acrylic: "Acrylic",
+  mica: "Mica",
+  solid: "Solid",
+  blur: "Legacy blur",
+};
+
 let toastSeq = 1;
 
 export function AppProvider({ children }: { children: ReactNode }) {
@@ -102,6 +111,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const widthFrame = useRef<number | null>(null);
   const renderedWidth = useRef<number | null>(null);
   const toastTimers = useRef(new Map<number, ReturnType<typeof setTimeout>>());
+  const lastStyleReport = useRef("");
 
   // Initial load from disk: every value is sanitized against known sets so
   // a corrupt or hand-edited file degrades to defaults, never crashes.
@@ -318,8 +328,25 @@ export function AppProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     if (!ready) return;
-    setWindowStyle(effectiveTheme, settings.effect).catch(() => {});
-  }, [ready, settings.effect, effectiveTheme]);
+    // The native side reports what it actually applied. If the requested
+    // material is unsupported it falls back down the ladder; surface that
+    // once per distinct (requested, applied) pair instead of re-toasting on
+    // every system theme flip.
+    const requested = settings.effect;
+    let stale = false;
+    setWindowStyle(effectiveTheme, requested)
+      .then((applied) => {
+        if (stale || applied === requested) return;
+        const key = `${effectiveTheme}:${requested}>${applied}`;
+        if (lastStyleReport.current === key) return;
+        lastStyleReport.current = key;
+        showToast(`${EFFECT_LABELS[requested]} unavailable`, `Using ${EFFECT_LABELS[applied]} instead`);
+      })
+      .catch(() => {});
+    return () => {
+      stale = true;
+    };
+  }, [ready, settings.effect, effectiveTheme, showToast]);
 
   useEffect(() => {
     if (!ready) return;

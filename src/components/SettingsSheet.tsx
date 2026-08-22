@@ -845,7 +845,10 @@ export function SettingsSheet() {
           <SettingsRow title="View zoom" detail="Ctrl + Up/Down or Ctrl + wheel">
             <ViewZoomControl />
           </SettingsRow>
-          <SettingsRow title="Window material" detail="Solid avoids DWM blur issues">
+          <SettingsRow
+            title="Window material"
+            detail="Acrylic and Mica use DWM backdrops; Solid disables blur"
+          >
             <Segmented<WindowEffect>
               label="Window material"
               value={settings.effect}
