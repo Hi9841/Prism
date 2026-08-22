@@ -1268,6 +1268,7 @@ impl Database {
         Ok(now - last_scanned <= max_age_secs as i64)
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn is_volume_fresh(&self, volume_id: &str, max_age_secs: u64) -> Result<bool, String> {
         let conn = self.reader.lock().map_err(|e| e.to_string())?;
         let mount: Option<String> = conn

@@ -23,6 +23,13 @@ use super::types::ScannedItem;
 
 const BATCH_SIZE: usize = 20_000;
 
+#[derive(Clone, Copy)]
+struct ScanPlan {
+    generation: u64,
+    finish_volume: bool,
+    descend_directories: bool,
+}
+
 #[allow(dead_code)]
 pub struct VolumeScanProgress {
     pub indexed_count: u64,
@@ -76,7 +83,11 @@ pub fn scan_volume(
     let result = scan_volume_inner(
         root,
         volume_id,
-        generation,
+        ScanPlan {
+            generation,
+            finish_volume: true,
+            descend_directories: true,
+        },
         &db,
         app_data_dir,
         &cancel,
@@ -87,6 +98,65 @@ pub fn scan_volume(
     // rebuilds the FTS index only if any row was actually written or pruned
     // while the triggers were down; an unchanged re-walk (the common case for
     // overflow reconciles) skips re-tokenizing millions of names for nothing.
+    let _ = db.end_bulk_load();
+    result
+}
+
+/// Reconciles one directory subtree without completing or pruning a
+/// volume-wide generation. The per-directory `seen` sets remain authoritative
+/// only for directories reached below `root`, so rows elsewhere are untouched.
+pub fn reconcile_scope(
+    root: &Path,
+    volume_id: &str,
+    generation: u64,
+    db: Arc<Database>,
+    app_data_dir: &Path,
+    cancel: Arc<AtomicBool>,
+) -> Result<u64, String> {
+    let _priority = ScanEfficiencyGuard::new();
+    db.begin_bulk_load()?;
+    let result = scan_volume_inner(
+        root,
+        volume_id,
+        ScanPlan {
+            generation,
+            finish_volume: false,
+            descend_directories: true,
+        },
+        &db,
+        app_data_dir,
+        &cancel,
+        &|_| {},
+    );
+    let _ = db.end_bulk_load();
+    result
+}
+
+/// Reconciles only the direct children of one directory. This is used by the
+/// nonrecursive topology watcher; recursive child shards own their subtrees.
+pub fn reconcile_directory(
+    root: &Path,
+    volume_id: &str,
+    generation: u64,
+    db: Arc<Database>,
+    app_data_dir: &Path,
+    cancel: Arc<AtomicBool>,
+) -> Result<u64, String> {
+    let _priority = ScanEfficiencyGuard::new();
+    db.begin_bulk_load()?;
+    let result = scan_volume_inner(
+        root,
+        volume_id,
+        ScanPlan {
+            generation,
+            finish_volume: false,
+            descend_directories: false,
+        },
+        &db,
+        app_data_dir,
+        &cancel,
+        &|_| {},
+    );
     let _ = db.end_bulk_load();
     result
 }
@@ -145,7 +215,7 @@ impl Drop for ScanEfficiencyGuard {
 fn scan_volume_inner(
     root: &Path,
     volume_id: &str,
-    generation: u64,
+    plan: ScanPlan,
     db: &Database,
     app_data_dir: &Path,
     cancel: &AtomicBool,
@@ -262,7 +332,7 @@ fn scan_volume_inner(
                     });
 
                     if batch.len() >= BATCH_SIZE {
-                        flush_file_batch(db, volume_id, generation, &mut batch)?;
+                        flush_file_batch(db, volume_id, plan.generation, &mut batch)?;
                         progress_callback(total_scanned);
                     }
 
@@ -275,7 +345,7 @@ fn scan_volume_inner(
                     } else {
                         !is_excluded_dir(&lower_name)
                     };
-                    if descend {
+                    if descend && plan.descend_directories {
                         queue.push_back(child_path);
                     }
                 } else {
@@ -297,7 +367,7 @@ fn scan_volume_inner(
                     });
 
                     if batch.len() >= BATCH_SIZE {
-                        flush_file_batch(db, volume_id, generation, &mut batch)?;
+                        flush_file_batch(db, volume_id, plan.generation, &mut batch)?;
                         progress_callback(total_scanned);
                     }
                 }
@@ -323,9 +393,11 @@ fn scan_volume_inner(
         return Err("scan cancelled".to_string());
     }
 
-    flush_file_batch(db, volume_id, generation, &mut batch)?;
+    flush_file_batch(db, volume_id, plan.generation, &mut batch)?;
 
-    db.finish_volume_scan(volume_id, generation, total_scanned)?;
+    if plan.finish_volume {
+        db.finish_volume_scan(volume_id, plan.generation, total_scanned)?;
+    }
     progress_callback(total_scanned);
 
     Ok(total_scanned)
@@ -368,9 +440,38 @@ fn wide_filename_to_string(wide: &[u16]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
     use windows::Win32::System::SystemServices::{
         IO_REPARSE_TAG_CLOUD_7, IO_REPARSE_TAG_MOUNT_POINT, IO_REPARSE_TAG_SYMLINK,
     };
+
+    fn temp_dir(name: &str) -> PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("prism-scan-{name}-{unique}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn scanned_file(path: &Path) -> ScannedItem {
+        let display_path = path.to_string_lossy().into_owned();
+        let name = path.file_name().unwrap().to_string_lossy().into_owned();
+        ScannedItem {
+            normalized_path: display_path.to_lowercase(),
+            display_path,
+            lower_name: name.to_lowercase(),
+            name,
+            parent: path.parent().unwrap().to_string_lossy().into_owned(),
+            is_directory: false,
+            extension: path
+                .extension()
+                .map(|extension| extension.to_string_lossy().to_lowercase()),
+            modified_at: 1,
+            size: 1,
+        }
+    }
 
     #[test]
     fn cloud_placeholder_roots_are_descended_but_not_other_reparse_points() {
@@ -390,5 +491,74 @@ mod tests {
         assert!(!is_excluded_dir(".git"));
         assert!(!is_excluded_dir("temp"));
         assert!(!is_excluded_dir("windowsapps"));
+    }
+
+    #[test]
+    fn scoped_repair_converges_only_the_requested_subtree() {
+        let dir = temp_dir("scope");
+        let scope = dir.join("dirty");
+        let outside = dir.join("outside");
+        std::fs::create_dir_all(&scope).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+
+        let db = Arc::new(Database::open(&dir.join("catalog.db")).unwrap());
+        let stale = scope.join("stale-inside.txt");
+        let sentinel = outside.join("sentinel-outside.txt");
+        db.insert_batch("vol1", 1, &[scanned_file(&stale), scanned_file(&sentinel)])
+            .unwrap();
+
+        let fresh = scope.join("fresh-inside.txt");
+        std::fs::write(&fresh, "fresh").unwrap();
+        reconcile_scope(
+            &scope,
+            "vol1",
+            2,
+            db.clone(),
+            &dir.join("prism-data"),
+            Arc::new(AtomicBool::new(false)),
+        )
+        .unwrap();
+
+        assert!(db.search_candidates("stale-inside", 10).unwrap().is_empty());
+        assert!(db
+            .search_candidates("fresh-inside", 10)
+            .unwrap()
+            .iter()
+            .any(|item| item.display_path == fresh.to_string_lossy()));
+        assert!(db
+            .search_candidates("sentinel-outside", 10)
+            .unwrap()
+            .iter()
+            .any(|item| item.display_path == sentinel.to_string_lossy()));
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn topology_repair_does_not_descend_into_child_shards() {
+        let dir = temp_dir("topology");
+        let child = dir.join("child-shard");
+        std::fs::create_dir_all(&child).unwrap();
+        let nested = child.join("nested.txt");
+        std::fs::write(&nested, "nested").unwrap();
+        let db = Arc::new(Database::open(&dir.join("catalog.db")).unwrap());
+
+        reconcile_directory(
+            &dir,
+            "vol1",
+            1,
+            db.clone(),
+            &dir.join("prism-data"),
+            Arc::new(AtomicBool::new(false)),
+        )
+        .unwrap();
+
+        assert!(db
+            .search_candidates("child-shard", 10)
+            .unwrap()
+            .iter()
+            .any(|item| item.display_path == child.to_string_lossy() && item.is_directory));
+        assert!(db.search_candidates("nested", 10).unwrap().is_empty());
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

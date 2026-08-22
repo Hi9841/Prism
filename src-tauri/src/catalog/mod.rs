@@ -7,13 +7,13 @@ pub mod types;
 pub mod volume;
 pub mod watcher;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ffi::c_void;
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use base64::Engine;
 use serde::Deserialize;
@@ -48,14 +48,6 @@ const VOLUME_DISCOVERY_INTERVAL: Duration = Duration::from_secs(15);
 /// Long sleeps are sliced so a hidden -> visible transition resumes the fast
 /// cadence (and journal freshness) within a second of opening the palette.
 const POLL_WAKE_SLICE: Duration = Duration::from_secs(1);
-/// Watcher-overflow reconciles re-walk a whole volume - the single most
-/// expensive thing this app does. Overflows can arrive in bursts (churning
-/// builds, browser caches), so at most one reconcile per volume per window;
-/// the periodic 6-hour reconciliation catches anything the window defers.
-const OVERFLOW_RECONCILE_MIN_INTERVAL: Duration = Duration::from_secs(15 * 60);
-/// A volume that just finished a sweep does not need another: the sweep
-/// already reconciled the tree, so an overflow observed during it is stale.
-const OVERFLOW_RECONCILE_SCAN_GRACE: u64 = 120;
 // Sweeps walk the tree but write only rows that actually changed, so the
 // periodic reconcile catches watcher misses cheaply without the disk churn of
 // the old full re-index.
@@ -82,6 +74,73 @@ pub(crate) fn catalog_debug_enabled() -> bool {
 #[derive(Clone, Default)]
 pub struct IndexCounts {
     inner: Arc<Mutex<HashMap<String, u64>>>,
+}
+
+#[derive(Default)]
+struct ScopeRepairCoordinator {
+    /// Presence means one worker owns the scope; true requests another pass.
+    running: HashMap<String, bool>,
+}
+
+impl ScopeRepairCoordinator {
+    fn request(&mut self, key: String) -> bool {
+        if let Some(pending) = self.running.get_mut(&key) {
+            *pending = true;
+            false
+        } else {
+            self.running.insert(key, false);
+            true
+        }
+    }
+
+    fn finish_pass(&mut self, key: &str) -> bool {
+        match self.running.get_mut(key) {
+            Some(pending) if *pending => {
+                *pending = false;
+                true
+            }
+            Some(_) => {
+                self.running.remove(key);
+                false
+            }
+            None => false,
+        }
+    }
+}
+
+#[derive(Default)]
+struct SourceWorkerCoordinator {
+    /// Presence means a worker is active. Some(value) requests another pass;
+    /// false wins because a forced rebuild cannot be weakened by a fresh pass.
+    running: HashMap<String, Option<bool>>,
+}
+
+impl SourceWorkerCoordinator {
+    fn request(&mut self, volume_id: String, fresh_ok: bool) -> bool {
+        if let Some(pending) = self.running.get_mut(&volume_id) {
+            *pending = Some(pending.unwrap_or(true) && fresh_ok);
+            false
+        } else {
+            self.running.insert(volume_id, None);
+            true
+        }
+    }
+
+    fn finish_pass(&mut self, volume_id: &str) -> Option<bool> {
+        let pending = self.running.get_mut(volume_id)?.take();
+        if pending.is_none() {
+            self.running.remove(volume_id);
+        }
+        pending
+    }
+
+    fn is_empty(&self) -> bool {
+        self.running.is_empty()
+    }
+
+    fn is_running(&self, volume_id: &str) -> bool {
+        self.running.contains_key(volume_id)
+    }
 }
 
 impl IndexCounts {
@@ -130,7 +189,9 @@ pub struct FileIndex {
     app_data_dir: Arc<RwLock<PathBuf>>,
     app_handle: Arc<Mutex<Option<tauri::AppHandle>>>,
     scan_generation: Arc<AtomicU64>,
-    last_overflow_reconcile: Arc<Mutex<HashMap<String, Instant>>>,
+    scope_repairs: Arc<Mutex<ScopeRepairCoordinator>>,
+    source_workers: Arc<Mutex<SourceWorkerCoordinator>>,
+    scan_slots: Arc<tokio::sync::Semaphore>,
 }
 
 impl Default for FileIndex {
@@ -147,7 +208,9 @@ impl Default for FileIndex {
             app_data_dir: Arc::new(RwLock::new(PathBuf::from("."))),
             app_handle: Arc::new(Mutex::new(None)),
             scan_generation: Arc::new(AtomicU64::new(1)),
-            last_overflow_reconcile: Arc::new(Mutex::new(HashMap::new())),
+            scope_repairs: Arc::new(Mutex::new(ScopeRepairCoordinator::default())),
+            source_workers: Arc::new(Mutex::new(SourceWorkerCoordinator::default())),
+            scan_slots: Arc::new(tokio::sync::Semaphore::new(2)),
         }
     }
 }
@@ -301,10 +364,9 @@ impl FileIndex {
             }
         }
 
-        // Decide which volumes need a fallback walk BEFORE flipping the
-        // indexing flag, so a startup with a persisted NTFS index reports
-        // ready immediately while its cursor catches up in the background.
-        let mut any_scan = false;
+        // Persist discovery and mount changes before scheduling source work.
+        // Each source owns its subsequent lifecycle, so a slow share cannot
+        // hold back another discovered volume.
         for vol in &discovered {
             let Some(mount_path) = vol.canonical_mount_path() else {
                 continue;
@@ -338,34 +400,55 @@ impl FileIndex {
                 }
             }
             debug_volume_plan(db, vol, &mount_path, fresh, update.as_ref().ok());
-            if !fresh {
-                any_scan |= vol.accessible;
-            }
         }
-        self.indexing.store(any_scan, Ordering::SeqCst);
-        self.emit_updated();
 
-        // A bounded pair lets a new secondary volume begin discovery even if a
-        // first recursive C: walk is long-running. SQLite writes remain
-        // serialized by Database while filesystem enumeration proceeds per
-        // volume; the bound prevents uncontrolled full-volume contention.
-        for pair in discovered.chunks(2) {
-            let mut tasks = Vec::with_capacity(pair.len());
-            for volume in pair.iter().filter(|volume| volume.accessible) {
-                let this = self.clone();
-                let volume = volume.clone();
-                tasks.push(tauri::async_runtime::spawn_blocking(move || {
-                    this.scan_one_volume_sync(&volume, fresh_ok);
-                }));
+        for volume in discovered.into_iter().filter(|volume| volume.accessible) {
+            let volume_id = volume.volume_id.clone();
+            let should_start = self
+                .source_workers
+                .lock()
+                .unwrap()
+                .request(volume_id.clone(), fresh_ok);
+            if !should_start {
+                continue;
             }
-            for task in tasks {
-                let _ = task.await;
-            }
+
+            let this = self.clone();
+            let slots = self.scan_slots.clone();
+            tauri::async_runtime::spawn(async move {
+                let mut pass_fresh_ok = fresh_ok;
+                loop {
+                    if let Ok(permit) = slots.clone().acquire_owned().await {
+                        let index = this.clone();
+                        let pass_volume = volume.clone();
+                        let _ = tauri::async_runtime::spawn_blocking(move || {
+                            index.scan_one_volume_sync(&pass_volume, pass_fresh_ok);
+                        })
+                        .await;
+                        drop(permit);
+                    }
+
+                    let pending = this.source_workers.lock().unwrap().finish_pass(&volume_id);
+                    let Some(next_fresh_ok) = pending else {
+                        break;
+                    };
+                    pass_fresh_ok = next_fresh_ok;
+                }
+
+                this.refresh_totals_and_status();
+                let active = !this.source_workers.lock().unwrap().is_empty();
+                this.indexing.store(active, Ordering::SeqCst);
+                this.ready.store(true, Ordering::SeqCst);
+                this.emit_updated();
+            });
         }
 
         self.refresh_totals_and_status();
-        self.indexing.store(false, Ordering::SeqCst);
-        self.ready.store(true, Ordering::SeqCst);
+        let active = !self.source_workers.lock().unwrap().is_empty();
+        self.indexing.store(active, Ordering::SeqCst);
+        if !active {
+            self.ready.store(true, Ordering::SeqCst);
+        }
         self.emit_updated();
     }
 
@@ -454,16 +537,18 @@ impl FileIndex {
                 .is_volume_fresh_at_mount(&volume_id, &mount_path, STARTUP_SWEEP_WINDOW.as_secs())
                 .unwrap_or(false);
 
-        // Overflow handler: re-sweep the volume that lost events, on the
-        // blocking pool so the watcher thread is never stalled.
+        // Repair only the shard that lost events, on the blocking pool so the
+        // watcher thread is never stalled.
         let overflow_index = self.clone();
         let overflow_volume = volume_id.clone();
-        let overflow_cb: Arc<dyn Fn(String) + Send + Sync> = Arc::new(move |_| {
+        let overflow_cb: Arc<dyn Fn(String, PathBuf) + Send + Sync> = Arc::new(move |_, scope| {
             let idx = overflow_index.clone();
             let v_id = overflow_volume.clone();
-            tauri::async_runtime::spawn_blocking(move || {
-                idx.reconcile_volume_sync(&v_id);
-            });
+            idx.request_scope_repair(v_id, scope);
+        });
+        let update_index = self.clone();
+        let update_cb: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
+            update_index.emit_updated();
         });
 
         // Start the watcher if needed, otherwise buffer its events so the scan
@@ -490,6 +575,7 @@ impl FileIndex {
                     app_data_clone,
                     counts_clone,
                     drive_clone,
+                    update_cb,
                     overflow_cb,
                 ) {
                     watchers.insert(volume_id.clone(), w);
@@ -557,6 +643,12 @@ impl FileIndex {
             self.counts.set(&drive, exact);
         }
 
+        // The baseline is complete before queued name events are replayed.
+        // A directory addition found during replay may therefore schedule a
+        // scoped repair immediately without being mistaken for a competing
+        // volume scan.
+        self.scan_cancels.lock().unwrap().remove(&volume_id);
+
         // Flush buffered watcher events (also releases buffering); deltas are
         // applied on top of the exact scanned count.
         {
@@ -578,13 +670,17 @@ impl FileIndex {
         // The sweep (and its FTS rebuild) left most of the WAL behind; fold
         // it back into the catalog so the next launch does not pay recovery.
         let _ = db.checkpoint();
-        self.scan_cancels.lock().unwrap().remove(&volume_id);
         self.emit_updated();
     }
 
     async fn catch_up_ntfs_volumes(&self, volumes: &[VolumeInfo]) {
         for volume in volumes {
             if select_backend(volume, true) != BackendKind::Ntfs
+                || self
+                    .source_workers
+                    .lock()
+                    .unwrap()
+                    .is_running(&volume.volume_id)
                 || self
                     .watchers
                     .lock()
@@ -618,44 +714,75 @@ impl FileIndex {
         self.refresh_totals_and_status();
     }
 
-    /// Incremental sweep of a single volume after a watcher overflow. Runs on
-    /// the blocking pool via the overflow callback - never on a runtime thread.
-    ///
-    /// Guarded three ways, because a full re-walk is minutes of CPU and the
-    /// whole point of the guards is that overflow bursts cannot chain
-    /// re-walks back to back: never while another scan of the volume is
-    /// already running, never more than once per
-    /// `OVERFLOW_RECONCILE_MIN_INTERVAL`, and never for a volume whose sweep
-    /// just completed (that sweep already reconciled the tree).
-    fn reconcile_volume_sync(&self, volume_id: &str) {
-        let scan_active = self.scan_cancels.lock().unwrap().contains_key(volume_id);
-        let last = self
-            .last_overflow_reconcile
-            .lock()
-            .unwrap()
-            .get(volume_id)
-            .copied();
-        let recently_scanned = {
-            let db_opt = self.db.read().unwrap().clone();
-            db_opt.as_ref().is_some_and(|db| {
-                db.is_volume_fresh(volume_id, OVERFLOW_RECONCILE_SCAN_GRACE)
-                    .unwrap_or(false)
-            })
-        };
-        if !reconcile_eligible(last, Instant::now(), scan_active, recently_scanned) {
+    fn request_scope_repair(&self, volume_id: String, scope: PathBuf) {
+        let key = format!("{}|{}", volume_id, scope.to_string_lossy().to_lowercase());
+        if !self.scope_repairs.lock().unwrap().request(key.clone()) {
             return;
         }
-        self.last_overflow_reconcile
-            .lock()
-            .unwrap()
-            .insert(volume_id.to_string(), Instant::now());
 
-        let volumes = volume::discover_volumes();
+        let index = self.clone();
+        tauri::async_runtime::spawn_blocking(move || loop {
+            index.reconcile_scope_sync(&volume_id, &scope);
+            if !index.scope_repairs.lock().unwrap().finish_pass(&key) {
+                break;
+            }
+        });
+    }
 
-        let Some(vol) = volumes.into_iter().find(|v| v.volume_id == volume_id) else {
+    fn reconcile_scope_sync(&self, volume_id: &str, requested_scope: &Path) {
+        let Some(db) = self.db.read().unwrap().clone() else {
             return;
         };
-        self.scan_one_volume_sync(&vol, false);
+        let (volume_root, attached) = {
+            let watchers = self.watchers.lock().unwrap();
+            let Some(watcher) = watchers.get(volume_id) else {
+                return;
+            };
+            (
+                watcher.root().to_path_buf(),
+                watcher.ensure_current_shards(),
+            )
+        };
+
+        if requested_scope != volume_root && !requested_scope.starts_with(&volume_root) {
+            return;
+        }
+
+        let mut scopes: HashSet<PathBuf> = attached.into_iter().collect();
+        scopes.insert(requested_scope.to_path_buf());
+        let app_data_dir = self.app_data_dir.read().unwrap().clone();
+        for scope in scopes {
+            let generation = self.scan_generation.fetch_add(1, Ordering::SeqCst);
+            let cancel = Arc::new(AtomicBool::new(false));
+            let result = if scope == volume_root {
+                scanner::reconcile_directory(
+                    &scope,
+                    volume_id,
+                    generation,
+                    db.clone(),
+                    &app_data_dir,
+                    cancel,
+                )
+            } else {
+                scanner::reconcile_scope(
+                    &scope,
+                    volume_id,
+                    generation,
+                    db.clone(),
+                    &app_data_dir,
+                    cancel,
+                )
+            };
+            if let Err(error) = result {
+                eprintln!(
+                    "[Prism Catalog] Scoped repair for {} failed: {}",
+                    scope.display(),
+                    error
+                );
+            }
+        }
+        let _ = db.checkpoint();
+        self.emit_updated();
     }
 
     fn update_progress(&self, drive: &str, count: u64) {
@@ -1079,22 +1206,6 @@ fn image_thumbnail(path: &Path, len: u64) -> Option<String> {
     ))
 }
 
-/// Scheduling decision for a watcher-overflow reconcile: a full volume
-/// re-walk only ever runs when no sweep is active, the last sweep is older
-/// than the grace window, and the previous reconcile is outside the debounce
-/// window. Overflow bursts must not chain re-walks back to back.
-fn reconcile_eligible(
-    last: Option<Instant>,
-    now: Instant,
-    scan_active: bool,
-    recently_scanned: bool,
-) -> bool {
-    if scan_active || recently_scanned {
-        return false;
-    }
-    last.is_none_or(|previous| now.duration_since(previous) >= OVERFLOW_RECONCILE_MIN_INTERVAL)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1133,19 +1244,41 @@ mod tests {
     }
 
     #[test]
-    fn overflow_reconciles_are_debounced_and_scan_guarded() {
-        let now = Instant::now();
-        // First overflow after startup: eligible.
-        assert!(reconcile_eligible(None, now, false, false));
-        // A sweep just finished: never reconcile on top of it.
-        assert!(!reconcile_eligible(None, now, false, true));
-        // Another sweep is still running: never stack a second walk.
-        assert!(!reconcile_eligible(None, now, true, false));
-        // Within the debounce window: drop the burst.
-        let moments_ago = now - Duration::from_secs(30);
-        assert!(!reconcile_eligible(Some(moments_ago), now, false, false));
-        // Outside the debounce window: eligible again.
-        let long_ago = now - OVERFLOW_RECONCILE_MIN_INTERVAL - Duration::from_secs(1);
-        assert!(reconcile_eligible(Some(long_ago), now, false, false));
+    fn scoped_repairs_coalesce_without_losing_a_pending_pass() {
+        let mut coordinator = ScopeRepairCoordinator::default();
+        let key = "vol1|c:\\users".to_string();
+
+        assert!(
+            coordinator.request(key.clone()),
+            "first request starts work"
+        );
+        assert!(
+            !coordinator.request(key.clone()),
+            "second request joins active work"
+        );
+        assert!(
+            coordinator.finish_pass(&key),
+            "pending work gets another pass"
+        );
+        assert!(!coordinator.finish_pass(&key), "quiet scope stops running");
+        assert!(
+            coordinator.request(key),
+            "a later request starts fresh work"
+        );
+    }
+
+    #[test]
+    fn source_workers_are_independent_and_preserve_forced_reruns() {
+        let mut coordinator = SourceWorkerCoordinator::default();
+
+        assert!(coordinator.request("c".into(), true));
+        assert!(coordinator.request("nas".into(), true));
+        assert!(coordinator.is_running("c"));
+        assert!(coordinator.is_running("nas"));
+        assert!(!coordinator.request("c".into(), false));
+        assert_eq!(coordinator.finish_pass("c"), Some(false));
+        assert_eq!(coordinator.finish_pass("c"), None);
+        assert_eq!(coordinator.finish_pass("nas"), None);
+        assert!(coordinator.is_empty());
     }
 }
