@@ -1,3 +1,17 @@
+import {
+  Accessibility,
+  Bluetooth,
+  Clock,
+  Gamepad2,
+  Home,
+  LayoutGrid,
+  Monitor,
+  Paintbrush,
+  RefreshCw,
+  Shield,
+  UserRound,
+  Wifi,
+} from "lucide-react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { openWindowsSettings } from "../../lib/bridge";
 import { searchWindowsSettings } from "./windowsSettings";
@@ -24,5 +38,24 @@ describe("Windows Settings actions", () => {
 
     expect(openWindowsSettingsMock).toHaveBeenCalledOnce();
     expect(openWindowsSettingsMock).toHaveBeenCalledWith(uri);
+  });
+
+  it.each([
+    ["settings", Home],
+    ["display", Monitor],
+    ["bluetooth", Bluetooth],
+    ["network & internet", Wifi],
+    ["background", Paintbrush],
+    ["installed apps", LayoutGrid],
+    ["your info", UserRound],
+    ["date & time", Clock],
+    ["game mode", Gamepad2],
+    ["narrator", Accessibility],
+    ["privacy & security", Shield],
+    ["windows update", RefreshCw],
+  ])("uses the Windows category icon for %s", (query, expectedIcon) => {
+    const result = searchWindowsSettings(query)[0];
+
+    expect(result.icon).toMatchObject({ kind: "tile", icon: expectedIcon, tint: "azure" });
   });
 });
