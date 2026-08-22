@@ -144,6 +144,11 @@ export async function launchAppAsAdmin(appId: string): Promise<void> {
   await invoke("launch_app_as_admin", { id: appId });
 }
 
+export async function openWindowsSettings(uri: string): Promise<void> {
+  if (!inTauri) return;
+  await invoke("open_windows_settings", { uri });
+}
+
 export async function openPath(path: string): Promise<void> {
   if (!inTauri) return;
   await invoke("open_path", { path });
