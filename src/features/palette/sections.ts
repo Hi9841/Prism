@@ -34,6 +34,7 @@ import type {
   TileTint,
 } from "../../lib/types";
 import { isElevatablePath } from "../../lib/types";
+import { searchWindowsSettings } from "./windowsSettings";
 
 export interface Section {
   id: string;
@@ -183,6 +184,10 @@ export function buildSections(sources: PaletteSources): {
 
     if (filePathBrowse && fileItems.length > 0) {
       out.push({ id: "files", label: "Folder Contents", items: fileItems });
+    }
+    const settingsItems = filePathBrowse ? [] : searchWindowsSettings(normalized);
+    if (settingsItems.length > 0) {
+      out.push({ id: "settings", label: "Settings", items: settingsItems });
     }
     const appsSection = buildAppsSection(appHits, appIcons, appGroups, SEARCH_APPS_LIMIT);
     if (appsSection) {
