@@ -97,7 +97,6 @@ export const PINNED_APP_LIMIT = 64;
 export const APP_GROUP_LIMIT = 16;
 export const APP_GROUP_APP_LIMIT = 64;
 export const DEFAULT_SECTION_ORDER = ["pinned", "recent", "quick", "apps"] as const;
-export type BuiltInSectionId = (typeof DEFAULT_SECTION_ORDER)[number];
 export const SECTION_ORDER_LIMIT = DEFAULT_SECTION_ORDER.length;
 
 const ELEVATABLE_EXTENSIONS = new Set(["exe", "com", "bat", "cmd", "ps1", "vbs", "js", "wsf"]);
@@ -114,16 +113,7 @@ export function reorderPinnedApps(
   sourceAppId: string,
   targetAppId: string,
 ): string[] {
-  const sourceIndex = pinnedApps.indexOf(sourceAppId);
-  const targetIndex = pinnedApps.indexOf(targetAppId);
-  if (sourceIndex < 0 || targetIndex < 0 || sourceIndex === targetIndex) {
-    return [...pinnedApps];
-  }
-
-  const reordered = [...pinnedApps];
-  const [movedAppId] = reordered.splice(sourceIndex, 1);
-  reordered.splice(targetIndex, 0, movedAppId);
-  return reordered;
+  return reorderAt(pinnedApps, pinnedApps.indexOf(sourceAppId), pinnedApps.indexOf(targetAppId));
 }
 
 export function reorderQuickAccess(
@@ -131,16 +121,7 @@ export function reorderQuickAccess(
   sourceKind: QuickAccessKind,
   targetKind: QuickAccessKind,
 ): QuickAccessKind[] {
-  const sourceIndex = quickAccess.indexOf(sourceKind);
-  const targetIndex = quickAccess.indexOf(targetKind);
-  if (sourceIndex < 0 || targetIndex < 0 || sourceIndex === targetIndex) {
-    return [...quickAccess];
-  }
-
-  const reordered = [...quickAccess];
-  const [movedKind] = reordered.splice(sourceIndex, 1);
-  reordered.splice(targetIndex, 0, movedKind);
-  return reordered;
+  return reorderAt(quickAccess, quickAccess.indexOf(sourceKind), quickAccess.indexOf(targetKind));
 }
 
 export function reorderSections(
@@ -148,16 +129,7 @@ export function reorderSections(
   sourceId: string,
   targetId: string,
 ): string[] {
-  const sourceIndex = sectionOrder.indexOf(sourceId);
-  const targetIndex = sectionOrder.indexOf(targetId);
-  if (sourceIndex < 0 || targetIndex < 0 || sourceIndex === targetIndex) {
-    return [...sectionOrder];
-  }
-
-  const reordered = [...sectionOrder];
-  const [movedId] = reordered.splice(sourceIndex, 1);
-  reordered.splice(targetIndex, 0, movedId);
-  return reordered;
+  return reorderAt(sectionOrder, sectionOrder.indexOf(sourceId), sectionOrder.indexOf(targetId));
 }
 
 export function reorderAppGroups(
@@ -165,15 +137,21 @@ export function reorderAppGroups(
   sourceId: string,
   targetId: string,
 ): AppGroup[] {
-  const sourceIndex = groups.findIndex((group) => group.id === sourceId);
-  const targetIndex = groups.findIndex((group) => group.id === targetId);
+  return reorderAt(
+    groups,
+    groups.findIndex((group) => group.id === sourceId),
+    groups.findIndex((group) => group.id === targetId),
+  );
+}
+
+function reorderAt<T>(items: readonly T[], sourceIndex: number, targetIndex: number): T[] {
   if (sourceIndex < 0 || targetIndex < 0 || sourceIndex === targetIndex) {
-    return [...groups];
+    return [...items];
   }
 
-  const reordered = [...groups];
-  const [movedGroup] = reordered.splice(sourceIndex, 1);
-  reordered.splice(targetIndex, 0, movedGroup);
+  const reordered = [...items];
+  const [moved] = reordered.splice(sourceIndex, 1);
+  reordered.splice(targetIndex, 0, moved);
   return reordered;
 }
 
@@ -183,7 +161,7 @@ export interface QuickAccessEntry {
   kind: QuickAccessKind;
 }
 
-export type VolumeState = "ready" | "indexing" | "offline" | "error";
+type VolumeState = "ready" | "indexing" | "offline" | "error";
 
 export interface VolumeCoverage {
   drive: string;
@@ -206,7 +184,7 @@ export type WindowWidth = 560 | 640 | 720;
 export type ThemeMode = "system" | "dark" | "light";
 export type TaskbarAlignment = "left" | "center" | "right";
 export const VIEW_ZOOM_LEVELS = [70, 80, 90, 100, 110, 120, 130, 140, 150] as const;
-export type ViewZoom = (typeof VIEW_ZOOM_LEVELS)[number];
+type ViewZoom = (typeof VIEW_ZOOM_LEVELS)[number];
 
 export function stepViewZoom(current: ViewZoom, direction: -1 | 1): ViewZoom {
   const currentIndex = VIEW_ZOOM_LEVELS.indexOf(current);

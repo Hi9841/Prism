@@ -1,6 +1,6 @@
 import type { AppEntry } from "./types";
 
-export interface FuzzyHit<T> {
+interface FuzzyHit<T> {
   item: T;
   score: number;
 }

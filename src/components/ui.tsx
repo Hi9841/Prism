@@ -71,7 +71,7 @@ export function RowIcon({ icon, size = 40 }: { icon: PaletteIcon; size?: number 
 
 /* ---------------- App logo tile ---------------- */
 
-export function AppLogo({ src, name, size = 40 }: { src: string; name: string; size?: number }) {
+function AppLogo({ src, name, size = 40 }: { src: string; name: string; size?: number }) {
   return (
     <div
       className="grid shrink-0 place-items-center rounded-[10px] bg-surface"
@@ -92,7 +92,7 @@ export function AppLogo({ src, name, size = 40 }: { src: string; name: string; s
 
 /* ---------------- Monogram tile ---------------- */
 
-export function Monogram({ name, size = 40 }: { name: string; size?: number }) {
+function Monogram({ name, size = 40 }: { name: string; size?: number }) {
   const hue = hueForName(name);
   return (
     <div

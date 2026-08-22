@@ -26,14 +26,10 @@ use windows::Win32::UI::Shell::{
 };
 
 const EXPLORER_ADVANCED_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced";
-const SEARCH_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Search";
 const TASKBAR_SIZE_VALUE: &str = "TaskbarSi";
 const ICON_SIZE_PREFERENCE_VALUE: &str = "IconSizePreference";
 const COMBINE_VALUE: &str = "TaskbarGlomLevel";
 const SECONDARY_COMBINE_VALUE: &str = "MMTaskbarGlomLevel";
-const TASK_VIEW_VALUE: &str = "ShowTaskViewButton";
-const WIDGETS_VALUE: &str = "TaskbarDa";
-const SEARCHBOX_MODE_VALUE: &str = "SearchboxMode";
 const ICON_SETTINGS_NAME: &str = "taskbar-start-icon.json";
 const CUSTOM_ICON_PNG: &str = "taskbar-start-icon.png";
 const CUSTOM_ICON_DIR: &str = "taskbar-start-icons";
@@ -88,7 +84,7 @@ struct IconSettings {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct CustomStartIcon {
+struct CustomStartIcon {
     id: String,
     /// Base64 PNG preview. Serialized as a string so a dozen previews cost
     /// kilobytes of IPC instead of megabytes of JSON number arrays.
@@ -101,9 +97,6 @@ pub(crate) struct TaskbarSettings {
     thickness: &'static str,
     auto_hide: bool,
     combine_buttons: &'static str,
-    show_task_view: bool,
-    show_widgets: bool,
-    searchbox_mode: &'static str,
     start_icon: &'static str,
     selected_custom_icon: Option<String>,
     custom_start_icons: Vec<CustomStartIcon>,
@@ -124,14 +117,6 @@ pub(crate) fn settings(app: &AppHandle) -> Result<TaskbarSettings, String> {
             .and_then(|key| read_dword(key.0, name).ok().flatten())
             .unwrap_or(fallback)
     };
-    let search = open_key(SEARCH_KEY, KEY_QUERY_VALUE)?;
-    let read_search = |name, fallback| {
-        search
-            .as_ref()
-            .and_then(|key| read_dword(key.0, name).ok().flatten())
-            .unwrap_or(fallback)
-    };
-
     Ok(TaskbarSettings {
         thickness: thickness_name(
             read_advanced(TASKBAR_SIZE_VALUE, 1),
@@ -139,9 +124,6 @@ pub(crate) fn settings(app: &AppHandle) -> Result<TaskbarSettings, String> {
         ),
         auto_hide: taskbar_auto_hide(),
         combine_buttons: combine_name(read_advanced(COMBINE_VALUE, 0)),
-        show_task_view: read_advanced(TASK_VIEW_VALUE, 1) != 0,
-        show_widgets: read_advanced(WIDGETS_VALUE, 1) != 0,
-        searchbox_mode: searchbox_mode_name(read_search(SEARCHBOX_MODE_VALUE, 1)),
         start_icon: icon_settings.start_icon.name(),
         selected_custom_icon: selected_custom_id(app, &icon_settings),
         custom_start_icons: custom_start_icons(app)?,
@@ -193,34 +175,6 @@ pub(crate) fn set_combine_buttons(value: &str) -> Result<(), String> {
     write_advanced_dword(COMBINE_VALUE, code)?;
     write_advanced_dword(SECONDARY_COMBINE_VALUE, code)?;
     crate::taskbar_alignment::notify_taskbars("TraySettings");
-    Ok(())
-}
-
-pub(crate) fn set_task_view(visible: bool) -> Result<(), String> {
-    write_advanced_dword(TASK_VIEW_VALUE, u32::from(visible))?;
-    crate::taskbar_alignment::notify_taskbars("TraySettings");
-    Ok(())
-}
-
-pub(crate) fn set_widgets(visible: bool) -> Result<(), String> {
-    write_advanced_dword(WIDGETS_VALUE, u32::from(visible))?;
-    crate::taskbar_alignment::notify_taskbars("TraySettings");
-    Ok(())
-}
-
-pub(crate) fn set_searchbox_mode(value: &str) -> Result<(), String> {
-    let code = match value {
-        "hidden" => 0,
-        "icon" | "button" => 1,
-        "box" | "searchBox" => 2,
-        "iconWithLabel" | "buttonWithLabel" => 3,
-        _ => return Err(format!("unsupported searchbox mode '{value}'")),
-    };
-    let key = open_key(SEARCH_KEY, KEY_SET_VALUE)?
-        .ok_or_else(|| "Windows search settings are unavailable".to_string())?;
-    write_dword(key.0, SEARCHBOX_MODE_VALUE, code)?;
-    crate::taskbar_alignment::notify_taskbars("TraySettings");
-    crate::win_key::request_start_rect_refresh();
     Ok(())
 }
 
@@ -467,16 +421,6 @@ fn combine_name(value: u32) -> &'static str {
     }
 }
 
-fn searchbox_mode_name(value: u32) -> &'static str {
-    match value {
-        0 => "hidden",
-        1 => "icon",
-        2 => "box",
-        3 => "iconWithLabel",
-        _ => "icon",
-    }
-}
-
 fn write_advanced_dword(name: &str, value: u32) -> Result<(), String> {
     let key = open_key(EXPLORER_ADVANCED_KEY, KEY_SET_VALUE)?
         .ok_or_else(|| "Windows taskbar settings are unavailable".to_string())?;
@@ -640,15 +584,6 @@ mod tests {
         assert_eq!(combine_name(1), "whenFull");
         assert_eq!(combine_name(2), "never");
         assert_eq!(combine_name(99), "always");
-    }
-
-    #[test]
-    fn searchbox_mode_codes_have_stable_fallbacks() {
-        assert_eq!(searchbox_mode_name(0), "hidden");
-        assert_eq!(searchbox_mode_name(1), "icon");
-        assert_eq!(searchbox_mode_name(2), "box");
-        assert_eq!(searchbox_mode_name(3), "iconWithLabel");
-        assert_eq!(searchbox_mode_name(99), "icon");
     }
 
     #[test]
