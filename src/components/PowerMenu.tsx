@@ -1,4 +1,4 @@
-import { Lock, Power, RotateCcw } from "lucide-react";
+import { Lock, Moon, Power, RotateCcw } from "lucide-react";
 import { useCallback, useEffect, useId, useRef, useState } from "react";
 import { type PowerAction, performPowerAction } from "../lib/bridge";
 import { onTransientUiDismiss } from "../lib/transientUi";
@@ -7,6 +7,7 @@ import { IconButton } from "./ui";
 
 const ACTIONS: { action: PowerAction; label: string; icon: typeof Power }[] = [
   { action: "lock", label: "Lock", icon: Lock },
+  { action: "sleep", label: "Sleep", icon: Moon },
   { action: "shutdown", label: "Shut down", icon: Power },
   { action: "restart", label: "Restart", icon: RotateCcw },
 ];
