@@ -16,16 +16,9 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::Duration;
 
-use tauri::{
-    window::{Color, Effect, EffectsBuilder},
-    Emitter, Manager, Theme, WindowEvent,
-};
+use tauri::{Emitter, Manager, Theme, WindowEvent};
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
 use windows::Win32::Foundation::{HWND, POINT, RECT};
-use windows::Win32::Graphics::Dwm::{
-    DwmSetWindowAttribute, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_DONOTROUND,
-    DWM_WINDOW_CORNER_PREFERENCE,
-};
 use windows::Win32::Graphics::Gdi::{
     GetMonitorInfoW, MonitorFromPoint, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST,
 };
@@ -175,7 +168,12 @@ pub fn run() {
                 app.handle().clone(),
             );
             if let Some(window) = app.get_webview_window("main") {
-                let _ = apply_window_look(&window, "solid", "dark");
+                // Start from the persisted look instead of hardcoded defaults so
+                // light-theme or blur-material users never see a wrong flash
+                // before the frontend restyles the window.
+                let theme =
+                    startup_window_look(persisted.as_ref(), theme::apps_light() == Some(true));
+                let _ = apply_window_look_with(|| clear_window_material(&window));
                 schedule_hidden_memory_trim(app.handle().clone());
             }
             warm_apps(app.handle().clone());
@@ -755,88 +753,21 @@ fn register_shortcut(app: &tauri::AppHandle, combo: &str) -> Result<(), String> 
     Ok(())
 }
 
-fn apply_window_look(
-    window: &tauri::WebviewWindow,
-    effect: &str,
-    theme: &str,
-) -> Result<(), String> {
-    let (tint, mica) = if theme == "light" {
-        (Color(238, 240, 244, 190), Effect::MicaLight)
-    } else {
-        (Color(20, 20, 26, 165), Effect::MicaDark)
-    };
-    let build = |effect: Effect| {
-        EffectsBuilder::new()
-            .effect(effect)
-            .radius(12.0)
-            .color(tint)
-            .build()
-    };
-    let attempt = |effect: Effect| window.set_effects(build(effect)).is_ok();
-
-    apply_window_look_with(
-        effect,
-        mica,
-        attempt,
-        || window.set_effects(None).map_err(|error| error.to_string()),
-        || schedule_square_window_corners(window),
-    )
+/// Prism renders one way: a solid CSS-painted surface over a transparent
+/// window. Native backdrop materials (acrylic/mica/blur) paint the full
+/// square HWND and fight that design at every corner, so they are always
+/// cleared - including whatever an older build or a hand-edited state file
+/// left active on the window.
+fn apply_window_look_with(mut clear: impl FnMut() -> Result<(), String>) -> Result<(), String> {
+    clear()
 }
 
-fn apply_window_look_with(
-    effect: &str,
-    mica: Effect,
-    mut attempt: impl FnMut(Effect) -> bool,
-    mut clear: impl FnMut() -> Result<(), String>,
-    mut square_corners: impl FnMut(),
-) -> Result<(), String> {
-    let applied = match effect {
-        "acrylic" => attempt(Effect::Acrylic) || attempt(mica) || attempt(Effect::Blur),
-        "mica" => attempt(mica) || attempt(Effect::Acrylic) || attempt(Effect::Blur),
-        "solid" => {
-            clear()?;
-            true
-        }
-        _ => return Err(format!("unknown effect '{effect}'")),
-    };
-
-    if !applied {
-        clear()?;
-    }
-    square_corners();
-    Ok(())
+fn clear_window_material(window: &tauri::WebviewWindow) -> Result<(), String> {
+    // `EffectsBuilder::clear_effects()` only empties a new config. Tauri
+    // interprets `None` as the instruction to remove the active native
+    // material from the HWND.
+    window.set_effects(None).map_err(|error| error.to_string())
 }
-
-fn schedule_square_window_corners(window: &tauri::WebviewWindow) {
-    let window = window.clone();
-    let _ = window.clone().run_on_main_thread(move || {
-        set_square_window_corners(&window);
-    });
-}
-
-fn window_corner_preference() -> DWM_WINDOW_CORNER_PREFERENCE {
-    DWMWCP_DONOTROUND
-}
-
-fn set_square_window_corners(window: &tauri::WebviewWindow) {
-    let Ok(hwnd) = window.hwnd() else {
-        return;
-    };
-    let preference = window_corner_preference();
-    // Backdrop changes can restore DWM's default rounding. Run after Tauri's
-    // queued effect change so every material keeps the old Solid window shape.
-    // Ignore the hint when unsupported.
-    unsafe {
-        let _ = DwmSetWindowAttribute(
-            hwnd,
-            DWMWA_WINDOW_CORNER_PREFERENCE,
-            std::ptr::from_ref(&preference).cast(),
-            std::mem::size_of_val(&preference) as u32,
-        );
-    }
-}
-
-/* ---------------- commands ---------------- */
 
 #[tauri::command]
 async fn get_apps(
@@ -1179,16 +1110,12 @@ fn is_animatable_window_width(width: u32) -> bool {
     (560..=720).contains(&width)
 }
 
-/// Applies the two coupled native style settings in one IPC round-trip and
-/// one window-style application. The frontend changes these together during
-/// startup and when the user switches appearance settings.
+/// Applies the window style in one IPC round-trip: native theme plus the
+/// solid-only surface rule.
 #[tauri::command]
-fn set_window_style(app: tauri::AppHandle, theme: String, effect: String) -> Result<(), String> {
+fn set_window_style(app: tauri::AppHandle, theme: String) -> Result<(), String> {
     if !matches!(theme.as_str(), "light" | "dark") {
         return Err(format!("unknown theme '{theme}'"));
-    }
-    if !matches!(effect.as_str(), "acrylic" | "mica" | "solid") {
-        return Err(format!("unknown effect '{effect}'"));
     }
     let window = app
         .get_webview_window("main")
@@ -1198,7 +1125,7 @@ fn set_window_style(app: tauri::AppHandle, theme: String, effect: String) -> Res
     } else {
         Theme::Dark
     }));
-    apply_window_look(&window, &effect, &theme)
+    apply_window_look_with(|| clear_window_material(&window))
 }
 
 #[tauri::command]
@@ -1224,6 +1151,27 @@ fn validate_shortcut(combo: &str) -> Result<(), String> {
             .map_err(|_| format!("invalid shortcut '{combo}'"))?;
     }
     Ok(())
+}
+
+/// Resolves the (theme, effect) pair the window starts with, before the
+/// frontend loads. Persisted values win when valid; "system" resolves
+/// against the OS apps-light preference; anything else falls back to dark
+/// solid so startup never depends on frontend timing.
+fn startup_window_look(
+    state: Option<&serde_json::Value>,
+    system_prefers_light: bool,
+) -> &'static str {
+    let raw = state
+        .and_then(|value| value.get("settings"))
+        .and_then(|value| value.as_object())
+        .and_then(|settings| settings.get("theme"))
+        .and_then(|value| value.as_str());
+    match raw {
+        Some("light") => "light",
+        Some("dark") => "dark",
+        Some("system") if system_prefers_light => "light",
+        _ => "dark",
+    }
 }
 
 fn startup_shortcut(state: Option<&serde_json::Value>) -> String {
@@ -1671,75 +1619,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn window_corner_preference_matches_old_solid_shape() {
-        assert_eq!(
-            window_corner_preference(),
-            windows::Win32::Graphics::Dwm::DWMWCP_DONOTROUND
-        );
-    }
-
-    #[test]
-    fn every_window_material_reasserts_square_corners() {
-        for effect in ["acrylic", "mica", "solid"] {
-            let events = std::cell::RefCell::new(Vec::new());
-            apply_window_look_with(
-                effect,
-                Effect::MicaDark,
-                |_| {
-                    events.borrow_mut().push("attempt");
-                    true
-                },
-                || {
-                    events.borrow_mut().push("clear");
-                    Ok(())
-                },
-                || events.borrow_mut().push("square"),
-            )
-            .unwrap();
-            let expected = if effect == "solid" {
-                vec!["clear", "square"]
-            } else {
-                vec!["attempt", "square"]
-            };
-            assert_eq!(*events.borrow(), expected, "{effect} callback order");
-        }
-
-        let events = std::cell::RefCell::new(Vec::new());
-        apply_window_look_with(
-            "acrylic",
-            Effect::MicaDark,
-            |_| {
-                events.borrow_mut().push("attempt");
-                false
-            },
-            || {
-                events.borrow_mut().push("clear");
-                Ok(())
-            },
-            || events.borrow_mut().push("square"),
-        )
+    fn window_materials_are_always_cleared_for_solid_rendering() {
+        // Prism renders solid only: whatever a legacy setting or an older
+        // build left on the HWND gets cleared before every style pass.
+        let cleared = std::cell::Cell::new(false);
+        apply_window_look_with(|| {
+            cleared.set(true);
+            Ok(())
+        })
         .unwrap();
-        assert_eq!(
-            *events.borrow(),
-            ["attempt", "attempt", "attempt", "clear", "square"]
-        );
+        assert!(cleared.get());
 
-        let events = std::cell::RefCell::new(Vec::new());
-        assert!(apply_window_look_with(
-            "hologram",
-            Effect::MicaDark,
-            |_| {
-                events.borrow_mut().push("attempt");
-                true
-            },
-            || {
-                events.borrow_mut().push("clear");
-                Ok(())
-            },
-            || events.borrow_mut().push("square"),
-        )
-        .is_err());
-        assert!(events.borrow().is_empty());
+        // A failed clear fails the call so the frontend knows styling broke.
+        assert!(apply_window_look_with(|| Err("clear failed".to_string())).is_err());
     }
 
     #[test]
@@ -1777,6 +1669,47 @@ mod tests {
                 "settings": { "shortcut": "Win+L" }
             }))),
             DEFAULT_SHORTCUT
+        );
+    }
+
+    #[test]
+    fn startup_window_look_follows_persisted_theme() {
+        // No persisted state: dark default.
+        assert_eq!(startup_window_look(None, false), "dark");
+        // Persisted value wins when valid.
+        assert_eq!(
+            startup_window_look(
+                Some(&serde_json::json!({ "settings": { "theme": "light" } })),
+                false
+            ),
+            "light"
+        );
+        // "system" resolves against the OS apps-light preference.
+        assert_eq!(
+            startup_window_look(
+                Some(&serde_json::json!({ "settings": { "theme": "system" } })),
+                true
+            ),
+            "light"
+        );
+        assert_eq!(
+            startup_window_look(
+                Some(&serde_json::json!({ "settings": { "theme": "system" } })),
+                false
+            ),
+            "dark"
+        );
+        // Invalid or missing values fall back instead of crashing startup.
+        assert_eq!(
+            startup_window_look(
+                Some(&serde_json::json!({ "settings": { "theme": "hologram" } })),
+                false
+            ),
+            "dark"
+        );
+        assert_eq!(
+            startup_window_look(Some(&serde_json::json!({ "version": 3 })), false),
+            "dark"
         );
     }
 

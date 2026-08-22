@@ -27,7 +27,6 @@ import type {
   QuickAccessKind,
   TaskbarAlignment,
   ThemeMode,
-  WindowEffect,
   WindowWidth,
 } from "../lib/types";
 import {
@@ -844,18 +843,6 @@ export function SettingsSheet() {
           </SettingsRow>
           <SettingsRow title="View zoom" detail="Ctrl + Up/Down or Ctrl + wheel">
             <ViewZoomControl />
-          </SettingsRow>
-          <SettingsRow title="Window material" detail="Solid avoids DWM blur issues">
-            <Segmented<WindowEffect>
-              label="Window material"
-              value={settings.effect}
-              onChange={(effect) => updateSettings({ effect })}
-              options={[
-                { value: "acrylic", label: "Acrylic" },
-                { value: "mica", label: "Mica" },
-                { value: "solid", label: "Solid" },
-              ]}
-            />
           </SettingsRow>
 
           <SectionTitle>Taskbar</SectionTitle>

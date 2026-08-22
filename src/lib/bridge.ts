@@ -4,7 +4,7 @@ import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
-import type { AppEntry, FileSearchResponse, PersistedState, QuickAccessEntry, WindowEffect } from "./types";
+import type { AppEntry, FileSearchResponse, PersistedState, QuickAccessEntry } from "./types";
 
 export type PowerAction = "lock" | "shutdown" | "restart";
 export type TaskbarThickness = "compact" | "default" | "adaptive";
@@ -248,9 +248,9 @@ export function onFileIndexUpdated(cb: () => void): () => void {
   };
 }
 
-export async function setWindowStyle(theme: "light" | "dark", effect: WindowEffect): Promise<void> {
+export async function setWindowStyle(theme: "light" | "dark"): Promise<void> {
   if (!inTauri) return;
-  await invoke("set_window_style", { theme, effect });
+  await invoke("set_window_style", { theme });
 }
 
 export async function setWindowWidth(width: number): Promise<void> {

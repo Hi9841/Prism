@@ -953,10 +953,10 @@ impl ShellBridge {
         };
 
         if let Some(rect) = self.start_button_locator.rect() {
-            if !same_rect(rect, self.start_rect) {
-                if post_start_button_rect(self.taskbar_thread, message, rect).is_ok() {
-                    self.start_rect = rect;
-                }
+            if !same_rect(rect, self.start_rect)
+                && post_start_button_rect(self.taskbar_thread, message, rect).is_ok()
+            {
+                self.start_rect = rect;
             }
         }
 
@@ -966,10 +966,10 @@ impl ShellBridge {
             (None, None) => false,
             _ => true,
         };
-        if search_changed {
-            if post_search_button_rect(self.taskbar_thread, message, search_rect).is_ok() {
-                self.search_rect = search_rect;
-            }
+        if search_changed
+            && post_search_button_rect(self.taskbar_thread, message, search_rect).is_ok()
+        {
+            self.search_rect = search_rect;
         }
     }
 }
