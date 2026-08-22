@@ -249,6 +249,15 @@ body {
       inset 0 -1px 0 rgb(0 0 0 / 0.18);
   }
 
+  /* Glass surface mode (native DWM backdrop active): DWM clips backdrop
+     materials at the Windows 11 corner radius (~8px), so the shell must
+     match that native curve. A larger CSS radius would let the raw material
+     show through every corner. Solid mode keeps the generous silhouette
+     because nothing native renders behind the window. */
+  :root[data-surface="glass"] .shell {
+    border-radius: 8px;
+  }
+
   /* Solid surface mode (no native blur available): a slightly more opaque
      glass so text stays readable without DWM blur behind the window. */
   :root[data-surface="solid"] .shell {
