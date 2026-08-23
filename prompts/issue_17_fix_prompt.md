@@ -1,27 +1,29 @@
-# Task Prompt: Fix Issue #17 - app sometimes crashes and usage becomes extremely high
+# Task Prompt: Fix Issue #17 Recurrence - removed paths scan the full catalog
 
 ## Context
 In `Hi9841/Prism`, the fallback file catalog recursively watches a mounted volume in `src-tauri/src/catalog/watcher.rs`. It queues Windows directory-change notifications and periodically folds them into SQLite updates so filename search stays current while the palette is hidden.
 
 ## Problem Statement
-The fallback watcher subscribes to last-write, creation-time, and size notifications across the whole volume. These content-only changes do not affect Prism's filename or path search, but high-churn browser, build, and system caches send them into an unbounded queue. `apply_queued_events` then deduplicates paths with repeated `Vec::contains` and `Vec::retain` scans, making large batches quadratic, before writing the touched rows back to SQLite.
+The earlier fix stopped content-only watcher events, but watcher removals and startup scan pruning still delete directory subtrees with `normalized_path LIKE ? || '%'`. SQLite can only use the `volume_id` part of the `(volume_id, normalized_path)` index, so each removed or already-missing filename scans the entire volume catalog.
 
-On the reported machine, the hidden app's `prism-flush-<volume-id>` thread consumed one full CPU core continuously and the catalog WAL changed every second. The catalog contained 2,859,188 fallback entries in a 3.3 GB database. This sustained queue and database churn explains the high CPU and disk use and creates an eventual memory or crash risk.
+On the reported machine, Prism crashed and was reopened. The replacement process immediately consumed one full CPU core while hidden and read about 2.8 GB every three seconds. The catalog contains 2,874,343 entries in a 3.35 GB database. A missing-path subtree probe took about 790 ms, while the exact composite-index probe took 0.1 ms.
 
 ## Objective
-Keep fallback filename search current for file and directory additions, removals, and renames without processing content-only writes. Fold remaining event bursts in linear time while preserving the existing final-state semantics.
+Keep file and directory removal semantics while making watcher updates and startup pruning use the complete composite index, so removal batches cannot pin a CPU core or repeatedly read the full catalog.
 
 ## Key Files to Modify
-1. `src-tauri/src/catalog/watcher.rs`
-   - Subscribe only to `FILE_NOTIFY_CHANGE_FILE_NAME` and `FILE_NOTIFY_CHANGE_DIR_NAME`.
-   - Keep add, remove, rename, and overflow behavior intact.
-   - Replace repeated vector membership scans with hash-set folding.
-   - Add a real Windows watcher regression test proving that an existing file's content change does not enqueue a catalog update.
+1. `src-tauri/src/catalog/db.rs`
+   - Replace the non-indexable subtree `LIKE` delete with exact and bounded descendant-range deletes.
+   - Share the indexed delete across watcher updates and scan pruning.
+   - Add regressions that fail when either removal path scales with total catalog rows.
+2. `src-tauri/src/catalog/watcher.rs`
+   - Preserve existing add, remove, rename, overflow, and content-write filtering behavior.
 
 ## Acceptance Criteria
-- Content, timestamp, and size-only changes do not enter the fallback catalog queue.
-- File and directory additions, removals, and renames still update search membership.
-- Duplicate event folding remains correct and runs in linear expected time.
+- Missing and ordinary file removals do not scan all rows for a volume.
+- Startup pruning does not scan all rows once per missing directory.
+- Directory removal still deletes the directory and every descendant.
+- File additions, removals, renames, overflow repair, and content-write filtering keep working.
 - The focused watcher tests pass.
 - All existing Rust tests pass with `cargo test`.
 - All frontend tests pass with `bun run test`.
