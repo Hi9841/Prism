@@ -1163,24 +1163,14 @@ impl Database {
 
         let mut conn = self.writer.lock().map_err(|e| e.to_string())?;
         let tx = conn.transaction().map_err(|e| e.to_string())?;
+        let mut removed = 0;
         for (path, is_dir) in &missing {
-            if *is_dir {
-                let prefix = escape_like_pattern(&format!("{path}\\"));
-                tx.execute(
-                    "DELETE FROM files WHERE volume_id = ?1 AND (normalized_path = ?2 OR normalized_path LIKE ?3 || '%' ESCAPE '!');",
-                    params![volume_id, path, prefix],
-                )
-                .map_err(|e| e.to_string())?;
-            } else {
-                tx.execute(
-                    "DELETE FROM files WHERE volume_id = ?1 AND normalized_path = ?2;",
-                    params![volume_id, path],
-                )
-                .map_err(|e| e.to_string())?;
-            }
+            removed += Self::delete_path_rows(&tx, volume_id, path, *is_dir)?;
         }
         tx.commit().map_err(|e| e.to_string())?;
-        self.note_bulk_write();
+        if removed != 0 {
+            self.note_bulk_write();
+        }
         Ok(())
     }
 
@@ -1341,25 +1331,47 @@ impl Database {
         normalized_path: &str,
         is_dir: bool,
     ) -> Result<i64, String> {
-        let conn = self.writer.lock().map_err(|e| e.to_string())?;
-        let removed = if is_dir {
-            let prefix = escape_like_pattern(&format!("{normalized_path}\\"));
-            conn.execute(
-                "DELETE FROM files WHERE volume_id = ?1 AND (normalized_path = ?2 OR normalized_path LIKE ?3 || '%' ESCAPE '!');",
-                params![volume_id, normalized_path, prefix],
-            )
-            .map_err(|e| e.to_string())?
-        } else {
-            conn.execute(
-                "DELETE FROM files WHERE volume_id = ?1 AND normalized_path = ?2;",
-                params![volume_id, normalized_path],
-            )
-            .map_err(|e| e.to_string())?
-        };
+        let mut conn = self.writer.lock().map_err(|e| e.to_string())?;
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
+        let removed = Self::delete_path_rows(&tx, volume_id, normalized_path, is_dir)?;
+
+        tx.commit().map_err(|e| e.to_string())?;
         if removed != 0 {
             self.note_bulk_write();
         }
         Ok(removed as i64)
+    }
+
+    fn delete_path_rows(
+        tx: &rusqlite::Transaction<'_>,
+        volume_id: &str,
+        normalized_path: &str,
+        include_descendants: bool,
+    ) -> Result<usize, String> {
+        let mut removed = tx
+            .execute(
+                "DELETE FROM files WHERE volume_id = ?1 AND normalized_path = ?2;",
+                params![volume_id, normalized_path],
+            )
+            .map_err(|e| e.to_string())?;
+
+        if include_descendants {
+            let descendant_start = format!("{normalized_path}\\");
+            // Backslash is immediately before ']' in SQLite's binary text order,
+            // so this bounds every descendant while keeping the composite index usable.
+            let descendant_end = format!("{normalized_path}]");
+            removed += tx
+                .execute(
+                    "DELETE FROM files
+                     WHERE volume_id = ?1
+                       AND normalized_path >= ?2
+                       AND normalized_path < ?3;",
+                    params![volume_id, descendant_start, descendant_end],
+                )
+                .map_err(|e| e.to_string())?;
+        }
+
+        Ok(removed)
     }
 
     /// Renames a file or directory subtree (watcher path). Returns the net row
@@ -2070,6 +2082,46 @@ mod ntfs_tests {
         }
     }
 
+    fn seed_large_fallback_catalog(db: &Database) {
+        db.begin_bulk_load().unwrap();
+        {
+            let conn = db.writer.lock().unwrap();
+            conn.execute_batch(
+                r#"WITH digits(value) AS (
+                       VALUES (0), (1), (2), (3), (4), (5), (6), (7), (8), (9)
+                   ),
+                   high(value) AS (VALUES (0), (1), (2)),
+                   numbers(value) AS (
+                       SELECT ones.value
+                            + tens.value * 10
+                            + hundreds.value * 100
+                            + thousands.value * 1000
+                            + ten_thousands.value * 10000
+                            + high.value * 100000
+                       FROM digits ones
+                       CROSS JOIN digits tens
+                       CROSS JOIN digits hundreds
+                       CROSS JOIN digits thousands
+                       CROSS JOIN digits ten_thousands
+                       CROSS JOIN high
+                   )
+                   INSERT INTO files(
+                       volume_id, normalized_path, display_path, name, lower_name,
+                       parent, is_directory, extension, scan_generation, modified_at, size
+                   )
+                   SELECT 'stable-volume',
+                          printf('c:\bulk\file-%06d.tmp', value),
+                          printf('C:\Bulk\file-%06d.tmp', value),
+                          printf('file-%06d.tmp', value),
+                          printf('file-%06d.tmp', value),
+                          'C:\Bulk', 0, 'tmp', 1, 1, 1
+                   FROM numbers;"#,
+            )
+            .unwrap();
+        }
+        db.end_bulk_load().unwrap();
+    }
+
     fn node(frn: u64, parent_frn: u64, name: &str, is_directory: bool) -> NtfsNode {
         NtfsNode {
             frn,
@@ -2464,5 +2516,117 @@ mod ntfs_tests {
 
         drop(db);
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn directory_removal_deletes_descendants_without_touching_prefix_neighbors() {
+        let path = temp_db_path("directory-removal-range");
+        let db = Database::open(&path).unwrap();
+        let data = volume();
+        db.upsert_volume(&data, VolumeState::Ready).unwrap();
+
+        let mut directory = scanned_file(r"C:\Projects\App", "App");
+        directory.is_directory = true;
+        directory.extension = None;
+        directory.size = 0;
+        db.insert_batch(
+            &data.volume_id,
+            1,
+            &[
+                directory,
+                scanned_file(r"C:\Projects\App\child.txt", "child.txt"),
+                scanned_file(r"C:\Projects\App2\keep.txt", "keep.txt"),
+                scanned_file(r"C:\Projects\App.log", "App.log"),
+            ],
+        )
+        .unwrap();
+
+        let removed = db
+            .remove_file(&data.volume_id, r"c:\projects\app", true)
+            .unwrap();
+
+        assert_eq!(removed, 2);
+        assert!(db.search_candidates("child.txt", 10).unwrap().is_empty());
+        assert_eq!(db.search_candidates("keep.txt", 10).unwrap().len(), 1);
+        assert_eq!(db.search_candidates("app.log", 10).unwrap().len(), 1);
+
+        drop(db);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn missing_path_removals_do_not_scan_every_catalog_row() {
+        let path = temp_db_path("bounded-removal");
+        let db = Database::open(&path).unwrap();
+        let data = volume();
+        db.upsert_volume(&data, VolumeState::Ready).unwrap();
+        seed_large_fallback_catalog(&db);
+
+        let started = std::time::Instant::now();
+        for index in 0..32 {
+            db.remove_file(
+                &data.volume_id,
+                &format!(r"c:\missing\already-gone-{index}.tmp"),
+                true,
+            )
+            .unwrap();
+        }
+        let elapsed = started.elapsed();
+        let within_budget = elapsed < std::time::Duration::from_millis(250);
+
+        drop(db);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+        assert!(
+            within_budget,
+            "32 missing-path removals took {elapsed:?}; each removal is scanning the volume catalog"
+        );
+    }
+
+    #[test]
+    fn pruning_missing_directories_does_not_scan_every_catalog_row() {
+        let path = temp_db_path("bounded-pruning");
+        let db = Database::open(&path).unwrap();
+        let data = volume();
+        db.upsert_volume(&data, VolumeState::Ready).unwrap();
+        seed_large_fallback_catalog(&db);
+
+        let mut missing = Vec::new();
+        for index in 0..32 {
+            let name = format!("Gone-{index:02}");
+            let directory_path = format!(r"C:\Root\{name}");
+            let mut directory = scanned_file(&directory_path, &name);
+            directory.is_directory = true;
+            directory.extension = None;
+            directory.size = 0;
+            missing.push(directory);
+            missing.push(scanned_file(
+                &format!(r"{directory_path}\child.txt"),
+                "child.txt",
+            ));
+        }
+        db.insert_batch(&data.volume_id, 1, &missing).unwrap();
+
+        let started = std::time::Instant::now();
+        db.prune_removed_children(&data.volume_id, r"C:\Root", &HashSet::new())
+            .unwrap();
+        let elapsed = started.elapsed();
+        let within_budget = elapsed < std::time::Duration::from_millis(250);
+        let remaining: i64 = {
+            let conn = db.reader.lock().unwrap();
+            conn.query_row(
+                "SELECT COUNT(*) FROM files WHERE volume_id = ?1;",
+                params![data.volume_id],
+                |row| row.get(0),
+            )
+            .unwrap()
+        };
+
+        drop(db);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+        assert_eq!(remaining, 300_000);
+        assert!(
+            within_budget,
+            "pruning 32 missing directories took {elapsed:?}; each subtree delete is scanning the volume catalog"
+        );
     }
 }
