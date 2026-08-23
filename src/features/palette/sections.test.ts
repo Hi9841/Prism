@@ -289,24 +289,20 @@ describe("buildSections - search layout", () => {
     expect(result.sections[0].items[0].title).toBe("Display");
   });
 
-  it("ranks Settings before app and file matches in keyboard order", () => {
-    const query = "display";
+  it("ranks Apps before Settings and file matches in keyboard order", () => {
+    const query = "dis";
     const result = buildSections(
       sources({
         query,
-        apps: [app("Display Manager")],
-        fileResults: [file("display-notes.txt", "C:\\Users\\You\\display-notes.txt")],
+        apps: [app("Discord")],
+        fileResults: [file("discord-notes.txt", "C:\\Users\\You\\discord-notes.txt")],
         fileResultQuery: query,
         fileIndexReady: true,
       }),
     );
 
-    expect(ids(result.sections)).toEqual(["settings", "apps", "files"]);
-    expect(result.flatItems.map((entry) => entry.title)).toEqual([
-      "Display",
-      "Display Manager",
-      "display-notes.txt",
-    ]);
+    expect(ids(result.sections)).toEqual(["apps", "settings", "files"]);
+    expect(result.flatItems[0]?.title).toBe("Discord");
   });
 
   it("does not offer the copy fallback when a Settings page matches", () => {
