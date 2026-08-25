@@ -238,18 +238,22 @@ impl FileIndex {
             if self.counts.total() > 0 {
                 self.ready.store(true, Ordering::SeqCst);
             }
-            *self.db.write().unwrap() = Some(db_arc);
+            *self.db.write().unwrap_or_else(|e| e.into_inner()) = Some(db_arc);
         }
-        *self.app_data_dir.write().unwrap() = app_data_dir.to_path_buf();
+        *self.app_data_dir.write().unwrap_or_else(|e| e.into_inner()) = app_data_dir.to_path_buf();
     }
 
     pub fn search(&self, query: &str, limit: Option<usize>) -> FileSearchResponse {
-        let volumes = self.volumes.read().unwrap().clone();
+        let volumes = self
+            .volumes
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
         let total_indexed = self.counts.total();
         let indexing = self.indexing.load(Ordering::Relaxed);
         let ready = self.ready.load(Ordering::Relaxed);
 
-        let db = self.db.read().unwrap().clone();
+        let db = self.db.read().unwrap_or_else(|e| e.into_inner()).clone();
         let Some(ref db) = db else {
             return search::browse_path(query.trim(), search::clamp_limit(limit))
                 .map(|items| FileSearchResponse {
@@ -288,7 +292,7 @@ impl FileIndex {
         let this = self.clone();
         tauri::async_runtime::spawn(async move {
             this.cancel_all_scans();
-            let db = this.db.read().unwrap().clone();
+            let db = this.db.read().unwrap_or_else(|e| e.into_inner()).clone();
             if let Some(ref db) = db {
                 let _ = db.clear_catalog();
             }
@@ -299,14 +303,14 @@ impl FileIndex {
     }
 
     fn cancel_all_scans(&self) {
-        let cancels = self.scan_cancels.lock().unwrap();
+        let cancels = self.scan_cancels.lock().unwrap_or_else(|e| e.into_inner());
         for (_, cancel) in cancels.iter() {
             cancel.store(true, Ordering::SeqCst);
         }
     }
 
     pub fn set_app_handle(&self, app: tauri::AppHandle) {
-        *self.app_handle.lock().unwrap() = Some(app);
+        *self.app_handle.lock().unwrap_or_else(|e| e.into_inner()) = Some(app);
     }
 
     /// True when the palette window is shown. The background poll loop uses
@@ -323,7 +327,12 @@ impl FileIndex {
     }
 
     fn emit_updated(&self) {
-        if let Some(app) = self.app_handle.lock().unwrap().as_ref() {
+        if let Some(app) = self
+            .app_handle
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+        {
             let _ = app.emit("file-index-updated", ());
         }
     }
@@ -333,7 +342,7 @@ impl FileIndex {
     /// recursive scanner/watcher fallback. `fresh_ok` only short-circuits the
     /// fallback path.
     async fn scan_all_volumes(&self, fresh_ok: bool) {
-        let db_opt = self.db.read().unwrap().clone();
+        let db_opt = self.db.read().unwrap_or_else(|e| e.into_inner()).clone();
         let Some(ref db) = db_opt else { return };
 
         let discovered = tauri::async_runtime::spawn_blocking(volume::discover_volumes)
@@ -392,7 +401,11 @@ impl FileIndex {
             if let Ok(update) = &update {
                 if let Some(previous_mount) = &update.previous_mount_path {
                     if !previous_mount.eq_ignore_ascii_case(&mount_path.to_string_lossy()) {
-                        if let Some(watcher) = self.watchers.lock().unwrap().remove(&vol.volume_id)
+                        if let Some(watcher) = self
+                            .watchers
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .remove(&vol.volume_id)
                         {
                             watcher.request_stop();
                         }
@@ -428,7 +441,11 @@ impl FileIndex {
                         drop(permit);
                     }
 
-                    let pending = this.source_workers.lock().unwrap().finish_pass(&volume_id);
+                    let pending = this
+                        .source_workers
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .finish_pass(&volume_id);
                     let Some(next_fresh_ok) = pending else {
                         break;
                     };
@@ -436,7 +453,11 @@ impl FileIndex {
                 }
 
                 this.refresh_totals_and_status();
-                let active = !this.source_workers.lock().unwrap().is_empty();
+                let active = !this
+                    .source_workers
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .is_empty();
                 this.indexing.store(active, Ordering::SeqCst);
                 this.ready.store(true, Ordering::SeqCst);
                 this.emit_updated();
@@ -444,7 +465,11 @@ impl FileIndex {
         }
 
         self.refresh_totals_and_status();
-        let active = !self.source_workers.lock().unwrap().is_empty();
+        let active = !self
+            .source_workers
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_empty();
         self.indexing.store(active, Ordering::SeqCst);
         if !active {
             self.ready.store(true, Ordering::SeqCst);
@@ -457,7 +482,7 @@ impl FileIndex {
     /// (spawn_blocking with no nested future) also avoids the type-level cycle
     /// of an async closure that awaits back into this module's own futures.
     fn scan_one_volume_sync(&self, vol: &VolumeInfo, fresh_ok: bool) {
-        let db_opt = self.db.read().unwrap().clone();
+        let db_opt = self.db.read().unwrap_or_else(|e| e.into_inner()).clone();
         let Some(db) = db_opt else { return };
 
         let volume_id = vol.volume_id.clone();
@@ -470,7 +495,11 @@ impl FileIndex {
         // A watcher means this volume already selected the directory backend
         // for the current process. Do not race it with an NTFS generation
         // swap; raw access will be probed again on the next launch.
-        let fallback_active = self.watchers.lock().unwrap().contains_key(&volume_id);
+        let fallback_active = self
+            .watchers
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains_key(&volume_id);
         let mut directory_fallback = select_backend(vol, true) == BackendKind::Directory;
         if !fallback_active && !directory_fallback {
             let had_ready_generation = db.get_ntfs_checkpoint(&volume_id).ok().flatten().is_some();
@@ -554,7 +583,7 @@ impl FileIndex {
         // Start the watcher if needed, otherwise buffer its events so the scan
         // and the watcher never race on the same rows.
         {
-            let mut watchers = self.watchers.lock().unwrap();
+            let mut watchers = self.watchers.lock().unwrap_or_else(|e| e.into_inner());
             let replace = watchers
                 .get(&volume_id)
                 .is_some_and(|watcher| watcher_root_changed(watcher.root(), &mount_path));
@@ -565,7 +594,11 @@ impl FileIndex {
             }
             if !watchers.contains_key(&volume_id) {
                 let db_clone = db.clone();
-                let app_data_clone = self.app_data_dir.read().unwrap().clone();
+                let app_data_clone = self
+                    .app_data_dir
+                    .read()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .clone();
                 let counts_clone = self.counts.clone();
                 let drive_clone = drive.clone();
                 if let Some(w) = VolumeWatcher::start(
@@ -590,7 +623,7 @@ impl FileIndex {
             // watcher apply events directly (it was just started in buffering
             // mode above). Drain events captured between the last scan and the
             // watcher becoming live before releasing the buffer.
-            let watchers = self.watchers.lock().unwrap();
+            let watchers = self.watchers.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(w) = watchers.get(&volume_id) {
                 w.flush_queue(&db);
             }
@@ -609,7 +642,11 @@ impl FileIndex {
         }
 
         let gen = self.scan_generation.fetch_add(1, Ordering::SeqCst);
-        let app_data_scan = self.app_data_dir.read().unwrap().clone();
+        let app_data_scan = self
+            .app_data_dir
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
         let index_for_progress = self.clone();
         let drive_progress = drive.clone();
 
@@ -647,12 +684,15 @@ impl FileIndex {
         // A directory addition found during replay may therefore schedule a
         // scoped repair immediately without being mistaken for a competing
         // volume scan.
-        self.scan_cancels.lock().unwrap().remove(&volume_id);
+        self.scan_cancels
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&volume_id);
 
         // Flush buffered watcher events (also releases buffering); deltas are
         // applied on top of the exact scanned count.
         {
-            let watchers = self.watchers.lock().unwrap();
+            let watchers = self.watchers.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(w) = watchers.get(&volume_id) {
                 w.flush_queue(&db);
             }
@@ -694,7 +734,7 @@ impl FileIndex {
             // drive per poll tick).
             let volume = volume.clone();
             let _ = tauri::async_runtime::spawn_blocking(move || {
-                let Some(db) = this.db.read().unwrap().clone() else {
+                let Some(db) = this.db.read().unwrap_or_else(|e| e.into_inner()).clone() else {
                     return;
                 };
                 let mount = volume
@@ -716,25 +756,35 @@ impl FileIndex {
 
     fn request_scope_repair(&self, volume_id: String, scope: PathBuf) {
         let key = format!("{}|{}", volume_id, scope.to_string_lossy().to_lowercase());
-        if !self.scope_repairs.lock().unwrap().request(key.clone()) {
+        if !self
+            .scope_repairs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .request(key.clone())
+        {
             return;
         }
 
         let index = self.clone();
         tauri::async_runtime::spawn_blocking(move || loop {
             index.reconcile_scope_sync(&volume_id, &scope);
-            if !index.scope_repairs.lock().unwrap().finish_pass(&key) {
+            if !index
+                .scope_repairs
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .finish_pass(&key)
+            {
                 break;
             }
         });
     }
 
     fn reconcile_scope_sync(&self, volume_id: &str, requested_scope: &Path) {
-        let Some(db) = self.db.read().unwrap().clone() else {
+        let Some(db) = self.db.read().unwrap_or_else(|e| e.into_inner()).clone() else {
             return;
         };
         let (volume_root, attached) = {
-            let watchers = self.watchers.lock().unwrap();
+            let watchers = self.watchers.lock().unwrap_or_else(|e| e.into_inner());
             let Some(watcher) = watchers.get(volume_id) else {
                 return;
             };
@@ -750,7 +800,11 @@ impl FileIndex {
 
         let mut scopes: HashSet<PathBuf> = attached.into_iter().collect();
         scopes.insert(requested_scope.to_path_buf());
-        let app_data_dir = self.app_data_dir.read().unwrap().clone();
+        let app_data_dir = self
+            .app_data_dir
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
         for scope in scopes {
             let generation = self.scan_generation.fetch_add(1, Ordering::SeqCst);
             let cancel = Arc::new(AtomicBool::new(false));
@@ -821,7 +875,7 @@ impl FileIndex {
     }
 
     fn refresh_totals_and_status(&self) {
-        let db_opt = self.db.read().unwrap().clone();
+        let db_opt = self.db.read().unwrap_or_else(|e| e.into_inner()).clone();
         if let Some(ref db) = db_opt {
             if let Ok(covs) = db.get_volume_coverages() {
                 self.counts.clear();
@@ -837,7 +891,7 @@ impl FileIndex {
 
     /// Migrates temporary bootstrap entries from old files.json if present
     fn try_migrate_legacy_cache(&self, legacy_cache_path: &Path) {
-        let db_opt = self.db.read().unwrap().clone();
+        let db_opt = self.db.read().unwrap_or_else(|e| e.into_inner()).clone();
         let Some(ref db) = db_opt else { return };
         if let Ok(total) = db.get_total_indexed_count() {
             if total > 0 {
@@ -1155,8 +1209,21 @@ fn known_folder(id: &GUID) -> Option<PathBuf> {
 
 const THUMBNAIL_MAX_BYTES: u64 = 32 * 1024 * 1024;
 const THUMBNAIL_SIZE: u32 = 64;
+/// The preview is only 64px, but `image::decode` first allocates a full bitmap
+/// sized by the header. Cap the declared dimensions so a small decompression
+/// bomb (huge width/height in a tiny file) cannot force a large allocation
+/// before the preview is produced. Mirrors the custom-icon decoder.
+const THUMBNAIL_MAX_EDGE: u32 = 8_192;
+const THUMBNAIL_MAX_PIXELS: u64 = 16_777_216; // 8_192 * 2_048
 /// Bounds the per-request decode work; one result page is at most ~20 files.
 const THUMBNAIL_BATCH_CAP: usize = 64;
+
+fn thumbnail_dimensions_within_limit(width: u32, height: u32) -> bool {
+    width != 0
+        && height != 0
+        && width.max(height) <= THUMBNAIL_MAX_EDGE
+        && u64::from(width) * u64::from(height) <= THUMBNAIL_MAX_PIXELS
+}
 
 fn file_thumbnail(path: &str) -> Option<String> {
     let path = Path::new(path);
@@ -1189,6 +1256,18 @@ fn image_thumbnail(path: &Path, len: u64) -> Option<String> {
         return None;
     }
     if len > THUMBNAIL_MAX_BYTES {
+        return None;
+    }
+    // Probe the declared dimensions from the header before decoding: the full
+    // decode allocates a bitmap sized by those dimensions, so reject anything
+    // outside the cap before that allocation happens.
+    let (width, height) = image::ImageReader::open(path)
+        .ok()?
+        .with_guessed_format()
+        .ok()?
+        .into_dimensions()
+        .ok()?;
+    if !thumbnail_dimensions_within_limit(width, height) {
         return None;
     }
     let image = image::ImageReader::open(path)
@@ -1280,5 +1359,75 @@ mod tests {
         assert_eq!(coordinator.finish_pass("c"), None);
         assert_eq!(coordinator.finish_pass("nas"), None);
         assert!(coordinator.is_empty());
+    }
+
+    #[test]
+    fn thumbnail_dimension_cap_accepts_valid_sizes_and_rejects_oversize() {
+        assert!(thumbnail_dimensions_within_limit(1, 1));
+        // A long panorama that stays at the pixel cap is allowed.
+        assert!(thumbnail_dimensions_within_limit(8_192, 2_048));
+        assert!(!thumbnail_dimensions_within_limit(8_193, 1));
+        // Edge within cap but total pixels over the cap.
+        assert!(!thumbnail_dimensions_within_limit(8_192, 8_192));
+        assert!(!thumbnail_dimensions_within_limit(0, 100));
+        assert!(!thumbnail_dimensions_within_limit(100, 0));
+    }
+
+    #[test]
+    fn thumbnail_rejects_a_header_bomb_before_decoding() {
+        let dir = std::env::temp_dir().join(format!("prism-thumb-bomb-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("bomb.png");
+        // Declares 9000x9000 (edge over cap). A real decode would allocate a
+        // huge bitmap; the guard must reject it from the header alone.
+        std::fs::write(&path, png_header_only(9_000, 9_000)).unwrap();
+        let len = path.metadata().unwrap().len();
+        assert!(image_thumbnail(&path, len).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn thumbnail_produces_a_preview_for_a_normal_image() {
+        let dir = std::env::temp_dir().join(format!("prism-thumb-ok-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("ok.png");
+        let img = image::RgbaImage::from_pixel(16, 16, image::Rgba([10, 20, 30, 255]));
+        image::DynamicImage::ImageRgba8(img).save(&path).unwrap();
+        let len = path.metadata().unwrap().len();
+        let thumb = image_thumbnail(&path, len);
+        assert!(thumb
+            .as_deref()
+            .is_some_and(|t| t.starts_with("data:image/png;base64,")));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn crc32(data: &[u8]) -> u32 {
+        let mut crc: u32 = 0xffff_ffff;
+        for &byte in data {
+            crc ^= u32::from(byte);
+            for _ in 0..8 {
+                let mask = (crc & 1).wrapping_neg();
+                crc = (crc >> 1) ^ (0xedb8_8320 & mask);
+            }
+        }
+        !crc
+    }
+
+    /// Minimal PNG signature + IHDR only, so the header dimension probe sees
+    /// the declared size without needing any image data.
+    fn png_header_only(width: u32, height: u32) -> Vec<u8> {
+        let mut png = vec![0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
+        let mut ihdr = Vec::new();
+        ihdr.extend_from_slice(&width.to_be_bytes());
+        ihdr.extend_from_slice(&height.to_be_bytes());
+        // 8-bit RGBA, default compression / filter / interlace.
+        ihdr.extend_from_slice(&[8, 6, 0, 0, 0]);
+        png.extend_from_slice(&(ihdr.len() as u32).to_be_bytes());
+        png.extend_from_slice(b"IHDR");
+        png.extend_from_slice(&ihdr);
+        let mut crc_input = b"IHDR".to_vec();
+        crc_input.extend_from_slice(&ihdr);
+        png.extend_from_slice(&crc32(&crc_input).to_be_bytes());
+        png
     }
 }
