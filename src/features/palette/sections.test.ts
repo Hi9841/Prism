@@ -1,7 +1,7 @@
 import { Home } from "lucide-react";
 import { describe, expect, it } from "vitest";
 import type { AppEntry, FileEntry, PaletteItem, QuickAccessEntry } from "../../lib/types";
-import { buildSections, isClipboardKind, type PaletteSources } from "./sections";
+import { buildSections, isClipboardKind, type PaletteSources, quickAccessPaletteItem } from "./sections";
 
 function app(name: string, overrides: Partial<AppEntry> = {}): AppEntry {
   return {
@@ -457,3 +457,45 @@ describe("quick access kinds round-trip", () => {
     }
   });
 });
+
+describe("openLocation support", () => {
+  it("attaches openLocation to quickAccessPaletteItem", () => {
+    const qa = quickAccessPaletteItem({ name: "Downloads", path: "C:\\Users\\You\\Downloads", kind: "downloads" });
+    expect(typeof qa.openLocation).toBe("function");
+    expect(typeof qa.run).toBe("function");
+  });
+
+  it("attaches openLocation to file search results", () => {
+    const fileHit = file("report.pdf", "C:\\Users\\You\\Documents\\report.pdf");
+    const result = buildSections(
+      sources({
+        query: "report",
+        fileResults: [fileHit],
+        fileResultQuery: "report",
+      }),
+    );
+    const fileSection = result.sections.find((s) => s.id === "files");
+    expect(fileSection).toBeDefined();
+    expect(typeof fileSection?.items[0].openLocation).toBe("function");
+  });
+
+  it("attaches openLocation to apps with valid local paths", () => {
+    const appWithLocalPath = app("ToolA", { path: "C:\\Tools\\custom.exe" });
+    const appWithoutPath = app("ToolB", { path: undefined });
+
+    const result = buildSections(
+      sources({
+        query: "tool",
+        apps: [appWithLocalPath, appWithoutPath],
+      }),
+    );
+
+    const appsSection = result.sections.find((s) => s.id === "apps");
+    expect(appsSection).toBeDefined();
+    const withPathItem = appsSection?.items.find((i) => i.title === "ToolA");
+    const withoutPathItem = appsSection?.items.find((i) => i.title === "ToolB");
+    expect(typeof withPathItem?.openLocation).toBe("function");
+    expect(withoutPathItem?.openLocation).toBeUndefined();
+  });
+});
+

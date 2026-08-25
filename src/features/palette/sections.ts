@@ -20,7 +20,7 @@ import {
   Monitor,
   Music,
 } from "lucide-react";
-import { copyText, launchApp, launchAppAsAdmin, openPath, runPathAsAdmin } from "../../lib/bridge";
+import { copyText, launchApp, launchAppAsAdmin, openPath, openPathLocation, runPathAsAdmin } from "../../lib/bridge";
 import { sortApps } from "../../lib/emoji";
 import { formatNumber, isMathLike, tryEvaluate } from "../../lib/math";
 import { fuzzy, fuzzyApps } from "../../lib/search";
@@ -275,6 +275,8 @@ export function isClipboardKind(id: string): boolean {
 }
 
 function appPaletteItem(app: AppEntry, icons: Readonly<Record<string, string>>): PaletteItem {
+  const localTarget =
+    app.location ?? (app.path && (app.path.includes(":") || app.path.startsWith("\\\\")) ? app.path : undefined);
   return {
     id: `app::${app.appId}`,
     title: app.name,
@@ -284,6 +286,7 @@ function appPaletteItem(app: AppEntry, icons: Readonly<Record<string, string>>):
     appId: app.appId,
     run: () => launchApp(app.appId),
     runAsAdmin: isElevatablePath(app.path) ? () => launchAppAsAdmin(app.appId) : undefined,
+    openLocation: localTarget ? () => openPathLocation(localTarget) : undefined,
   };
 }
 
@@ -339,6 +342,7 @@ export function quickAccessPaletteItem(entry: QuickAccessEntry): PaletteItem {
     historyTitle: entry.name,
     quickAccessKind: entry.kind,
     run: () => openPath(entry.path),
+    openLocation: () => openPathLocation(entry.path),
   };
 }
 
@@ -356,6 +360,7 @@ function filePaletteItem(entry: FileEntry): PaletteItem {
     run: () => openPath(entry.path),
     runAsAdmin:
       !entry.isDirectory && isElevatablePath(entry.path) ? () => runPathAsAdmin(entry.path) : undefined,
+    openLocation: () => openPathLocation(entry.path),
   };
 }
 

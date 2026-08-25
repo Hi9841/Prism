@@ -19,6 +19,8 @@ export interface PaletteItem {
   run: () => Promise<void> | void;
   /** Runs an eligible application or script through the Windows UAC prompt. */
   runAsAdmin?: () => Promise<void> | void;
+  /** Opens the containing folder and reveals the item in File Explorer. */
+  openLocation?: () => Promise<void> | void;
   /** Display title used when persisting to history */
   historyTitle: string;
   /** Extra line shown in the toast after a clipboard-style run */
