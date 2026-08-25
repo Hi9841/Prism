@@ -1,6 +1,6 @@
 # Prism
 
-Prism is a fast, keyboard-first command palette and Windows taskbar companion. Search local applications, files, and folders; keep frequent locations close; and customize the Windows 11 taskbar without StartAllBack.
+Prism is a fast, keyboard-first command palette and Windows taskbar companion. Search local applications, files, and folders; keep frequent locations close; and customize the Windows 11 taskbar.
 
 [Demo attachment](https://github.com/user-attachments/assets/ec4ac19a-8868-4a01-b9f4-10008c297b6c)
 
