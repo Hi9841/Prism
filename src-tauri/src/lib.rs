@@ -233,6 +233,7 @@ pub fn run() {
             launch_app_as_admin,
             open_windows_settings,
             open_path,
+            open_path_location,
             run_path_as_admin,
             present_palette,
             hide_palette,
@@ -895,6 +896,20 @@ async fn open_path(path: String) -> Result<(), String> {
         .await
         .map_err(|e| format!("open path task failed: {e}"))?;
     perf::finish(timer, "open_path", move || format!("kind={kind}"));
+    result
+}
+
+#[tauri::command]
+async fn open_path_location(path: String) -> Result<(), String> {
+    let timer = perf::start();
+    let path = PathBuf::from(path);
+    if !path.is_absolute() || !path.exists() {
+        return Err("path must be an existing absolute file or folder".to_string());
+    }
+    let result = tauri::async_runtime::spawn_blocking(move || apps::open_path_location(&path))
+        .await
+        .map_err(|e| format!("open path location task failed: {e}"))?;
+    perf::finish(timer, "open_path_location", String::new);
     result
 }
 

@@ -1862,6 +1862,12 @@ pub fn open_path(path: &Path) -> Result<(), String> {
     }
 }
 
+pub fn open_path_location(path: &Path) -> Result<(), String> {
+    let value = path.to_string_lossy();
+    let arg = format!("/select,\"{value}\"");
+    explorer_arg(&arg)
+}
+
 fn is_executable(path: &str) -> bool {
     Path::new(path)
         .extension()
