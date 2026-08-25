@@ -42,7 +42,8 @@ use windows::Win32::UI::Accessibility::{
     TreeScope_Descendants, UIA_AutomationIdPropertyId, UIA_ProcessIdPropertyId,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    VK_CONTROL, VK_ESCAPE, VK_LCONTROL, VK_LWIN, VK_RCONTROL, VK_RWIN,
+    GetAsyncKeyState, VK_CONTROL, VK_ESCAPE, VK_LCONTROL, VK_LMENU, VK_LSHIFT, VK_LWIN, VK_MENU,
+    VK_RCONTROL, VK_RMENU, VK_RSHIFT, VK_RWIN, VK_SHIFT,
 };
 use windows::Win32::UI::Input::{
     GetRawInputData, RegisterRawInputDevices, HRAWINPUT, RAWINPUT, RAWINPUTDEVICE, RAWINPUTHEADER,
@@ -60,13 +61,13 @@ use windows::Win32::UI::WindowsAndMessaging::{
 
 const ACTION_MESSAGE: u32 = WM_APP + 1;
 const TOGGLE_DEBOUNCE_MS: u64 = 50;
+const WIN_TOGGLE_RELEASE_GRACE: Duration = Duration::from_millis(30);
 /// The Start button rect only needs refreshing occasionally; the UIA query is
 /// expensive and runs on Explorer's side.
 const START_RECT_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
 const SHELL_BRIDGE_MESSAGE_NAME: &str = "Prism.ShellBridge.v1";
 const SHELL_CONTROL_DISABLE_WIN_HOTKEY: usize = 1;
 const SHELL_EVENT_HOTKEY_DISABLED: usize = 2;
-const SHELL_EVENT_TOGGLE_PRISM: usize = 3;
 const SHELL_CONTROL_START_RECT_LEFT: usize = 4;
 const SHELL_CONTROL_START_RECT_TOP: usize = 5;
 const SHELL_CONTROL_START_RECT_RIGHT: usize = 6;
@@ -216,9 +217,10 @@ impl WinKeyMachine {
                 let left_down = self.left.down;
                 let right_down = self.right.down;
                 let ctrl_esc_down = self.ctrl_esc.down;
-                if is_down && (left_down || right_down) {
-                    // Win+key combo: remember it so the Win release is not
-                    // mistaken for a standalone press.
+                if left_down || right_down {
+                    // Windows can deliver only the release for a Win chord
+                    // through raw input. Any non-Win event while Win is held
+                    // proves this was not a standalone press.
                     self.left.combo |= left_down;
                     self.right.combo |= right_down;
                 }
@@ -330,6 +332,7 @@ static SHELL_TASKBAR_THREAD: AtomicU32 = AtomicU32::new(0);
 static SHELL_ICON_SHUTDOWN_ACK: AtomicU32 = AtomicU32::new(0);
 static LAST_TOGGLE_MS: AtomicU64 = AtomicU64::new(0);
 static TOGGLE_CLOCK: OnceLock<Instant> = OnceLock::new();
+static PENDING_WIN_TOGGLE: Mutex<PendingWinToggle> = Mutex::new(PendingWinToggle::EMPTY);
 /// Set when taskbar geometry changes (alignment moves, resizes) so the pump
 /// refreshes the Start rect immediately instead of up to 5 seconds later.
 static START_RECT_REFRESH_REQUEST: AtomicBool = AtomicBool::new(false);
@@ -337,6 +340,82 @@ static START_RECT_REFRESH_REQUEST: AtomicBool = AtomicBool::new(false);
 enum Action {
     ToggleWin(WinSide),
     ToggleTaskbar(POINT),
+}
+
+struct PendingWinToggle {
+    side: Option<WinSide>,
+    blocked_keys: [bool; 256],
+    post_release_keys: [bool; 256],
+    deadline: Option<Instant>,
+}
+
+impl PendingWinToggle {
+    const EMPTY: Self = Self {
+        side: None,
+        blocked_keys: [false; 256],
+        post_release_keys: [false; 256],
+        deadline: None,
+    };
+
+    fn arm(&mut self, side: WinSide, blocked_keys: [bool; 256], now: Instant) {
+        self.side = Some(side);
+        self.blocked_keys = blocked_keys;
+        self.post_release_keys.fill(false);
+        self.deadline = Some(now + WIN_TOGGLE_RELEASE_GRACE);
+    }
+
+    fn cancel(&mut self) {
+        self.side = None;
+        self.blocked_keys.fill(false);
+        self.post_release_keys.fill(false);
+        self.deadline = None;
+    }
+
+    fn observe_key(&mut self, key: u16, is_down: bool, now: Instant) {
+        let key = canonical_non_win_key(key);
+        if self.side.is_none() || key as usize >= self.blocked_keys.len() {
+            return;
+        }
+        let key = key as usize;
+        if is_down {
+            // This transition occurred after Win-up, so a snapshot that saw
+            // this key held reflected new typing rather than the Win chord.
+            self.blocked_keys[key] = false;
+            self.post_release_keys[key] = true;
+            if self.deadline.is_none() {
+                self.deadline = Some(now + WIN_TOGGLE_RELEASE_GRACE);
+            }
+            return;
+        }
+        if self.post_release_keys[key] {
+            self.post_release_keys[key] = false;
+            return;
+        }
+        // A key-up without a post-release key-down belongs to the Win chord.
+        self.cancel();
+    }
+
+    fn take_if_ready(&mut self, now: Instant) -> Option<WinSide> {
+        let deadline = self.deadline?;
+        if now < deadline {
+            return None;
+        }
+        if self.blocked_keys.iter().any(|down| *down) {
+            // Wait for ordered input to identify whether the held key belonged
+            // to the Win chord or was pressed after Win-up.
+            self.deadline = None;
+            return None;
+        }
+        let side = self.side.take();
+        self.deadline = None;
+        side
+    }
+
+    fn wait_duration(&self, now: Instant) -> Option<Duration> {
+        self.side
+            .and(self.deadline)
+            .map(|deadline| deadline.saturating_duration_since(now))
+    }
 }
 
 static ACTION_TX: OnceLock<mpsc::Sender<Action>> = OnceLock::new();
@@ -351,6 +430,8 @@ pub fn init(app: AppHandle) {
 pub fn set_provider_suppression(active: bool) {
     PROVIDER_SUPPRESSES_START.store(active, Ordering::Release);
     RAW_MACHINE.lock().map(|mut machine| machine.reset()).ok();
+    cancel_pending_win_toggle();
+    clear_queued_actions();
 }
 
 pub(crate) fn notify_start_icon_changed() {
@@ -396,6 +477,7 @@ pub fn set_enabled(on: bool) -> Result<(), String> {
     if !on {
         SHELL_BRIDGE_ACTIVE.store(false, Ordering::Release);
         RAW_MACHINE.lock().map(|mut m| m.reset()).ok();
+        cancel_pending_win_toggle();
         clear_queued_actions();
         LAST_TOGGLE_MS.store(0, Ordering::Release);
         let tid = THREAD_ID.load(Ordering::SeqCst);
@@ -509,6 +591,7 @@ unsafe fn run_pump(ready: HookReady) {
             let _ = TranslateMessage(&msg);
             let _ = DispatchMessageW(&msg);
         }
+        flush_pending_win_toggle();
         // Drain native actions outside the callback.
         if let Ok(mut rx_slot) = ACTION_RX.lock() {
             if let Some(rx) = rx_slot.as_mut() {
@@ -547,9 +630,12 @@ unsafe fn run_pump(ready: HookReady) {
         // The pump has no timer work faster than the Start-rect refresh
         // interval; input already wakes the loop through the message queue.
         // A long timeout removes a permanent 1 Hz wakeup from the hot path.
+        let wait = pending_win_toggle_wait()
+            .unwrap_or(START_RECT_REFRESH_INTERVAL)
+            .min(START_RECT_REFRESH_INTERVAL);
         let _ = MsgWaitForMultipleObjectsEx(
             None,
-            START_RECT_REFRESH_INTERVAL.as_millis() as u32,
+            wait.as_millis().min(u128::from(u32::MAX)) as u32,
             QS_ALLINPUT,
             Default::default(),
         );
@@ -558,6 +644,7 @@ unsafe fn run_pump(ready: HookReady) {
     SHELL_TASKBAR_THREAD.store(0, Ordering::Release);
     RAW_OBSERVER_ACTIVE.store(false, Ordering::Release);
     RAW_MACHINE.lock().map(|mut machine| machine.reset()).ok();
+    cancel_pending_win_toggle();
     // Ask the Explorer-thread renderer to tear down its window while the hook
     // and observer are still alive, then release the bridge.
     drop(shell_bridge);
@@ -595,6 +682,8 @@ fn disable_observation(reason: &str) {
     ACTIVE.store(false, Ordering::SeqCst);
     SHELL_BRIDGE_ACTIVE.store(false, Ordering::Release);
     RAW_MACHINE.lock().map(|mut m| m.reset()).ok();
+    cancel_pending_win_toggle();
+    clear_queued_actions();
     LAST_TOGGLE_MS.store(0, Ordering::Release);
     if let Some(app) = APP.get() {
         let _ = app.emit(FAILED_EVENT, reason.to_string());
@@ -1526,6 +1615,72 @@ fn classify_raw_key(
     Some((kind, !is_up))
 }
 
+fn cancel_pending_win_toggle() {
+    if let Ok(mut pending) = PENDING_WIN_TOGGLE.lock() {
+        pending.cancel();
+    }
+}
+
+fn schedule_win_toggle(side: WinSide, blocked_keys: [bool; 256]) {
+    if let Ok(mut pending) = PENDING_WIN_TOGGLE.lock() {
+        pending.arm(side, blocked_keys, Instant::now());
+    }
+}
+
+fn flush_pending_win_toggle() {
+    if let Ok(mut pending) = PENDING_WIN_TOGGLE.lock() {
+        let side = pending.take_if_ready(Instant::now());
+        if let Some(side) = side {
+            // Keep the pending lock through enqueueing. Disable/reset paths
+            // take this same lock after clearing ACTIVE, so a candidate either
+            // queues before their final drain or observes inactive.
+            if ACTIVE.load(Ordering::Acquire)
+                && RAW_OBSERVER_ACTIVE.load(Ordering::Acquire)
+                && SHELL_BRIDGE_ACTIVE.load(Ordering::Acquire)
+            {
+                queue_action(Action::ToggleWin(side));
+            }
+        }
+    }
+}
+
+fn pending_win_toggle_wait() -> Option<Duration> {
+    PENDING_WIN_TOGGLE
+        .lock()
+        .ok()
+        .and_then(|pending| pending.wait_duration(Instant::now()))
+}
+
+fn non_win_keys_down() -> [bool; 256] {
+    let mut down = [false; 256];
+    for key in 0x08u16..=0xfe {
+        if key != VK_LWIN.0 && key != VK_RWIN.0 {
+            let is_down = unsafe { GetAsyncKeyState(i32::from(key)) } as u16 & 0x8000 != 0;
+            down[canonical_non_win_key(key) as usize] |= is_down;
+        }
+    }
+    down
+}
+
+fn canonical_non_win_key(key: u16) -> u16 {
+    match key {
+        key if key == VK_LSHIFT.0 || key == VK_RSHIFT.0 => VK_SHIFT.0,
+        key if key == VK_LCONTROL.0 || key == VK_RCONTROL.0 => VK_CONTROL.0,
+        key if key == VK_LMENU.0 || key == VK_RMENU.0 => VK_MENU.0,
+        _ => key,
+    }
+}
+
+fn observe_pending_win_key(key: u16, is_down: bool) {
+    if let Ok(mut pending) = PENDING_WIN_TOGGLE.lock() {
+        pending.observe_key(key, is_down, Instant::now());
+    }
+}
+
+fn should_defer_toggle(kind: KeyKind) -> bool {
+    matches!(kind, KeyKind::Win(_))
+}
+
 unsafe extern "system" fn raw_input_window_proc(
     window: HWND,
     message: u32,
@@ -1548,13 +1703,6 @@ unsafe extern "system" fn raw_input_window_proc(
             }
             SHELL_EVENT_START_ICON_REFRESHED => {
                 debug_trace(&format!("start-icon-refresh {}", lparam.0));
-            }
-            SHELL_EVENT_TOGGLE_PRISM
-                if ACTIVE.load(Ordering::Acquire)
-                    && RAW_OBSERVER_ACTIVE.load(Ordering::Acquire)
-                    && SHELL_BRIDGE_ACTIVE.load(Ordering::Acquire) =>
-            {
-                queue_action(Action::ToggleWin(WinSide::Left));
             }
             SHELL_EVENT_TASKBAR_START_CLICK_X => {
                 SHELL_START_CLICK_X.store(lparam.0 as i32, Ordering::Release);
@@ -1596,11 +1744,17 @@ unsafe extern "system" fn raw_input_window_proc(
                 keyboard.Flags,
                 keyboard.Message,
             ) {
+                if let KeyKind::Other(key) = kind {
+                    observe_pending_win_key(key, is_down);
+                }
                 let decision = RAW_MACHINE
                     .lock()
                     .map(|mut machine| machine.feed(kind, is_down))
                     .unwrap_or(Decision::Pass);
                 match decision {
+                    Decision::Toggle(side) if should_defer_toggle(kind) => {
+                        schedule_win_toggle(side, non_win_keys_down());
+                    }
                     Decision::Toggle(side) => {
                         queue_action(Action::ToggleWin(side));
                     }
@@ -1810,6 +1964,130 @@ mod tests {
                 "key {key:#x}"
             );
         }
+    }
+
+    #[test]
+    fn win_r_combo_never_toggles() {
+        assert_eq!(
+            run(&[
+                (win(WinSide::Left), true),
+                (KeyKind::Other(0x52), true), // R
+                (KeyKind::Other(0x52), false),
+                (win(WinSide::Left), false),
+            ]),
+            vec![
+                Decision::Mask,
+                Decision::Pass,
+                Decision::Pass,
+                Decision::Pass,
+            ]
+        );
+    }
+
+    #[test]
+    fn win_r_release_only_combo_never_toggles() {
+        assert_eq!(
+            run(&[
+                (win(WinSide::Left), true),
+                (KeyKind::Other(0x52), false), // R-up without a matching raw R-down
+                (win(WinSide::Left), false),
+            ]),
+            vec![Decision::Mask, Decision::Pass, Decision::Pass]
+        );
+    }
+
+    #[test]
+    fn queued_r_release_cancels_a_deferred_win_toggle() {
+        let mut machine = WinKeyMachine::default();
+        let mut pending = PendingWinToggle::EMPTY;
+        assert_eq!(machine.feed(win(WinSide::Left), true), Decision::Mask);
+        let decision = machine.feed(win(WinSide::Left), false);
+        let Decision::Toggle(side) = decision else {
+            panic!("Win-up should create a deferred toggle candidate");
+        };
+        let now = Instant::now();
+        pending.arm(side, [false; 256], now);
+
+        assert_eq!(machine.feed(KeyKind::Other(0x52), false), Decision::Pass);
+        pending.observe_key(0x52, false, now);
+
+        assert_eq!(pending.take_if_ready(now + WIN_TOGGLE_RELEASE_GRACE), None);
+    }
+
+    #[test]
+    fn held_r_snapshot_waits_for_its_trailing_release() {
+        let mut blocked = [false; 256];
+        blocked[0x52] = true;
+        let mut pending = PendingWinToggle::EMPTY;
+        let now = Instant::now();
+        pending.arm(WinSide::Left, blocked, now);
+
+        assert_eq!(pending.take_if_ready(now + WIN_TOGGLE_RELEASE_GRACE), None);
+        pending.observe_key(0x52, false, now + WIN_TOGGLE_RELEASE_GRACE);
+        assert_eq!(pending.take_if_ready(now + WIN_TOGGLE_RELEASE_GRACE), None);
+    }
+
+    #[test]
+    fn typing_after_bare_win_does_not_cancel_the_deferred_toggle() {
+        let mut pending = PendingWinToggle::EMPTY;
+        let now = Instant::now();
+        pending.arm(WinSide::Left, [false; 256], now);
+
+        pending.observe_key(0x41, true, now);
+        pending.observe_key(0x41, false, now);
+        assert_eq!(
+            pending.take_if_ready(now + WIN_TOGGLE_RELEASE_GRACE),
+            Some(WinSide::Left)
+        );
+    }
+
+    #[test]
+    fn post_release_keydown_clears_a_stale_physical_snapshot() {
+        let mut blocked = [false; 256];
+        blocked[0x41] = true;
+        let mut pending = PendingWinToggle::EMPTY;
+        let now = Instant::now();
+        pending.arm(WinSide::Left, blocked, now);
+
+        assert_eq!(pending.take_if_ready(now + WIN_TOGGLE_RELEASE_GRACE), None);
+        let retry_at = now + WIN_TOGGLE_RELEASE_GRACE;
+        pending.observe_key(0x41, true, retry_at);
+        assert_eq!(
+            pending.take_if_ready(retry_at + WIN_TOGGLE_RELEASE_GRACE),
+            Some(WinSide::Left)
+        );
+    }
+
+    #[test]
+    fn modifier_aliases_share_one_pending_key_slot() {
+        for (specific, generic) in [
+            (VK_LSHIFT.0, VK_SHIFT.0),
+            (VK_RSHIFT.0, VK_SHIFT.0),
+            (VK_LCONTROL.0, VK_CONTROL.0),
+            (VK_RCONTROL.0, VK_CONTROL.0),
+            (VK_LMENU.0, VK_MENU.0),
+            (VK_RMENU.0, VK_MENU.0),
+        ] {
+            assert_eq!(canonical_non_win_key(specific), generic);
+        }
+
+        let now = Instant::now();
+        let mut blocked = [false; 256];
+        blocked[VK_SHIFT.0 as usize] = true;
+        let mut pending = PendingWinToggle::EMPTY;
+        pending.arm(WinSide::Left, blocked, now);
+        pending.observe_key(VK_LSHIFT.0, true, now);
+        pending.observe_key(VK_SHIFT.0, false, now);
+        assert_eq!(
+            pending.take_if_ready(now + WIN_TOGGLE_RELEASE_GRACE),
+            Some(WinSide::Left)
+        );
+    }
+
+    #[test]
+    fn ctrl_esc_toggles_immediately_without_win_deferral() {
+        assert!(!should_defer_toggle(KeyKind::Other(VK_ESCAPE_CODE)));
+        assert!(should_defer_toggle(win(WinSide::Left)));
     }
 
     #[test]
