@@ -82,9 +82,11 @@ export function Palette() {
 
   const openResultMenu = useCallback(
     (item: PaletteItem, index: number, x: number, y: number) => {
-      if (!item.runAsAdmin) return;
+      if (!item.runAsAdmin && !item.openLocation) return;
       palette.select(index);
-      setResultMenu({ item, position: clampContextMenuPosition(x, y) });
+      const actionCount = (item.openLocation ? 1 : 0) + (item.runAsAdmin ? 1 : 0);
+      const menuHeight = actionCount * 36 + 8;
+      setResultMenu({ item, position: clampContextMenuPosition(x, y, menuHeight) });
     },
     [palette.select],
   );
@@ -410,7 +412,7 @@ export function Palette() {
       if (e.key === "ContextMenu" || (e.key === "F10" && e.shiftKey)) {
         e.preventDefault();
         const item = palette.flatItems[palette.selected];
-        if (!item?.runAsAdmin) return;
+        if (!item?.runAsAdmin && !item?.openLocation) return;
         const row = document.getElementById(`prism-opt-${palette.selected}`);
         const bounds = row?.getBoundingClientRect();
         openResultMenu(
@@ -710,6 +712,11 @@ export function Palette() {
         <ResultContextMenu
           item={resultMenu.item}
           position={resultMenu.position}
+          onOpenLocation={() => {
+            const { item } = resultMenu;
+            setResultMenu(null);
+            item.openLocation?.();
+          }}
           onRunAsAdmin={() => {
             const { item } = resultMenu;
             setResultMenu(null);
@@ -963,7 +970,9 @@ const ResultRow = memo(function ResultRow({
       onMouseEnter={() => onSelect(index)}
       onContextMenu={(event) => {
         event.preventDefault();
-        if (item.runAsAdmin) onOpenContextMenu(item, index, event.clientX, event.clientY);
+        if (item.runAsAdmin || item.openLocation) {
+          onOpenContextMenu(item, index, event.clientX, event.clientY);
+        }
       }}
       className={`group row w-full text-left transition-colors duration-50 ${
         selected ? "bg-surface-active" : "hover:bg-surface-hover"
