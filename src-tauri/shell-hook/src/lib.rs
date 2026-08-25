@@ -89,7 +89,6 @@ const IMAGE_BITMAP: usize = 0;
 const SC_TASKLIST: usize = 0xF130;
 const CONTROL_DISABLE_WIN_HOTKEY: usize = 1;
 const EVENT_HOTKEY_DISABLED: usize = 2;
-const EVENT_TOGGLE_PRISM: usize = 3;
 const CONTROL_START_RECT_LEFT: usize = 4;
 const CONTROL_START_RECT_TOP: usize = 5;
 const CONTROL_START_RECT_RIGHT: usize = 6;
@@ -242,6 +241,10 @@ unsafe fn observer_window() -> Hwnd {
 unsafe fn notify_observer(message: u32, event: usize, detail: isize) -> bool {
     let observer = observer_window();
     !observer.is_null() && PostMessageW(observer, message, event, detail) != 0
+}
+
+fn is_start_command(message: &Msg) -> bool {
+    message.message == WM_SYSCOMMAND && message.wparam & 0xFFF0 == SC_TASKLIST
 }
 
 fn bridge_message_id() -> u32 {
@@ -771,12 +774,10 @@ pub unsafe extern "system" fn PrismShellGetMessageHook(
                 }
                 _ => {}
             }
-        } else if message.message == WM_SYSCOMMAND
-            && message.wparam & 0xFFF0 == SC_TASKLIST
-            && notify_observer(message_id, EVENT_TOGGLE_PRISM, message.lparam)
-        {
-            // Consume the Start command only after Prism accepted the event.
-            // If Prism is gone, the command remains untouched and Start opens.
+        } else if is_start_command(message) && !observer_window().is_null() {
+            // Consume the Start command only while Prism's observer is alive.
+            // The raw-input state machine decides whether the key sequence was
+            // a standalone Win press, so Win+key chords never open Prism.
             message.message = WM_NULL;
         } else if message.message == WM_SETTINGCHANGE
             && has_active_icon()
@@ -789,6 +790,34 @@ pub unsafe extern "system" fn PrismShellGetMessageHook(
     }
 
     CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn message(message: u32, wparam: usize) -> Msg {
+        Msg {
+            hwnd: std::ptr::null_mut(),
+            message,
+            wparam,
+            lparam: 0,
+            time: 0,
+            point: Point { x: 0, y: 0 },
+            private: 0,
+        }
+    }
+
+    #[test]
+    fn identifies_only_the_shell_start_command() {
+        assert!(is_start_command(&message(WM_SYSCOMMAND, SC_TASKLIST)));
+        assert!(is_start_command(&message(
+            WM_SYSCOMMAND,
+            SC_TASKLIST | 0x000f
+        )));
+        assert!(!is_start_command(&message(WM_SYSCOMMAND, 0xF000)));
+        assert!(!is_start_command(&message(WM_NULL, SC_TASKLIST)));
+    }
 }
 
 /// Explorer invokes this callback before taskbar mouse messages reach the
