@@ -39,9 +39,10 @@ use windows::Win32::UI::Shell::{
     FOLDERID_Desktop, FOLDERID_Documents, FOLDERID_LocalAppData, FOLDERID_Profile,
     FOLDERID_ProgramFiles, FOLDERID_ProgramFilesX86, FOLDERID_Programs, FOLDERID_PublicDesktop,
     FOLDERID_PublicDocuments, FOLDERID_RoamingAppData, IApplicationActivationManager, IEnumIDList,
-    ILFree, IShellFolder, IShellItem, IShellItemImageFactory, IShellLinkW,
+    ILCreateFromPathW, ILFree, IShellFolder, IShellItem, IShellItemImageFactory, IShellLinkW,
     SHCreateItemFromParsingName, SHCreateItemWithParent, SHGetIDListFromObject,
-    SHGetKnownFolderPath, SHGetPathFromIDListW, ShellExecuteW, AO_NONE, SHCONTF_INCLUDEHIDDEN,
+    SHGetKnownFolderPath, SHGetPathFromIDListW, SHOpenFolderAndSelectItems, ShellExecuteW, AO_NONE,
+    SHCONTF_INCLUDEHIDDEN,
     SHCONTF_NONFOLDERS, SIGDN_NORMALDISPLAY, SIIGBF_ICONONLY,
 };
 use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
@@ -1863,9 +1864,24 @@ pub fn open_path(path: &Path) -> Result<(), String> {
 }
 
 pub fn open_path_location(path: &Path) -> Result<(), String> {
-    let value = path.to_string_lossy();
-    let arg = format!("/select,\"{value}\"");
-    explorer_arg(&arg)
+    let _com = ComGuard::init();
+    let wide_path = wide(&path.to_string_lossy());
+    unsafe {
+        let item_idl = ILCreateFromPathW(PCWSTR(wide_path.as_ptr()));
+        if !item_idl.is_null() {
+            let hr = SHOpenFolderAndSelectItems(item_idl, None, 0);
+            ILFree(Some(item_idl));
+            if hr.is_ok() {
+                return Ok(());
+            }
+        }
+        let value = path.to_string_lossy();
+        if shell_execute("open", "explorer.exe", Some(&format!("/select,\"{value}\"")), None).is_ok() {
+            Ok(())
+        } else {
+            Err(format!("failed to locate {}", path.display()))
+        }
+    }
 }
 
 fn is_executable(path: &str) -> bool {
@@ -2071,6 +2087,12 @@ mod tests {
         let png = png_data_url(&[0, 1, 2, 3, 255, 254, 253]);
         assert!(png.starts_with("data:image/png;base64,"));
         assert!(png.len() > 30);
+    }
+
+    #[test]
+    fn open_path_location_resolves_valid_file_path() {
+        let current = std::env::current_exe().expect("current test executable");
+        assert!(open_path_location(&current).is_ok());
     }
 }
 
