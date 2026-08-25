@@ -154,6 +154,11 @@ export async function openPath(path: string): Promise<void> {
   await invoke("open_path", { path });
 }
 
+export async function openPathLocation(path: string): Promise<void> {
+  if (!inTauri) return;
+  await invoke("open_path_location", { path });
+}
+
 export async function runPathAsAdmin(path: string): Promise<void> {
   if (!inTauri) return;
   await invoke("run_path_as_admin", { path });
