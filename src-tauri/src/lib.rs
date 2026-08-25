@@ -804,8 +804,14 @@ fn get_app_icons(
     let apps = apps
         .as_ref()
         .ok_or_else(|| "application index is not ready".to_string())?;
+    // Index by app id once instead of scanning the whole list per requested
+    // id (O(n·m) worst case, with m up to 512).
+    let by_id: std::collections::HashMap<&str, &apps::AppEntry> = apps
+        .iter()
+        .map(|entry| (entry.app_id.as_str(), entry))
+        .collect();
     for id in ids.into_iter().take(512) {
-        let Some(entry) = apps.iter().find(|entry| entry.app_id == id) else {
+        let Some(entry) = by_id.get(id.as_str()) else {
             continue;
         };
         if let Some(icon) = entry.icon.as_deref() {
