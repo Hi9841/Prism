@@ -41,9 +41,9 @@ use windows::Win32::UI::Shell::{
     FOLDERID_PublicDocuments, FOLDERID_RoamingAppData, IApplicationActivationManager, IEnumIDList,
     ILCreateFromPathW, ILFree, IShellFolder, IShellItem, IShellItemImageFactory, IShellLinkW,
     SHCreateItemFromParsingName, SHCreateItemWithParent, SHGetIDListFromObject,
-    SHGetKnownFolderPath, SHGetPathFromIDListW, SHOpenFolderAndSelectItems, ShellExecuteW, AO_NONE,
-    SHCONTF_INCLUDEHIDDEN,
-    SHCONTF_NONFOLDERS, SIGDN_NORMALDISPLAY, SIIGBF_ICONONLY,
+    SHGetKnownFolderPath, SHGetPathFromIDListW, SHOpenFolderAndSelectItems, ShellExecuteExW,
+    ShellExecuteW, AO_NONE, SEE_MASK_INVOKEIDLIST, SHCONTF_INCLUDEHIDDEN, SHCONTF_NONFOLDERS,
+    SHELLEXECUTEINFOW, SIGDN_NORMALDISPLAY, SIIGBF_ICONONLY,
 };
 use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
 
@@ -1876,12 +1876,129 @@ pub fn open_path_location(path: &Path) -> Result<(), String> {
             }
         }
         let value = path.to_string_lossy();
-        if shell_execute("open", "explorer.exe", Some(&format!("/select,\"{value}\"")), None).is_ok() {
+        if shell_execute(
+            "open",
+            "explorer.exe",
+            Some(&format!("/select,\"{value}\"")),
+            None,
+        )
+        .is_ok()
+        {
             Ok(())
         } else {
             Err(format!("failed to locate {}", path.display()))
         }
     }
+}
+
+/// Pins or unpins a launch target on the Windows taskbar through the shell's
+/// hidden `taskbarpin` / `taskbarunpin` verbs. Both verbs are implemented by
+/// a COM context-menu handler, so the invocation must include
+/// SEE_MASK_INVOKEIDLIST (plain ShellExecuteW cannot run handler verbs).
+pub fn set_taskbar_pinned(path: &Path, pinned: bool) -> Result<(), String> {
+    if !path.exists() {
+        return Err(format!("{} does not exist", path.display()));
+    }
+    let verb = if pinned { "taskbarpin" } else { "taskbarunpin" };
+    unsafe { shell_execute_verb(verb, path) }.map_err(|code| {
+        format!(
+            "failed to {} {} (Shell error {code})",
+            if pinned { "pin" } else { "unpin" },
+            path.display()
+        )
+    })
+}
+
+/// Opens the Windows Properties dialog for a file or folder through the
+/// shell's handler-backed `properties` verb.
+pub fn show_properties(path: &Path) -> Result<(), String> {
+    if !path.exists() {
+        return Err(format!("{} does not exist", path.display()));
+    }
+    unsafe { shell_execute_verb("properties", path) }.map_err(|code| {
+        format!(
+            "failed to open properties for {} (Shell error {code})",
+            path.display()
+        )
+    })
+}
+
+/// Reports whether a launch target already sits on the taskbar's pin list.
+/// The TaskBar pin folder stores copies of the pinned shortcuts, so a target
+/// counts as pinned when one of those copies is the path itself, resolves to
+/// the same launch target (a Start Menu shortcut and its taskbar copy resolve
+/// to the same executable), or - UWP pins resolve to no filesystem target -
+/// carries the same shortcut file name.
+pub fn is_pinned_to_taskbar(path: &Path) -> bool {
+    let _com = ComGuard::init();
+    let Some(taskbar) = taskbar_pins_dir() else {
+        return false;
+    };
+    let Ok(entries) = std::fs::read_dir(&taskbar) else {
+        return false;
+    };
+    let mut match_keys = vec![path_key(&path.to_string_lossy())];
+    if path
+        .extension()
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("lnk"))
+    {
+        if let Some(resolved) = resolve_lnk(path) {
+            if !resolved.target.is_empty() {
+                match_keys.push(path_key(&resolved.target));
+            }
+        }
+    }
+    let requested_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(|name| name.to_ascii_lowercase());
+    for entry in entries.flatten() {
+        let link = entry.path();
+        if !link
+            .extension()
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("lnk"))
+        {
+            continue;
+        }
+        if match_keys.contains(&path_key(&link.to_string_lossy())) {
+            return true;
+        }
+        let Some(resolved) = resolve_lnk(&link) else {
+            continue;
+        };
+        if resolved.target.is_empty() {
+            let link_name = link
+                .file_name()
+                .and_then(|name| name.to_str())
+                .map(|name| name.to_ascii_lowercase());
+            if requested_name.is_some() && link_name == requested_name {
+                return true;
+            }
+        } else if match_keys.contains(&path_key(&resolved.target)) {
+            return true;
+        }
+    }
+    false
+}
+
+fn taskbar_pins_dir() -> Option<PathBuf> {
+    Some(
+        unsafe { known_folder(&FOLDERID_RoamingAppData) }?
+            .join("Microsoft")
+            .join("Internet Explorer")
+            .join("Quick Launch")
+            .join("User Pinned")
+            .join("TaskBar"),
+    )
+}
+
+/// Case-insensitive comparison key for Windows filesystem paths coming from
+/// different shell APIs: trims separators and normalizes slashes and casing.
+fn path_key(path: &str) -> String {
+    path.trim()
+        .replace('/', "\\")
+        .trim_end_matches('\\')
+        .to_ascii_lowercase()
 }
 
 fn is_executable(path: &str) -> bool {
@@ -1925,6 +2042,26 @@ unsafe fn shell_execute(
     } else {
         Err(code)
     }
+}
+
+/// Handler-backed shell verbs (taskbar pinning, Properties) only run through
+/// ShellExecuteEx with SEE_MASK_INVOKEIDLIST; `shell_execute` above uses
+/// plain ShellExecuteW, which resolves static verbs only.
+unsafe fn shell_execute_verb(verb: &str, path: &Path) -> Result<(), isize> {
+    let _com = ComGuard::init();
+    let operation = wide(verb);
+    let file = wide(&path.to_string_lossy());
+    let mut info = SHELLEXECUTEINFOW {
+        cbSize: std::mem::size_of::<SHELLEXECUTEINFOW>() as u32,
+        fMask: SEE_MASK_INVOKEIDLIST,
+        hwnd: HWND::default(),
+        lpVerb: PCWSTR(operation.as_ptr()),
+        lpFile: PCWSTR(file.as_ptr()),
+        nShow: SW_SHOWNORMAL.0,
+        ..Default::default()
+    };
+    // On failure the call returns FALSE and hInstApp carries the SE_ERR_ code.
+    unsafe { ShellExecuteExW(&mut info) }.map_err(|_| info.hInstApp.0 as isize)
 }
 
 fn explorer_arg(arg: &str) -> Result<(), String> {
@@ -2093,6 +2230,31 @@ mod tests {
     fn open_path_location_resolves_valid_file_path() {
         let current = std::env::current_exe().expect("current test executable");
         assert!(open_path_location(&current).is_ok());
+    }
+
+    #[test]
+    fn path_key_normalizes_windows_paths() {
+        assert_eq!(
+            path_key(r"C:\Users\Hi\App.exe"),
+            path_key("c:/users/hi/APP.exe")
+        );
+        assert_eq!(path_key(r"C:\Dir\"), path_key(r"C:\Dir"));
+        assert_ne!(path_key(r"C:\A.exe"), path_key(r"C:\B.exe"));
+    }
+
+    #[test]
+    fn taskbar_pin_and_properties_reject_missing_paths() {
+        let missing = Path::new(r"C:\missing\prism-issue-34.lnk");
+        assert!(set_taskbar_pinned(missing, true).is_err());
+        assert!(set_taskbar_pinned(missing, false).is_err());
+        assert!(show_properties(missing).is_err());
+    }
+
+    #[test]
+    fn unknown_targets_are_reported_unpinned() {
+        assert!(!is_pinned_to_taskbar(Path::new(
+            r"C:\missing\prism-issue-34.exe"
+        )));
     }
 }
 

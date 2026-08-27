@@ -21,6 +21,12 @@ export interface PaletteItem {
   runAsAdmin?: () => Promise<void> | void;
   /** Opens the containing folder and reveals the item in File Explorer. */
   openLocation?: () => Promise<void> | void;
+  /** Local filesystem target used by shell context-menu actions. */
+  shellPath?: string;
+  /** Pins/unpins the item's target on the Windows taskbar. */
+  toggleTaskbarPin?: () => Promise<void> | void;
+  /** Opens the Windows Properties dialog for the item's target. */
+  showProperties?: () => Promise<void> | void;
   /** Display title used when persisting to history */
   historyTitle: string;
   /** Extra line shown in the toast after a clipboard-style run */
@@ -108,6 +114,17 @@ export function isElevatablePath(path: string | undefined): boolean {
   const filename = path.split(/[\\/]/).pop() ?? "";
   const boundary = filename.lastIndexOf(".");
   return boundary > 0 && ELEVATABLE_EXTENSIONS.has(filename.slice(boundary + 1).toLowerCase());
+}
+
+const PINNABLE_EXTENSIONS = new Set(["exe", "lnk", "bat", "cmd", "msc"]);
+
+/** Windows' taskbar-pin shell verb applies to launchable targets only:
+ *  shortcuts, executables and script hosts - not documents or folders. */
+export function isTaskbarPinablePath(path: string | undefined): boolean {
+  if (!path || /^[a-z][a-z0-9+.-]*:\/\//i.test(path)) return false;
+  const filename = path.split(/[\\/]/).pop() ?? "";
+  const boundary = filename.lastIndexOf(".");
+  return boundary > 0 && PINNABLE_EXTENSIONS.has(filename.slice(boundary + 1).toLowerCase());
 }
 
 export function reorderPinnedApps(
