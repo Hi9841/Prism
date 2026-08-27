@@ -1,7 +1,14 @@
 import { Home } from "lucide-react";
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { isPinnedToTaskbar, setTaskbarPinned } from "../../lib/bridge";
 import type { AppEntry, FileEntry, PaletteItem, QuickAccessEntry } from "../../lib/types";
 import { buildSections, isClipboardKind, type PaletteSources, quickAccessPaletteItem } from "./sections";
+
+vi.mock("../../lib/bridge", async (importOriginal) => ({
+  ...(await importOriginal<Record<string, unknown>>()),
+  isPinnedToTaskbar: vi.fn(),
+  setTaskbarPinned: vi.fn(),
+}));
 
 function app(name: string, overrides: Partial<AppEntry> = {}): AppEntry {
   return {
@@ -460,7 +467,11 @@ describe("quick access kinds round-trip", () => {
 
 describe("openLocation support", () => {
   it("attaches openLocation to quickAccessPaletteItem", () => {
-    const qa = quickAccessPaletteItem({ name: "Downloads", path: "C:\\Users\\You\\Downloads", kind: "downloads" });
+    const qa = quickAccessPaletteItem({
+      name: "Downloads",
+      path: "C:\\Users\\You\\Downloads",
+      kind: "downloads",
+    });
     expect(typeof qa.openLocation).toBe("function");
     expect(typeof qa.run).toBe("function");
   });
@@ -499,3 +510,82 @@ describe("openLocation support", () => {
   });
 });
 
+describe("taskbar pin & properties support", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("attaches shell actions to apps with a local launch target", () => {
+    const withTarget = app("ToolA", { path: "C:\\Tools\\custom.exe" });
+    const packaged = app("ToolB", { path: undefined });
+
+    const result = buildSections(
+      sources({
+        query: "tool",
+        apps: [withTarget, packaged],
+      }),
+    );
+
+    const appsSection = result.sections.find((s) => s.id === "apps");
+    const targetItem = appsSection?.items.find((i) => i.title === "ToolA");
+    const packagedItem = appsSection?.items.find((i) => i.title === "ToolB");
+    expect(targetItem?.shellPath).toBe("C:\\Tools\\custom.exe");
+    expect(typeof targetItem?.toggleTaskbarPin).toBe("function");
+    expect(typeof targetItem?.showProperties).toBe("function");
+    expect(packagedItem?.shellPath).toBeUndefined();
+    expect(packagedItem?.toggleTaskbarPin).toBeUndefined();
+    expect(packagedItem?.showProperties).toBeUndefined();
+  });
+
+  it("does not offer taskbar pin for URL shortcuts", () => {
+    const webApp = app("Site", { path: "https://example.com", location: "C:\\Links\\Site.url" });
+    const result = buildSections(sources({ query: "site", apps: [webApp] }));
+
+    const siteItem = result.sections.find((s) => s.id === "apps")?.items[0];
+    expect(siteItem?.shellPath).toBe("C:\\Links\\Site.url");
+    expect(siteItem?.toggleTaskbarPin).toBeUndefined();
+    expect(typeof siteItem?.showProperties).toBe("function");
+  });
+
+  it("pins only launchable files but shows properties for every file result", () => {
+    const installer = file("setup.exe", "C:\\Users\\You\\Downloads\\setup.exe");
+    const doc = file("report.pdf", "C:\\Users\\You\\Documents\\report.pdf");
+    const result = buildSections(
+      sources({
+        query: "s",
+        fileResults: [installer, doc],
+        fileResultQuery: "s",
+      }),
+    );
+
+    const filesSection = result.sections.find((s) => s.id === "files");
+    const exeItem = filesSection?.items.find((i) => i.title === "setup.exe");
+    const pdfItem = filesSection?.items.find((i) => i.title === "report.pdf");
+    expect(exeItem?.shellPath).toBe("C:\\Users\\You\\Downloads\\setup.exe");
+    expect(typeof exeItem?.toggleTaskbarPin).toBe("function");
+    expect(typeof pdfItem?.showProperties).toBe("function");
+    expect(pdfItem?.toggleTaskbarPin).toBeUndefined();
+  });
+
+  it("attaches properties but not taskbar pin to Quick Access folders", () => {
+    const qa = quickAccessPaletteItem({ name: "Downloads", path: DOWNLOADS_PATH, kind: "downloads" });
+    expect(qa.shellPath).toBe(DOWNLOADS_PATH);
+    expect(qa.toggleTaskbarPin).toBeUndefined();
+    expect(typeof qa.showProperties).toBe("function");
+  });
+
+  it("flips the queried taskbar pin state at click time", async () => {
+    const installer = file("setup.exe", "C:\\Users\\You\\Downloads\\setup.exe");
+    const result = buildSections(sources({ query: "s", fileResults: [installer], fileResultQuery: "s" }));
+    const exeItem = result.sections.find((s) => s.id === "files")?.items[0];
+
+    vi.mocked(isPinnedToTaskbar).mockResolvedValue(false);
+    await exeItem?.toggleTaskbarPin?.();
+    expect(isPinnedToTaskbar).toHaveBeenCalledWith("C:\\Users\\You\\Downloads\\setup.exe");
+    expect(setTaskbarPinned).toHaveBeenLastCalledWith("C:\\Users\\You\\Downloads\\setup.exe", true);
+
+    vi.mocked(isPinnedToTaskbar).mockResolvedValue(true);
+    await exeItem?.toggleTaskbarPin?.();
+    expect(setTaskbarPinned).toHaveBeenLastCalledWith("C:\\Users\\You\\Downloads\\setup.exe", false);
+  });
+});

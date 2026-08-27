@@ -164,6 +164,21 @@ export async function runPathAsAdmin(path: string): Promise<void> {
   await invoke("run_path_as_admin", { path });
 }
 
+export async function isPinnedToTaskbar(path: string): Promise<boolean> {
+  if (!inTauri) return false;
+  return invoke<boolean>("is_pinned_to_taskbar", { path });
+}
+
+export async function setTaskbarPinned(path: string, pinned: boolean): Promise<void> {
+  if (!inTauri) return;
+  await invoke("set_taskbar_pinned", { path, pinned });
+}
+
+export async function showPathProperties(path: string): Promise<void> {
+  if (!inTauri) return;
+  await invoke("show_path_properties", { path });
+}
+
 export async function searchFiles(query: string, limit = 20): Promise<FileSearchResponse> {
   if (!inTauri) {
     const lower = query.toLowerCase();
