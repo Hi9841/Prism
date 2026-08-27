@@ -1,5 +1,6 @@
-import { FolderOpen, ShieldCheck } from "lucide-react";
+import { FolderOpen, Info, Pin, PinOff, ShieldCheck } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { isPinnedToTaskbar } from "../../lib/bridge";
 import { onTransientUiDismiss } from "../../lib/transientUi";
 import type { PaletteItem } from "../../lib/types";
 
@@ -29,21 +30,28 @@ export function ResultContextMenu({
   position,
   onOpenLocation,
   onRunAsAdmin,
+  onToggleTaskbarPin,
+  onShowProperties,
   onClose,
 }: {
   item: PaletteItem;
   position: ContextMenuPosition;
   onOpenLocation?: () => void;
   onRunAsAdmin?: () => void;
+  onToggleTaskbarPin?: () => void;
+  onShowProperties?: () => void;
   onClose: (restoreFocus: boolean) => void;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const [closing, setClosing] = useState(false);
   const closingRef = useRef(false);
   const closeTimerRef = useRef<number | null>(null);
+  const [pinnedToTaskbar, setPinnedToTaskbar] = useState<boolean | null>(null);
 
   const hasOpenLocation = Boolean(item.openLocation && onOpenLocation);
   const hasRunAsAdmin = Boolean(item.runAsAdmin && onRunAsAdmin);
+  const hasTaskbarPin = Boolean(item.toggleTaskbarPin && onToggleTaskbarPin);
+  const hasProperties = Boolean(item.showProperties && onShowProperties);
 
   // Deliberate closes animate out first; closes triggered by the palette
   // hiding (prism:close, transient dismiss) snap since the window is gone.
@@ -87,6 +95,25 @@ export function ResultContextMenu({
       window.removeEventListener("resize", closeOnViewportChange);
     };
   }, [onClose]);
+
+  useEffect(() => {
+    // The shell owns the pin state; resolve it lazily so the menu reads
+    // "Unpin from taskbar" exactly when the target is already pinned. Reset
+    // first so a swapped item can never flash the previous item's label.
+    setPinnedToTaskbar(null);
+    if (!hasTaskbarPin || !item.shellPath) return;
+    let active = true;
+    isPinnedToTaskbar(item.shellPath)
+      .then((pinned) => {
+        if (active) setPinnedToTaskbar(pinned);
+      })
+      .catch(() => {
+        if (active) setPinnedToTaskbar(null);
+      });
+    return () => {
+      active = false;
+    };
+  }, [hasTaskbarPin, item.shellPath]);
 
   const handleKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
     const buttons = Array.from(
@@ -158,6 +185,32 @@ export function ResultContextMenu({
           >
             <ShieldCheck className="h-4 w-4 text-accent" aria-hidden="true" />
             <span>Run as administrator</span>
+          </button>
+        )}
+        {hasTaskbarPin && pinnedToTaskbar !== null && (
+          <button
+            type="button"
+            role="menuitem"
+            onClick={onToggleTaskbarPin}
+            className="focus-ring press flex h-9 w-full cursor-pointer items-center gap-2 rounded-[4px] px-2.5 text-left text-[12.5px] font-medium text-fg-secondary hover:bg-surface-hover hover:text-fg"
+          >
+            {pinnedToTaskbar ? (
+              <PinOff className="h-4 w-4 text-accent" aria-hidden="true" />
+            ) : (
+              <Pin className="h-4 w-4 text-accent" aria-hidden="true" />
+            )}
+            <span>{pinnedToTaskbar ? "Unpin from taskbar" : "Pin to taskbar"}</span>
+          </button>
+        )}
+        {hasProperties && (
+          <button
+            type="button"
+            role="menuitem"
+            onClick={onShowProperties}
+            className="focus-ring press flex h-9 w-full cursor-pointer items-center gap-2 rounded-[4px] px-2.5 text-left text-[12.5px] font-medium text-fg-secondary hover:bg-surface-hover hover:text-fg"
+          >
+            <Info className="h-4 w-4 text-accent" aria-hidden="true" />
+            <span>Properties</span>
           </button>
         )}
       </div>

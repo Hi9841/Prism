@@ -37,6 +37,21 @@ interface ReorderDragState {
   targetItemId: string | null;
 }
 
+/** Any action that justifies opening the result context menu. */
+function hasResultActions(item: PaletteItem | undefined): item is PaletteItem {
+  return Boolean(item && resultActionCount(item) > 0);
+}
+
+/** Rows the context menu will render; menu viewport clamping sizes from it. */
+function resultActionCount(item: PaletteItem): number {
+  return (
+    (item.openLocation ? 1 : 0) +
+    (item.runAsAdmin ? 1 : 0) +
+    (item.toggleTaskbarPin ? 1 : 0) +
+    (item.showProperties ? 1 : 0)
+  );
+}
+
 interface ResultMenuState {
   item: PaletteItem;
   position: ContextMenuPosition;
@@ -82,9 +97,9 @@ export function Palette() {
 
   const openResultMenu = useCallback(
     (item: PaletteItem, index: number, x: number, y: number) => {
-      if (!item.runAsAdmin && !item.openLocation) return;
+      const actionCount = resultActionCount(item);
+      if (actionCount === 0) return;
       palette.select(index);
-      const actionCount = (item.openLocation ? 1 : 0) + (item.runAsAdmin ? 1 : 0);
       const menuHeight = actionCount * 36 + 8;
       setResultMenu({ item, position: clampContextMenuPosition(x, y, menuHeight) });
     },
@@ -412,7 +427,7 @@ export function Palette() {
       if (e.key === "ContextMenu" || (e.key === "F10" && e.shiftKey)) {
         e.preventDefault();
         const item = palette.flatItems[palette.selected];
-        if (!item?.runAsAdmin && !item?.openLocation) return;
+        if (!hasResultActions(item)) return;
         const row = document.getElementById(`prism-opt-${palette.selected}`);
         const bounds = row?.getBoundingClientRect();
         openResultMenu(
@@ -721,6 +736,28 @@ export function Palette() {
             const { item } = resultMenu;
             setResultMenu(null);
             palette.runItemAsAdmin(item);
+          }}
+          onToggleTaskbarPin={() => {
+            const { item } = resultMenu;
+            setResultMenu(null);
+            void (async () => {
+              try {
+                await item.toggleTaskbarPin?.();
+              } catch (error) {
+                showToast("Could not update taskbar pin", String(error));
+              }
+            })();
+          }}
+          onShowProperties={() => {
+            const { item } = resultMenu;
+            setResultMenu(null);
+            void (async () => {
+              try {
+                await item.showProperties?.();
+              } catch (error) {
+                showToast("Could not open properties", String(error));
+              }
+            })();
           }}
           onClose={closeResultMenu}
         />

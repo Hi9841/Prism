@@ -20,7 +20,17 @@ import {
   Monitor,
   Music,
 } from "lucide-react";
-import { copyText, launchApp, launchAppAsAdmin, openPath, openPathLocation, runPathAsAdmin } from "../../lib/bridge";
+import {
+  copyText,
+  isPinnedToTaskbar,
+  launchApp,
+  launchAppAsAdmin,
+  openPath,
+  openPathLocation,
+  runPathAsAdmin,
+  setTaskbarPinned,
+  showPathProperties,
+} from "../../lib/bridge";
 import { sortApps } from "../../lib/emoji";
 import { formatNumber, isMathLike, tryEvaluate } from "../../lib/math";
 import { fuzzy, fuzzyApps } from "../../lib/search";
@@ -33,7 +43,7 @@ import type {
   QuickAccessEntry,
   TileTint,
 } from "../../lib/types";
-import { isElevatablePath } from "../../lib/types";
+import { isElevatablePath, isTaskbarPinablePath } from "../../lib/types";
 import { searchWindowsSettings } from "./windowsSettings";
 
 export interface Section {
@@ -274,9 +284,17 @@ export function isClipboardKind(id: string): boolean {
   return id.startsWith("calc::") || id.startsWith("copy::");
 }
 
+/** Queries the live taskbar pin state and flips it. The context menu labels
+ *  itself from the same query, so the toggle re-checks at click time. */
+async function toggleTaskbarPin(path: string): Promise<void> {
+  const pinned = await isPinnedToTaskbar(path).catch(() => false);
+  await setTaskbarPinned(path, !pinned);
+}
+
 function appPaletteItem(app: AppEntry, icons: Readonly<Record<string, string>>): PaletteItem {
   const localTarget =
-    app.location ?? (app.path && (app.path.includes(":") || app.path.startsWith("\\\\")) ? app.path : undefined);
+    app.location ??
+    (app.path && (app.path.includes(":") || app.path.startsWith("\\\\")) ? app.path : undefined);
   return {
     id: `app::${app.appId}`,
     title: app.name,
@@ -287,6 +305,10 @@ function appPaletteItem(app: AppEntry, icons: Readonly<Record<string, string>>):
     run: () => launchApp(app.appId),
     runAsAdmin: isElevatablePath(app.path) ? () => launchAppAsAdmin(app.appId) : undefined,
     openLocation: localTarget ? () => openPathLocation(localTarget) : undefined,
+    shellPath: localTarget,
+    toggleTaskbarPin:
+      localTarget && isTaskbarPinablePath(localTarget) ? () => toggleTaskbarPin(localTarget) : undefined,
+    showProperties: localTarget ? () => showPathProperties(localTarget) : undefined,
   };
 }
 
@@ -343,6 +365,8 @@ export function quickAccessPaletteItem(entry: QuickAccessEntry): PaletteItem {
     quickAccessKind: entry.kind,
     run: () => openPath(entry.path),
     openLocation: () => openPathLocation(entry.path),
+    shellPath: entry.path,
+    showProperties: () => showPathProperties(entry.path),
   };
 }
 
@@ -361,6 +385,10 @@ function filePaletteItem(entry: FileEntry): PaletteItem {
     runAsAdmin:
       !entry.isDirectory && isElevatablePath(entry.path) ? () => runPathAsAdmin(entry.path) : undefined,
     openLocation: () => openPathLocation(entry.path),
+    shellPath: entry.path,
+    toggleTaskbarPin:
+      !entry.isDirectory && isTaskbarPinablePath(entry.path) ? () => toggleTaskbarPin(entry.path) : undefined,
+    showProperties: () => showPathProperties(entry.path),
   };
 }
 

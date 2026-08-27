@@ -235,6 +235,9 @@ pub fn run() {
             open_path,
             open_path_location,
             run_path_as_admin,
+            is_pinned_to_taskbar,
+            set_taskbar_pinned,
+            show_path_properties,
             present_palette,
             hide_palette,
             set_window_style,
@@ -922,6 +925,39 @@ async fn run_path_as_admin(path: String) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || apps::launch_path_elevated(&path, None, None))
         .await
         .map_err(|e| format!("run as administrator task failed: {e}"))?
+}
+
+#[tauri::command]
+async fn is_pinned_to_taskbar(path: String) -> bool {
+    let path = PathBuf::from(path);
+    if !path.is_absolute() {
+        return false;
+    }
+    tauri::async_runtime::spawn_blocking(move || apps::is_pinned_to_taskbar(&path))
+        .await
+        .unwrap_or(false)
+}
+
+#[tauri::command]
+async fn set_taskbar_pinned(path: String, pinned: bool) -> Result<(), String> {
+    let path = PathBuf::from(path);
+    if !path.is_absolute() || !path.exists() {
+        return Err("path must be an existing absolute file".to_string());
+    }
+    tauri::async_runtime::spawn_blocking(move || apps::set_taskbar_pinned(&path, pinned))
+        .await
+        .map_err(|e| format!("taskbar pin task failed: {e}"))?
+}
+
+#[tauri::command]
+async fn show_path_properties(path: String) -> Result<(), String> {
+    let path = PathBuf::from(path);
+    if !path.is_absolute() || !path.exists() {
+        return Err("path must be an existing absolute file or folder".to_string());
+    }
+    tauri::async_runtime::spawn_blocking(move || apps::show_properties(&path))
+        .await
+        .map_err(|e| format!("properties task failed: {e}"))?
 }
 
 #[tauri::command]
