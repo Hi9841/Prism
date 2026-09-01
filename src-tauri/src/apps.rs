@@ -41,9 +41,9 @@ use windows::Win32::UI::Shell::{
     FOLDERID_PublicDocuments, FOLDERID_RoamingAppData, IApplicationActivationManager, IEnumIDList,
     ILCreateFromPathW, ILFree, IShellFolder, IShellItem, IShellItemImageFactory, IShellLinkW,
     SHCreateItemFromParsingName, SHCreateItemWithParent, SHGetIDListFromObject,
-    SHGetKnownFolderPath, SHGetPathFromIDListW, SHOpenFolderAndSelectItems, ShellExecuteExW,
-    ShellExecuteW, AO_NONE, SEE_MASK_INVOKEIDLIST, SHCONTF_INCLUDEHIDDEN, SHCONTF_NONFOLDERS,
-    SHELLEXECUTEINFOW, SIGDN_NORMALDISPLAY, SIIGBF_ICONONLY,
+    SHGetKnownFolderPath, SHGetPathFromIDListW, SHOpenFolderAndSelectItems, SHParseDisplayName,
+    ShellExecuteExW, ShellExecuteW, AO_NONE, SEE_MASK_INVOKEIDLIST, SHCONTF_INCLUDEHIDDEN,
+    SHCONTF_NONFOLDERS, SHELLEXECUTEINFOW, SIGDN_NORMALDISPLAY, SIIGBF_ICONONLY,
 };
 use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
 
@@ -1891,24 +1891,6 @@ pub fn open_path_location(path: &Path) -> Result<(), String> {
     }
 }
 
-/// Pins or unpins a launch target on the Windows taskbar through the shell's
-/// hidden `taskbarpin` / `taskbarunpin` verbs. Both verbs are implemented by
-/// a COM context-menu handler, so the invocation must include
-/// SEE_MASK_INVOKEIDLIST (plain ShellExecuteW cannot run handler verbs).
-pub fn set_taskbar_pinned(path: &Path, pinned: bool) -> Result<(), String> {
-    if !path.exists() {
-        return Err(format!("{} does not exist", path.display()));
-    }
-    let verb = if pinned { "taskbarpin" } else { "taskbarunpin" };
-    unsafe { shell_execute_verb(verb, path) }.map_err(|code| {
-        format!(
-            "failed to {} {} (Shell error {code})",
-            if pinned { "pin" } else { "unpin" },
-            path.display()
-        )
-    })
-}
-
 /// Opens the Windows Properties dialog for a file or folder through the
 /// shell's handler-backed `properties` verb.
 pub fn show_properties(path: &Path) -> Result<(), String> {
@@ -1923,19 +1905,174 @@ pub fn show_properties(path: &Path) -> Result<(), String> {
     })
 }
 
-/// Reports whether a launch target already sits on the taskbar's pin list.
-/// The TaskBar pin folder stores copies of the pinned shortcuts, so a target
-/// counts as pinned when one of those copies is the path itself, resolves to
-/// the same launch target (a Start Menu shortcut and its taskbar copy resolve
-/// to the same executable), or - UWP pins resolve to no filesystem target -
-/// carries the same shortcut file name.
-pub fn is_pinned_to_taskbar(path: &Path) -> bool {
+/// CLSID_TaskbandPin and IID_IPinnedList3: undocumented COM interface used by
+/// the Windows Shell (and browsers like Edge/Firefox) to pin and unpin items on the Taskbar.
+const CLSID_TASKBAND_PIN: GUID = GUID::from_u128(0x90aa3a4e_1cba_4233_b8bb_535773d48449);
+const IID_IPINNED_LIST3: GUID = GUID::from_u128(0x0dd79ae2_d156_45d4_9eeb_3b549769e940);
+const PLMC_INT_MAX: i32 = 0x7fff_ffff;
+
+#[repr(C)]
+#[allow(non_snake_case)]
+struct IPinnedList3Vtbl {
+    pub QueryInterface: unsafe extern "system" fn(
+        this: *mut c_void,
+        riid: *const GUID,
+        ppv: *mut *mut c_void,
+    ) -> windows::core::HRESULT,
+    pub AddRef: unsafe extern "system" fn(this: *mut c_void) -> u32,
+    pub Release: unsafe extern "system" fn(this: *mut c_void) -> u32,
+    pub Other: [usize; 13],
+    pub Modify: unsafe extern "system" fn(
+        this: *mut c_void,
+        unpin: *const ITEMIDLIST,
+        pin: *const ITEMIDLIST,
+        caller: i32,
+    ) -> windows::core::HRESULT,
+}
+
+#[repr(C)]
+struct IPinnedList3 {
+    pub vtbl: *const IPinnedList3Vtbl,
+}
+
+fn resolve_shell_pidl(path: &Path) -> Option<*mut ITEMIDLIST> {
+    let wide_path = wide(&path.to_string_lossy());
+    let mut pidl: *mut ITEMIDLIST = std::ptr::null_mut();
+    let hr = unsafe { SHParseDisplayName(PCWSTR(wide_path.as_ptr()), None, &mut pidl, 0, None) };
+    if hr.is_ok() && !pidl.is_null() {
+        return Some(pidl);
+    }
+    let fallback = unsafe { ILCreateFromPathW(PCWSTR(wide_path.as_ptr())) };
+    if !fallback.is_null() {
+        Some(fallback)
+    } else {
+        None
+    }
+}
+
+fn modify_taskband_pin(
+    unpin_pidl: Option<*const ITEMIDLIST>,
+    pin_pidl: Option<*const ITEMIDLIST>,
+) -> Result<(), String> {
     let _com = ComGuard::init();
-    let Some(taskbar) = taskbar_pins_dir() else {
-        return false;
-    };
+    unsafe {
+        let unknown: windows::core::IUnknown =
+            CoCreateInstance(&CLSID_TASKBAND_PIN, None, CLSCTX_INPROC_SERVER)
+                .map_err(|error| format!("failed to instantiate TaskbandPin: {error}"))?;
+
+        let mut pinned_list_raw: *mut c_void = std::ptr::null_mut();
+        let hr = (windows::core::Interface::vtable(&unknown).QueryInterface)(
+            windows::core::Interface::as_raw(&unknown),
+            &IID_IPINNED_LIST3,
+            &mut pinned_list_raw,
+        );
+        if hr.is_err() || pinned_list_raw.is_null() {
+            return Err(format!("failed to query IPinnedList3: {hr:?}"));
+        }
+
+        let pinned_list = pinned_list_raw as *mut IPinnedList3;
+        let mut modify_hr = ((*(*pinned_list).vtbl).Modify)(
+            pinned_list_raw,
+            unpin_pidl.unwrap_or(std::ptr::null()),
+            pin_pidl.unwrap_or(std::ptr::null()),
+            4, // PLMC_SHELL_PIN_UNPIN
+        );
+        if modify_hr.is_err() {
+            modify_hr = ((*(*pinned_list).vtbl).Modify)(
+                pinned_list_raw,
+                unpin_pidl.unwrap_or(std::ptr::null()),
+                pin_pidl.unwrap_or(std::ptr::null()),
+                PLMC_INT_MAX,
+            );
+        }
+        ((*(*pinned_list).vtbl).Release)(pinned_list_raw);
+
+        modify_hr
+            .ok()
+            .map_err(|error| format!("taskbar pin modify failed: {error}"))
+    }
+}
+
+/// Pins or unpins a launch target on the Windows taskbar. Uses `IPinnedList3`
+/// COM interface (the native mechanism on Windows 10/11) with fallback to shell verbs
+/// and pin store manipulation.
+pub fn set_taskbar_pinned(path: &Path, pinned: bool) -> Result<(), String> {
+    if !path.exists() {
+        return Err(format!("{} does not exist", path.display()));
+    }
+
+    let _com = ComGuard::init();
+
+    if pinned {
+        // When pinning: if path is already a shortcut (.lnk), pass its PIDL directly.
+        // If path is an executable (.exe), create a staging shortcut outside the TaskBar folder
+        // so Windows Shell can copy it into User Pinned\TaskBar and register it.
+        let target_shortcut = if path
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("lnk"))
+        {
+            path.to_path_buf()
+        } else {
+            let staging_dir = std::env::temp_dir().join("Prism").join("pin-shortcuts");
+            let _ = std::fs::create_dir_all(&staging_dir);
+            if let Ok(dest) = pin_destination(path, &staging_dir) {
+                let _ = create_pin_shortcut(path, &dest);
+                dest
+            } else {
+                path.to_path_buf()
+            }
+        };
+
+        let pidl = resolve_shell_pidl(&target_shortcut).or_else(|| resolve_shell_pidl(path));
+
+        let Some(pidl) = pidl else {
+            return Err(format!("failed to allocate PIDL for {}", path.display()));
+        };
+
+        let res = modify_taskband_pin(None, Some(pidl));
+        unsafe { ILFree(Some(pidl)) };
+
+        if res.is_err() {
+            let _ = unsafe { shell_execute_verb("taskbarpin", path) };
+        }
+        res
+    } else {
+        // When unpinning: find the pinned link in User Pinned\TaskBar.
+        let pinned_link = find_taskbar_pin(path);
+        let target_path = pinned_link.as_deref().unwrap_or(path);
+
+        let pidl = resolve_shell_pidl(target_path).or_else(|| resolve_shell_pidl(path));
+
+        let res = if let Some(pidl) = pidl {
+            let r = modify_taskband_pin(Some(pidl), None);
+            unsafe { ILFree(Some(pidl)) };
+            r
+        } else {
+            Err(format!(
+                "failed to allocate PIDL for {}",
+                target_path.display()
+            ))
+        };
+
+        let store_unpinned = unpin_in_store(path).unwrap_or(false);
+
+        if res.is_err() {
+            let verb_unpinned = unsafe { shell_execute_verb("taskbarunpin", path) }.is_ok();
+            if store_unpinned || verb_unpinned {
+                return Ok(());
+            }
+        }
+        res
+    }
+}
+
+/// Finds the taskbar pin-store shortcut that represents a launch target, so
+/// callers can check pin state or remove the exact pin.
+pub fn find_taskbar_pin(path: &Path) -> Option<PathBuf> {
+    let _com = ComGuard::init();
+    let taskbar = taskbar_pins_dir()?;
     let Ok(entries) = std::fs::read_dir(&taskbar) else {
-        return false;
+        return None;
     };
     let mut match_keys = vec![path_key(&path.to_string_lossy())];
     if path
@@ -1961,7 +2098,7 @@ pub fn is_pinned_to_taskbar(path: &Path) -> bool {
             continue;
         }
         if match_keys.contains(&path_key(&link.to_string_lossy())) {
-            return true;
+            return Some(link);
         }
         let Some(resolved) = resolve_lnk(&link) else {
             continue;
@@ -1972,13 +2109,18 @@ pub fn is_pinned_to_taskbar(path: &Path) -> bool {
                 .and_then(|name| name.to_str())
                 .map(|name| name.to_ascii_lowercase());
             if requested_name.is_some() && link_name == requested_name {
-                return true;
+                return Some(link);
             }
         } else if match_keys.contains(&path_key(&resolved.target)) {
-            return true;
+            return Some(link);
         }
     }
-    false
+    None
+}
+
+/// Reports whether a launch target already sits on the taskbar's pin list.
+pub fn is_pinned_to_taskbar(path: &Path) -> bool {
+    find_taskbar_pin(path).is_some()
 }
 
 fn taskbar_pins_dir() -> Option<PathBuf> {
@@ -1999,6 +2141,78 @@ fn path_key(path: &str) -> String {
         .replace('/', "\\")
         .trim_end_matches('\\')
         .to_ascii_lowercase()
+}
+
+/// Drops the pin-store shortcut copy that represents the target; already
+/// unpinned targets report no change instead of failing.
+fn unpin_in_store(path: &Path) -> Result<bool, String> {
+    match find_taskbar_pin(path) {
+        Some(link) => {
+            if let Err(error) = std::fs::remove_file(&link) {
+                if error.kind() != std::io::ErrorKind::NotFound {
+                    return Err(format!("failed to remove {}: {error}", link.display()));
+                }
+            }
+            Ok(true)
+        }
+        None => Ok(false),
+    }
+}
+
+/// Chooses the pin-store shortcut path for a target: shortcuts keep their
+/// own file name, executables are pinned under their binary name, and name
+/// collisions get numbered copies like the shell itself creates.
+fn pin_destination(path: &Path, taskbar: &Path) -> Result<PathBuf, String> {
+    let is_shortcut = path
+        .extension()
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("lnk"));
+    let mut file_name = if is_shortcut {
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .map(str::to_string)
+    } else {
+        path.file_stem()
+            .and_then(|name| name.to_str())
+            .map(|stem| format!("{stem}.lnk"))
+    }
+    .ok_or_else(|| format!("{} has no usable file name", path.display()))?;
+    let mut candidate = taskbar.join(&file_name);
+    let mut suffix = 2u32;
+    while candidate.exists() {
+        let stem = file_name
+            .get(..file_name.len() - 4)
+            .unwrap_or(&file_name)
+            .to_string();
+        file_name = format!("{stem} ({suffix}).lnk");
+        candidate = taskbar.join(&file_name);
+        suffix += 1;
+    }
+    Ok(candidate)
+}
+
+/// Creates a plain shortcut to an executable target for the pin store.
+fn create_pin_shortcut(target: &Path, destination: &Path) -> Result<(), String> {
+    unsafe {
+        let link: IShellLinkW = CoCreateInstance(&CLSID_SHELL_LINK, None, CLSCTX_INPROC_SERVER)
+            .map_err(|error| format!("failed to create the shortcut object: {error}"))?;
+        let wide_target = wide(&target.to_string_lossy());
+        link.SetPath(PCWSTR(wide_target.as_ptr()))
+            .map_err(|error| format!("failed to set the shortcut target: {error}"))?;
+        if let Some(directory) = target
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+        {
+            let wide_directory = wide(&directory.to_string_lossy());
+            let _ = link.SetWorkingDirectory(PCWSTR(wide_directory.as_ptr()));
+        }
+        let persist: IPersistFile = link
+            .cast()
+            .map_err(|error| format!("failed to load shortcut persistence: {error}"))?;
+        let wide_destination = wide(&destination.to_string_lossy());
+        persist
+            .Save(PCWSTR(wide_destination.as_ptr()), true)
+            .map_err(|error| format!("failed to save {}: {error}", destination.display()))
+    }
 }
 
 fn is_executable(path: &str) -> bool {
@@ -2255,6 +2469,28 @@ mod tests {
         assert!(!is_pinned_to_taskbar(Path::new(
             r"C:\missing\prism-issue-34.exe"
         )));
+    }
+
+    #[test]
+    fn created_pin_shortcuts_resolve_to_their_target() {
+        let _com = ComGuard::init();
+        let target = std::env::current_exe().expect("current test executable");
+        let directory = std::env::temp_dir().join("prism-pin-shortcut-test");
+        std::fs::create_dir_all(&directory).expect("create temp directory");
+        let destination = directory.join("prism-test-target.lnk");
+
+        let result = create_pin_shortcut(&target, &destination);
+        let resolved = destination
+            .exists()
+            .then(|| resolve_lnk(&destination))
+            .flatten();
+        let _ = std::fs::remove_file(&destination);
+
+        assert!(result.is_ok());
+        assert_eq!(
+            resolved.map(|resolved| path_key(&resolved.target)),
+            Some(path_key(&target.to_string_lossy()))
+        );
     }
 }
 
