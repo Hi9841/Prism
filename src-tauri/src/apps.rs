@@ -40,10 +40,11 @@ use windows::Win32::UI::Shell::{
     FOLDERID_ProgramFiles, FOLDERID_ProgramFilesX86, FOLDERID_Programs, FOLDERID_PublicDesktop,
     FOLDERID_PublicDocuments, FOLDERID_RoamingAppData, IApplicationActivationManager, IEnumIDList,
     ILCreateFromPathW, ILFree, IShellFolder, IShellItem, IShellItemImageFactory, IShellLinkW,
-    SHCreateItemFromParsingName, SHCreateItemWithParent, SHGetIDListFromObject,
+    SHChangeNotify, SHCreateItemFromParsingName, SHCreateItemWithParent, SHGetIDListFromObject,
     SHGetKnownFolderPath, SHGetPathFromIDListW, SHOpenFolderAndSelectItems, SHParseDisplayName,
-    ShellExecuteExW, ShellExecuteW, AO_NONE, SEE_MASK_INVOKEIDLIST, SHCONTF_INCLUDEHIDDEN,
-    SHCONTF_NONFOLDERS, SHELLEXECUTEINFOW, SIGDN_NORMALDISPLAY, SIIGBF_ICONONLY,
+    ShellExecuteExW, ShellExecuteW, AO_NONE, SEE_MASK_INVOKEIDLIST, SHCNE_CREATE, SHCNE_DELETE,
+    SHCNE_ID, SHCNE_UPDATEDIR, SHCNF_FLUSH, SHCNF_PATHW, SHCONTF_INCLUDEHIDDEN, SHCONTF_NONFOLDERS,
+    SHELLEXECUTEINFOW, SIGDN_NORMALDISPLAY, SIIGBF_ICONONLY,
 };
 use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
 
@@ -1996,6 +1997,18 @@ fn modify_taskband_pin(
 /// Pins or unpins a launch target on the Windows taskbar. Uses `IPinnedList3`
 /// COM interface (the native mechanism on Windows 10/11) with fallback to shell verbs
 /// and pin store manipulation.
+fn notify_shell_file_change(event: SHCNE_ID, path: &Path) {
+    let wide_path = wide(&path.to_string_lossy());
+    unsafe {
+        SHChangeNotify(
+            event,
+            SHCNF_PATHW | SHCNF_FLUSH,
+            Some(wide_path.as_ptr() as *const c_void),
+            None,
+        );
+    }
+}
+
 pub fn set_taskbar_pinned(path: &Path, pinned: bool) -> Result<(), String> {
     if !path.exists() {
         return Err(format!("{} does not exist", path.display()));
@@ -2029,52 +2042,42 @@ pub fn set_taskbar_pinned(path: &Path, pinned: bool) -> Result<(), String> {
         };
 
         let pidl = resolve_shell_pidl(&target_shortcut).or_else(|| resolve_shell_pidl(path));
-        let mut pinned_ok = false;
         if let Some(pidl) = pidl {
-            pinned_ok = modify_taskband_pin(None, Some(pidl)).is_ok();
+            let _ = modify_taskband_pin(None, Some(pidl));
             unsafe { ILFree(Some(pidl)) };
         }
 
-        if !pinned_ok {
-            pinned_ok = unsafe { shell_execute_verb("taskbarpin", path) }.is_ok();
-        }
+        let _ = unsafe { shell_execute_verb("taskbarpin", path) };
 
-        if !pinned_ok {
-            // Also ensure pin shortcut exists in User Pinned\TaskBar for classic/StartAllBack taskbars
-            if let Some(taskbar_dir) = taskbar_pins_dir() {
-                if let Ok(dest) = pin_destination(path, &taskbar_dir) {
-                    let _ = create_pin_shortcut(path, &dest);
-                    pinned_ok = true;
-                }
+        // Ensure pin shortcut exists in User Pinned\TaskBar and notify Shell
+        if let Some(taskbar_dir) = taskbar_pins_dir() {
+            if let Ok(dest) = pin_destination(path, &taskbar_dir) {
+                let _ = create_pin_shortcut(path, &dest);
+                notify_shell_file_change(SHCNE_CREATE, &dest);
+                notify_shell_file_change(SHCNE_UPDATEDIR, &taskbar_dir);
             }
         }
 
-        if pinned_ok {
-            Ok(())
-        } else {
-            Err("Taskbar pinning is restricted by Windows 11 without active Shell Bridge".into())
-        }
+        Ok(())
     } else {
         let pinned_link = find_taskbar_pin(path);
         let target_path = pinned_link.as_deref().unwrap_or(path);
 
         let pidl = resolve_shell_pidl(target_path).or_else(|| resolve_shell_pidl(path));
-        let com_ok = if let Some(pidl) = pidl {
-            let r = modify_taskband_pin(Some(pidl), None).is_ok();
+        if let Some(pidl) = pidl {
+            let _ = modify_taskband_pin(Some(pidl), None);
             unsafe { ILFree(Some(pidl)) };
-            r
-        } else {
-            false
-        };
-
-        let store_unpinned = unpin_in_store(path).unwrap_or(false);
-        let verb_unpinned = unsafe { shell_execute_verb("taskbarunpin", path) }.is_ok();
-
-        if com_ok || store_unpinned || verb_unpinned {
-            Ok(())
-        } else {
-            Err("Could not unpin item from taskbar".into())
         }
+
+        let _ = unpin_in_store(path);
+        let _ = unsafe { shell_execute_verb("taskbarunpin", path) };
+
+        if let Some(taskbar_dir) = taskbar_pins_dir() {
+            notify_shell_file_change(SHCNE_DELETE, target_path);
+            notify_shell_file_change(SHCNE_UPDATEDIR, &taskbar_dir);
+        }
+
+        Ok(())
     }
 }
 
