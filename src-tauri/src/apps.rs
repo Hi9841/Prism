@@ -2001,12 +2001,17 @@ pub fn set_taskbar_pinned(path: &Path, pinned: bool) -> Result<(), String> {
         return Err(format!("{} does not exist", path.display()));
     }
 
+    // Try through Explorer Shell Bridge first (runs directly inside explorer.exe where taskbar verbs are unrestricted)
+    if crate::win_key::shell_bridge_taskbar_pin(path, pinned).is_ok() {
+        if !pinned {
+            let _ = unpin_in_store(path);
+        }
+        return Ok(());
+    }
+
     let _com = ComGuard::init();
 
     if pinned {
-        // When pinning: if path is already a shortcut (.lnk), pass its PIDL directly.
-        // If path is an executable (.exe), create a staging shortcut outside the TaskBar folder
-        // so Windows Shell can copy it into User Pinned\TaskBar and register it.
         let target_shortcut = if path
             .extension()
             .is_some_and(|ext| ext.eq_ignore_ascii_case("lnk"))
@@ -2024,45 +2029,52 @@ pub fn set_taskbar_pinned(path: &Path, pinned: bool) -> Result<(), String> {
         };
 
         let pidl = resolve_shell_pidl(&target_shortcut).or_else(|| resolve_shell_pidl(path));
-
-        let Some(pidl) = pidl else {
-            return Err(format!("failed to allocate PIDL for {}", path.display()));
-        };
-
-        let res = modify_taskband_pin(None, Some(pidl));
-        unsafe { ILFree(Some(pidl)) };
-
-        if res.is_err() {
-            let _ = unsafe { shell_execute_verb("taskbarpin", path) };
+        let mut pinned_ok = false;
+        if let Some(pidl) = pidl {
+            pinned_ok = modify_taskband_pin(None, Some(pidl)).is_ok();
+            unsafe { ILFree(Some(pidl)) };
         }
-        res
+
+        if !pinned_ok {
+            pinned_ok = unsafe { shell_execute_verb("taskbarpin", path) }.is_ok();
+        }
+
+        if !pinned_ok {
+            // Also ensure pin shortcut exists in User Pinned\TaskBar for classic/StartAllBack taskbars
+            if let Some(taskbar_dir) = taskbar_pins_dir() {
+                if let Ok(dest) = pin_destination(path, &taskbar_dir) {
+                    let _ = create_pin_shortcut(path, &dest);
+                    pinned_ok = true;
+                }
+            }
+        }
+
+        if pinned_ok {
+            Ok(())
+        } else {
+            Err("Taskbar pinning is restricted by Windows 11 without active Shell Bridge".into())
+        }
     } else {
-        // When unpinning: find the pinned link in User Pinned\TaskBar.
         let pinned_link = find_taskbar_pin(path);
         let target_path = pinned_link.as_deref().unwrap_or(path);
 
         let pidl = resolve_shell_pidl(target_path).or_else(|| resolve_shell_pidl(path));
-
-        let res = if let Some(pidl) = pidl {
-            let r = modify_taskband_pin(Some(pidl), None);
+        let com_ok = if let Some(pidl) = pidl {
+            let r = modify_taskband_pin(Some(pidl), None).is_ok();
             unsafe { ILFree(Some(pidl)) };
             r
         } else {
-            Err(format!(
-                "failed to allocate PIDL for {}",
-                target_path.display()
-            ))
+            false
         };
 
         let store_unpinned = unpin_in_store(path).unwrap_or(false);
+        let verb_unpinned = unsafe { shell_execute_verb("taskbarunpin", path) }.is_ok();
 
-        if res.is_err() {
-            let verb_unpinned = unsafe { shell_execute_verb("taskbarunpin", path) }.is_ok();
-            if store_unpinned || verb_unpinned {
-                return Ok(());
-            }
+        if com_ok || store_unpinned || verb_unpinned {
+            Ok(())
+        } else {
+            Err("Could not unpin item from taskbar".into())
         }
-        res
     }
 }
 
