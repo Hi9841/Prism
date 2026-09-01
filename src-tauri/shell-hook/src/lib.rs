@@ -105,6 +105,9 @@ const CONTROL_SEARCH_RECT_TOP: usize = 16;
 const CONTROL_SEARCH_RECT_RIGHT: usize = 17;
 const CONTROL_SEARCH_RECT_BOTTOM: usize = 18;
 const EVENT_SEARCH_RECT_CONFIGURED: usize = 19;
+const CONTROL_TASKBAR_PIN: usize = 20;
+const CONTROL_TASKBAR_UNPIN: usize = 21;
+const EVENT_TASKBAR_PIN_COMPLETED: usize = 22;
 const WS_POPUP: u32 = 0x8000_0000;
 const SS_BITMAP: u32 = 0x0000_000e;
 const WS_EX_TOOLWINDOW: u32 = 0x0000_0080;
@@ -138,18 +141,17 @@ static ICON_BITMAP: Mutex<usize> = Mutex::new(0);
 static ICON_BACKGROUND: Mutex<Option<(i32, i32, Vec<u8>)>> = Mutex::new(None);
 
 const BRIDGE_MESSAGE: &[u16] = &[
-    80, 114, 105, 115, 109, 46, 83, 104, 101, 108, 108, 66, 114, 105, 100, 103, 101, 46, 118,
-    49, 0,
+    80, 114, 105, 115, 109, 46, 83, 104, 101, 108, 108, 66, 114, 105, 100, 103, 101, 46, 118, 49, 0,
 ];
 const OBSERVER_CLASS: &[u16] = &[
-    80, 114, 105, 115, 109, 82, 97, 119, 75, 101, 121, 98, 111, 97, 114, 100, 79, 98, 115,
-    101, 114, 118, 101, 114, 0,
+    80, 114, 105, 115, 109, 82, 97, 119, 75, 101, 121, 98, 111, 97, 114, 100, 79, 98, 115, 101,
+    114, 118, 101, 114, 0,
 ];
 
 const STATIC_CLASS: &[u16] = &[83, 116, 97, 116, 105, 99, 0];
 const ICON_WINDOW_TITLE: &[u16] = &[
-    80, 114, 105, 115, 109, 46, 83, 116, 97, 114, 116, 73, 99, 111, 110, 83, 104, 101, 108,
-    108, 79, 118, 101, 114, 108, 97, 121, 46, 118, 49, 0,
+    80, 114, 105, 115, 109, 46, 83, 116, 97, 114, 116, 73, 99, 111, 110, 83, 104, 101, 108, 108,
+    79, 118, 101, 114, 108, 97, 121, 46, 118, 49, 0,
 ];
 const TASKBAR_CLASS: &[u16] = &[
     83, 104, 101, 108, 108, 95, 84, 114, 97, 121, 87, 110, 100, 0,
@@ -229,6 +231,100 @@ extern "system" {
     fn Sleep(milliseconds: u32);
 }
 
+#[repr(C)]
+struct ShellExecuteInfoW {
+    cb_size: u32,
+    f_mask: u32,
+    hwnd: Hwnd,
+    verb: *const u16,
+    file: *const u16,
+    parameters: *const u16,
+    directory: *const u16,
+    show: i32,
+    inst_app: *mut c_void,
+    id_list: *mut c_void,
+    class: *const u16,
+    key_class: *mut c_void,
+    hot_key: u32,
+    icon_or_monitor: *mut c_void,
+    process: *mut c_void,
+}
+
+#[link(name = "shell32")]
+extern "system" {
+    fn ShellExecuteExW(info: *mut ShellExecuteInfoW) -> i32;
+    fn ShellExecuteW(
+        hwnd: Hwnd,
+        operation: *const u16,
+        file: *const u16,
+        parameters: *const u16,
+        directory: *const u16,
+        show_cmd: i32,
+    ) -> isize;
+}
+
+fn to_wide(s: &str) -> Vec<u16> {
+    s.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
+fn handle_taskbar_pin(pin: bool) -> isize {
+    let pin_file = match std::env::var_os("TEMP") {
+        Some(temp) => PathBuf::from(temp)
+            .join("Prism")
+            .join("taskbar-pin-target.txt"),
+        None => return 0,
+    };
+    let path_str = match std::fs::read_to_string(&pin_file) {
+        Ok(s) => s.trim().to_string(),
+        Err(_) => return 0,
+    };
+    if path_str.is_empty() {
+        return 0;
+    }
+    let wide_verb = if pin {
+        to_wide("taskbarpin")
+    } else {
+        to_wide("taskbarunpin")
+    };
+    let wide_path = to_wide(&path_str);
+    let mut info = ShellExecuteInfoW {
+        cb_size: std::mem::size_of::<ShellExecuteInfoW>() as u32,
+        f_mask: 0x0000_0400 | 0x0000_0040, // SEE_MASK_FLAG_NO_UI | SEE_MASK_NOASYNC
+        hwnd: std::ptr::null_mut(),
+        verb: wide_verb.as_ptr(),
+        file: wide_path.as_ptr(),
+        parameters: std::ptr::null(),
+        directory: std::ptr::null(),
+        show: SW_HIDE,
+        inst_app: std::ptr::null_mut(),
+        id_list: std::ptr::null_mut(),
+        class: std::ptr::null(),
+        key_class: std::ptr::null_mut(),
+        hot_key: 0,
+        icon_or_monitor: std::ptr::null_mut(),
+        process: std::ptr::null_mut(),
+    };
+    let ok = unsafe { ShellExecuteExW(&mut info) };
+    if ok != 0 {
+        return 1;
+    }
+    let res = unsafe {
+        ShellExecuteW(
+            std::ptr::null_mut(),
+            wide_verb.as_ptr(),
+            wide_path.as_ptr(),
+            std::ptr::null(),
+            std::ptr::null(),
+            SW_HIDE,
+        )
+    };
+    if res > 32 {
+        1
+    } else {
+        0
+    }
+}
+
 unsafe fn observer_window() -> Hwnd {
     FindWindowExW(
         HWND_MESSAGE,
@@ -252,9 +348,10 @@ fn bridge_message_id() -> u32 {
 }
 
 fn icon_file_path() -> Option<PathBuf> {
-    std::env::var_os("APPDATA")
-        .map(PathBuf::from)
-        .map(|path| path.join("app.prism.launcher").join("taskbar-start-icon.rgba"))
+    std::env::var_os("APPDATA").map(PathBuf::from).map(|path| {
+        path.join("app.prism.launcher")
+            .join("taskbar-start-icon.rgba")
+    })
 }
 
 fn load_icon_pixels() -> Result<(u32, u32, Vec<u8>), isize> {
@@ -275,8 +372,7 @@ fn load_icon_pixels() -> Result<(u32, u32, Vec<u8>), isize> {
             .map_err(|_| -12isize)?,
     );
     let pixel_bytes =
-        usize::try_from(u64::from(width) * u64::from(height) * 4)
-            .map_err(|_| -13isize)?;
+        usize::try_from(u64::from(width) * u64::from(height) * 4).map_err(|_| -13isize)?;
     if width == 0
         || height == 0
         || width > 4_096
@@ -423,8 +519,7 @@ fn erase_native_glyph(frame: &mut [u8], width: i32, height: i32) {
             let offset = (x - left) as u32;
             let span = edge.max(1) as u32;
             for channel in 0..3 {
-                frame[destination + channel] = ((u32::from(left_pixel[channel])
-                    * (span - offset)
+                frame[destination + channel] = ((u32::from(left_pixel[channel]) * (span - offset)
                     + u32::from(right_pixel[channel]) * offset)
                     / span) as u8;
             }
@@ -468,9 +563,8 @@ fn compose_frame(
             for channel in 0..3 {
                 let source_value = u32::from(icon[source + (2 - channel)]);
                 let destination_value = u32::from(frame[destination + channel]);
-                frame[destination + channel] = ((source_value * alpha
-                    + destination_value * (255 - alpha))
-                    / 255) as u8;
+                frame[destination + channel] =
+                    ((source_value * alpha + destination_value * (255 - alpha)) / 255) as u8;
             }
         }
     }
@@ -557,9 +651,11 @@ unsafe fn refresh_icon_window() -> isize {
     }
     let _ = ShowWindow(window, SW_HIDE);
     let cached = ICON_BACKGROUND.lock().ok().and_then(|background| {
-        background.as_ref().and_then(|(cached_width, cached_height, pixels)| {
-            (*cached_width == width && *cached_height == height).then(|| pixels.clone())
-        })
+        background
+            .as_ref()
+            .and_then(|(cached_width, cached_height, pixels)| {
+                (*cached_width == width && *cached_height == height).then(|| pixels.clone())
+            })
     });
     let background = match cached {
         Some(background) => Some(background),
@@ -579,14 +675,7 @@ unsafe fn refresh_icon_window() -> isize {
     if let Ok(mut cached) = ICON_BACKGROUND.lock() {
         *cached = Some((width, height, background.clone()));
     }
-    let frame = compose_frame(
-        width,
-        height,
-        background,
-        icon_width,
-        icon_height,
-        &icon,
-    );
+    let frame = compose_frame(width, height, background, icon_width, icon_height, &icon);
     let bitmap = create_bitmap(width, height, &frame);
     if bitmap.is_null() {
         return -4;
@@ -719,11 +808,8 @@ pub unsafe extern "system" fn PrismShellGetMessageHook(
                         && START_RECT_BOTTOM.load(Ordering::Relaxed)
                             > START_RECT_TOP.load(Ordering::Relaxed);
                     START_RECT_READY.store(valid, Ordering::Release);
-                    let _ = notify_observer(
-                        message_id,
-                        EVENT_START_RECT_CONFIGURED,
-                        valid as isize,
-                    );
+                    let _ =
+                        notify_observer(message_id, EVENT_START_RECT_CONFIGURED, valid as isize);
                     // The Start button moved or resized: re-render the glyph
                     // at its new position immediately. Waiting for the next
                     // icon change leaves the overlay stranded at the stale
@@ -765,11 +851,18 @@ pub unsafe extern "system" fn PrismShellGetMessageHook(
                         && SEARCH_RECT_BOTTOM.load(Ordering::Relaxed)
                             > SEARCH_RECT_TOP.load(Ordering::Relaxed);
                     SEARCH_RECT_READY.store(valid, Ordering::Release);
-                    let _ = notify_observer(
-                        message_id,
-                        EVENT_SEARCH_RECT_CONFIGURED,
-                        valid as isize,
-                    );
+                    let _ =
+                        notify_observer(message_id, EVENT_SEARCH_RECT_CONFIGURED, valid as isize);
+                    message.message = WM_NULL;
+                }
+                CONTROL_TASKBAR_PIN => {
+                    let result = handle_taskbar_pin(true);
+                    let _ = notify_observer(message_id, EVENT_TASKBAR_PIN_COMPLETED, result);
+                    message.message = WM_NULL;
+                }
+                CONTROL_TASKBAR_UNPIN => {
+                    let result = handle_taskbar_pin(false);
+                    let _ = notify_observer(message_id, EVENT_TASKBAR_PIN_COMPLETED, result);
                     message.message = WM_NULL;
                 }
                 _ => {}
@@ -779,9 +872,7 @@ pub unsafe extern "system" fn PrismShellGetMessageHook(
             // The raw-input state machine decides whether the key sequence was
             // a standalone Win press, so Win+key chords never open Prism.
             message.message = WM_NULL;
-        } else if message.message == WM_SETTINGCHANGE
-            && has_active_icon()
-        {
+        } else if message.message == WM_SETTINGCHANGE && has_active_icon() {
             // Wallpaper, theme, or layout changes behind the Start button
             // invalidate the cached capture. Re-render so the glyph never
             // sits on a stale background. Only when a custom icon is active.
@@ -831,8 +922,8 @@ pub unsafe extern "system" fn PrismShellMouseHook(
 ) -> isize {
     if code >= HC_ACTION && lparam != 0 {
         let mouse = &*(lparam as *const MouseHookStruct);
-        let in_target = point_is_in_start_button(&mouse.point)
-            || point_is_in_search_button(&mouse.point);
+        let in_target =
+            point_is_in_start_button(&mouse.point) || point_is_in_search_button(&mouse.point);
         if wparam == WM_LBUTTONDOWN {
             let capture = in_target && !observer_window().is_null();
             START_PRESS_CAPTURED.store(capture, Ordering::Release);
