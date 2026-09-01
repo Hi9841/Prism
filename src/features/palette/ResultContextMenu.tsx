@@ -38,7 +38,7 @@ export function ResultContextMenu({
   position: ContextMenuPosition;
   onOpenLocation?: () => void;
   onRunAsAdmin?: () => void;
-  onToggleTaskbarPin?: () => void;
+  onToggleTaskbarPin?: (wasPinned: boolean) => void;
   onShowProperties?: () => void;
   onClose: (restoreFocus: boolean) => void;
 }) {
@@ -191,7 +191,7 @@ export function ResultContextMenu({
           <button
             type="button"
             role="menuitem"
-            onClick={onToggleTaskbarPin}
+            onClick={() => onToggleTaskbarPin?.(pinnedToTaskbar)}
             className="focus-ring press flex h-9 w-full cursor-pointer items-center gap-2 rounded-[4px] px-2.5 text-left text-[12.5px] font-medium text-fg-secondary hover:bg-surface-hover hover:text-fg"
           >
             {pinnedToTaskbar ? (

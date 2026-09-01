@@ -737,12 +737,13 @@ export function Palette() {
             setResultMenu(null);
             palette.runItemAsAdmin(item);
           }}
-          onToggleTaskbarPin={() => {
+          onToggleTaskbarPin={(wasPinned) => {
             const { item } = resultMenu;
             setResultMenu(null);
             void (async () => {
               try {
                 await item.toggleTaskbarPin?.();
+                showToast(wasPinned ? "Unpinned from taskbar" : "Pinned to taskbar", item.title);
               } catch (error) {
                 showToast("Could not update taskbar pin", String(error));
               }

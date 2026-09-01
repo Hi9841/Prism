@@ -51,8 +51,8 @@ use windows::Win32::UI::Input::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, EnumChildWindows,
-    FindWindowW, GetClassNameW, GetWindowRect, GetWindowThreadProcessId, IsWindowVisible,
-    MsgWaitForMultipleObjectsEx, PeekMessageW, PostThreadMessageW, RegisterClassW,
+    FindWindowW, GetClassNameW, GetShellWindow, GetWindowRect, GetWindowThreadProcessId,
+    IsWindowVisible, MsgWaitForMultipleObjectsEx, PeekMessageW, PostThreadMessageW, RegisterClassW,
     RegisterWindowMessageW, SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx, HHOOK,
     HWND_MESSAGE, MSG, PM_REMOVE, QS_ALLINPUT, RI_KEY_BREAK, WH_GETMESSAGE, WH_MOUSE,
     WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_INPUT, WM_KEYDOWN, WM_KEYUP, WM_SYSKEYDOWN,
@@ -1441,20 +1441,25 @@ fn shell_bridge_message() -> Result<u32, String> {
 }
 
 unsafe fn find_shell_window(class_name: &str) -> Result<HWND, String> {
+    if class_name.eq_ignore_ascii_case("Progman") {
+        let shell_wnd = GetShellWindow();
+        if !shell_wnd.0.is_null() {
+            return Ok(shell_wnd);
+        }
+    }
     let class_name_wide = wide(class_name);
     let mut last_error = None;
     for _ in 0..20 {
         match FindWindowW(PCWSTR(class_name_wide.as_ptr()), PCWSTR::null()) {
-            Ok(window) => return Ok(window),
-            Err(error) => last_error = Some(error),
+            Ok(window) if !window.0.is_null() => return Ok(window),
+            Ok(_) => last_error = Some("window handle was null".to_string()),
+            Err(error) => last_error = Some(error.to_string()),
         }
         std::thread::sleep(Duration::from_millis(50));
     }
     Err(format!(
         "Explorer window '{class_name}' is unavailable: {}",
-        last_error
-            .map(|error| error.to_string())
-            .unwrap_or_else(|| "timed out".to_string())
+        last_error.unwrap_or_else(|| "timed out".to_string())
     ))
 }
 
