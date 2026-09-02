@@ -468,9 +468,11 @@ pub(crate) fn shell_bridge_taskbar_pin(path: &Path, pinned: bool) -> Result<(), 
         return Err("shell taskbar thread not available".into());
     }
 
-    let target_file = std::env::temp_dir()
-        .join("Prism")
-        .join("taskbar-pin-target.txt");
+    let target_file = std::env::var_os("LOCALAPPDATA")
+        .or_else(|| std::env::var_os("APPDATA"))
+        .map(PathBuf::from)
+        .map(|path| path.join("app.prism.launcher").join("taskbar-pin-target.txt"))
+        .unwrap_or_else(|| std::env::temp_dir().join("Prism").join("taskbar-pin-target.txt"));
     if let Some(parent) = target_file.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|error| format!("failed to create pin request directory: {error}"))?;
@@ -491,18 +493,29 @@ pub(crate) fn shell_bridge_taskbar_pin(path: &Path, pinned: bool) -> Result<(), 
             WPARAM(control),
             LPARAM(0),
         )
-        .map_err(|error| format!("failed to post pin request to Explorer: {error}"))?;
+        .map_err(|error| {
+            let _ = std::fs::remove_file(&target_file);
+            format!("failed to post pin request to Explorer: {error}")
+        })?;
     }
 
     let started = Instant::now();
+    let mut outcome = Err("Explorer taskbar pin request timed out".into());
     while started.elapsed() < Duration::from_millis(1500) {
         match SHELL_TASKBAR_PIN_ACK.load(Ordering::Acquire) {
-            2 => return Ok(()),
-            1 => return Err("Explorer rejected the taskbar pin request".into()),
+            2 => {
+                outcome = Ok(());
+                break;
+            }
+            1 => {
+                outcome = Err("Explorer rejected the taskbar pin request".into());
+                break;
+            }
             _ => std::thread::sleep(Duration::from_millis(20)),
         }
     }
-    Err("Explorer taskbar pin request timed out".into())
+    let _ = std::fs::remove_file(&target_file);
+    outcome
 }
 
 /// Asks the observation pump to re-query the Start button rectangle now.

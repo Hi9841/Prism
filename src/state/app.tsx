@@ -328,12 +328,18 @@ export function AppProvider({ children }: { children: ReactNode }) {
 
     const startedAt = performance.now();
     const duration = 240;
+    let lastDispatched = from;
+    let lastDispatchTime = 0;
     const step = (now: number) => {
       const progress = Math.min(1, (now - startedAt) / duration);
       const eased = 1 - (1 - progress) ** 3;
       const next = Math.round(from + (target - from) * eased);
       renderedWidth.current = next;
-      setWindowWidth(next).catch(() => {});
+      if (progress >= 1 || (now - lastDispatchTime >= 45 && next !== lastDispatched)) {
+        lastDispatched = next;
+        lastDispatchTime = now;
+        setWindowWidth(next).catch(() => {});
+      }
       if (progress < 1) widthFrame.current = requestAnimationFrame(step);
     };
     widthFrame.current = requestAnimationFrame(step);

@@ -87,6 +87,7 @@ export function Palette() {
   const [categoryDrag, setCategoryDrag] = useState<CategoryDragState | null>(null);
   const [resultMenu, setResultMenu] = useState<ResultMenuState | null>(null);
   const [previewLeaving, setPreviewLeaving] = useState(false);
+  const [reorderAnnouncement, setReorderAnnouncement] = useState("");
   const previewLeaveTimerRef = useRef<number | null>(null);
   const leavingDragRef = useRef<ReorderDragState | null>(null);
 
@@ -264,6 +265,8 @@ export function Palette() {
         const pinnedApps = reorderPinnedApps(settings.pinnedApps, source.appId, targetItemId.slice(4));
         if (!pinnedApps.every((appId, index) => appId === settings.pinnedApps[index])) {
           app.updateSettings({ pinnedApps });
+          const newPos = pinnedApps.indexOf(source.appId) + 1;
+          setReorderAnnouncement(`Moved ${source.title} to position ${newPos} of ${pinnedApps.length}`);
         }
         return;
       }
@@ -275,6 +278,8 @@ export function Palette() {
         );
         if (!quickAccess.every((kind, index) => kind === settings.quickAccess[index])) {
           app.updateSettings({ quickAccess });
+          const newPos = quickAccess.indexOf(source.quickAccessKind) + 1;
+          setReorderAnnouncement(`Moved ${source.title} to position ${newPos} of ${quickAccess.length}`);
         }
       }
     },
@@ -772,6 +777,10 @@ export function Palette() {
 
       {categoryDrag?.active ? <CategoryDragPreview drag={categoryDrag} /> : null}
 
+      <div aria-live="polite" aria-atomic="true" className="sr-only">
+        {reorderAnnouncement}
+      </div>
+
       {/* ------- footer ------- */}
       <div className="footer-bar flex min-h-12 items-center justify-between px-5 py-2.5">
         <div className="flex items-center gap-1.5 text-[11px] text-fg-quiet">
@@ -1008,7 +1017,7 @@ const ResultRow = memo(function ResultRow({
       onMouseEnter={() => onSelect(index)}
       onContextMenu={(event) => {
         event.preventDefault();
-        if (item.runAsAdmin || item.openLocation) {
+        if (hasResultActions(item)) {
           onOpenContextMenu(item, index, event.clientX, event.clientY);
         }
       }}
