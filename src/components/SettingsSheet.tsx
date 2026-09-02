@@ -849,6 +849,13 @@ export function SettingsSheet() {
           <SettingsRow title="Alignment">
             <TaskbarAlignmentPicker />
           </SettingsRow>
+          <SettingsRow title="Scroll volume" detail="Scroll mouse wheel over taskbar apps to adjust volume">
+            <Toggle
+              checked={settings.taskbarScrollVolume ?? true}
+              onChange={(v) => updateSettings({ taskbarScrollVolume: v })}
+              label="Scroll taskbar to adjust volume"
+            />
+          </SettingsRow>
           <TaskbarCustomization />
 
           <SectionTitle>Behavior</SectionTitle>

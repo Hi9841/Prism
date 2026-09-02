@@ -218,6 +218,7 @@ export interface Settings {
   shortcut: string;
   alwaysOnTop: boolean;
   taskbarAlignment: TaskbarAlignment;
+  taskbarScrollVolume: boolean;
   theme: ThemeMode;
   quickAccess: QuickAccessKind[];
   quickAccessCollapsed: boolean;
@@ -233,6 +234,7 @@ export const DEFAULT_SETTINGS: Settings = {
   shortcut: "Win",
   alwaysOnTop: true,
   taskbarAlignment: "center",
+  taskbarScrollVolume: true,
   theme: "system",
   quickAccess: [...DEFAULT_QUICK_ACCESS],
   quickAccessCollapsed: false,

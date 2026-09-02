@@ -2825,7 +2825,7 @@ checksum = "925383efa346730478fb4838dbe9137d2a47675ad789c546d150a6e1dd4ab31c"
 
 [[package]]
 name = "prism"
-version = "0.9.33"
+version = "0.9.34"
 dependencies = [
  "base64 0.22.1",
  "image",

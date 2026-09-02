@@ -370,6 +370,16 @@ export async function setShortcut(combo: string): Promise<void> {
   await invoke("set_shortcut", { combo });
 }
 
+export async function setTaskbarScrollVolume(enabled: boolean): Promise<void> {
+  if (!inTauri) return;
+  await invoke("set_taskbar_scroll_volume", { enabled });
+}
+
+export async function isTaskbarScrollVolumeEnabled(): Promise<boolean> {
+  if (!inTauri) return true;
+  return invoke<boolean>("is_taskbar_scroll_volume_enabled");
+}
+
 export async function quitApp(): Promise<void> {
   if (!inTauri) return;
   await invoke("quit_app");

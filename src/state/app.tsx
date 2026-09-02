@@ -9,6 +9,7 @@ import {
   setAlwaysOnTop,
   setShortcut,
   setTaskbarAlignment,
+  setTaskbarScrollVolume,
   setViewZoom,
   setWindowStyle,
   setWindowWidth,
@@ -359,6 +360,11 @@ export function AppProvider({ children }: { children: ReactNode }) {
     setViewZoom(settings.viewZoom).catch(() => {});
   }, [ready, settings.viewZoom]);
 
+  useEffect(() => {
+    if (!ready) return;
+    setTaskbarScrollVolume(settings.taskbarScrollVolume ?? true).catch(() => {});
+  }, [ready, settings.taskbarScrollVolume]);
+
   // Safe recovery: if Win-key interception self-disables (e.g. an elevated
   // app rejected the replay), drop back to the default shortcut so the UI
   // and reality stay in sync.
@@ -433,6 +439,10 @@ export function sanitizeSettings(raw: unknown): Settings {
       ["left", "center", "right"],
       DEFAULT_SETTINGS.taskbarAlignment,
     ),
+    taskbarScrollVolume:
+      typeof src.taskbarScrollVolume === "boolean"
+        ? src.taskbarScrollVolume
+        : DEFAULT_SETTINGS.taskbarScrollVolume,
     theme: pick(src.theme, ["system", "dark", "light"], DEFAULT_SETTINGS.theme),
     quickAccess: sanitizeQuickAccess(src.quickAccess),
     quickAccessCollapsed:

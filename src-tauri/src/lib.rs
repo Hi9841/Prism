@@ -11,6 +11,9 @@ mod taskbar_icon_overlay;
 mod theme;
 mod win_key;
 mod windows_settings;
+pub mod audio;
+pub mod audio_osd;
+pub mod audio_hook;
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -158,6 +161,7 @@ pub fn run() {
             tauri::async_runtime::spawn_blocking(move || {
                 taskbar_customization::init(customization_app);
             });
+            audio_hook::init(app.handle().clone());
             theme::watch(app.handle().clone());
             let app_data_dir = app
                 .path()
@@ -257,6 +261,8 @@ pub fn run() {
             load_state,
             save_state,
             perform_power_action,
+            set_taskbar_scroll_volume,
+            is_taskbar_scroll_volume_enabled,
             quit_app
         ])
         .run(tauri::generate_context!())
@@ -1127,6 +1133,16 @@ fn set_taskbar_combine_buttons(value: String) -> Result<(), String> {
 }
 
 #[tauri::command]
+fn set_taskbar_scroll_volume(enabled: bool) {
+    audio_hook::set_enabled(enabled);
+}
+
+#[tauri::command]
+fn is_taskbar_scroll_volume_enabled() -> bool {
+    audio_hook::is_enabled()
+}
+
+#[tauri::command]
 async fn set_custom_start_icon(app: tauri::AppHandle, base64_png: String) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || {
         taskbar_customization::set_custom_start_icon(&app, &base64_png)
@@ -1470,6 +1486,11 @@ fn validate_state(state: &serde_json::Value) -> Result<(), String> {
     if let Some(always_on_top) = settings.get("alwaysOnTop") {
         if !always_on_top.is_boolean() {
             return Err("state.settings.alwaysOnTop must be a boolean".to_string());
+        }
+    }
+    if let Some(scroll_vol) = settings.get("taskbarScrollVolume") {
+        if !scroll_vol.is_boolean() {
+            return Err("state.settings.taskbarScrollVolume must be a boolean".to_string());
         }
     }
     if let Some(alignment) = settings.get("taskbarAlignment") {
