@@ -30,6 +30,7 @@ import {
   runPathAsAdmin,
   setTaskbarPinned,
   showPathProperties,
+  startFileDrag,
 } from "../../lib/bridge";
 import { sortApps } from "../../lib/emoji";
 import { formatNumber, isMathLike, tryEvaluate } from "../../lib/math";
@@ -43,7 +44,7 @@ import type {
   QuickAccessEntry,
   TileTint,
 } from "../../lib/types";
-import { isElevatablePath, isTaskbarPinablePath } from "../../lib/types";
+import { isElevatablePath, isPicturePath, isTaskbarPinablePath } from "../../lib/types";
 import { searchWindowsSettings } from "./windowsSettings";
 
 export interface Section {
@@ -372,6 +373,7 @@ export function quickAccessPaletteItem(entry: QuickAccessEntry): PaletteItem {
 
 function filePaletteItem(entry: FileEntry): PaletteItem {
   const { icon, tint } = fileAppearance(entry);
+  const isPicture = !entry.isDirectory && isPicturePath(entry.path);
   return {
     id: pathItemId(entry.path, entry.isDirectory),
     title: entry.name,
@@ -381,6 +383,8 @@ function filePaletteItem(entry: FileEntry): PaletteItem {
       ? { kind: "image", src: entry.thumbnail, name: entry.name }
       : { kind: "tile", icon, tint },
     historyTitle: entry.name,
+    isPicture,
+    dragFile: !entry.isDirectory ? () => startFileDrag([entry.path]) : undefined,
     run: () => openPath(entry.path),
     runAsAdmin:
       !entry.isDirectory && isElevatablePath(entry.path) ? () => runPathAsAdmin(entry.path) : undefined,

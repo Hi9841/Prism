@@ -395,3 +395,10 @@ export async function saveState(state: PersistedState): Promise<void> {
   if (!inTauri) return;
   await invoke("save_state", { state });
 }
+
+/** Initiates a native Windows OLE drag-and-drop operation for one or more files out of Prism.
+ *  Returns true if the user dropped the file into an external application, or false if cancelled. */
+export async function startFileDrag(paths: string[]): Promise<boolean> {
+  if (!inTauri) return false;
+  return invoke<boolean>("start_file_drag", { paths });
+}
