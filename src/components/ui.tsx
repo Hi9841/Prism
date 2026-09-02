@@ -141,7 +141,7 @@ export function Toggle({
       aria-label={label}
       disabled={disabled}
       onClick={() => onChange(!checked)}
-      className="focus-ring relative h-[24px] w-[40px] cursor-pointer rounded-full transition-colors duration-200 disabled:cursor-default disabled:opacity-45"
+      className="focus-ring relative h-[24px] w-[40px] cursor-pointer rounded-full transition-colors duration-200 after:absolute after:-inset-2.5 after:content-[''] disabled:cursor-default disabled:opacity-45"
       style={{ background: checked ? "var(--accent)" : "var(--t-track)" }}
     >
       <span
@@ -257,7 +257,7 @@ export function IconButton({
       data-settings-trigger={settingsTrigger || undefined}
       onClick={onClick}
       disabled={disabled}
-      className={`focus-ring press grid h-8 w-8 cursor-pointer place-items-center rounded-[10px] ${
+      className={`focus-ring press relative grid h-8 w-8 cursor-pointer place-items-center rounded-[10px] after:absolute after:-inset-1.5 after:content-[''] ${
         disabled
           ? "cursor-default opacity-40"
           : active

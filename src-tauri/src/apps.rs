@@ -1818,6 +1818,7 @@ pub fn is_elevatable_path(path: &Path) -> bool {
 }
 
 fn elevated_command(path: &str, extension: &str, args: Option<&str>) -> (String, Option<String>) {
+    let clean_path = path.trim().trim_matches('"');
     let trailing_args = args
         .filter(|value| !value.trim().is_empty())
         .map(|value| format!(" {value}"))
@@ -1825,19 +1826,19 @@ fn elevated_command(path: &str, extension: &str, args: Option<&str>) -> (String,
     match extension {
         "bat" | "cmd" => (
             "cmd.exe".to_string(),
-            Some(format!("/d /s /c \"\"{path}\"{trailing_args}\"")),
+            Some(format!("/d /s /c \"\"{clean_path}\"{trailing_args}\"")),
         ),
         "ps1" => (
             "powershell.exe".to_string(),
             Some(format!(
-                "-NoLogo -NoProfile -File \"{path}\"{trailing_args}"
+                "-NoLogo -NoProfile -File \"{clean_path}\"{trailing_args}"
             )),
         ),
         "vbs" | "js" | "wsf" => (
             "wscript.exe".to_string(),
-            Some(format!("//nologo \"{path}\"{trailing_args}")),
+            Some(format!("//nologo \"{clean_path}\"{trailing_args}")),
         ),
-        _ => (path.to_string(), args.map(str::to_string)),
+        _ => (clean_path.to_string(), args.map(str::to_string)),
     }
 }
 
@@ -1994,8 +1995,8 @@ fn modify_taskband_pin(
     }
 }
 
-const TASKBAR_STATE_CHECKS: usize = 20;
-const TASKBAR_STATE_CHECK_INTERVAL: Duration = Duration::from_millis(100);
+const TASKBAR_STATE_CHECKS: usize = 10;
+const TASKBAR_STATE_CHECK_INTERVAL: Duration = Duration::from_millis(75);
 
 fn wait_for_taskbar_state_with<F>(
     pinned: bool,

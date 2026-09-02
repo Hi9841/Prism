@@ -268,16 +268,22 @@ fn to_wide(value: &str) -> Vec<u16> {
 }
 
 fn handle_taskbar_pin(pinned: bool) -> isize {
-    let target_file = match std::env::var_os("TEMP") {
-        Some(temp) => PathBuf::from(temp)
-            .join("Prism")
+    let target_file = match std::env::var_os("LOCALAPPDATA").or_else(|| std::env::var_os("APPDATA")) {
+        Some(appdata) => PathBuf::from(appdata)
+            .join("app.prism.launcher")
             .join("taskbar-pin-target.txt"),
-        None => return 0,
+        None => match std::env::var_os("TEMP") {
+            Some(temp) => PathBuf::from(temp)
+                .join("Prism")
+                .join("taskbar-pin-target.txt"),
+            None => return 0,
+        },
     };
-    let target = match std::fs::read_to_string(target_file) {
+    let target = match std::fs::read_to_string(&target_file) {
         Ok(value) if !value.trim().is_empty() => value.trim().to_string(),
         _ => return 0,
     };
+    let _ = std::fs::remove_file(&target_file);
     let verb = to_wide(if pinned {
         "taskbarpin"
     } else {

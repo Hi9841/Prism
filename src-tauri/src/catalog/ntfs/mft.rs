@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use windows::Win32::Foundation::{ERROR_HANDLE_EOF, ERROR_MORE_DATA};
 use windows::Win32::Storage::FileSystem::FILE_ATTRIBUTE_DIRECTORY;
 use windows::Win32::System::Ioctl::{FSCTL_ENUM_USN_DATA, MFT_ENUM_DATA_V0};
@@ -19,7 +21,7 @@ pub(super) fn enumerate(
     // FRNs of skipped root-level system directories ($Extend, $RECYCLE.BIN,
     // System Volume Information): their descendants are skipped too.
     // FSCTL_ENUM_USN_DATA walks in FRN order, so parents are seen first.
-    let mut system_subtrees: Vec<u64> = Vec::new();
+    let mut system_subtrees: HashSet<u64> = HashSet::new();
 
     loop {
         let input = MFT_ENUM_DATA_V0 {
@@ -55,7 +57,7 @@ pub(super) fn enumerate(
                         || system_subtrees.contains(&record.parent_frn)
                     {
                         if record.attributes & FILE_ATTRIBUTE_DIRECTORY.0 != 0 {
-                            system_subtrees.push(record.frn);
+                            system_subtrees.insert(record.frn);
                         }
                     } else {
                         consume(record.into_node())?;
