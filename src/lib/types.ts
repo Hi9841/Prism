@@ -27,6 +27,10 @@ export interface PaletteItem {
   toggleTaskbarPin?: () => Promise<void> | void;
   /** Opens the Windows Properties dialog for the item's target. */
   showProperties?: () => Promise<void> | void;
+  /** Whether this item is a picture file that can be dragged into external applications. */
+  isPicture?: boolean;
+  /** Starts native drag-and-drop out of Prism for this item. */
+  dragFile?: () => Promise<boolean> | boolean;
   /** Display title used when persisting to history */
   historyTitle: string;
   /** Extra line shown in the toast after a clipboard-style run */
@@ -125,6 +129,29 @@ export function isTaskbarPinablePath(path: string | undefined): boolean {
   const filename = path.split(/[\\/]/).pop() ?? "";
   const boundary = filename.lastIndexOf(".");
   return boundary > 0 && PINNABLE_EXTENSIONS.has(filename.slice(boundary + 1).toLowerCase());
+}
+
+export const PICTURE_EXTENSIONS = new Set([
+  "jpg",
+  "jpeg",
+  "png",
+  "gif",
+  "webp",
+  "bmp",
+  "svg",
+  "ico",
+  "tiff",
+  "tif",
+  "avif",
+  "heic",
+]);
+
+/** Recognizes common image and picture file extensions for drag-out and preview. */
+export function isPicturePath(path: string | undefined): boolean {
+  if (!path || /^[a-z][a-z0-9+.-]*:\/\//i.test(path)) return false;
+  const filename = path.split(/[\\/]/).pop() ?? "";
+  const boundary = filename.lastIndexOf(".");
+  return boundary > 0 && PICTURE_EXTENSIONS.has(filename.slice(boundary + 1).toLowerCase());
 }
 
 export function reorderPinnedApps(

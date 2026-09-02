@@ -1006,6 +1006,49 @@ const ResultRow = memo(function ResultRow({
 }) {
   const itemReorderId = reorderItemId(item);
   const canReorder = reorderable && Boolean(itemReorderId);
+  const isPicture = Boolean(item.isPicture && item.shellPath && item.dragFile);
+  const pictureDragRef = useRef<{ pointerId: number; x: number; y: number; started: boolean } | null>(null);
+
+  const handlePicturePointerDown = (event: React.PointerEvent) => {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    pictureDragRef.current = {
+      pointerId: event.pointerId,
+      x: event.clientX,
+      y: event.clientY,
+      started: false,
+    };
+  };
+
+  const handlePicturePointerMove = (event: React.PointerEvent) => {
+    if (!event.currentTarget.hasPointerCapture(event.pointerId)) return;
+    const state = pictureDragRef.current;
+    if (!state || state.started || state.pointerId !== event.pointerId) return;
+    if (Math.hypot(event.clientX - state.x, event.clientY - state.y) > 4) {
+      state.started = true;
+      event.currentTarget.releasePointerCapture(event.pointerId);
+      void item.dragFile?.();
+    }
+  };
+
+  const handlePicturePointerUp = (event: React.PointerEvent) => {
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+    const state = pictureDragRef.current;
+    pictureDragRef.current = null;
+    if (state && !state.started && event.button === 0) {
+      onRun(item);
+    }
+  };
+
+  const handlePicturePointerCancel = (event: React.PointerEvent) => {
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+    pictureDragRef.current = null;
+  };
 
   return (
     <li
@@ -1035,26 +1078,46 @@ const ResultRow = memo(function ResultRow({
       <div className="pointer-events-none relative z-[1]">
         <div
           onPointerDown={(event) => {
-            if (!canReorder || event.button !== 0) return;
-            event.preventDefault();
-            event.currentTarget.setPointerCapture(event.pointerId);
-            onStartReorderDrag(item, event.pointerId, event.clientX, event.clientY);
+            if (canReorder && event.button === 0) {
+              event.preventDefault();
+              event.currentTarget.setPointerCapture(event.pointerId);
+              onStartReorderDrag(item, event.pointerId, event.clientX, event.clientY);
+            } else if (isPicture) {
+              handlePicturePointerDown(event);
+            }
           }}
           onPointerMove={(event) => {
-            if (!event.currentTarget.hasPointerCapture(event.pointerId)) return;
-            onUpdateReorderDrag(event.pointerId, event.clientX, event.clientY);
+            if (canReorder) {
+              if (!event.currentTarget.hasPointerCapture(event.pointerId)) return;
+              onUpdateReorderDrag(event.pointerId, event.clientX, event.clientY);
+            } else if (isPicture) {
+              handlePicturePointerMove(event);
+            }
           }}
           onPointerUp={(event) => {
-            if (event.currentTarget.hasPointerCapture(event.pointerId)) {
-              event.currentTarget.releasePointerCapture(event.pointerId);
+            if (canReorder) {
+              if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+                event.currentTarget.releasePointerCapture(event.pointerId);
+              }
+              const dragged = onFinishReorderDrag(event.pointerId);
+              if (!dragged) onRun(item);
+            } else if (isPicture) {
+              handlePicturePointerUp(event);
             }
-            const dragged = onFinishReorderDrag(event.pointerId);
-            if (!dragged) onRun(item);
           }}
-          onPointerCancel={(event) => onCancelReorderDrag(event.pointerId)}
+          onPointerCancel={(event) => {
+            if (canReorder) {
+              onCancelReorderDrag(event.pointerId);
+            } else if (isPicture) {
+              handlePicturePointerCancel(event);
+            }
+          }}
           className={
-            canReorder ? "pointer-events-auto touch-none cursor-grab active:cursor-grabbing" : undefined
+            canReorder || isPicture
+              ? "pointer-events-auto touch-none cursor-grab active:cursor-grabbing"
+              : undefined
           }
+          title={isPicture ? `Drag ${item.title} into another application` : undefined}
         >
           <RowIcon icon={item.icon} />
         </div>
@@ -1166,6 +1229,25 @@ const ResultRow = memo(function ResultRow({
           </button>
         ) : selected && item.id.startsWith("calc::") ? (
           <span className="text-[12px] font-semibold text-accent tabular-nums">Enter to copy</span>
+        ) : isPicture ? (
+          <div className="flex items-center gap-1.5">
+            {selected ? (
+              <span className="text-[11px] font-medium text-fg-tertiary">Drag to copy</span>
+            ) : null}
+            <button
+              type="button"
+              aria-label={`Drag ${item.title} into another application`}
+              title={`Drag ${item.title} into another app (Discord, Photoshop, Explorer, etc.)`}
+              tabIndex={selected ? 0 : -1}
+              onPointerDown={handlePicturePointerDown}
+              onPointerMove={handlePicturePointerMove}
+              onPointerUp={handlePicturePointerUp}
+              onPointerCancel={handlePicturePointerCancel}
+              className="focus-ring grid h-8 w-8 touch-none place-items-center rounded-[8px] text-fg-quiet transition-[color,background-color] duration-100 hover:bg-surface-hover hover:text-accent cursor-grab active:cursor-grabbing"
+            >
+              <GripVertical className="h-4 w-4" />
+            </button>
+          </div>
         ) : selected && item.id.startsWith("file::") ? (
           <span className="text-[11.5px] font-medium text-fg-tertiary">Enter to open</span>
         ) : null}

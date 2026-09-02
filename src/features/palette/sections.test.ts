@@ -4,10 +4,17 @@ import { isPinnedToTaskbar, setTaskbarPinned } from "../../lib/bridge";
 import type { AppEntry, FileEntry, PaletteItem, QuickAccessEntry } from "../../lib/types";
 import { buildSections, isClipboardKind, type PaletteSources, quickAccessPaletteItem } from "./sections";
 
-vi.mock("../../lib/bridge", async (importOriginal) => ({
-  ...(await importOriginal<Record<string, unknown>>()),
-  isPinnedToTaskbar: vi.fn(),
-  setTaskbarPinned: vi.fn(),
+vi.mock("../../lib/bridge", () => ({
+  isPinnedToTaskbar: vi.fn().mockResolvedValue(false),
+  setTaskbarPinned: vi.fn().mockResolvedValue(undefined),
+  startFileDrag: vi.fn().mockResolvedValue(true),
+  openPath: vi.fn().mockResolvedValue(undefined),
+  openPathLocation: vi.fn().mockResolvedValue(undefined),
+  runPathAsAdmin: vi.fn().mockResolvedValue(undefined),
+  showPathProperties: vi.fn().mockResolvedValue(undefined),
+  launchApp: vi.fn().mockResolvedValue(undefined),
+  launchAppAsAdmin: vi.fn().mockResolvedValue(undefined),
+  copyText: vi.fn().mockResolvedValue(undefined),
 }));
 
 function app(name: string, overrides: Partial<AppEntry> = {}): AppEntry {
@@ -587,5 +594,19 @@ describe("taskbar pin & properties support", () => {
     vi.mocked(isPinnedToTaskbar).mockResolvedValue(true);
     await exeItem?.toggleTaskbarPin?.();
     expect(setTaskbarPinned).toHaveBeenLastCalledWith("C:\\Users\\You\\Downloads\\setup.exe", false);
+  });
+
+  it("marks pictures as draggable with isPicture and dragFile", () => {
+    const photo = file("photo.png", "C:\\Users\\You\\Pictures\\photo.png");
+    const doc = file("report.docx", "C:\\Users\\You\\Documents\\report.docx");
+    const result = buildSections(sources({ query: "p", fileResults: [photo, doc], fileResultQuery: "p" }));
+    const filesSection = result.sections.find((s) => s.id === "files");
+    const photoItem = filesSection?.items.find((i) => i.title === "photo.png");
+    const docItem = filesSection?.items.find((i) => i.title === "report.docx");
+
+    expect(photoItem?.isPicture).toBe(true);
+    expect(typeof photoItem?.dragFile).toBe("function");
+    expect(docItem?.isPicture).toBe(false);
+    expect(typeof docItem?.dragFile).toBe("function");
   });
 });

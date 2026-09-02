@@ -14,6 +14,7 @@ mod windows_settings;
 pub mod audio;
 pub mod audio_osd;
 pub mod audio_hook;
+pub mod drag;
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -207,6 +208,9 @@ pub fn run() {
             // Clicking away dismisses the launcher, like Raycast.
             if matches!(event, WindowEvent::Focused(false)) && window.is_visible().unwrap_or(false)
             {
+                if drag::is_dragging() {
+                    return;
+                }
                 // Windows may report the palette as unfocused once before
                 // granting foreground activation to the existing process.
                 if ACTIVATION_FOCUS_PENDING.swap(false, Ordering::AcqRel) {
@@ -243,6 +247,7 @@ pub fn run() {
             is_pinned_to_taskbar,
             set_taskbar_pinned,
             show_path_properties,
+            start_file_drag,
             present_palette,
             hide_palette,
             set_window_style,
@@ -995,6 +1000,40 @@ async fn show_path_properties(path: String) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || apps::show_properties(&path))
         .await
         .map_err(|e| format!("properties task failed: {e}"))?
+}
+
+#[tauri::command]
+async fn start_file_drag(app: tauri::AppHandle, paths: Vec<String>) -> Result<bool, String> {
+    if paths.is_empty() {
+        return Err("No file paths provided".to_string());
+    }
+    let path_bufs: Vec<PathBuf> = paths
+        .into_iter()
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute() && p.exists())
+        .collect();
+    if path_bufs.is_empty() {
+        return Err("No existing absolute file paths provided for drag".to_string());
+    }
+
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    app.run_on_main_thread(move || {
+        let result = drag::drag_files(&path_bufs);
+        let _ = tx.send(result);
+    })
+    .map_err(|e| format!("failed to schedule drag on main thread: {e}"))?;
+
+    let drag_result = rx
+        .await
+        .map_err(|_| "drag task cancelled".to_string())??;
+    let dropped = drag_result == drag::DragResult::Dropped;
+    if dropped {
+        let hide_app = app.clone();
+        let _ = app.run_on_main_thread(move || {
+            let _ = hide_palette(hide_app);
+        });
+    }
+    Ok(dropped)
 }
 
 #[tauri::command]

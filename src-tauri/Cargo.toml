@@ -1,6 +1,6 @@
 [package]
 name = "prism"
-version = "0.9.35"
+version = "0.9.36"
 description = "Prism - a keyboard-first command palette for Windows"
 edition = "2021"
 
@@ -58,6 +58,7 @@ windows = { version = "0.61", features = [
   "Win32_Media_Audio",
   "Win32_Media_Audio_Endpoints",
 ] }
+windows-core = "0.61"
 image = { version = "0.25", default-features = false, features = ["bmp", "gif", "jpeg", "png", "webp"] }
 tauri-plugin-updater = "2"
 base64 = "0.22"
