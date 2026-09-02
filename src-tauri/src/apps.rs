@@ -40,11 +40,11 @@ use windows::Win32::UI::Shell::{
     FOLDERID_ProgramFiles, FOLDERID_ProgramFilesX86, FOLDERID_Programs, FOLDERID_PublicDesktop,
     FOLDERID_PublicDocuments, FOLDERID_RoamingAppData, IApplicationActivationManager, IEnumIDList,
     ILCreateFromPathW, ILFree, IShellFolder, IShellItem, IShellItemImageFactory, IShellLinkW,
-    SHChangeNotify, SHCreateItemFromParsingName, SHCreateItemWithParent, SHGetIDListFromObject,
+    SHCreateItemFromParsingName, SHCreateItemWithParent, SHGetIDListFromObject,
     SHGetKnownFolderPath, SHGetPathFromIDListW, SHOpenFolderAndSelectItems, SHParseDisplayName,
-    ShellExecuteExW, ShellExecuteW, AO_NONE, SEE_MASK_INVOKEIDLIST, SHCNE_CREATE, SHCNE_DELETE,
-    SHCNE_ID, SHCNE_UPDATEDIR, SHCNF_FLUSH, SHCNF_PATHW, SHCONTF_INCLUDEHIDDEN, SHCONTF_NONFOLDERS,
-    SHELLEXECUTEINFOW, SIGDN_NORMALDISPLAY, SIIGBF_ICONONLY,
+    ShellExecuteExW, ShellExecuteW, AO_NONE, SEE_MASK_INVOKEIDLIST, SEE_MASK_NOASYNC,
+    SHCONTF_INCLUDEHIDDEN, SHCONTF_NONFOLDERS, SHELLEXECUTEINFOW, SIGDN_NORMALDISPLAY,
+    SIIGBF_ICONONLY,
 };
 use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
 
@@ -1994,91 +1994,99 @@ fn modify_taskband_pin(
     }
 }
 
-/// Pins or unpins a launch target on the Windows taskbar. Uses `IPinnedList3`
-/// COM interface (the native mechanism on Windows 10/11) with fallback to shell verbs
-/// and pin store manipulation.
-fn notify_shell_file_change(event: SHCNE_ID, path: &Path) {
-    let wide_path = wide(&path.to_string_lossy());
-    unsafe {
-        SHChangeNotify(
-            event,
-            SHCNF_PATHW | SHCNF_FLUSH,
-            Some(wide_path.as_ptr() as *const c_void),
-            None,
-        );
+const TASKBAR_STATE_CHECKS: usize = 20;
+const TASKBAR_STATE_CHECK_INTERVAL: Duration = Duration::from_millis(100);
+
+fn wait_for_taskbar_state_with<F>(
+    pinned: bool,
+    attempts: usize,
+    delay: Duration,
+    mut current_state: F,
+) -> bool
+where
+    F: FnMut() -> bool,
+{
+    for attempt in 0..attempts {
+        if current_state() == pinned {
+            return true;
+        }
+        if attempt + 1 < attempts {
+            std::thread::sleep(delay);
+        }
     }
+    false
 }
 
+fn wait_for_taskbar_state(path: &Path, pinned: bool) -> bool {
+    wait_for_taskbar_state_with(
+        pinned,
+        TASKBAR_STATE_CHECKS,
+        TASKBAR_STATE_CHECK_INTERVAL,
+        || is_pinned_to_taskbar(path),
+    )
+}
+
+/// Pins or unpins a launch target and returns success only after the taskbar
+/// pin store reflects the requested state.
 pub fn set_taskbar_pinned(path: &Path, pinned: bool) -> Result<(), String> {
     if !path.exists() {
         return Err(format!("{} does not exist", path.display()));
     }
-
-    // Try through Explorer Shell Bridge first (runs directly inside explorer.exe where taskbar verbs are unrestricted)
-    if crate::win_key::shell_bridge_taskbar_pin(path, pinned).is_ok() {
-        if !pinned {
-            let _ = unpin_in_store(path);
-        }
+    if is_pinned_to_taskbar(path) == pinned {
         return Ok(());
     }
 
     let _com = ComGuard::init();
-
-    if pinned {
-        let target_shortcut = if path
+    let pin_target = if pinned
+        && !path
             .extension()
-            .is_some_and(|ext| ext.eq_ignore_ascii_case("lnk"))
-        {
-            path.to_path_buf()
-        } else {
-            let staging_dir = std::env::temp_dir().join("Prism").join("pin-shortcuts");
-            let _ = std::fs::create_dir_all(&staging_dir);
-            if let Ok(dest) = pin_destination(path, &staging_dir) {
-                let _ = create_pin_shortcut(path, &dest);
-                dest
-            } else {
-                path.to_path_buf()
-            }
-        };
-
-        let pidl = resolve_shell_pidl(&target_shortcut).or_else(|| resolve_shell_pidl(path));
-        if let Some(pidl) = pidl {
-            let _ = modify_taskband_pin(None, Some(pidl));
-            unsafe { ILFree(Some(pidl)) };
-        }
-
-        let _ = unsafe { shell_execute_verb("taskbarpin", path) };
-
-        // Ensure pin shortcut exists in User Pinned\TaskBar and notify Shell
-        if let Some(taskbar_dir) = taskbar_pins_dir() {
-            if let Ok(dest) = pin_destination(path, &taskbar_dir) {
-                let _ = create_pin_shortcut(path, &dest);
-                notify_shell_file_change(SHCNE_CREATE, &dest);
-                notify_shell_file_change(SHCNE_UPDATEDIR, &taskbar_dir);
-            }
-        }
-
-        Ok(())
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("lnk"))
+    {
+        let staging_dir = std::env::temp_dir().join("Prism").join("pin-shortcuts");
+        std::fs::create_dir_all(&staging_dir)
+            .ok()
+            .and_then(|_| pin_destination(path, &staging_dir).ok())
+            .and_then(|destination| {
+                create_pin_shortcut(path, &destination)
+                    .ok()
+                    .map(|_| destination)
+            })
+            .unwrap_or_else(|| path.to_path_buf())
     } else {
-        let pinned_link = find_taskbar_pin(path);
-        let target_path = pinned_link.as_deref().unwrap_or(path);
+        path.to_path_buf()
+    };
+    let pinned_link = (!pinned).then(|| find_taskbar_pin(path)).flatten();
+    let taskband_target = if pinned {
+        pin_target.as_path()
+    } else {
+        pinned_link.as_deref().unwrap_or(path)
+    };
 
-        let pidl = resolve_shell_pidl(target_path).or_else(|| resolve_shell_pidl(path));
-        if let Some(pidl) = pidl {
-            let _ = modify_taskband_pin(Some(pidl), None);
-            unsafe { ILFree(Some(pidl)) };
+    if let Some(pidl) = resolve_shell_pidl(taskband_target) {
+        let result = if pinned {
+            modify_taskband_pin(None, Some(pidl))
+        } else {
+            modify_taskband_pin(Some(pidl), None)
+        };
+        unsafe { ILFree(Some(pidl)) };
+        if result.is_ok() && wait_for_taskbar_state(path, pinned) {
+            return Ok(());
         }
-
-        let _ = unpin_in_store(path);
-        let _ = unsafe { shell_execute_verb("taskbarunpin", path) };
-
-        if let Some(taskbar_dir) = taskbar_pins_dir() {
-            notify_shell_file_change(SHCNE_DELETE, target_path);
-            notify_shell_file_change(SHCNE_UPDATEDIR, &taskbar_dir);
-        }
-
-        Ok(())
     }
+
+    let verb = if pinned { "taskbarpin" } else { "taskbarunpin" };
+    if unsafe { shell_execute_verb(verb, path) }.is_ok() && wait_for_taskbar_state(path, pinned) {
+        return Ok(());
+    }
+
+    let (action, menu_action) = if pinned {
+        ("pin this item", "Pin to taskbar")
+    } else {
+        ("unpin this item", "Unpin from taskbar")
+    };
+    Err(format!(
+        "Windows did not {action}. Right-click it in Windows and choose \"{menu_action}\"."
+    ))
 }
 
 /// Finds the taskbar pin-store shortcut that represents a launch target, so
@@ -2158,25 +2166,7 @@ fn path_key(path: &str) -> String {
         .to_ascii_lowercase()
 }
 
-/// Drops the pin-store shortcut copy that represents the target; already
-/// unpinned targets report no change instead of failing.
-fn unpin_in_store(path: &Path) -> Result<bool, String> {
-    match find_taskbar_pin(path) {
-        Some(link) => {
-            if let Err(error) = std::fs::remove_file(&link) {
-                if error.kind() != std::io::ErrorKind::NotFound {
-                    return Err(format!("failed to remove {}: {error}", link.display()));
-                }
-            }
-            Ok(true)
-        }
-        None => Ok(false),
-    }
-}
-
-/// Chooses the pin-store shortcut path for a target: shortcuts keep their
-/// own file name, executables are pinned under their binary name, and name
-/// collisions get numbered copies like the shell itself creates.
+/// Chooses a unique shortcut path in the temporary staging directory.
 fn pin_destination(path: &Path, taskbar: &Path) -> Result<PathBuf, String> {
     let is_shortcut = path
         .extension()
@@ -2205,7 +2195,7 @@ fn pin_destination(path: &Path, taskbar: &Path) -> Result<PathBuf, String> {
     Ok(candidate)
 }
 
-/// Creates a plain shortcut to an executable target for the pin store.
+/// Creates a temporary shortcut for taskbar APIs that expect a shell link.
 fn create_pin_shortcut(target: &Path, destination: &Path) -> Result<(), String> {
     unsafe {
         let link: IShellLinkW = CoCreateInstance(&CLSID_SHELL_LINK, None, CLSCTX_INPROC_SERVER)
@@ -2282,7 +2272,7 @@ unsafe fn shell_execute_verb(verb: &str, path: &Path) -> Result<(), isize> {
     let file = wide(&path.to_string_lossy());
     let mut info = SHELLEXECUTEINFOW {
         cbSize: std::mem::size_of::<SHELLEXECUTEINFOW>() as u32,
-        fMask: SEE_MASK_INVOKEIDLIST,
+        fMask: SEE_MASK_INVOKEIDLIST | SEE_MASK_NOASYNC,
         hwnd: HWND::default(),
         lpVerb: PCWSTR(operation.as_ptr()),
         lpFile: PCWSTR(file.as_ptr()),
@@ -2469,6 +2459,29 @@ mod tests {
         );
         assert_eq!(path_key(r"C:\Dir\"), path_key(r"C:\Dir"));
         assert_ne!(path_key(r"C:\A.exe"), path_key(r"C:\B.exe"));
+    }
+
+    #[test]
+    fn taskbar_state_wait_requires_the_requested_state() {
+        let mut pin_states = [false, false, true].into_iter();
+        assert!(wait_for_taskbar_state_with(true, 3, Duration::ZERO, || {
+            pin_states.next().unwrap_or(false)
+        }));
+
+        let mut unpin_states = [true, false].into_iter();
+        assert!(wait_for_taskbar_state_with(
+            false,
+            2,
+            Duration::ZERO,
+            || unpin_states.next().unwrap_or(true)
+        ));
+
+        assert!(!wait_for_taskbar_state_with(
+            true,
+            2,
+            Duration::ZERO,
+            || false
+        ));
     }
 
     #[test]
