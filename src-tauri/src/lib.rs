@@ -169,7 +169,8 @@ pub fn run() {
                 app.handle().clone(),
             );
             if let Some(window) = app.get_webview_window("main") {
-                let _ = clear_window_material(&window);
+                let startup_theme = startup_window_theme(persisted.as_ref(), theme::apps_light());
+                let _ = apply_window_style(&window, startup_theme);
                 schedule_hidden_memory_trim(app.handle().clone());
             }
             warm_apps(app.handle().clone());
@@ -750,11 +751,41 @@ fn register_shortcut(app: &tauri::AppHandle, combo: &str) -> Result<(), String> 
     Ok(())
 }
 
-fn clear_window_material(window: &tauri::WebviewWindow) -> Result<(), String> {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WindowTheme {
+    Light,
+    Dark,
+}
+
+impl WindowTheme {
+    fn from_request(value: &str) -> Result<Self, String> {
+        match value {
+            "light" => Ok(Self::Light),
+            "dark" => Ok(Self::Dark),
+            _ => Err(format!("unknown theme '{value}'")),
+        }
+    }
+
+    fn as_tauri(self) -> Theme {
+        match self {
+            Self::Light => Theme::Light,
+            Self::Dark => Theme::Dark,
+        }
+    }
+}
+
+fn enforce_solid_window_surface(window: &tauri::WebviewWindow) -> Result<(), String> {
     // `EffectsBuilder::clear_effects()` only empties a new config. Tauri
     // interprets `None` as the instruction to remove the active native
     // material from the HWND.
     window.set_effects(None).map_err(|error| error.to_string())
+}
+
+fn apply_window_style(window: &tauri::WebviewWindow, theme: WindowTheme) -> Result<(), String> {
+    window
+        .set_theme(Some(theme.as_tauri()))
+        .map_err(|error| format!("apply native window theme: {error}"))?;
+    enforce_solid_window_surface(window)
 }
 
 #[tauri::command]
@@ -1139,18 +1170,11 @@ fn is_animatable_window_width(width: u32) -> bool {
 /// solid-only surface rule.
 #[tauri::command]
 fn set_window_style(app: tauri::AppHandle, theme: String) -> Result<(), String> {
-    if !matches!(theme.as_str(), "light" | "dark") {
-        return Err(format!("unknown theme '{theme}'"));
-    }
+    let theme = WindowTheme::from_request(&theme)?;
     let window = app
         .get_webview_window("main")
         .ok_or_else(|| "main window not found".to_string())?;
-    let _ = window.set_theme(Some(if theme == "light" {
-        Theme::Light
-    } else {
-        Theme::Dark
-    }));
-    clear_window_material(&window)
+    apply_window_style(&window, theme)
 }
 
 #[tauri::command]
@@ -1196,6 +1220,22 @@ fn startup_taskbar_alignment(state: Option<&serde_json::Value>) -> String {
         .filter(|alignment| matches!(*alignment, "left" | "center" | "right"))
         .unwrap_or("center")
         .to_string()
+}
+
+fn startup_window_theme(
+    state: Option<&serde_json::Value>,
+    system_light: Option<bool>,
+) -> WindowTheme {
+    match state
+        .and_then(|value| value.get("settings"))
+        .and_then(|settings| settings.get("theme"))
+        .and_then(|theme| theme.as_str())
+    {
+        Some("light") => WindowTheme::Light,
+        Some("dark") => WindowTheme::Dark,
+        _ if system_light == Some(true) => WindowTheme::Light,
+        _ => WindowTheme::Dark,
+    }
 }
 
 fn apply_startup_shortcut(app: &tauri::AppHandle, combo: String) {
@@ -1677,6 +1717,42 @@ mod tests {
             }))),
             "center"
         );
+    }
+
+    #[test]
+    fn startup_window_theme_uses_persisted_or_system_preference() {
+        assert_eq!(startup_window_theme(None, Some(true)), WindowTheme::Light);
+        assert_eq!(startup_window_theme(None, Some(false)), WindowTheme::Dark);
+        assert_eq!(startup_window_theme(None, None), WindowTheme::Dark);
+        assert_eq!(
+            startup_window_theme(
+                Some(&serde_json::json!({ "settings": { "theme": "light" } })),
+                Some(false),
+            ),
+            WindowTheme::Light
+        );
+        assert_eq!(
+            startup_window_theme(
+                Some(&serde_json::json!({ "settings": { "theme": "dark" } })),
+                Some(true),
+            ),
+            WindowTheme::Dark
+        );
+        assert_eq!(
+            startup_window_theme(
+                Some(&serde_json::json!({ "settings": { "theme": "system" } })),
+                Some(true),
+            ),
+            WindowTheme::Light
+        );
+    }
+
+    #[test]
+    fn runtime_window_theme_rejects_unknown_values() {
+        assert_eq!(WindowTheme::from_request("light"), Ok(WindowTheme::Light));
+        assert_eq!(WindowTheme::from_request("dark"), Ok(WindowTheme::Dark));
+        assert!(WindowTheme::from_request("system").is_err());
+        assert!(WindowTheme::from_request("sepia").is_err());
     }
 
     #[test]

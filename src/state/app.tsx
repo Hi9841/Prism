@@ -32,6 +32,7 @@ interface Toast {
   id: number;
   title: string;
   detail?: string;
+  kind: "success" | "error";
   /** Set while the toast animates out before removal. */
   closing?: boolean;
 }
@@ -48,7 +49,7 @@ interface AppCtx {
   removeHistory: (id: string) => void;
   clearHistory: () => void;
   toasts: Toast[];
-  showToast: (title: string, detail?: string) => void;
+  showToast: (title: string, detail?: string, kind?: Toast["kind"]) => void;
   dismissToast: (id: number) => void;
 }
 
@@ -285,11 +286,13 @@ export function AppProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const showToast = useCallback(
-    (title: string, detail?: string) => {
+    (title: string, detail?: string, kind: Toast["kind"] = "success") => {
       const id = toastSeq++;
-      setToasts((prev) => [...prev, { id, title, detail }]);
-      const timer = setTimeout(() => dismissToast(id), 1900);
-      toastTimers.current.set(id, timer);
+      setToasts((prev) => [...prev, { id, title, detail, kind }]);
+      if (kind === "success") {
+        const timer = setTimeout(() => dismissToast(id), 1900);
+        toastTimers.current.set(id, timer);
+      }
       // Keep at most two toasts on screen; evict the oldest with its exit
       // animation instead of dropping it instantly.
       const visible = toastsRef.current;
@@ -308,8 +311,10 @@ export function AppProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     if (!ready) return;
-    setWindowStyle(effectiveTheme).catch(() => {});
-  }, [ready, effectiveTheme]);
+    setWindowStyle(effectiveTheme).catch((error) => {
+      showToast("Appearance not applied", String(error), "error");
+    });
+  }, [ready, effectiveTheme, showToast]);
 
   useEffect(() => {
     if (!ready) return;
@@ -354,7 +359,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     if (!ready) return;
     const off = onWinModeFailed((reason) => {
-      showToast("Win-key mode disabled", reason);
+      showToast("Win-key mode disabled", reason, "error");
       updateSettings({ shortcut: DEFAULT_SETTINGS.shortcut });
     });
     return off;

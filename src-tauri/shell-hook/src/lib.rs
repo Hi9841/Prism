@@ -105,6 +105,9 @@ const CONTROL_SEARCH_RECT_TOP: usize = 16;
 const CONTROL_SEARCH_RECT_RIGHT: usize = 17;
 const CONTROL_SEARCH_RECT_BOTTOM: usize = 18;
 const EVENT_SEARCH_RECT_CONFIGURED: usize = 19;
+const CONTROL_TASKBAR_PIN: usize = 20;
+const CONTROL_TASKBAR_UNPIN: usize = 21;
+const EVENT_TASKBAR_PIN_COMPLETED: usize = 22;
 const WS_POPUP: u32 = 0x8000_0000;
 const SS_BITMAP: u32 = 0x0000_000e;
 const WS_EX_TOOLWINDOW: u32 = 0x0000_0080;
@@ -226,6 +229,92 @@ extern "system" {
 extern "system" {
     fn GetModuleHandleW(module_name: *const u16) -> *mut c_void;
     fn Sleep(milliseconds: u32);
+}
+
+#[repr(C)]
+struct ShellExecuteInfoW {
+    cb_size: u32,
+    f_mask: u32,
+    hwnd: Hwnd,
+    verb: *const u16,
+    file: *const u16,
+    parameters: *const u16,
+    directory: *const u16,
+    show: i32,
+    inst_app: *mut c_void,
+    id_list: *mut c_void,
+    class: *const u16,
+    key_class: *mut c_void,
+    hot_key: u32,
+    icon_or_monitor: *mut c_void,
+    process: *mut c_void,
+}
+
+#[link(name = "shell32")]
+extern "system" {
+    fn ShellExecuteExW(info: *mut ShellExecuteInfoW) -> i32;
+    fn ShellExecuteW(
+        hwnd: Hwnd,
+        operation: *const u16,
+        file: *const u16,
+        parameters: *const u16,
+        directory: *const u16,
+        show_cmd: i32,
+    ) -> isize;
+}
+
+fn to_wide(value: &str) -> Vec<u16> {
+    value.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
+fn handle_taskbar_pin(pinned: bool) -> isize {
+    let target_file = match std::env::var_os("TEMP") {
+        Some(temp) => PathBuf::from(temp)
+            .join("Prism")
+            .join("taskbar-pin-target.txt"),
+        None => return 0,
+    };
+    let target = match std::fs::read_to_string(target_file) {
+        Ok(value) if !value.trim().is_empty() => value.trim().to_string(),
+        _ => return 0,
+    };
+    let verb = to_wide(if pinned {
+        "taskbarpin"
+    } else {
+        "taskbarunpin"
+    });
+    let target = to_wide(&target);
+    let mut info = ShellExecuteInfoW {
+        cb_size: std::mem::size_of::<ShellExecuteInfoW>() as u32,
+        f_mask: 0x0000_0400 | 0x0000_0040,
+        hwnd: std::ptr::null_mut(),
+        verb: verb.as_ptr(),
+        file: target.as_ptr(),
+        parameters: std::ptr::null(),
+        directory: std::ptr::null(),
+        show: SW_HIDE,
+        inst_app: std::ptr::null_mut(),
+        id_list: std::ptr::null_mut(),
+        class: std::ptr::null(),
+        key_class: std::ptr::null_mut(),
+        hot_key: 0,
+        icon_or_monitor: std::ptr::null_mut(),
+        process: std::ptr::null_mut(),
+    };
+    if unsafe { ShellExecuteExW(&mut info) } != 0 {
+        return 1;
+    }
+    let result = unsafe {
+        ShellExecuteW(
+            std::ptr::null_mut(),
+            verb.as_ptr(),
+            target.as_ptr(),
+            std::ptr::null(),
+            std::ptr::null(),
+            SW_HIDE,
+        )
+    };
+    isize::from(result > 32)
 }
 
 unsafe fn observer_window() -> Hwnd {
@@ -756,6 +845,16 @@ pub unsafe extern "system" fn PrismShellGetMessageHook(
                     SEARCH_RECT_READY.store(valid, Ordering::Release);
                     let _ =
                         notify_observer(message_id, EVENT_SEARCH_RECT_CONFIGURED, valid as isize);
+                    message.message = WM_NULL;
+                }
+                CONTROL_TASKBAR_PIN => {
+                    let result = handle_taskbar_pin(true);
+                    let _ = notify_observer(message_id, EVENT_TASKBAR_PIN_COMPLETED, result);
+                    message.message = WM_NULL;
+                }
+                CONTROL_TASKBAR_UNPIN => {
+                    let result = handle_taskbar_pin(false);
+                    let _ = notify_observer(message_id, EVENT_TASKBAR_PIN_COMPLETED, result);
                     message.message = WM_NULL;
                 }
                 _ => {}

@@ -1,285 +1,432 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Prism Code Audit - Window Material Corner Bug and Findings</title>
-<style>
-  :root {
-    --bg: #f6f6f8;
-    --paper: #ffffff;
-    --ink: #16171c;
-    --ink-2: #5b5d66;
-    --line: #e3e4ea;
-    --accent: #745ce8;
-    --accent-soft: #efeaff;
-    --red: #b3261e;
-    --red-soft: #fdecea;
-    --amber: #9a6b00;
-    --amber-soft: #fff7df;
-    --green: #1a6b3c;
-    --green-soft: #e7f5ec;
-    --mono: "Cascadia Code", Consolas, monospace;
-  }
-  * { box-sizing: border-box; }
-  body {
-    margin: 0;
-    background: var(--bg);
-    color: var(--ink);
-    font-family: "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
-    font-size: 15px;
-    line-height: 1.55;
-  }
-  main { max-width: 900px; margin: 0 auto; padding: 40px 24px 80px; }
-  header.report {
-    border-bottom: 2px solid var(--ink);
-    padding-bottom: 20px;
-    margin-bottom: 32px;
-  }
-  h1 { font-size: 30px; letter-spacing: -0.02em; margin: 0 0 6px; }
-  header.report p.meta { color: var(--ink-2); margin: 0; font-size: 13px; }
-  h2 {
-    font-size: 20px;
-    margin: 44px 0 12px;
-    padding-top: 18px;
-    border-top: 1px solid var(--line);
-    letter-spacing: -0.01em;
-  }
-  h3 { font-size: 16px; margin: 26px 0 8px; }
-  code {
-    font-family: var(--mono);
-    font-size: 13px;
-    background: #ececf1;
-    padding: 1px 5px;
-    border-radius: 4px;
-  }
-  pre {
-    background: #14151a;
-    color: #e8e9ee;
-    font-family: var(--mono);
-    font-size: 13px;
-    line-height: 1.55;
-    padding: 14px 18px;
-    border-radius: 10px;
-    overflow-x: auto;
-  }
-  pre code { background: none; padding: 0; color: inherit; }
-  .cmt { color: #8b90a0; }
-  .kwd { color: #c792ea; }
-  .str { color: #a5d6a7; }
-  table { width: 100%; border-collapse: collapse; margin: 14px 0; font-size: 14px; }
-  th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
-  th { color: var(--ink-2); font-weight: 600; font-size: 12.5px; text-transform: uppercase; letter-spacing: 0.04em; }
-  .pill {
-    display: inline-block;
-    font-size: 11.5px;
-    font-weight: 600;
-    padding: 2px 9px;
-    border-radius: 999px;
-    white-space: nowrap;
-  }
-  .pill.critical { background: var(--red-soft); color: var(--red); }
-  .pill.high { background: var(--amber-soft); color: var(--amber); }
-  .pill.medium { background: var(--accent-soft); color: var(--accent); }
-  .pill.low { background: var(--green-soft); color: var(--green); }
-  .callout {
-    border-left: 3px solid var(--accent);
-    background: var(--paper);
-    padding: 14px 18px;
-    border-radius: 0 10px 10px 0;
-    margin: 16px 0;
-  }
-  .callout.red { border-color: var(--red); background: var(--red-soft); }
-  .chain { list-style: none; padding: 0; margin: 16px 0; counter-reset: step; }
-  .chain li {
-    counter-increment: step;
-    position: relative;
-    padding: 10px 14px 10px 46px;
-    background: var(--paper);
-    border: 1px solid var(--line);
-    border-radius: 10px;
-    margin-bottom: 8px;
-  }
-  .chain li::before {
-    content: counter(step);
-    position: absolute;
-    left: 12px;
-    top: 12px;
-    width: 22px;
-    height: 22px;
-    border-radius: 50%;
-    background: var(--accent);
-    color: #fff;
-    font-size: 12.5px;
-    font-weight: 700;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-  }
-  .loc { font-family: var(--mono); font-size: 12px; color: var(--ink-2); display: block; margin-top: 3px; }
-  ul.tight li { margin: 4px 0; }
-  .verdict { display: flex; gap: 12px; flex-wrap: wrap; margin: 18px 0; }
-  .stat {
-    flex: 1 1 160px;
-    background: var(--paper);
-    border: 1px solid var(--line);
-    border-radius: 12px;
-    padding: 14px 16px;
-  }
-  .stat b { display: block; font-size: 24px; letter-spacing: -0.02em; }
-  .stat span { color: var(--ink-2); font-size: 13px; }
-</style>
-</head>
-<body>
-<main>
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Prism audit resolution report</title>
+    <style>
+      :root {
+        color-scheme: light;
+        --page: oklch(0.97 0.006 255);
+        --paper: oklch(0.995 0.002 255);
+        --ink: oklch(0.22 0.02 255);
+        --muted: oklch(0.48 0.025 255);
+        --line: oklch(0.88 0.012 255);
+        --accent: oklch(0.56 0.17 255);
+        --accent-soft: oklch(0.94 0.035 255);
+        --success: oklch(0.48 0.12 155);
+        --success-soft: oklch(0.94 0.04 155);
+        --code: oklch(0.24 0.018 255);
+        font-family: "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
+      }
 
-<header class="report">
-  <h1>Prism Audit Report</h1>
-  <p class="meta">Repo: C:\Users\hi\Desktop\Work\Prism &middot; v0.9.12 (commit 9cdb98e) &middot; Method: systematic debugging, root cause before fixes &middot; Scope: window material bug plus full-code sweep</p>
-</header>
+      * {
+        box-sizing: border-box;
+      }
 
-<div class="verdict">
-  <div class="stat"><b>81 / 81</b><span>vitest tests passing</span></div>
-  <div class="stat"><b>0</b><span>biome lint errors</span></div>
-  <div class="stat"><b>2</b><span>clippy warnings (cosmetic)</span></div>
-  <div class="stat"><b>1</b><span>confirmed root cause found</span></div>
-</div>
+      body {
+        margin: 0;
+        background: var(--page);
+        color: var(--ink);
+        line-height: 1.55;
+      }
 
-<!-- ============================================================ -->
-<h2>Primary bug: switching Window material breaks the corners</h2>
+      main {
+        inline-size: min(920px, calc(100% - 32px));
+        margin-inline: auto;
+        padding-block: 48px 72px;
+      }
 
-<p><strong>Symptom.</strong> In Settings &rarr; Appearance &rarr; Window material, switching between Acrylic / Mica / Solid damages the rounded corners of the launcher window: the native material shows through the corners as a hard-edged or wrongly-rounded sheet that clashes with the shell's rounded silhouette.</p>
+      header {
+        padding-block-end: 32px;
+      }
 
-<h3>Root cause chain</h3>
-<ol class="chain">
-  <li>
-    <strong>The rounded look is CSS-only. The native window is square.</strong>
-    The main window is configured with <code>transparent: true, decorations: false, shadow: false</code>.
-    <span class="loc">src-tauri/tauri.conf.json (main window)</span>
-    Neither tao 0.35.3 nor any Prism code ever sets <code>DWMWA_WINDOW_CORNER_PREFERENCE</code> (verified by grepping the tao crate sources and all of src-tauri/src - there are zero <code>DwmSetWindowAttribute</code> calls in the repo). The corners look round only because <code>.shell</code> clips the webview with <code>border-radius: 24px 24px 8px 8px</code> over a transparent webview.
-    <span class="loc">src/styles/tokens.css - .shell</span>
-  </li>
-  <li>
-    <strong>Switching material writes a DWM system backdrop across the full rectangular HWND.</strong>
-    <code>set_window_style</code> &rarr; <code>apply_window_look</code> &rarr; <code>window.set_effects(...)</code> ends up in window-vibrancy 0.6.0, which on Windows 11 sets <code>DWMWA_SYSTEMBACKDROP_TYPE</code>: acrylic &rarr; <code>DWMSBT_TRANSIENTWINDOW</code>, mica &rarr; <code>DWMSBT_MAINWINDOW</code>, solid &rarr; <code>DWMSBT_DISABLE</code>.
-    <span class="loc">src-tauri/src/lib.rs:754 apply_window_look &middot; ~/.cargo/.../window-vibrancy-0.6.0/src/windows.rs</span>
-  </li>
-  <li>
-    <strong>DWM clips the backdrop sheet with its own radius (~8px), not the CSS radii.</strong>
-    Once a backdrop is active, the material paints the entire square window rectangle, clipped only by the system's default corner policy. Every pixel outside the CSS-rounded shell stays transparent in the webview, so the raw material becomes visible in the corners. Result: two mismatched rounding curves stacked (CSS 24px top vs DWM ~8px), which reads as "broken corners". In Solid mode the backdrop is off, transparency hides everything outside the shell, and the illusion works - which is exactly why only the switch breaks it.
-  </li>
-  <li>
-    <strong>The code that tries to control the native radius is dead on Windows.</strong>
-    <code>EffectsBuilder::new().effect(effect).radius(12.0).color(tint)</code> looks like it aligns the native corner radius, but tauri's Windows vibrancy implementation destructures only <code>{ effects, color }</code> from the config. <code>radius</code> is applied on macOS only.
-    <span class="loc">src-tauri/src/lib.rs:764-769 &middot; ~/.cargo/.../tauri-2.11.5/src/vibrancy/windows.rs (apply_effects signature)</span>
-  </li>
-  <li>
-    <strong>The fallback ladder can select a material with no corner clipping at all.</strong>
-    Acrylic falls back to Mica then to <code>Effect::Blur</code>. Blur uses <code>SetWindowCompositionAttribute(ACCENT_ENABLE_ACRYLICBLURBEHIND)</code>, which has no DWM corner treatment whatsoever: a perfectly square blur sheet behind a rounded CSS shell.
-    <span class="loc">src-tauri/src/lib.rs:773-787 &middot; window-vibrancy windows.rs apply_blur</span>
-  </li>
-  <li>
-    <strong>The switch happens live while the window is visible.</strong>
-    Each change runs clear + apply (<code>clear_effects</code> calls clear_blur, clear_acrylic and clear_mica in sequence), so the user watches the backdrop toggle, flicker, and repaint stale corner pixels until WebView2 catches up.
-    <span class="loc">tauri-2.11.5/src/vibrancy/windows.rs clear_effects</span>
-  </li>
-</ol>
+      h1,
+      h2 {
+        margin: 0;
+        letter-spacing: 0;
+      }
 
-<div class="callout red">
-  <strong>Root cause in one sentence:</strong> the app never claims rounded corners natively (<code>DWMWA_WINDOW_CORNER_PREFERENCE</code> is never set), so any DWM backdrop material paints into the square window corners that the CSS-only design assumes stay transparent, while the one API call meant to align radii (<code>.radius(12.0)</code>) is silently ignored on Windows.
-</div>
+      h1 {
+        max-inline-size: 18ch;
+        font-size: 3.5rem;
+        line-height: 1.04;
+        text-wrap: balance;
+      }
 
-<h3>Recommended fix</h3>
-<p>Claim the corners natively and match the radii. In <code>apply_window_look</code> (or once at window setup), after applying effects:</p>
+      h2 {
+        margin-block: 40px 16px;
+        font-size: 1.25rem;
+        line-height: 1.25;
+      }
 
-<pre><code><span class="cmt">// src-tauri/src/lib.rs - after set_effects succeeds</span>
-<span class="kwd">use</span> windows::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_WINDOW_CORNER_PREFERENCE};
-<span class="kwd">use</span> windows::Win32::UI::Controls::DWMWCP_ROUND;
+      p {
+        margin-block: 10px;
+      }
 
-<span class="kwd">let</span> pref: u32 = DWMWCP_ROUND.0;   <span class="cmt">// Win11 standard ~8px round corners</span>
-<span class="kwd">unsafe</span> {
-    DwmSetWindowAttribute(
-        HWND(hwnd.0),
-        DWMWA_WINDOW_CORNER_PREFERENCE,
-        &amp;pref <span class="kwd">as</span> *<span class="kwd">const</span> _ <span class="kwd">as</span> _,
-        4,
-    );
-}</code></pre>
+      .lede {
+        max-inline-size: 68ch;
+        color: var(--muted);
+        font-size: 1.05rem;
+      }
 
-<ul class="tight">
-  <li><strong>Match the CSS radius to the DWM radius when a backdrop is active.</strong> With a backdrop on, DWM rounds at ~8px, so <code>.shell</code> should use 8px corners under <code>[data-surface="glass"]</code>; keep the current generous 24px/8px only for solid mode if that silhouette is preferred. Two matching curves = clean corners.</li>
-  <li><strong>Delete or comment <code>.radius(12.0)</code></strong> as macOS-only so nobody trusts it again.</li>
-  <li><strong>Consider dropping <code>Effect::Blur</code> from the fallback ladder on Win11</strong> (backdrop is supported there), since SWCA blur both looks wrong at corners and has known lag artifacts.</li>
-  <li><strong>Optional polish:</strong> briefly hide or fade the window during material switches to avoid the visible backdrop toggle flicker.</li>
-  <li>Verify manually: switch Acrylic &rarr; Mica &rarr; Solid &rarr; Acrylic with the palette open; corners should stay a single consistent curve, including on light theme and after a webview refresh.</li>
-</ul>
+      .meta {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px 18px;
+        margin-block-start: 20px;
+        color: var(--muted);
+        font-size: 0.875rem;
+        font-variant-numeric: tabular-nums;
+      }
 
-<!-- ============================================================ -->
-<h2>Other findings</h2>
+      .summary {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 12px;
+        margin-block-start: 28px;
+      }
 
-<table>
-  <tr><th>#</th><th>Severity</th><th>Finding</th><th>Location</th></tr>
-  <tr>
-    <td>1</td><td><span class="pill high">High</span></td>
-    <td><strong>Silent material downgrade with no feedback.</strong> The fallback ladder (acrylic&rarr;mica&rarr;blur&rarr;solid) applies a different material than the user picked and returns <code>Ok(())</code>. The settings UI keeps showing "Acrylic" even when solid is active. Combined with the swallowed error below, UI and native state can diverge silently.</td>
-    <td><code>src-tauri/src/lib.rs:773-787</code>, <code>src/state/app.tsx:321</code></td>
-  </tr>
-  <tr>
-    <td>2</td><td><span class="pill medium">Medium</span></td>
-    <td><strong>Errors swallowed on the style IPC.</strong> <code>setWindowStyle(...).catch(() =&gt; {})</code> discards failures. If <code>set_window_style</code> errors, the user sees the selected material in settings while the native window keeps the previous one. Return the actually-applied material from the command and show a toast ("Acrylic unavailable - using Mica").</td>
-    <td><code>src/state/app.tsx:319-322</code></td>
-  </tr>
-  <tr>
-    <td>3</td><td><span class="pill medium">Medium</span></td>
-    <td><strong>Startup styles hardcoded to dark/solid before real settings load.</strong> Setup runs <code>apply_window_look(&amp;window, "solid", "dark")</code>, then the frontend re-styles with persisted theme/effect on ready. Light-theme users get a double style application and a possible flash on every launch. Pass the persisted values (they are already loaded natively at that point via <code>load_state_value</code>).</td>
-    <td><code>src-tauri/src/lib.rs:174</code></td>
-  </tr>
-  <tr>
-    <td>4</td><td><span class="pill low">Low</span></td>
-    <td><strong>Misleading dead parameter.</strong> <code>.radius(12.0)</code> in the effects builder has no effect on Windows (macOS-only field). Remove it or annotate it to prevent future confusion - it contributed to this bug's camouflage.</td>
-    <td><code>src-tauri/src/lib.rs:767</code></td>
-  </tr>
-  <tr>
-    <td>5</td><td><span class="pill low">Low</span></td>
-    <td><strong>Two clippy warnings</strong> (collapsible_if) in the taskbar rect refresh path. Cosmetic; collapse the nested ifs.</td>
-    <td><code>src-tauri/src/win_key.rs:956, 969</code></td>
-  </tr>
-  <tr>
-    <td>6</td><td><span class="pill low">Low</span></td>
-    <td><strong>Settings copy undersells the fix.</strong> "Solid avoids DWM blur issues" reads like an apology. Once corners are fixed natively, update the detail text to describe what each material does instead of warning about breakage.</td>
-    <td><code>src/components/SettingsSheet.tsx:848</code></td>
-  </tr>
-  <tr>
-    <td>7</td><td><span class="pill low">Info</span></td>
-    <td><strong>No regression test for window styling.</strong> The effect mapping (acrylic/mica/solid &rarr; expected DWM attribute sequence) is pure logic worth unit-testing once it returns its result, e.g. a test asserting the ladder order and the reported fallback material.</td>
-    <td><code>src-tauri/src/lib.rs</code> tests module</td>
-  </tr>
-</table>
+      .metric {
+        min-block-size: 96px;
+        padding: 18px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: var(--paper);
+      }
 
-<!-- ============================================================ -->
-<h2>What is healthy</h2>
-<ul class="tight">
-  <li>All 81 frontend unit tests pass; biome reports zero issues; TypeScript compiles clean.</li>
-  <li>Rust clippy produces only the two cosmetic warnings above - no unsafe issues, no suspicious casts in the audited paths.</li>
-  <li>State sanitization on load is thorough (settings, history, groups, quick access are all validated against known value sets with caps). A corrupt state file degrades to defaults rather than crashing.</li>
-  <li>Presentation logic (palette positioning, taskbar anchoring, transition generations, raise retries) uses generation counters consistently, which closes most toggle races between native and webview.</li>
-  <li>Memory handling around the hidden window (WebView2 memory usage target, deferred trim) is deliberate and well-commented.</li>
-  <li>CSP is strict (<code>default-src 'self'</code>, no remote origins beyond the updater endpoint allowlist).</li>
-</ul>
+      .metric strong {
+        display: block;
+        color: var(--success);
+        font-size: 1.75rem;
+        line-height: 1.1;
+        font-variant-numeric: tabular-nums;
+      }
 
-<!-- ============================================================ -->
-<h2>Evidence appendix</h2>
-<p>Key dependency sources inspected (from the locked versions in Cargo.lock):</p>
-<table>
-  <tr><th>Crate</th><th>Version</th><th>Relevant behavior</th></tr>
-  <tr><td>tauri</td><td>2.11.5</td><td><code>vibrancy/windows.rs::apply_effects</code> ignores <code>radius</code>; <code>set_effects(None)</code> clears blur+acrylic+mica.</td></tr>
-  <tr><td>window-vibrancy</td><td>0.6.0</td><td>Acrylic/mica via <code>DWMWA_SYSTEMBACKDROP_TYPE</code> on Win11; blur via SWCA with no corner treatment; HRESULTs of DwmSetWindowAttribute are not checked (attempts always report success).</td></tr>
-  <tr><td>tao</td><td>0.35.3</td><td>Never touches <code>DWMWA_WINDOW_CORNER_PREFERENCE</code>; undecorated windows get no automatic rounding.</td></tr>
-  <tr><td>Prism</td><td>-</td><td>Zero direct DWM calls in src-tauri/src; corner shape exists only in CSS.</td></tr>
-</table>
+      .metric span {
+        display: block;
+        margin-block-start: 8px;
+        color: var(--muted);
+        font-size: 0.875rem;
+      }
 
-<p style="color:var(--ink-2); font-size:13px;">Generated as part of a systematic-debugging audit: Phase 1 (root cause) complete for the primary bug; fixes proposed but not applied. Confidence in the root cause chain: high - each step is verified against the exact locked dependency sources, and the mechanism explains why solid mode renders correctly while acrylic/mica do not.</p>
+      .callout {
+        margin-block: 24px;
+        padding: 18px 20px;
+        border-inline-start: 4px solid var(--success);
+        background: var(--success-soft);
+      }
 
-</main>
-</body>
+      .callout strong {
+        display: block;
+        margin-block-end: 4px;
+      }
+
+      .finding-list {
+        display: grid;
+        gap: 12px;
+        margin: 0;
+        padding: 0;
+        list-style: none;
+      }
+
+      .finding {
+        display: grid;
+        grid-template-columns: 112px minmax(0, 1fr);
+        gap: 16px;
+        padding: 18px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: var(--paper);
+      }
+
+      .status {
+        align-self: start;
+        inline-size: fit-content;
+        padding: 4px 9px;
+        border-radius: 999px;
+        background: var(--success-soft);
+        color: var(--success);
+        font-size: 0.75rem;
+        font-weight: 700;
+        text-transform: uppercase;
+      }
+
+      .finding h3 {
+        margin: 0;
+        font-size: 1rem;
+        line-height: 1.35;
+      }
+
+      .finding p {
+        margin-block-end: 0;
+        color: var(--muted);
+      }
+
+      code {
+        padding: 2px 5px;
+        border-radius: 4px;
+        background: var(--accent-soft);
+        color: var(--code);
+        font-family: "Cascadia Code", "SFMono-Regular", Consolas, monospace;
+        font-size: 0.9em;
+        overflow-wrap: anywhere;
+      }
+
+      table {
+        inline-size: 100%;
+        border-collapse: collapse;
+        border: 1px solid var(--line);
+        background: var(--paper);
+        font-size: 0.9rem;
+      }
+
+      th,
+      td {
+        padding: 12px 14px;
+        border-block-end: 1px solid var(--line);
+        text-align: start;
+        vertical-align: top;
+      }
+
+      th {
+        color: var(--muted);
+        font-size: 0.75rem;
+        text-transform: uppercase;
+      }
+
+      tbody tr:last-child td {
+        border-block-end: 0;
+      }
+
+      .pass {
+        color: var(--success);
+        font-weight: 700;
+      }
+
+      footer {
+        margin-block-start: 40px;
+        padding-block-start: 20px;
+        border-block-start: 1px solid var(--line);
+        color: var(--muted);
+        font-size: 0.875rem;
+      }
+
+      @media (max-width: 640px) {
+        main {
+          inline-size: min(100% - 24px, 920px);
+          padding-block-start: 28px;
+        }
+
+        .summary {
+          grid-template-columns: 1fr;
+        }
+
+        h1 {
+          font-size: 2.5rem;
+        }
+
+        .finding {
+          grid-template-columns: 1fr;
+          gap: 10px;
+        }
+
+        .table-wrap {
+          overflow-x: auto;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <header>
+        <h1>Window audit resolved</h1>
+        <p class="lede">
+          Every actionable item from the original window-material audit is resolved in Prism
+          0.9.32. The old Acrylic and Mica implementation no longer exists, and the remaining
+          theme, error-reporting, test, and elevated Win-key issues are fixed.
+        </p>
+        <div class="meta" aria-label="Report metadata">
+          <span>Updated: September 2, 2026</span>
+          <span>Baseline audit: Prism 0.9.12</span>
+          <span>Verified build: Prism 0.9.32</span>
+        </div>
+        <div class="summary" aria-label="Resolution summary">
+          <div class="metric">
+            <strong>7/7</strong>
+            <span>Original findings resolved</span>
+          </div>
+          <div class="metric">
+            <strong>264</strong>
+            <span>Automated tests passed</span>
+          </div>
+          <div class="metric">
+            <strong>0</strong>
+            <span>Open report issues</span>
+          </div>
+        </div>
+      </header>
+
+      <section aria-labelledby="primary-resolution">
+        <h2 id="primary-resolution">Primary corner bug</h2>
+        <div class="callout">
+          <strong>Resolved by removing native backdrop materials.</strong>
+          Prism now enforces a solid-only native surface with <code>set_effects(None)</code>.
+          Acrylic, Mica, Blur, the fallback ladder, and the ineffective Windows radius setting
+          have been removed. With no DWM backdrop painting behind the transparent webview, the
+          CSS shell is again the only visible corner shape.
+        </div>
+        <p>
+          Adding <code>DWMWA_WINDOW_CORNER_PREFERENCE</code> is no longer appropriate. That
+          recommendation applied to the old material system and would introduce a second native
+          radius that does not match Prism's current shell silhouette.
+        </p>
+      </section>
+
+      <section aria-labelledby="finding-resolution">
+        <h2 id="finding-resolution">Finding-by-finding resolution</h2>
+        <ol class="finding-list">
+          <li class="finding">
+            <span class="status">Resolved</span>
+            <div>
+              <h3>1. Silent material downgrade</h3>
+              <p>
+                The material selector and fallback ladder were removed. There is now one
+                authoritative surface: solid. The UI cannot display a material that differs from
+                the native window.
+              </p>
+            </div>
+          </li>
+          <li class="finding">
+            <span class="status">Resolved</span>
+            <div>
+              <h3>2. Style IPC errors were swallowed</h3>
+              <p>
+                <code>set_window_style</code> now propagates both native theme and surface errors.
+                The frontend shows a persistent, dismissible error toast instead of discarding the
+                rejection. Error toasts use an alert icon rather than a success checkmark.
+              </p>
+            </div>
+          </li>
+          <li class="finding">
+            <span class="status">Resolved</span>
+            <div>
+              <h3>3. Startup theme was hardcoded</h3>
+              <p>
+                Native setup now resolves the persisted light, dark, or system preference before
+                the first frontend render. Runtime changes use the same
+                <code>apply_window_style</code> contract.
+              </p>
+            </div>
+          </li>
+          <li class="finding">
+            <span class="status">Resolved</span>
+            <div>
+              <h3>4. Dead material radius configuration</h3>
+              <p>
+                The old <code>EffectsBuilder.radius(12.0)</code> call no longer exists. The current
+                native path contains no effect builder or ignored radius value.
+              </p>
+            </div>
+          </li>
+          <li class="finding">
+            <span class="status">Resolved</span>
+            <div>
+              <h3>5. Clippy warnings</h3>
+              <p>
+                The reported nested conditionals are gone. Clippy passes across every Rust target
+                with warnings treated as errors.
+              </p>
+            </div>
+          </li>
+          <li class="finding">
+            <span class="status">Resolved</span>
+            <div>
+              <h3>6. Defensive material copy</h3>
+              <p>
+                The material setting and its "Solid avoids DWM blur issues" copy were removed with
+                the unsupported material choices.
+              </p>
+            </div>
+          </li>
+          <li class="finding">
+            <span class="status">Resolved</span>
+            <div>
+              <h3>7. Missing style regression coverage</h3>
+              <p>
+                Pure tests now cover persisted and system startup-theme resolution plus strict
+                runtime theme parsing. Material ladder tests are obsolete because no ladder
+                remains.
+              </p>
+            </div>
+          </li>
+        </ol>
+      </section>
+
+      <section aria-labelledby="win-key-resolution">
+        <h2 id="win-key-resolution">Elevated test-app issue</h2>
+        <div class="callout">
+          <strong>Resolved: Explorer can acknowledge an elevated Prism process.</strong>
+          The screenshot failure occurred because Explorer runs at medium integrity while the
+          test app inherited a high-integrity shell. Windows blocked Explorer's bridge
+          acknowledgment. Prism now allows only its private registered bridge message through the
+          observer window's message filter. The elevated reproduction reaches
+          <code>bridge-install-ok</code>.
+        </div>
+      </section>
+
+      <section aria-labelledby="verification">
+        <h2 id="verification">Verification</h2>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th scope="col">Check</th>
+                <th scope="col">Result</th>
+                <th scope="col">Evidence</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Frontend unit tests</td>
+                <td class="pass">Pass</td>
+                <td>118 tests in 10 files</td>
+              </tr>
+              <tr>
+                <td>Rust unit tests</td>
+                <td class="pass">Pass</td>
+                <td>146 passed, 5 intentionally ignored</td>
+              </tr>
+              <tr>
+                <td>TypeScript</td>
+                <td class="pass">Pass</td>
+                <td><code>bun x tsc --noEmit</code></td>
+              </tr>
+              <tr>
+                <td>Frontend lint</td>
+                <td class="pass">Pass</td>
+                <td><code>bun run lint</code></td>
+              </tr>
+              <tr>
+                <td>Rust lint and format</td>
+                <td class="pass">Pass</td>
+                <td>Clippy with <code>-D warnings</code> and rustfmt check</td>
+              </tr>
+              <tr>
+                <td>Elevated Windows launch</td>
+                <td class="pass">Pass</td>
+                <td>Explorer bridge logs <code>bridge-install-ok</code></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <footer>
+        Source locations: <code>src-tauri/src/lib.rs</code>,
+        <code>src-tauri/src/win_key.rs</code>, <code>src/state/app.tsx</code>, and
+        <code>src/components/Toast.tsx</code>.
+      </footer>
+    </main>
+  </body>
 </html>
