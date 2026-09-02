@@ -322,6 +322,11 @@ body {
     animation: reorder-drag-pickup 120ms var(--ease-out-soft) both;
   }
 
+  .file-drag-preview {
+    width: 280px;
+    max-width: calc(100vw - 32px);
+  }
+
   .category-drag-preview {
     display: grid;
     grid-template-columns: 32px minmax(0, 1fr);

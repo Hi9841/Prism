@@ -25,6 +25,7 @@ import { useApp } from "../../state/app";
 import { usePalette } from "../../state/palette";
 import { UpdateControl } from "../updater/UpdateControl";
 import { type ContextMenuPosition, clampContextMenuPosition, ResultContextMenu } from "./ResultContextMenu";
+import { isClipboardKind } from "./sections";
 
 interface ReorderDragState {
   item: PaletteItem;
@@ -35,6 +36,16 @@ interface ReorderDragState {
   y: number;
   active: boolean;
   targetItemId: string | null;
+}
+
+interface FileDragState {
+  item: PaletteItem;
+  pointerId: number;
+  startX: number;
+  startY: number;
+  x: number;
+  y: number;
+  active: boolean;
 }
 
 /** Any action that justifies opening the result context menu. */
@@ -90,6 +101,18 @@ export function Palette() {
   const [reorderAnnouncement, setReorderAnnouncement] = useState("");
   const previewLeaveTimerRef = useRef<number | null>(null);
   const leavingDragRef = useRef<ReorderDragState | null>(null);
+  const fileDragRef = useRef<FileDragState | null>(null);
+  const pendingFileDragRef = useRef<{
+    pointerId: number;
+    x: number;
+    y: number;
+    captureEl?: HTMLElement | null;
+  } | null>(null);
+  const fileDragFrameRef = useRef<number | null>(null);
+  const [fileDrag, setFileDrag] = useState<FileDragState | null>(null);
+  const [filePreviewLeaving, setFilePreviewLeaving] = useState(false);
+  const filePreviewLeaveTimerRef = useRef<number | null>(null);
+  const leavingFileDragRef = useRef<FileDragState | null>(null);
 
   const closeResultMenu = useCallback((restoreFocus: boolean) => {
     setResultMenu(null);
@@ -405,23 +428,148 @@ export function Palette() {
     [animatePreviewOut, updateReorderDragState],
   );
 
+  const updateFileDragState = useCallback((next: FileDragState | null) => {
+    fileDragRef.current = next;
+    setFileDrag(next);
+  }, []);
+
+  const animateFilePreviewOut = useCallback(() => {
+    const current = fileDragRef.current;
+    if (!current?.active) return;
+    leavingFileDragRef.current = current;
+    setFilePreviewLeaving(true);
+    if (filePreviewLeaveTimerRef.current !== null) window.clearTimeout(filePreviewLeaveTimerRef.current);
+    filePreviewLeaveTimerRef.current = window.setTimeout(() => {
+      filePreviewLeaveTimerRef.current = null;
+      leavingFileDragRef.current = null;
+      setFilePreviewLeaving(false);
+    }, 110);
+  }, []);
+
+  const startNativeFileDrag = useCallback(
+    async (item: PaletteItem, pointerId: number, captureEl?: HTMLElement | null) => {
+      if (captureEl && captureEl.hasPointerCapture(pointerId)) {
+        try {
+          captureEl.releasePointerCapture(pointerId);
+        } catch {
+          // ignore
+        }
+      }
+      try {
+        await item.dragFile?.();
+      } catch {
+        // ignore
+      } finally {
+        animateFilePreviewOut();
+        updateFileDragState(null);
+      }
+    },
+    [animateFilePreviewOut, updateFileDragState],
+  );
+
+  const startFileDrag = useCallback(
+    (item: PaletteItem, pointerId: number, x: number, y: number) => {
+      updateFileDragState({
+        item,
+        pointerId,
+        startX: x,
+        startY: y,
+        x,
+        y,
+        active: false,
+      });
+    },
+    [updateFileDragState],
+  );
+
+  const applyFileDrag = useCallback(
+    (pointerId: number, x: number, y: number, captureEl?: HTMLElement | null) => {
+      const current = fileDragRef.current;
+      if (!current || current.pointerId !== pointerId) return;
+
+      const crossedThreshold = Math.hypot(x - current.startX, y - current.startY) >= 4;
+      if (!current.active && crossedThreshold) {
+        const nextState = { ...current, x, y, active: true };
+        updateFileDragState(nextState);
+        void startNativeFileDrag(current.item, pointerId, captureEl);
+      } else if (current.active) {
+        updateFileDragState({ ...current, x, y });
+      }
+    },
+    [startNativeFileDrag, updateFileDragState],
+  );
+
+  const updateFileDrag = useCallback(
+    (pointerId: number, x: number, y: number, captureEl?: HTMLElement | null) => {
+      pendingFileDragRef.current = { pointerId, x, y, captureEl };
+      if (fileDragFrameRef.current !== null) return;
+      fileDragFrameRef.current = requestAnimationFrame(() => {
+        fileDragFrameRef.current = null;
+        const pending = pendingFileDragRef.current;
+        pendingFileDragRef.current = null;
+        if (pending) applyFileDrag(pending.pointerId, pending.x, pending.y, pending.captureEl);
+      });
+    },
+    [applyFileDrag],
+  );
+
+  const finishFileDrag = useCallback(
+    (pointerId: number) => {
+      if (fileDragFrameRef.current !== null) {
+        cancelAnimationFrame(fileDragFrameRef.current);
+        fileDragFrameRef.current = null;
+      }
+      const pending = pendingFileDragRef.current;
+      pendingFileDragRef.current = null;
+      if (pending) applyFileDrag(pending.pointerId, pending.x, pending.y, pending.captureEl);
+      const current = fileDragRef.current;
+      if (!current || current.pointerId !== pointerId) return false;
+      if (current.active) {
+        animateFilePreviewOut();
+        updateFileDragState(null);
+        return true;
+      }
+      updateFileDragState(null);
+      return false;
+    },
+    [animateFilePreviewOut, applyFileDrag, updateFileDragState],
+  );
+
+  const cancelFileDrag = useCallback(
+    (pointerId: number) => {
+      pendingFileDragRef.current = null;
+      if (fileDragFrameRef.current !== null) {
+        cancelAnimationFrame(fileDragFrameRef.current);
+        fileDragFrameRef.current = null;
+      }
+      if (fileDragRef.current?.pointerId === pointerId) {
+        if (fileDragRef.current.active) animateFilePreviewOut();
+        updateFileDragState(null);
+      }
+    },
+    [animateFilePreviewOut, updateFileDragState],
+  );
+
   useEffect(() => {
-    if (!reorderDrag && !categoryDrag) return;
+    if (!reorderDrag && !categoryDrag && !fileDrag) return;
     const cancelOnEscape = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
         updateReorderDragState(null);
         updateCategoryDragState(null);
+        updateFileDragState(null);
       }
     };
     window.addEventListener("keydown", cancelOnEscape);
     return () => window.removeEventListener("keydown", cancelOnEscape);
-  }, [categoryDrag, reorderDrag, updateCategoryDragState, updateReorderDragState]);
+  }, [categoryDrag, fileDrag, reorderDrag, updateCategoryDragState, updateFileDragState, updateReorderDragState]);
 
   useEffect(
     () => () => {
       if (reorderDragFrameRef.current !== null) cancelAnimationFrame(reorderDragFrameRef.current);
       if (categoryDragFrameRef.current !== null) cancelAnimationFrame(categoryDragFrameRef.current);
+      if (fileDragFrameRef.current !== null) cancelAnimationFrame(fileDragFrameRef.current);
       if (previewLeaveTimerRef.current !== null) window.clearTimeout(previewLeaveTimerRef.current);
+      if (filePreviewLeaveTimerRef.current !== null) window.clearTimeout(filePreviewLeaveTimerRef.current);
     },
     [],
   );
@@ -708,7 +856,13 @@ export function Palette() {
                   selected={palette.selected === index}
                   pinned={item.appId ? settings.pinnedApps.includes(item.appId) : false}
                   reorderable={reorderable}
-                  draggedItem={reorderDrag?.active ? reorderItemId(reorderDrag.item) : null}
+                  draggedItem={
+                    reorderDrag?.active
+                      ? reorderItemId(reorderDrag.item)
+                      : fileDrag?.active
+                      ? fileDrag.item.id
+                      : null
+                  }
                   dropTargetItem={reorderDrag?.active ? reorderDrag.targetItemId : null}
                   onSelect={palette.select}
                   onRun={palette.runItem}
@@ -721,6 +875,10 @@ export function Palette() {
                   onUpdateReorderDrag={updateReorderDrag}
                   onFinishReorderDrag={finishReorderDrag}
                   onCancelReorderDrag={cancelReorderDrag}
+                  onStartFileDrag={startFileDrag}
+                  onUpdateFileDrag={updateFileDrag}
+                  onFinishFileDrag={finishFileDrag}
+                  onCancelFileDrag={cancelFileDrag}
                 />
               );
             }
@@ -773,6 +931,12 @@ export function Palette() {
         <ReorderDragPreview drag={reorderDrag} />
       ) : previewLeaving && leavingDragRef.current ? (
         <ReorderDragPreview drag={leavingDragRef.current} leaving />
+      ) : null}
+
+      {fileDrag?.active ? (
+        <FileDragPreview drag={fileDrag} />
+      ) : filePreviewLeaving && leavingFileDragRef.current ? (
+        <FileDragPreview drag={leavingFileDragRef.current} leaving />
       ) : null}
 
       {categoryDrag?.active ? <CategoryDragPreview drag={categoryDrag} /> : null}
@@ -866,6 +1030,36 @@ function ReorderDragPreview({ drag, leaving }: { drag: ReorderDragState; leaving
           <div className="mt-[3px] truncate text-[11.5px] leading-tight text-fg-tertiary">
             {drag.item.subtitle ?? "Application"}
           </div>
+        </div>
+        <GripVertical className="h-4 w-4 shrink-0 text-accent" />
+      </div>
+    </div>
+  );
+}
+
+function FileDragPreview({ drag, leaving }: { drag: FileDragState; leaving?: boolean }) {
+  const previewWidth = 280;
+  const previewHeight = 54;
+  const isFromLeft = drag.startX < 120;
+  const rawX = isFromLeft ? drag.x + 14 : drag.x - previewWidth - 14;
+  const x = Math.min(Math.max(8, rawX), window.innerWidth - previewWidth - 8);
+  const y = Math.min(Math.max(8, drag.y - previewHeight / 2), window.innerHeight - previewHeight - 8);
+
+  return (
+    <div
+      aria-hidden="true"
+      className="pointer-events-none fixed top-0 left-0 z-50 will-change-transform"
+      style={{ transform: `translate3d(${x}px, ${y}px, 0)` }}
+    >
+      <div className={`reorder-drag-preview file-drag-preview${leaving ? " reorder-drag-preview-exit" : ""}`}>
+        <RowIcon icon={drag.item.icon} />
+        <div className="min-w-0">
+          <div className="truncate text-[13.5px] leading-tight font-semibold text-fg">{drag.item.title}</div>
+          {drag.item.subtitle ? (
+            <div className="mt-[3px] truncate text-[11.5px] leading-tight text-fg-tertiary">
+              {drag.item.subtitle}
+            </div>
+          ) : null}
         </div>
         <GripVertical className="h-4 w-4 shrink-0 text-accent" />
       </div>
@@ -984,6 +1178,10 @@ const ResultRow = memo(function ResultRow({
   onUpdateReorderDrag,
   onFinishReorderDrag,
   onCancelReorderDrag,
+  onStartFileDrag,
+  onUpdateFileDrag,
+  onFinishFileDrag,
+  onCancelFileDrag,
 }: {
   item: PaletteItem;
   index: number;
@@ -1003,59 +1201,21 @@ const ResultRow = memo(function ResultRow({
   onUpdateReorderDrag: (pointerId: number, x: number, y: number) => void;
   onFinishReorderDrag: (pointerId: number) => boolean;
   onCancelReorderDrag: (pointerId: number) => void;
+  onStartFileDrag: (item: PaletteItem, pointerId: number, x: number, y: number) => void;
+  onUpdateFileDrag: (pointerId: number, x: number, y: number, captureEl?: HTMLElement | null) => void;
+  onFinishFileDrag: (pointerId: number) => boolean;
+  onCancelFileDrag: (pointerId: number) => void;
 }) {
   const itemReorderId = reorderItemId(item);
   const canReorder = reorderable && Boolean(itemReorderId);
-  const isPicture = Boolean(item.isPicture && item.shellPath && item.dragFile);
-  const pictureDragRef = useRef<{ pointerId: number; x: number; y: number; started: boolean } | null>(null);
-
-  const handlePicturePointerDown = (event: React.PointerEvent) => {
-    if (event.button !== 0) return;
-    event.preventDefault();
-    event.currentTarget.setPointerCapture(event.pointerId);
-    pictureDragRef.current = {
-      pointerId: event.pointerId,
-      x: event.clientX,
-      y: event.clientY,
-      started: false,
-    };
-  };
-
-  const handlePicturePointerMove = (event: React.PointerEvent) => {
-    if (!event.currentTarget.hasPointerCapture(event.pointerId)) return;
-    const state = pictureDragRef.current;
-    if (!state || state.started || state.pointerId !== event.pointerId) return;
-    if (Math.hypot(event.clientX - state.x, event.clientY - state.y) > 4) {
-      state.started = true;
-      event.currentTarget.releasePointerCapture(event.pointerId);
-      void item.dragFile?.();
-    }
-  };
-
-  const handlePicturePointerUp = (event: React.PointerEvent) => {
-    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
-      event.currentTarget.releasePointerCapture(event.pointerId);
-    }
-    const state = pictureDragRef.current;
-    pictureDragRef.current = null;
-    if (state && !state.started && event.button === 0) {
-      onRun(item);
-    }
-  };
-
-  const handlePicturePointerCancel = (event: React.PointerEvent) => {
-    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
-      event.currentTarget.releasePointerCapture(event.pointerId);
-    }
-    pictureDragRef.current = null;
-  };
+  const canDragFile = Boolean(!canReorder && item.shellPath && item.dragFile);
 
   return (
     <li
       id={`prism-opt-${index}`}
       data-selected={selected}
       data-drop-target={canReorder && dropTargetItem === itemReorderId}
-      data-dragging={canReorder && draggedItem === itemReorderId}
+      data-dragging={(canReorder && draggedItem === itemReorderId) || (canDragFile && draggedItem === item.id)}
       data-reorder-item-id={canReorder ? (itemReorderId ?? undefined) : undefined}
       onMouseEnter={() => onSelect(index)}
       onContextMenu={(event) => {
@@ -1078,20 +1238,24 @@ const ResultRow = memo(function ResultRow({
       <div className="pointer-events-none relative z-[1]">
         <div
           onPointerDown={(event) => {
-            if (canReorder && event.button === 0) {
+            if (event.button !== 0) return;
+            if (canReorder) {
               event.preventDefault();
               event.currentTarget.setPointerCapture(event.pointerId);
               onStartReorderDrag(item, event.pointerId, event.clientX, event.clientY);
-            } else if (isPicture) {
-              handlePicturePointerDown(event);
+            } else if (canDragFile) {
+              event.preventDefault();
+              event.currentTarget.setPointerCapture(event.pointerId);
+              onStartFileDrag(item, event.pointerId, event.clientX, event.clientY);
             }
           }}
           onPointerMove={(event) => {
             if (canReorder) {
               if (!event.currentTarget.hasPointerCapture(event.pointerId)) return;
               onUpdateReorderDrag(event.pointerId, event.clientX, event.clientY);
-            } else if (isPicture) {
-              handlePicturePointerMove(event);
+            } else if (canDragFile) {
+              if (!event.currentTarget.hasPointerCapture(event.pointerId)) return;
+              onUpdateFileDrag(event.pointerId, event.clientX, event.clientY, event.currentTarget);
             }
           }}
           onPointerUp={(event) => {
@@ -1101,23 +1265,36 @@ const ResultRow = memo(function ResultRow({
               }
               const dragged = onFinishReorderDrag(event.pointerId);
               if (!dragged) onRun(item);
-            } else if (isPicture) {
-              handlePicturePointerUp(event);
+            } else if (canDragFile) {
+              if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+                event.currentTarget.releasePointerCapture(event.pointerId);
+              }
+              const dragged = onFinishFileDrag(event.pointerId);
+              if (!dragged) onRun(item);
             }
           }}
           onPointerCancel={(event) => {
             if (canReorder) {
               onCancelReorderDrag(event.pointerId);
-            } else if (isPicture) {
-              handlePicturePointerCancel(event);
+            } else if (canDragFile) {
+              if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+                event.currentTarget.releasePointerCapture(event.pointerId);
+              }
+              onCancelFileDrag(event.pointerId);
             }
           }}
           className={
-            canReorder || isPicture
+            canReorder || canDragFile
               ? "pointer-events-auto touch-none cursor-grab active:cursor-grabbing"
               : undefined
           }
-          title={isPicture ? `Drag ${item.title} into another application` : undefined}
+          title={
+            canReorder
+              ? `Reorder ${item.title}`
+              : canDragFile
+              ? `Drag ${item.title} into another application`
+              : undefined
+          }
         >
           <RowIcon icon={item.icon} />
         </div>
@@ -1227,9 +1404,9 @@ const ResultRow = memo(function ResultRow({
           >
             <X className="h-4 w-4" />
           </button>
-        ) : selected && item.id.startsWith("calc::") ? (
+        ) : isClipboardKind(item.id) && selected ? (
           <span className="text-[12px] font-semibold text-accent tabular-nums">Enter to copy</span>
-        ) : isPicture ? (
+        ) : canDragFile ? (
           <div className="flex items-center gap-1.5">
             {selected ? (
               <span className="text-[11px] font-medium text-fg-tertiary">Drag to copy</span>
@@ -1237,12 +1414,31 @@ const ResultRow = memo(function ResultRow({
             <button
               type="button"
               aria-label={`Drag ${item.title} into another application`}
-              title={`Drag ${item.title} into another app (Discord, Photoshop, Explorer, etc.)`}
+              title={`Drag ${item.title} into another app (Discord, Explorer, etc.)`}
               tabIndex={selected ? 0 : -1}
-              onPointerDown={handlePicturePointerDown}
-              onPointerMove={handlePicturePointerMove}
-              onPointerUp={handlePicturePointerUp}
-              onPointerCancel={handlePicturePointerCancel}
+              onPointerDown={(event) => {
+                if (event.button !== 0) return;
+                event.preventDefault();
+                event.currentTarget.setPointerCapture(event.pointerId);
+                onStartFileDrag(item, event.pointerId, event.clientX, event.clientY);
+              }}
+              onPointerMove={(event) => {
+                if (!event.currentTarget.hasPointerCapture(event.pointerId)) return;
+                onUpdateFileDrag(event.pointerId, event.clientX, event.clientY, event.currentTarget);
+              }}
+              onPointerUp={(event) => {
+                if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+                  event.currentTarget.releasePointerCapture(event.pointerId);
+                }
+                const dragged = onFinishFileDrag(event.pointerId);
+                if (!dragged) onRun(item);
+              }}
+              onPointerCancel={(event) => {
+                if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+                  event.currentTarget.releasePointerCapture(event.pointerId);
+                }
+                onCancelFileDrag(event.pointerId);
+              }}
               className="focus-ring grid h-8 w-8 touch-none place-items-center rounded-[8px] text-fg-quiet transition-[color,background-color] duration-100 hover:bg-surface-hover hover:text-accent cursor-grab active:cursor-grabbing"
             >
               <GripVertical className="h-4 w-4" />

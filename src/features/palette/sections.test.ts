@@ -599,14 +599,43 @@ describe("taskbar pin & properties support", () => {
   it("marks pictures as draggable with isPicture and dragFile", () => {
     const photo = file("photo.png", "C:\\Users\\You\\Pictures\\photo.png");
     const doc = file("report.docx", "C:\\Users\\You\\Documents\\report.docx");
-    const result = buildSections(sources({ query: "p", fileResults: [photo, doc], fileResultQuery: "p" }));
+    const video = file("clip.mp4", "C:\\Users\\You\\Videos\\clip.mp4");
+    const audio = file("song.mp3", "C:\\Users\\You\\Music\\song.mp3");
+    const archive = file("backup.zip", "C:\\Users\\You\\Downloads\\backup.zip");
+    const folder = { name: "Projects", path: "C:\\Users\\You\\Projects", parent: "C:\\Users\\You", isDirectory: true };
+    const result = buildSections(
+      sources({ query: "p", fileResults: [photo, doc, video, audio, archive, folder], fileResultQuery: "p" }),
+    );
     const filesSection = result.sections.find((s) => s.id === "files");
     const photoItem = filesSection?.items.find((i) => i.title === "photo.png");
     const docItem = filesSection?.items.find((i) => i.title === "report.docx");
+    const videoItem = filesSection?.items.find((i) => i.title === "clip.mp4");
+    const audioItem = filesSection?.items.find((i) => i.title === "song.mp3");
+    const archiveItem = filesSection?.items.find((i) => i.title === "backup.zip");
+    const folderItem = filesSection?.items.find((i) => i.title === "Projects");
 
     expect(photoItem?.isPicture).toBe(true);
     expect(typeof photoItem?.dragFile).toBe("function");
     expect(docItem?.isPicture).toBe(false);
     expect(typeof docItem?.dragFile).toBe("function");
+    expect(typeof videoItem?.dragFile).toBe("function");
+    expect(typeof audioItem?.dragFile).toBe("function");
+    expect(typeof archiveItem?.dragFile).toBe("function");
+    expect(typeof folderItem?.dragFile).toBe("function");
+  });
+
+  it("marks quick access and local app targets as draggable", () => {
+    const quick = quickAccessPaletteItem({
+      name: "Documents",
+      path: "C:\\Users\\You\\Documents",
+      kind: "documents",
+    });
+    expect(typeof quick.dragFile).toBe("function");
+
+    const appWithTarget = app("AppTarget", { path: "C:\\Games\\game.exe" });
+    const result = buildSections(sources({ query: "app", apps: [appWithTarget] }));
+    const appSection = result.sections.find((s) => s.id === "apps");
+    const appItem = appSection?.items.find((i) => i.title === "AppTarget");
+    expect(typeof appItem?.dragFile).toBe("function");
   });
 });
