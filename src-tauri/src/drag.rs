@@ -4,17 +4,22 @@
 use std::os::windows::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use windows::core::{implement, BOOL, PCWSTR, HRESULT};
-use windows::Win32::Foundation::{DRAGDROP_S_CANCEL, DRAGDROP_S_DROP, DRAGDROP_S_USEDEFAULTCURSORS, S_OK};
-use windows::Win32::System::Com::IDataObject;
+use windows::core::{implement, BOOL, PCWSTR, HRESULT, Interface};
+use windows::Win32::Foundation::{
+    COLORREF, DRAGDROP_S_CANCEL, DRAGDROP_S_DROP, DRAGDROP_S_USEDEFAULTCURSORS,
+    POINT, SIZE, S_OK,
+};
+use windows::Win32::Graphics::Gdi::{DeleteObject, GetObjectW, BITMAP, HBITMAP};
+use windows::Win32::System::Com::{CoCreateInstance, CLSCTX_INPROC_SERVER, IDataObject};
 use windows::Win32::System::Ole::{
     DoDragDrop, OleInitialize, IDropSource, IDropSource_Impl,
     DROPEFFECT, DROPEFFECT_COPY, DROPEFFECT_LINK,
 };
 use windows::Win32::System::SystemServices::{MK_LBUTTON, MODIFIERKEYS_FLAGS};
 use windows::Win32::UI::Shell::{
-    BHID_DataObject, ILCreateFromPathW, ILFree, IShellItem,
+    BHID_DataObject, ILCreateFromPathW, ILFree, IShellItem, IShellItemImageFactory,
     SHCreateItemFromParsingName, SHCreateShellItemArrayFromIDLists, Common::ITEMIDLIST,
+    IDragSourceHelper, SHDRAGIMAGE, SIIGBF_BIGGERSIZEOK, SIIGBF_RESIZETOFIT,
 };
 
 #[implement(IDropSource)]
@@ -103,6 +108,73 @@ pub fn get_file_data_object(paths: &[PathBuf]) -> Result<IDataObject, String> {
     }
 }
 
+const CLSID_DRAG_DROP_HELPER: windows::core::GUID =
+    windows::core::GUID::from_u128(0x4657278a_411b_11d2_839a_00c04fd918d0);
+
+fn attach_drag_image(data_object: &IDataObject, paths: &[PathBuf]) {
+    let Some(first_path) = paths.first() else { return; };
+    let wide_path = wide_null(first_path);
+    let shell_item: IShellItem = match unsafe {
+        SHCreateItemFromParsingName(PCWSTR(wide_path.as_ptr()), None)
+    } {
+        Ok(item) => item,
+        Err(_) => return,
+    };
+
+    let Ok(factory): Result<IShellItemImageFactory, _> = shell_item.cast() else { return; };
+
+    let target_size = SIZE { cx: 96, cy: 96 };
+    let hbitmap: HBITMAP = match unsafe {
+        factory.GetImage(target_size, SIIGBF_BIGGERSIZEOK | SIIGBF_RESIZETOFIT)
+    } {
+        Ok(h) => h,
+        Err(_) => return,
+    };
+
+    let mut bm = BITMAP::default();
+    let bm_size = std::mem::size_of::<BITMAP>() as i32;
+    let actual_size = if unsafe {
+        GetObjectW(hbitmap.into(), bm_size, Some(&mut bm as *mut _ as *mut _))
+    } == bm_size {
+        SIZE { cx: bm.bmWidth, cy: bm.bmHeight }
+    } else {
+        target_size
+    };
+
+    let helper: IDragSourceHelper = match unsafe {
+        CoCreateInstance(
+            &CLSID_DRAG_DROP_HELPER,
+            None,
+            CLSCTX_INPROC_SERVER,
+        )
+    } {
+        Ok(h) => h,
+        Err(_) => {
+            unsafe { let _ = DeleteObject(hbitmap.into()); }
+            return;
+        }
+    };
+
+    let offset = POINT {
+        x: actual_size.cx / 2,
+        y: actual_size.cy / 2,
+    };
+
+    let shdragimage = SHDRAGIMAGE {
+        sizeDragImage: actual_size,
+        ptOffset: offset,
+        hbmpDragImage: hbitmap,
+        crColorKey: COLORREF(0),
+    };
+
+    let result = unsafe {
+        helper.InitializeFromBitmap(&shdragimage, Some(data_object))
+    };
+    if result.is_err() {
+        unsafe { let _ = DeleteObject(hbitmap.into()); }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DragResult {
     Dropped,
@@ -123,6 +195,7 @@ pub fn drag_files(paths: &[PathBuf]) -> Result<DragResult, String> {
 
     init_thread_ole();
     let data_object = get_file_data_object(paths)?;
+    attach_drag_image(&data_object, paths);
     let drop_source: IDropSource = DropSource(()).into();
 
     unsafe {
@@ -183,5 +256,17 @@ mod tests {
     #[test]
     fn drag_state_is_inactive_by_default() {
         assert!(!is_dragging());
+    }
+
+    #[test]
+    fn attach_drag_image_runs_cleanly_for_valid_file() {
+        let temp_dir = std::env::temp_dir().join(format!("prism-drag-img-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&temp_dir);
+        let file_path = temp_dir.join("sample.png");
+        File::create(&file_path).unwrap();
+
+        let obj = get_file_data_object(&[file_path.clone()]).unwrap();
+        attach_drag_image(&obj, &[file_path]);
+        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 }
