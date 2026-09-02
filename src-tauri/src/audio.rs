@@ -140,16 +140,27 @@ pub fn adjust_app_volume(tokens: &[String], delta: f32) -> Result<Option<(String
                 };
 
                 let pid = control.GetProcessId().unwrap_or(0);
-                let process_name = if pid > 0 {
-                    get_process_name(pid).unwrap_or_default()
-                } else {
-                    String::new()
-                };
+                if pid == 0 {
+                    // pid 0 is the system sounds session. Never match an application to pid 0!
+                    continue;
+                }
+                if control.IsSystemSoundsSession() == windows::Win32::Foundation::S_OK {
+                    continue;
+                }
 
+                let process_name = get_process_name(pid).unwrap_or_default();
                 let proc_lower = process_name.to_ascii_lowercase();
+                let proc_stem = proc_lower.strip_suffix(".exe").unwrap_or(&proc_lower);
+                if proc_stem.is_empty() {
+                    continue;
+                }
+
                 let is_match = tokens.iter().any(|token| {
                     let t = token.to_ascii_lowercase();
-                    !t.is_empty() && (proc_lower.contains(&t) || t.contains(&proc_lower.replace(".exe", "")))
+                    if t.len() < 3 {
+                        return false;
+                    }
+                    proc_stem.contains(&t) || t.contains(proc_stem)
                 });
 
                 if is_match {
@@ -184,7 +195,32 @@ pub fn inspect_element_at(point: POINT) -> Option<(String, String, String, isize
     unsafe {
         let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
         let uia: IUIAutomation = CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER).ok()?;
-        let element = uia.ElementFromPoint(point).ok()?;
+        let mut element = uia.ElementFromPoint(point).ok()?;
+
+        let walker = uia.ControlViewWalker().ok();
+
+        // If hitting a child element (e.g. icon image or running bar), walk up to find the taskbar button
+        for _ in 0..4 {
+            let name = element.CurrentName().map(|s| s.to_string()).unwrap_or_default();
+            let auto_id = element.CurrentAutomationId().map(|s| s.to_string()).unwrap_or_default();
+            let class_name = element.CurrentClassName().map(|s| s.to_string()).unwrap_or_default();
+            let hwnd = element.CurrentNativeWindowHandle().map(|h| h.0 as isize).unwrap_or(0);
+
+            if !name.is_empty() || auto_id.starts_with("Appid: ") || class_name.contains("Button") || class_name.contains("TaskList") {
+                return Some((name, class_name, auto_id, hwnd));
+            }
+
+            if let Some(ref w) = walker {
+                if let Ok(parent) = w.GetParentElement(&element) {
+                    element = parent;
+                } else {
+                    break;
+                }
+            } else {
+                break;
+            }
+        }
+
         let name = element.CurrentName().map(|s| s.to_string()).unwrap_or_default();
         let class_name = element.CurrentClassName().map(|s| s.to_string()).unwrap_or_default();
         let auto_id = element.CurrentAutomationId().map(|s| s.to_string()).unwrap_or_default();
@@ -254,12 +290,27 @@ pub fn identify_taskbar_target_at(point: POINT) -> TaskbarTargetInfo {
 
 fn clean_app_display_name(name: &str, auto_id: &str) -> String {
     if !name.is_empty() {
-        let without_pinned = name.replace("pinned", "");
-        let first_part = without_pinned
-            .split(" - ")
-            .next()
-            .unwrap_or(name)
-            .trim();
+        let mut s = name.to_string();
+        for pattern in &[
+            " - 1 running window pinned",
+            " - 2 running windows pinned",
+            " - 3 running windows pinned",
+            " - 4 running windows pinned",
+            " - 5 running windows pinned",
+            " running window pinned",
+            " running windows pinned",
+            " - 1 running window",
+            " - 2 running windows",
+            " - 3 running windows",
+            " - 4 running windows",
+            " - 5 running windows",
+            " running window",
+            " running windows",
+            " pinned",
+        ] {
+            s = s.replace(pattern, "");
+        }
+        let first_part = s.split(" - ").next().unwrap_or(&s).trim();
         if !first_part.is_empty() {
             return first_part.to_string();
         }
@@ -313,26 +364,30 @@ pub fn adjust_volume_at_taskbar(point: POINT, delta: f32) -> Option<VolumeChange
         });
     }
 
-    // Try adjusting app volume
-    if let Ok(Some((_app_name, vol, muted))) = adjust_app_volume(&target.tokens, delta) {
-        return Some(VolumeChangeResult {
-            title: target.display_title,
-            volume: vol,
-            percentage: (vol * 100.0).round() as u32,
-            muted,
-            is_master: false,
-        });
+    // Adjust specific application volume (NEVER fall back to master volume on app buttons)
+    match adjust_app_volume(&target.tokens, delta) {
+        Ok(Some((_app_name, vol, muted))) => {
+            Some(VolumeChangeResult {
+                title: target.display_title,
+                volume: vol,
+                percentage: (vol * 100.0).round() as u32,
+                muted,
+                is_master: false,
+            })
+        }
+        Ok(None) => {
+            // The hovered application currently has no active audio session in the Windows Audio Mixer.
+            // Do NOT adjust master volume! Show clear inactive status instead of touching overall volume.
+            Some(VolumeChangeResult {
+                title: format!("{} (No Audio)", target.display_title),
+                volume: 0.0,
+                percentage: 0,
+                muted: true,
+                is_master: false,
+            })
+        }
+        Err(_) => None,
     }
-
-    // Graceful fallback to master volume if app currently has no active audio session
-    let (vol, muted) = adjust_master_volume(delta).ok()?;
-    Some(VolumeChangeResult {
-        title: format!("{} (Master)", target.display_title),
-        volume: vol,
-        percentage: (vol * 100.0).round() as u32,
-        muted,
-        is_master: true,
-    })
 }
 
 #[cfg(test)]
@@ -340,11 +395,51 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_clean_app_display_name() {
+        assert_eq!(
+            clean_app_display_name("Google Chrome - 1 running window pinned", "Appid: Chrome"),
+            "Google Chrome"
+        );
+        assert_eq!(
+            clean_app_display_name("Discord - 2 running windows", "Appid: Discord"),
+            "Discord"
+        );
+        assert_eq!(
+            clean_app_display_name("Fortnite  ", ""),
+            "Fortnite"
+        );
+        assert_eq!(
+            clean_app_display_name("Spotify Free", "Appid: Spotify.Spotify"),
+            "Spotify Free"
+        );
+        assert_eq!(
+            clean_app_display_name("", "Appid: Chrome"),
+            "Chrome"
+        );
+    }
+
+    #[test]
     fn test_adjust_master_volume_query() {
-        // Test query with 0.0 delta
         let res = adjust_master_volume(0.0);
-        assert!(res.is_ok(), "adjust_master_volume query failed: {:?}", res.err());
-        let (vol, muted) = res.unwrap();
-        println!("Master volume: {:.0}%, Muted: {}", vol * 100.0, muted);
+        assert!(res.is_ok(), "query master volume failed: {:?}", res.err());
+        let (vol, _muted) = res.unwrap();
+        assert!((0.0..=1.0).contains(&vol));
+    }
+
+    #[test]
+    fn test_adjust_app_volume_isolation() {
+        // Query Discord with 0.0 delta
+        let discord_res = adjust_app_volume(&["discord".to_string()], 0.0);
+        println!("adjust_app_volume discord res: {:?}", discord_res);
+        assert!(discord_res.unwrap().is_some());
+
+        // Query Fortnite with 0.0 delta
+        let fn_res = adjust_app_volume(&["fortnite".to_string()], 0.0);
+        println!("adjust_app_volume fortnite res: {:?}", fn_res);
+        assert!(fn_res.unwrap().is_some());
+
+        // Ensure unknown app returns Ok(None) and does not error or alter master
+        let none_res = adjust_app_volume(&["nonexistent_prism_app_xyz".to_string()], 0.0);
+        assert_eq!(none_res.unwrap(), None);
     }
 }

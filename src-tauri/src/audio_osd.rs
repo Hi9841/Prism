@@ -247,13 +247,20 @@ unsafe fn render_osd_surface(hwnd: HWND, state: &OsdState) {
     let _ = SetBkMode(mem_dc, TRANSPARENT);
     let _ = SetTextColor(mem_dc, rgb(255, 255, 255));
 
+    let is_no_audio = state.title.ends_with("(No Audio)");
+    let clean_title = if is_no_audio {
+        state.title.trim_end_matches(" (No Audio)").trim()
+    } else {
+        &state.title
+    };
+
     // Title text: truncated if long
-    let display_title = truncate_string(&state.title, 20);
+    let display_title = truncate_string(clean_title, if is_no_audio { 15 } else { 20 });
     let mut wide_title: Vec<u16> = display_title.encode_utf16().collect();
     let mut title_rect = RECT {
         left: 36,
         top: 10,
-        right: OSD_WIDTH - 50,
+        right: if is_no_audio { OSD_WIDTH - 80 } else { OSD_WIDTH - 50 },
         bottom: 28,
     };
     windows::Win32::Graphics::Gdi::DrawTextW(
@@ -264,19 +271,21 @@ unsafe fn render_osd_surface(hwnd: HWND, state: &OsdState) {
     );
 
     // Percentage text
-    let pct_text = if state.muted {
+    let pct_text = if is_no_audio {
+        "No Audio".to_string()
+    } else if state.muted {
         "Muted".to_string()
     } else {
         format!("{}%", state.percentage)
     };
     let mut wide_pct: Vec<u16> = pct_text.encode_utf16().collect();
     let mut pct_rect = RECT {
-        left: OSD_WIDTH - 60,
+        left: if is_no_audio { OSD_WIDTH - 82 } else { OSD_WIDTH - 60 },
         top: 10,
         right: OSD_WIDTH - 16,
         bottom: 28,
     };
-    let _ = SetTextColor(mem_dc, if state.muted { rgb(255, 120, 120) } else { rgb(200, 205, 215) });
+    let _ = SetTextColor(mem_dc, if is_no_audio { rgb(160, 165, 175) } else if state.muted { rgb(255, 120, 120) } else { rgb(200, 205, 215) });
     windows::Win32::Graphics::Gdi::DrawTextW(
         mem_dc,
         &mut wide_pct,
