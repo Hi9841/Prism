@@ -11,6 +11,7 @@ import {
   ClipboardCopy,
   Download,
   File,
+  FileArchive,
   FileImage,
   FileText,
   FileVideo,
@@ -303,6 +304,7 @@ function appPaletteItem(app: AppEntry, icons: Readonly<Record<string, string>>):
     icon: { kind: "app", name: app.name, icon: icons[app.appId] ?? app.icon },
     historyTitle: app.name,
     appId: app.appId,
+    dragFile: localTarget ? () => startFileDrag([localTarget]) : undefined,
     run: () => launchApp(app.appId),
     runAsAdmin: isElevatablePath(app.path) ? () => launchAppAsAdmin(app.appId) : undefined,
     openLocation: localTarget ? () => openPathLocation(localTarget) : undefined,
@@ -364,6 +366,7 @@ export function quickAccessPaletteItem(entry: QuickAccessEntry): PaletteItem {
     icon: { kind: "tile", icon: iconMap[entry.kind], tint: tintMap[entry.kind] },
     historyTitle: entry.name,
     quickAccessKind: entry.kind,
+    dragFile: entry.path ? () => startFileDrag([entry.path]) : undefined,
     run: () => openPath(entry.path),
     openLocation: () => openPathLocation(entry.path),
     shellPath: entry.path,
@@ -384,7 +387,7 @@ function filePaletteItem(entry: FileEntry): PaletteItem {
       : { kind: "tile", icon, tint },
     historyTitle: entry.name,
     isPicture,
-    dragFile: !entry.isDirectory ? () => startFileDrag([entry.path]) : undefined,
+    dragFile: entry.path ? () => startFileDrag([entry.path]) : undefined,
     run: () => openPath(entry.path),
     runAsAdmin:
       !entry.isDirectory && isElevatablePath(entry.path) ? () => runPathAsAdmin(entry.path) : undefined,
@@ -399,16 +402,83 @@ function filePaletteItem(entry: FileEntry): PaletteItem {
 function fileAppearance(entry: FileEntry) {
   if (entry.isDirectory) return { icon: Folder, tint: "azure" as const };
   const extension = entry.name.split(".").pop()?.toLowerCase() ?? "";
-  if (["jpg", "jpeg", "png", "gif", "webp", "bmp", "svg"].includes(extension)) {
+  if (
+    [
+      "jpg",
+      "jpeg",
+      "png",
+      "gif",
+      "webp",
+      "bmp",
+      "svg",
+      "ico",
+      "tiff",
+      "tif",
+      "avif",
+      "heic",
+      "psd",
+      "ai",
+      "xd",
+      "fig",
+      "sketch",
+      "raw",
+      "cr2",
+      "nef",
+    ].includes(extension)
+  ) {
     return { icon: FileImage, tint: "amber" as const };
   }
-  if (["mp4", "mov", "mkv", "avi", "webm"].includes(extension)) {
+  if (["mp4", "mov", "mkv", "avi", "webm", "wmv", "flv", "m4v", "3gp", "ts"].includes(extension)) {
     return { icon: FileVideo, tint: "rose" as const };
   }
-  if (["mp3", "wav", "flac", "m4a", "aac", "ogg"].includes(extension)) {
+  if (["mp3", "wav", "flac", "m4a", "aac", "ogg", "wma", "opus", "aiff", "mid", "midi"].includes(extension)) {
     return { icon: Music, tint: "mint" as const };
   }
-  if (["txt", "md", "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "csv"].includes(extension)) {
+  if (["zip", "rar", "7z", "tar", "gz", "bz2", "xz", "iso", "cab", "tgz"].includes(extension)) {
+    return { icon: FileArchive, tint: "amber" as const };
+  }
+  if (
+    [
+      "txt",
+      "md",
+      "pdf",
+      "doc",
+      "docx",
+      "xls",
+      "xlsx",
+      "ppt",
+      "pptx",
+      "csv",
+      "rtf",
+      "odt",
+      "ods",
+      "odp",
+      "json",
+      "xml",
+      "yaml",
+      "yml",
+      "toml",
+      "html",
+      "css",
+      "js",
+      "ts",
+      "tsx",
+      "jsx",
+      "rs",
+      "py",
+      "c",
+      "cpp",
+      "h",
+      "cs",
+      "java",
+      "go",
+      "sql",
+      "sh",
+      "bat",
+      "cmd",
+      "ps1",
+    ].includes(extension)
+  ) {
     return { icon: FileText, tint: "slate" as const };
   }
   return { icon: File, tint: "slate" as const };
