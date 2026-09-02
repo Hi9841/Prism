@@ -1,6 +1,6 @@
 [package]
 name = "prism"
-version = "0.9.33"
+version = "0.9.34"
 description = "Prism - a keyboard-first command palette for Windows"
 edition = "2021"
 
@@ -42,6 +42,7 @@ windows = { version = "0.61", features = [
   "Win32_System_Registry",
   "Win32_System_Power",
   "Win32_System_Shutdown",
+  "Win32_System_StationsAndDesktops",
   "Win32_System_SystemServices",
   "Win32_System_LibraryLoader",
   "Win32_System_Ole",
@@ -54,6 +55,8 @@ windows = { version = "0.61", features = [
   "Win32_UI_Shell_Common",
   "Win32_UI_Shell_PropertiesSystem",
   "Win32_UI_WindowsAndMessaging",
+  "Win32_Media_Audio",
+  "Win32_Media_Audio_Endpoints",
 ] }
 image = { version = "0.25", default-features = false, features = ["bmp", "gif", "jpeg", "png", "webp"] }
 tauri-plugin-updater = "2"

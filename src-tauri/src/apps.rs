@@ -2037,12 +2037,6 @@ pub fn set_taskbar_pinned(path: &Path, pinned: bool) -> Result<(), String> {
         return Ok(());
     }
 
-    if crate::win_key::shell_bridge_taskbar_pin(path, pinned).is_ok()
-        && wait_for_taskbar_state(path, pinned)
-    {
-        return Ok(());
-    }
-
     let _com = ComGuard::init();
     let pin_target = if pinned
         && !path
@@ -2069,6 +2063,12 @@ pub fn set_taskbar_pinned(path: &Path, pinned: bool) -> Result<(), String> {
         pinned_link.as_deref().unwrap_or(path)
     };
 
+    if crate::win_key::shell_bridge_taskbar_pin(taskband_target, pinned).is_ok()
+        && wait_for_taskbar_state(path, pinned)
+    {
+        return Ok(());
+    }
+
     if let Some(pidl) = resolve_shell_pidl(taskband_target) {
         let result = if pinned {
             modify_taskband_pin(None, Some(pidl))
@@ -2082,7 +2082,7 @@ pub fn set_taskbar_pinned(path: &Path, pinned: bool) -> Result<(), String> {
     }
 
     let verb = if pinned { "taskbarpin" } else { "taskbarunpin" };
-    if unsafe { shell_execute_verb(verb, path) }.is_ok() && wait_for_taskbar_state(path, pinned) {
+    if unsafe { shell_execute_verb(verb, taskband_target) }.is_ok() && wait_for_taskbar_state(path, pinned) {
         return Ok(());
     }
 
@@ -2105,6 +2105,7 @@ pub fn find_taskbar_pin(path: &Path) -> Option<PathBuf> {
         return None;
     };
     let mut match_keys = vec![path_key(&path.to_string_lossy())];
+    let path_aumid = read_lnk_aumid(path);
     if path
         .extension()
         .is_some_and(|extension| extension.eq_ignore_ascii_case("lnk"))
@@ -2129,6 +2130,11 @@ pub fn find_taskbar_pin(path: &Path) -> Option<PathBuf> {
         }
         if match_keys.contains(&path_key(&link.to_string_lossy())) {
             return Some(link);
+        }
+        if let (Some(ref req_aumid), Some(link_aumid)) = (&path_aumid, read_lnk_aumid(&link)) {
+            if !req_aumid.is_empty() && req_aumid.eq_ignore_ascii_case(&link_aumid) {
+                return Some(link);
+            }
         }
         let Some(resolved) = resolve_lnk(&link) else {
             continue;

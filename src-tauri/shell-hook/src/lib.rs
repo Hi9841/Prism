@@ -250,8 +250,51 @@ struct ShellExecuteInfoW {
     process: *mut c_void,
 }
 
+#[repr(C)]
+struct Guid {
+    data1: u32,
+    data2: u16,
+    data3: u16,
+    data4: [u8; 8],
+}
+
+const CLSID_TASKBAND_PIN: Guid = Guid {
+    data1: 0x90aa3a4e,
+    data2: 0x1cba,
+    data3: 0x4233,
+    data4: [0xb8, 0xbb, 0x53, 0x57, 0x73, 0xd4, 0x84, 0x49],
+};
+
+const IID_IPINNED_LIST3: Guid = Guid {
+    data1: 0x0dd79ae2,
+    data2: 0xd156,
+    data3: 0x45d4,
+    data4: [0x9e, 0xeb, 0x3b, 0x54, 0x97, 0x69, 0xe9, 0x40],
+};
+
+#[repr(C)]
+struct IPinnedList3Vtbl {
+    QueryInterface: unsafe extern "system" fn(this: *mut c_void, riid: *const Guid, ppv: *mut *mut c_void) -> i32,
+    AddRef: unsafe extern "system" fn(this: *mut c_void) -> u32,
+    Release: unsafe extern "system" fn(this: *mut c_void) -> u32,
+    Other: [usize; 13],
+    Modify: unsafe extern "system" fn(
+        this: *mut c_void,
+        unpin: *const c_void,
+        pin: *const c_void,
+        caller: i32,
+    ) -> i32,
+}
+
+#[repr(C)]
+struct IPinnedList3 {
+    vtbl: *const IPinnedList3Vtbl,
+}
+
 #[link(name = "shell32")]
 extern "system" {
+    fn ILCreateFromPathW(path: *const u16) -> *mut c_void;
+    fn ILFree(pidl: *mut c_void);
     fn ShellExecuteExW(info: *mut ShellExecuteInfoW) -> i32;
     fn ShellExecuteW(
         hwnd: Hwnd,
@@ -261,6 +304,19 @@ extern "system" {
         directory: *const u16,
         show_cmd: i32,
     ) -> isize;
+}
+
+#[link(name = "ole32")]
+extern "system" {
+    fn CoCreateInstance(
+        rclsid: *const Guid,
+        punkouter: *mut c_void,
+        dwclscontext: u32,
+        riid: *const Guid,
+        ppv: *mut *mut c_void,
+    ) -> i32;
+    fn CoInitialize(pvreserved: *mut c_void) -> i32;
+    fn CoUninitialize();
 }
 
 fn to_wide(value: &str) -> Vec<u16> {
@@ -284,43 +340,99 @@ fn handle_taskbar_pin(pinned: bool) -> isize {
         _ => return 0,
     };
     let _ = std::fs::remove_file(&target_file);
-    let verb = to_wide(if pinned {
-        "taskbarpin"
-    } else {
-        "taskbarunpin"
-    });
-    let target = to_wide(&target);
-    let mut info = ShellExecuteInfoW {
-        cb_size: std::mem::size_of::<ShellExecuteInfoW>() as u32,
-        f_mask: 0x0000_0400 | 0x0000_0040,
-        hwnd: std::ptr::null_mut(),
-        verb: verb.as_ptr(),
-        file: target.as_ptr(),
-        parameters: std::ptr::null(),
-        directory: std::ptr::null(),
-        show: SW_HIDE,
-        inst_app: std::ptr::null_mut(),
-        id_list: std::ptr::null_mut(),
-        class: std::ptr::null(),
-        key_class: std::ptr::null_mut(),
-        hot_key: 0,
-        icon_or_monitor: std::ptr::null_mut(),
-        process: std::ptr::null_mut(),
-    };
-    if unsafe { ShellExecuteExW(&mut info) } != 0 {
-        return 1;
-    }
-    let result = unsafe {
-        ShellExecuteW(
+
+    let target_wide = to_wide(&target);
+    unsafe {
+        let _ = CoInitialize(std::ptr::null_mut());
+        let pidl = ILCreateFromPathW(target_wide.as_ptr());
+        if !pidl.is_null() {
+            let mut pinned_list_raw: *mut c_void = std::ptr::null_mut();
+            let hr = CoCreateInstance(
+                &CLSID_TASKBAND_PIN,
+                std::ptr::null_mut(),
+                1, // CLSCTX_INPROC_SERVER
+                &IID_IPINNED_LIST3,
+                &mut pinned_list_raw,
+            );
+
+            if hr >= 0 && !pinned_list_raw.is_null() {
+                let pinned_list = pinned_list_raw as *mut IPinnedList3;
+                let (unpin, pin) = if pinned {
+                    (std::ptr::null(), pidl as *const c_void)
+                } else {
+                    (pidl as *const c_void, std::ptr::null())
+                };
+
+                let mut modify_hr = ((*(*pinned_list).vtbl).Modify)(
+                    pinned_list_raw,
+                    unpin,
+                    pin,
+                    4, // PLMC_EXPLORER
+                );
+                if modify_hr < 0 {
+                    modify_hr = ((*(*pinned_list).vtbl).Modify)(
+                        pinned_list_raw,
+                        unpin,
+                        pin,
+                        34, // PLMC_EDGE
+                    );
+                }
+                if modify_hr < 0 {
+                    modify_hr = ((*(*pinned_list).vtbl).Modify)(
+                        pinned_list_raw,
+                        unpin,
+                        pin,
+                        0x7FFF_FFFF,
+                    );
+                }
+                ((*(*pinned_list).vtbl).Release)(pinned_list_raw);
+                ILFree(pidl);
+                CoUninitialize();
+                if modify_hr >= 0 {
+                    return 1;
+                }
+            } else {
+                ILFree(pidl);
+            }
+        }
+        CoUninitialize();
+
+        // Fallback to ShellExecute verb
+        let verb = to_wide(if pinned {
+            "taskbarpin"
+        } else {
+            "taskbarunpin"
+        });
+        let mut info = ShellExecuteInfoW {
+            cb_size: std::mem::size_of::<ShellExecuteInfoW>() as u32,
+            f_mask: 0x0000_0400 | 0x0000_0040 | 0x0000_000C, // SEE_MASK_INVOKEIDLIST
+            hwnd: std::ptr::null_mut(),
+            verb: verb.as_ptr(),
+            file: target_wide.as_ptr(),
+            parameters: std::ptr::null(),
+            directory: std::ptr::null(),
+            show: SW_HIDE,
+            inst_app: std::ptr::null_mut(),
+            id_list: std::ptr::null_mut(),
+            class: std::ptr::null(),
+            key_class: std::ptr::null_mut(),
+            hot_key: 0,
+            icon_or_monitor: std::ptr::null_mut(),
+            process: std::ptr::null_mut(),
+        };
+        if ShellExecuteExW(&mut info) != 0 {
+            return 1;
+        }
+        let result = ShellExecuteW(
             std::ptr::null_mut(),
             verb.as_ptr(),
-            target.as_ptr(),
+            target_wide.as_ptr(),
             std::ptr::null(),
             std::ptr::null(),
             SW_HIDE,
-        )
-    };
-    isize::from(result > 32)
+        );
+        isize::from(result > 32)
+    }
 }
 
 unsafe fn observer_window() -> Hwnd {
