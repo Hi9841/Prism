@@ -110,9 +110,6 @@ export function Palette() {
   } | null>(null);
   const fileDragFrameRef = useRef<number | null>(null);
   const [fileDrag, setFileDrag] = useState<FileDragState | null>(null);
-  const [filePreviewLeaving, setFilePreviewLeaving] = useState(false);
-  const filePreviewLeaveTimerRef = useRef<number | null>(null);
-  const leavingFileDragRef = useRef<FileDragState | null>(null);
 
   const closeResultMenu = useCallback((restoreFocus: boolean) => {
     setResultMenu(null);
@@ -433,19 +430,6 @@ export function Palette() {
     setFileDrag(next);
   }, []);
 
-  const animateFilePreviewOut = useCallback(() => {
-    const current = fileDragRef.current;
-    if (!current?.active) return;
-    leavingFileDragRef.current = current;
-    setFilePreviewLeaving(true);
-    if (filePreviewLeaveTimerRef.current !== null) window.clearTimeout(filePreviewLeaveTimerRef.current);
-    filePreviewLeaveTimerRef.current = window.setTimeout(() => {
-      filePreviewLeaveTimerRef.current = null;
-      leavingFileDragRef.current = null;
-      setFilePreviewLeaving(false);
-    }, 110);
-  }, []);
-
   const startNativeFileDrag = useCallback(
     async (item: PaletteItem, pointerId: number, captureEl?: HTMLElement | null) => {
       if (captureEl && captureEl.hasPointerCapture(pointerId)) {
@@ -460,11 +444,10 @@ export function Palette() {
       } catch {
         // ignore
       } finally {
-        animateFilePreviewOut();
         updateFileDragState(null);
       }
     },
-    [animateFilePreviewOut, updateFileDragState],
+    [updateFileDragState],
   );
 
   const startFileDrag = useCallback(
@@ -525,14 +508,13 @@ export function Palette() {
       const current = fileDragRef.current;
       if (!current || current.pointerId !== pointerId) return false;
       if (current.active) {
-        animateFilePreviewOut();
         updateFileDragState(null);
         return true;
       }
       updateFileDragState(null);
       return false;
     },
-    [animateFilePreviewOut, applyFileDrag, updateFileDragState],
+    [applyFileDrag, updateFileDragState],
   );
 
   const cancelFileDrag = useCallback(
@@ -543,11 +525,10 @@ export function Palette() {
         fileDragFrameRef.current = null;
       }
       if (fileDragRef.current?.pointerId === pointerId) {
-        if (fileDragRef.current.active) animateFilePreviewOut();
         updateFileDragState(null);
       }
     },
-    [animateFilePreviewOut, updateFileDragState],
+    [updateFileDragState],
   );
 
   useEffect(() => {
@@ -569,7 +550,6 @@ export function Palette() {
       if (categoryDragFrameRef.current !== null) cancelAnimationFrame(categoryDragFrameRef.current);
       if (fileDragFrameRef.current !== null) cancelAnimationFrame(fileDragFrameRef.current);
       if (previewLeaveTimerRef.current !== null) window.clearTimeout(previewLeaveTimerRef.current);
-      if (filePreviewLeaveTimerRef.current !== null) window.clearTimeout(filePreviewLeaveTimerRef.current);
     },
     [],
   );
@@ -933,12 +913,6 @@ export function Palette() {
         <ReorderDragPreview drag={leavingDragRef.current} leaving />
       ) : null}
 
-      {fileDrag?.active ? (
-        <FileDragPreview drag={fileDrag} />
-      ) : filePreviewLeaving && leavingFileDragRef.current ? (
-        <FileDragPreview drag={leavingFileDragRef.current} leaving />
-      ) : null}
-
       {categoryDrag?.active ? <CategoryDragPreview drag={categoryDrag} /> : null}
 
       <div aria-live="polite" aria-atomic="true" className="sr-only">
@@ -1030,36 +1004,6 @@ function ReorderDragPreview({ drag, leaving }: { drag: ReorderDragState; leaving
           <div className="mt-[3px] truncate text-[11.5px] leading-tight text-fg-tertiary">
             {drag.item.subtitle ?? "Application"}
           </div>
-        </div>
-        <GripVertical className="h-4 w-4 shrink-0 text-accent" />
-      </div>
-    </div>
-  );
-}
-
-function FileDragPreview({ drag, leaving }: { drag: FileDragState; leaving?: boolean }) {
-  const previewWidth = 280;
-  const previewHeight = 54;
-  const isFromLeft = drag.startX < 120;
-  const rawX = isFromLeft ? drag.x + 14 : drag.x - previewWidth - 14;
-  const x = Math.min(Math.max(8, rawX), window.innerWidth - previewWidth - 8);
-  const y = Math.min(Math.max(8, drag.y - previewHeight / 2), window.innerHeight - previewHeight - 8);
-
-  return (
-    <div
-      aria-hidden="true"
-      className="pointer-events-none fixed top-0 left-0 z-50 will-change-transform"
-      style={{ transform: `translate3d(${x}px, ${y}px, 0)` }}
-    >
-      <div className={`reorder-drag-preview file-drag-preview${leaving ? " reorder-drag-preview-exit" : ""}`}>
-        <RowIcon icon={drag.item.icon} />
-        <div className="min-w-0">
-          <div className="truncate text-[13.5px] leading-tight font-semibold text-fg">{drag.item.title}</div>
-          {drag.item.subtitle ? (
-            <div className="mt-[3px] truncate text-[11.5px] leading-tight text-fg-tertiary">
-              {drag.item.subtitle}
-            </div>
-          ) : null}
         </div>
         <GripVertical className="h-4 w-4 shrink-0 text-accent" />
       </div>
