@@ -2036,6 +2036,12 @@ pub fn set_taskbar_pinned(path: &Path, pinned: bool) -> Result<(), String> {
         return Ok(());
     }
 
+    if crate::win_key::shell_bridge_taskbar_pin(path, pinned).is_ok()
+        && wait_for_taskbar_state(path, pinned)
+    {
+        return Ok(());
+    }
+
     let _com = ComGuard::init();
     let pin_target = if pinned
         && !path
