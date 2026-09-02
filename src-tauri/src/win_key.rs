@@ -18,7 +18,7 @@
 
 use std::fs::OpenOptions;
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, Ordering};
 use std::sync::{mpsc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -84,9 +84,6 @@ const SHELL_CONTROL_SEARCH_RECT_TOP: usize = 16;
 const SHELL_CONTROL_SEARCH_RECT_RIGHT: usize = 17;
 const SHELL_CONTROL_SEARCH_RECT_BOTTOM: usize = 18;
 const SHELL_EVENT_SEARCH_RECT_CONFIGURED: usize = 19;
-const SHELL_CONTROL_TASKBAR_PIN: usize = 20;
-const SHELL_CONTROL_TASKBAR_UNPIN: usize = 21;
-const SHELL_EVENT_TASKBAR_PIN_COMPLETED: usize = 22;
 
 /// Event the frontend receives when Win observation self-disables.
 pub const FAILED_EVENT: &str = "win-mode-failed";
@@ -333,7 +330,6 @@ static SHELL_SEARCH_RECT_ACK: AtomicU32 = AtomicU32::new(0);
 static SHELL_START_CLICK_X: AtomicI32 = AtomicI32::new(0);
 static SHELL_TASKBAR_THREAD: AtomicU32 = AtomicU32::new(0);
 static SHELL_ICON_SHUTDOWN_ACK: AtomicU32 = AtomicU32::new(0);
-static SHELL_TASKBAR_PIN_ACK: AtomicU32 = AtomicU32::new(0);
 static LAST_TOGGLE_MS: AtomicU64 = AtomicU64::new(0);
 static TOGGLE_CLOCK: OnceLock<Instant> = OnceLock::new();
 static PENDING_WIN_TOGGLE: Mutex<PendingWinToggle> = Mutex::new(PendingWinToggle::EMPTY);
@@ -453,51 +449,6 @@ pub(crate) fn notify_start_icon_changed() {
             );
         }
     }
-}
-
-pub(crate) fn shell_bridge_taskbar_pin(path: &Path, pin: bool) -> Result<(), String> {
-    if !SHELL_BRIDGE_ACTIVE.load(Ordering::Acquire) {
-        return Err("shell bridge not active".into());
-    }
-    let taskbar_thread = SHELL_TASKBAR_THREAD.load(Ordering::Acquire);
-    if taskbar_thread == 0 {
-        return Err("shell taskbar thread not available".into());
-    }
-    let message = shell_bridge_message()?;
-
-    let target_file = std::env::temp_dir()
-        .join("Prism")
-        .join("taskbar-pin-target.txt");
-    if let Some(parent) = target_file.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    std::fs::write(&target_file, path.to_string_lossy().as_bytes())
-        .map_err(|e| format!("failed to write pin target file: {e}"))?;
-
-    SHELL_TASKBAR_PIN_ACK.store(0, Ordering::Release);
-    let control = if pin {
-        SHELL_CONTROL_TASKBAR_PIN
-    } else {
-        SHELL_CONTROL_TASKBAR_UNPIN
-    };
-
-    let post_ok =
-        unsafe { PostThreadMessageW(taskbar_thread, message, WPARAM(control), LPARAM(0)) };
-    if post_ok.is_err() {
-        return Err("failed to post pin message to shell thread".into());
-    }
-
-    let start = std::time::Instant::now();
-    while start.elapsed() < std::time::Duration::from_millis(1500) {
-        let ack = SHELL_TASKBAR_PIN_ACK.load(Ordering::Acquire);
-        if ack == 2 {
-            return Ok(());
-        } else if ack == 1 {
-            return Err("shell pin operation failed in explorer".into());
-        }
-        std::thread::sleep(std::time::Duration::from_millis(20));
-    }
-    Err("shell bridge pin request timed out".into())
 }
 
 /// Asks the observation pump to re-query the Start button rectangle now.
@@ -1757,9 +1708,6 @@ unsafe extern "system" fn raw_input_window_proc(
             }
             SHELL_EVENT_START_ICON_REFRESHED => {
                 debug_trace(&format!("start-icon-refresh {}", lparam.0));
-            }
-            SHELL_EVENT_TASKBAR_PIN_COMPLETED => {
-                SHELL_TASKBAR_PIN_ACK.store(if lparam.0 != 0 { 2 } else { 1 }, Ordering::Release);
             }
             SHELL_EVENT_TASKBAR_START_CLICK_X => {
                 SHELL_START_CLICK_X.store(lparam.0 as i32, Ordering::Release);

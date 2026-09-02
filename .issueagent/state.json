@@ -1,0 +1,121 @@
+{
+  "issue": {
+    "number": 32,
+    "title": "Add 'Open location' to right-click context menu for files and folders",
+    "repo": "Hi9841/Prism",
+    "url": "https://github.com/Hi9841/Prism/issues/32"
+  },
+  "stages": {
+    "triage": {
+      "status": "completed",
+      "message": "Triage completed for issue #32",
+      "updated_at": "23:46:44"
+    },
+    "research": {
+      "status": "completed",
+      "message": "Codebase research completed",
+      "updated_at": "23:46:56"
+    },
+    "prompt": {
+      "status": "completed",
+      "message": "Task prompt generated at prompts/issue_32_fix_prompt.md",
+      "updated_at": "23:47:11"
+    },
+    "debug": {
+      "status": "completed",
+      "message": "Surgical implementation complete across frontend and backend",
+      "updated_at": "23:50:16"
+    },
+    "tests": {
+      "status": "completed",
+      "message": "Automated test gate passed (110 vitest tests + 138 Rust tests)",
+      "updated_at": "23:50:20"
+    },
+    "review": {
+      "status": "completed",
+      "message": "Independent code review passed (Verdict: PASS)",
+      "updated_at": "23:52:56"
+    },
+    "pr": {
+      "status": "completed",
+      "message": "Pull request created successfully",
+      "updated_at": "23:53:46"
+    }
+  },
+  "activity": [
+    {
+      "stage": "triage",
+      "status": "completed",
+      "message": "Triage completed for issue #32",
+      "detail": "Issue created: https://github.com/Hi9841/Prism/issues/32",
+      "timestamp": "23:46:44"
+    },
+    {
+      "stage": "research",
+      "status": "active",
+      "message": "Conducting in-depth codebase research across frontend and backend",
+      "detail": "Inspecting ResultContextMenu.tsx, Palette.tsx, bridge.ts, sections.ts, types.ts, src-tauri/src/lib.rs, and src-tauri/src/apps.rs",
+      "timestamp": "23:46:48"
+    },
+    {
+      "stage": "research",
+      "status": "completed",
+      "message": "Codebase research completed",
+      "detail": "Identified 7 key files to modify across frontend and Rust backend.",
+      "timestamp": "23:46:56"
+    },
+    {
+      "stage": "prompt",
+      "status": "active",
+      "message": "Generating in-depth task prompt for Issue #32",
+      "detail": "Writing prompts/issue_32_fix_prompt.md",
+      "timestamp": "23:47:00"
+    },
+    {
+      "stage": "prompt",
+      "status": "completed",
+      "message": "Task prompt generated at prompts/issue_32_fix_prompt.md",
+      "detail": "prompts/issue_32_fix_prompt.md",
+      "timestamp": "23:47:11"
+    },
+    {
+      "stage": "debug",
+      "status": "active",
+      "message": "Branch fix/issue-32-open-location checked out. Implementing surgical changes across Rust backend and React frontend.",
+      "detail": "",
+      "timestamp": "23:47:20"
+    },
+    {
+      "stage": "debug",
+      "status": "completed",
+      "message": "Surgical implementation complete across frontend and backend",
+      "detail": "Added open_path_location to apps.rs and lib.rs, openPathLocation to bridge.ts, openLocation to types.ts and sections.ts, and updated ResultContextMenu and Palette.tsx",
+      "timestamp": "23:50:16"
+    },
+    {
+      "stage": "tests",
+      "status": "completed",
+      "message": "Automated test gate passed (110 vitest tests + 138 Rust tests)",
+      "detail": "bun x vitest run: 110 passed; cargo test: 138 passed",
+      "timestamp": "23:50:20"
+    },
+    {
+      "stage": "review",
+      "status": "active",
+      "message": "Spawning independent code review subagent",
+      "detail": "",
+      "timestamp": "23:50:25"
+    },
+    {
+      "stage": "review",
+      "status": "completed",
+      "message": "Independent code review passed (Verdict: PASS)",
+      "detail": "Verified acceptance criteria, keyboard accessibility, boundary safety, and zero bloat.",
+      "timestamp": "23:52:56"
+    }
+  ],
+  "guidance": [],
+  "branch": "fix/issue-32-open-location",
+  "pr_url": "https://github.com/Hi9841/Prism/pull/33",
+  "status": "completed"
+}
