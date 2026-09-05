@@ -182,7 +182,7 @@ export function UpdateControl() {
         title="Check for updates"
         aria-label="Check for updates"
         onClick={() => checkForUpdate(true)}
-        className="focus-ring press grid h-11 w-11 place-items-center rounded-[7px] text-fg-quiet hover:bg-surface-hover hover:text-fg"
+        className="focus-ring press relative grid h-8 w-8 place-items-center rounded-[10px] text-fg-quiet after:absolute after:-inset-1.5 after:content-[''] hover:bg-surface-hover hover:text-fg"
       >
         <RefreshCw className="h-3.5 w-3.5" />
       </button>
@@ -221,7 +221,7 @@ export function UpdateControl() {
       aria-busy={busy}
       disabled={busy}
       onClick={installUpdate}
-      className={`focus-ring press inline-flex h-11 w-28 min-w-0 items-center justify-center gap-1.5 rounded-[7px] px-2.5 text-[11px] font-semibold ${
+      className={`focus-ring press relative inline-flex h-8 shrink-0 items-center justify-center gap-1.5 whitespace-nowrap rounded-[10px] px-2.5 text-[11px] font-semibold after:absolute after:-inset-y-1.5 after:-inset-x-1 after:content-[''] ${
         viewState.phase === "failed"
           ? "bg-danger-soft text-danger hover:opacity-90"
           : busy
@@ -250,7 +250,7 @@ export function UpdateControl() {
           }`}
         />
       </span>
-      <span className="truncate tabular-nums" aria-live="polite">
+      <span className="tabular-nums" aria-live="polite">
         {label}
       </span>
     </button>

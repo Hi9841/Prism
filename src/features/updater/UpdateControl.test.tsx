@@ -60,6 +60,17 @@ async function mountAvailable(resource: Update) {
 }
 
 describe("update installation ownership", () => {
+  it("keeps the available update label fully readable on one compact row", async () => {
+    await mountAvailable(update("0.9.44"));
+    const button = screen.getByRole("button", { name: "Install Prism v0.9.44" });
+    expect(button.textContent).toContain("Update v0.9.44");
+    expect(button.className).toContain("h-8");
+    expect(button.className).toContain("whitespace-nowrap");
+    expect(button.className).not.toContain("truncate");
+    expect(button.className).not.toMatch(/\bh-11\b/);
+    expect(button.className).not.toMatch(/\bw-28\b/);
+  });
+
   it("flushes edits made during download before starting installation", async () => {
     const resource = update("1.0.0");
     const download = deferred<void>();
