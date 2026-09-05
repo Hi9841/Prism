@@ -26,7 +26,10 @@ use windows::Win32::UI::Shell::{
     FOLDERID_Profile, FOLDERID_Videos, SHGetKnownFolderPath,
 };
 
-pub use types::{FileSearchResponse, QuickAccessEntry, VolumeCoverage, VolumeInfo, VolumeState};
+pub use types::{
+    FileSearchError, FileSearchErrorKind, FileSearchResponse, QuickAccessEntry, VolumeCoverage,
+    VolumeInfo, VolumeState,
+};
 
 use self::backend::{select_backend, BackendKind};
 use self::db::Database;
@@ -243,7 +246,22 @@ impl FileIndex {
         *self.app_data_dir.write().unwrap_or_else(|e| e.into_inner()) = app_data_dir.to_path_buf();
     }
 
+    #[cfg(test)]
     pub fn search(&self, query: &str, limit: Option<usize>) -> FileSearchResponse {
+        let generation = self.begin_search();
+        self.search_with_generation(query, limit, generation)
+    }
+
+    pub fn begin_search(&self) -> u64 {
+        self.search_generation.fetch_add(1, Ordering::AcqRel) + 1
+    }
+
+    pub fn search_with_generation(
+        &self,
+        query: &str,
+        limit: Option<usize>,
+        generation: u64,
+    ) -> FileSearchResponse {
         let volumes = self
             .volumes
             .read()
@@ -253,16 +271,43 @@ impl FileIndex {
         let indexing = self.indexing.load(Ordering::Relaxed);
         let ready = self.ready.load(Ordering::Relaxed);
 
+        if self.search_generation.load(Ordering::Acquire) != generation {
+            return FileSearchResponse {
+                items: Vec::new(),
+                ready,
+                indexing,
+                path_browse: false,
+                volumes,
+                total_indexed,
+                error: None,
+            };
+        }
+
         let db = self.db.read().unwrap_or_else(|e| e.into_inner()).clone();
         let Some(ref db) = db else {
-            return search::browse_path(query.trim(), search::clamp_limit(limit))
-                .map(|items| FileSearchResponse {
-                    items,
-                    ready: false,
-                    indexing: false,
-                    path_browse: true,
-                    volumes,
-                    total_indexed: 0,
+            return search::browse_path_with_errors(query.trim(), search::clamp_limit(limit))
+                .map(|result| match result {
+                    Ok(items) => FileSearchResponse {
+                        items,
+                        ready: false,
+                        indexing: false,
+                        path_browse: true,
+                        volumes,
+                        total_indexed: 0,
+                        error: None,
+                    },
+                    Err(message) => FileSearchResponse {
+                        items: Vec::new(),
+                        ready: false,
+                        indexing: false,
+                        path_browse: true,
+                        volumes,
+                        total_indexed: 0,
+                        error: Some(FileSearchError {
+                            kind: FileSearchErrorKind::DirectoryAccess,
+                            message,
+                        }),
+                    },
                 })
                 .unwrap_or_else(|| FileSearchResponse {
                     items: Vec::new(),
@@ -271,14 +316,16 @@ impl FileIndex {
                     path_browse: false,
                     volumes: Vec::new(),
                     total_indexed: 0,
+                    error: None,
                 });
         };
 
-        search::search(
+        search::search_with_generation(
             query,
             limit,
             db,
             &self.search_generation,
+            generation,
             &volumes,
             total_indexed,
             indexing,
@@ -1359,6 +1406,27 @@ mod tests {
         assert_eq!(coordinator.finish_pass("c"), None);
         assert_eq!(coordinator.finish_pass("nas"), None);
         assert!(coordinator.is_empty());
+    }
+
+    #[test]
+    fn newer_search_generation_cancels_older_work_before_browsing() {
+        let directory =
+            std::env::temp_dir().join(format!("prism-search-generation-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(directory.join("result.txt"), "test").unwrap();
+        let index = FileIndex::default();
+        let older = index.begin_search();
+        let current = index.begin_search();
+        let query = directory.to_string_lossy();
+
+        let cancelled = index.search_with_generation(&query, None, older);
+        let completed = index.search_with_generation(&query, None, current);
+
+        assert!(cancelled.items.is_empty());
+        assert!(!cancelled.path_browse);
+        assert_eq!(completed.items.len(), 1);
+        assert!(completed.path_browse);
+        let _ = std::fs::remove_dir_all(directory);
     }
 
     #[test]

@@ -471,8 +471,15 @@ pub(crate) fn shell_bridge_taskbar_pin(path: &Path, pinned: bool) -> Result<(), 
     let target_file = std::env::var_os("LOCALAPPDATA")
         .or_else(|| std::env::var_os("APPDATA"))
         .map(PathBuf::from)
-        .map(|path| path.join("app.prism.launcher").join("taskbar-pin-target.txt"))
-        .unwrap_or_else(|| std::env::temp_dir().join("Prism").join("taskbar-pin-target.txt"));
+        .map(|path| {
+            path.join("app.prism.launcher")
+                .join("taskbar-pin-target.txt")
+        })
+        .unwrap_or_else(|| {
+            std::env::temp_dir()
+                .join("Prism")
+                .join("taskbar-pin-target.txt")
+        });
     if let Some(parent) = target_file.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|error| format!("failed to create pin request directory: {error}"))?;

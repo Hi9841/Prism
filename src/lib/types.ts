@@ -223,6 +223,12 @@ export interface FileSearchResponse {
   pathBrowse: boolean;
   volumes: VolumeCoverage[];
   totalIndexed: number;
+  error?: FileSearchError;
+}
+
+export interface FileSearchError {
+  kind: "indexQuery" | "directoryAccess";
+  message: string;
 }
 
 export type AccentId = "iris" | "azure" | "mint" | "amber" | "rose";

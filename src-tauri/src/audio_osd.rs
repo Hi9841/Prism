@@ -5,27 +5,29 @@
 //! Runs with zero latency, never steals window focus (WS_EX_NOACTIVATE), and
 //! automatically fades out after 1.2s of inactivity.
 
-use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU64, Ordering};
 use std::sync::Mutex;
 use windows::core::w;
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM};
 use windows::Win32::Graphics::Gdi::{
-    CreateCompatibleDC, CreateDIBSection, CreateFontW, DeleteDC, DeleteObject, GetDC, ReleaseDC,
-    SelectObject, SetBkMode, SetTextColor, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, BLENDFUNCTION,
-    DIB_RGB_COLORS, FONT_CHARSET, FONT_CLIP_PRECISION, FONT_OUTPUT_PRECISION, FONT_QUALITY,
-    FW_SEMIBOLD, HGDIOBJ, TRANSPARENT,
+    CreateCompatibleDC, CreateDIBSection, CreateFontW, DeleteDC, DeleteObject, GetDC,
+    GetMonitorInfoW, MonitorFromPoint, ReleaseDC, SelectObject, SetBkMode, SetTextColor,
+    BITMAPINFO, BITMAPINFOHEADER, BI_RGB, BLENDFUNCTION, DIB_RGB_COLORS, FONT_CHARSET,
+    FONT_CLIP_PRECISION, FONT_OUTPUT_PRECISION, FONT_QUALITY, FW_SEMIBOLD, HGDIOBJ, MONITORINFO,
+    MONITOR_DEFAULTTONEAREST, TRANSPARENT,
 };
+use windows::Win32::UI::HiDpi::GetDpiForWindow;
 
 #[inline]
 const fn rgb(r: u8, g: u8, b: u8) -> COLORREF {
     COLORREF((r as u32) | ((g as u32) << 8) | ((b as u32) << 16))
 }
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DispatchMessageW, GetMessageW, GetSystemMetrics, KillTimer,
-    PostMessageW, RegisterClassW, SetTimer, SetWindowPos, ShowWindow, TranslateMessage,
-    UpdateLayeredWindow, CS_HREDRAW, CS_VREDRAW, HWND_TOPMOST, SM_CXSCREEN, SM_CYSCREEN,
-    SWP_NOACTIVATE, SW_HIDE, SW_SHOWNOACTIVATE, ULW_ALPHA, WM_APP, WM_DESTROY, WM_TIMER, WNDCLASSW,
-    WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+    CreateWindowExW, DefWindowProcW, DispatchMessageW, GetMessageW, KillTimer, PostMessageW,
+    RegisterClassW, SetTimer, SetWindowPos, ShowWindow, TranslateMessage, UpdateLayeredWindow,
+    CS_HREDRAW, CS_VREDRAW, HWND_TOPMOST, SWP_NOACTIVATE, SW_HIDE, SW_SHOWNOACTIVATE, ULW_ALPHA,
+    WM_APP, WM_DESTROY, WM_TIMER, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
+    WS_EX_TOPMOST, WS_POPUP,
 };
 
 const OSD_WIDTH: i32 = 244;
@@ -36,6 +38,7 @@ const WM_UPDATE_OSD: u32 = WM_APP + 50;
 
 static OSD_HWND: AtomicIsize = AtomicIsize::new(0);
 static OSD_THREAD_INITIALIZED: AtomicBool = AtomicBool::new(false);
+static OSD_REQUEST_GENERATION: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, Debug)]
 struct OsdState {
@@ -48,8 +51,6 @@ struct OsdState {
 static LATEST_STATE: Mutex<Option<OsdState>> = Mutex::new(None);
 
 pub fn show(title: &str, percentage: u32, muted: bool, cursor: POINT) {
-    ensure_osd_thread();
-
     let state = OsdState {
         title: title.to_string(),
         percentage: percentage.min(100),
@@ -60,6 +61,8 @@ pub fn show(title: &str, percentage: u32, muted: bool, cursor: POINT) {
     if let Ok(mut lock) = LATEST_STATE.lock() {
         *lock = Some(state);
     }
+    OSD_REQUEST_GENERATION.fetch_add(1, Ordering::SeqCst);
+    ensure_osd_thread();
 
     let h = OSD_HWND.load(Ordering::SeqCst);
     if h != 0 {
@@ -74,10 +77,11 @@ fn ensure_osd_thread() {
     if OSD_THREAD_INITIALIZED.swap(true, Ordering::SeqCst) {
         return;
     }
-    std::thread::spawn(osd_thread_proc);
+    let start_generation = OSD_REQUEST_GENERATION.load(Ordering::SeqCst);
+    std::thread::spawn(move || osd_thread_proc(start_generation));
 }
 
-fn osd_thread_proc() {
+fn osd_thread_proc(start_generation: u64) {
     unsafe {
         let class_name = w!("PrismVolumeOsdClass");
         let wc = WNDCLASSW {
@@ -108,10 +112,14 @@ fn osd_thread_proc() {
 
         let hwnd = match hwnd {
             Ok(h) => h,
-            Err(_) => return,
+            Err(_) => {
+                finish_failed_osd_thread(start_generation);
+                return;
+            }
         };
 
         OSD_HWND.store(hwnd.0 as isize, Ordering::SeqCst);
+        let _ = PostMessageW(Some(hwnd), WM_UPDATE_OSD, WPARAM(0), LPARAM(0));
 
         let mut msg = windows::Win32::UI::WindowsAndMessaging::MSG::default();
         while GetMessageW(&mut msg, None, 0, 0).as_bool() {
@@ -120,7 +128,22 @@ fn osd_thread_proc() {
         }
 
         OSD_HWND.store(0, Ordering::SeqCst);
+        OSD_THREAD_INITIALIZED.store(false, Ordering::SeqCst);
     }
+}
+
+fn finish_failed_osd_thread(start_generation: u64) {
+    OSD_THREAD_INITIALIZED.store(false, Ordering::SeqCst);
+    if should_retry_osd_thread(
+        start_generation,
+        OSD_REQUEST_GENERATION.load(Ordering::SeqCst),
+    ) {
+        ensure_osd_thread();
+    }
+}
+
+fn should_retry_osd_thread(start_generation: u64, latest_generation: u64) -> bool {
+    latest_generation != start_generation
 }
 
 unsafe extern "system" fn osd_wnd_proc(
@@ -155,43 +178,126 @@ unsafe extern "system" fn osd_wnd_proc(
 }
 
 unsafe fn render_and_position(hwnd: HWND, state: &OsdState) {
-    let screen_w = GetSystemMetrics(SM_CXSCREEN);
-    let screen_h = GetSystemMetrics(SM_CYSCREEN);
-
-    // Position horizontally centered above cursor, clamped to screen edges
-    let mut x = state.point.x - (OSD_WIDTH / 2);
-    x = x.clamp(12, screen_w - OSD_WIDTH - 12);
-
-    // Position vertically above taskbar
-    let mut y = state.point.y - OSD_HEIGHT - 16;
-    if y < 20 {
-        y = (screen_h - OSD_HEIGHT - 64).max(20);
+    let monitor = MonitorFromPoint(state.point, MONITOR_DEFAULTTONEAREST);
+    let mut monitor_info = MONITORINFO {
+        cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+        ..Default::default()
+    };
+    if !GetMonitorInfoW(monitor, &mut monitor_info).as_bool() {
+        return;
     }
 
+    // Place the window on the target monitor before asking Windows for that window's DPI.
+    let provisional_position = position_in_work_area(
+        Rect::from(monitor_info.rcWork),
+        state.point,
+        OSD_WIDTH,
+        OSD_HEIGHT,
+        96,
+    );
     let _ = SetWindowPos(
         hwnd,
         Some(HWND_TOPMOST),
-        x,
-        y,
+        provisional_position.x,
+        provisional_position.y,
         OSD_WIDTH,
         OSD_HEIGHT,
         SWP_NOACTIVATE,
     );
+    let dpi = GetDpiForWindow(hwnd).max(96);
+    let width = scale_for_dpi(OSD_WIDTH, dpi);
+    let height = scale_for_dpi(OSD_HEIGHT, dpi);
+    let position = position_in_work_area(
+        Rect::from(monitor_info.rcWork),
+        state.point,
+        width,
+        height,
+        dpi,
+    );
+
+    let _ = SetWindowPos(
+        hwnd,
+        Some(HWND_TOPMOST),
+        position.x,
+        position.y,
+        width,
+        height,
+        SWP_NOACTIVATE,
+    );
 
     // Render 32-bit ARGB DIB with rounded pill background and typography
-    render_osd_surface(hwnd, state);
+    render_osd_surface(hwnd, state, width, height);
     let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
 }
 
-unsafe fn render_osd_surface(hwnd: HWND, state: &OsdState) {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Rect {
+    left: i32,
+    top: i32,
+    right: i32,
+    bottom: i32,
+}
+
+impl From<RECT> for Rect {
+    fn from(value: RECT) -> Self {
+        Self {
+            left: value.left,
+            top: value.top,
+            right: value.right,
+            bottom: value.bottom,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct OsdPosition {
+    x: i32,
+    y: i32,
+}
+
+fn scale_for_dpi(value: i32, dpi: u32) -> i32 {
+    ((i64::from(value) * i64::from(dpi) + 48) / 96) as i32
+}
+
+fn position_in_work_area(
+    work_area: Rect,
+    point: POINT,
+    width: i32,
+    height: i32,
+    dpi: u32,
+) -> OsdPosition {
+    let margin = scale_for_dpi(12, dpi);
+    let offset = scale_for_dpi(16, dpi);
+    let min_x = work_area.left + margin;
+    let max_x = (work_area.right - width - margin).max(min_x);
+    let min_y = work_area.top + margin;
+    let max_y = (work_area.bottom - height - margin).max(min_y);
+
+    let (x, y) = if point.x < work_area.left {
+        (work_area.left + offset, point.y - height / 2)
+    } else if point.x >= work_area.right {
+        (work_area.right - width - offset, point.y - height / 2)
+    } else if point.y < work_area.top {
+        (point.x - width / 2, work_area.top + offset)
+    } else {
+        (point.x - width / 2, work_area.bottom - height - offset)
+    };
+
+    OsdPosition {
+        x: x.clamp(min_x, max_x),
+        y: y.clamp(min_y, max_y),
+    }
+}
+
+unsafe fn render_osd_surface(hwnd: HWND, state: &OsdState, width: i32, height: i32) {
     let screen_dc = GetDC(None);
     let mem_dc = CreateCompatibleDC(Some(screen_dc));
 
     let bmi = BITMAPINFO {
         bmiHeader: BITMAPINFOHEADER {
             biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
-            biWidth: OSD_WIDTH,
-            biHeight: -OSD_HEIGHT, // Top-down DIB
+            biWidth: width,
+            biHeight: -height, // Top-down DIB
             biPlanes: 1,
             biBitCount: 32,
             biCompression: BI_RGB.0,
@@ -211,9 +317,50 @@ unsafe fn render_osd_surface(hwnd: HWND, state: &OsdState) {
     };
 
     let old_bmp = SelectObject(mem_dc, bitmap.into());
-    let pixel_slice =
-        std::slice::from_raw_parts_mut(bits as *mut u32, (OSD_WIDTH * OSD_HEIGHT) as usize);
+    let pixel_slice = std::slice::from_raw_parts_mut(bits as *mut u32, (width * height) as usize);
 
+    let mut logical_pixels = vec![0; (OSD_WIDTH * OSD_HEIGHT) as usize];
+    render_osd_pixels(&mut logical_pixels, state);
+    scale_pixels(
+        &logical_pixels,
+        OSD_WIDTH,
+        OSD_HEIGHT,
+        pixel_slice,
+        width,
+        height,
+    );
+
+    let pt_src = POINT { x: 0, y: 0 };
+    let size_wnd = SIZE {
+        cx: width,
+        cy: height,
+    };
+    let blend = BLENDFUNCTION {
+        BlendOp: 0, // AC_SRC_OVER
+        BlendFlags: 0,
+        SourceConstantAlpha: 255,
+        AlphaFormat: 1, // AC_SRC_ALPHA
+    };
+
+    let _ = UpdateLayeredWindow(
+        hwnd,
+        Some(screen_dc),
+        None,
+        Some(&size_wnd),
+        Some(mem_dc),
+        Some(&pt_src),
+        COLORREF(0),
+        Some(&blend),
+        ULW_ALPHA,
+    );
+
+    let _ = SelectObject(mem_dc, old_bmp);
+    let _ = DeleteObject(bitmap.into());
+    let _ = DeleteDC(mem_dc);
+    let _ = ReleaseDC(None, screen_dc);
+}
+
+unsafe fn render_osd_pixels(pixel_slice: &mut [u32], state: &OsdState) {
     // 1. Draw Liquid Glass Pill background (concentric 16px radius, subtle vertical gradient, specular highlight rim)
     draw_liquid_glass_pill(pixel_slice, OSD_WIDTH, OSD_HEIGHT);
 
@@ -231,10 +378,12 @@ unsafe fn render_osd_surface(hwnd: HWND, state: &OsdState) {
     draw_progress_bar(
         pixel_slice,
         OSD_WIDTH,
-        16,
-        OSD_WIDTH - 16,
-        37,
-        42,
+        Rect {
+            left: 16,
+            top: 37,
+            right: OSD_WIDTH - 16,
+            bottom: 42,
+        },
         state.percentage,
         state.muted,
         state.title.ends_with("(No Audio)"),
@@ -242,35 +391,24 @@ unsafe fn render_osd_surface(hwnd: HWND, state: &OsdState) {
 
     // 4. Render and composite typography with pure grayscale antialiasing (no ClearType chromatic fringe)
     render_typography(pixel_slice, OSD_WIDTH, OSD_HEIGHT, state);
+}
 
-    let mut pt_src = POINT { x: 0, y: 0 };
-    let mut size_wnd = SIZE {
-        cx: OSD_WIDTH,
-        cy: OSD_HEIGHT,
-    };
-    let blend = BLENDFUNCTION {
-        BlendOp: 0, // AC_SRC_OVER
-        BlendFlags: 0,
-        SourceConstantAlpha: 255,
-        AlphaFormat: 1, // AC_SRC_ALPHA
-    };
-
-    let _ = UpdateLayeredWindow(
-        hwnd,
-        Some(screen_dc),
-        None,
-        Some(&mut size_wnd),
-        Some(mem_dc),
-        Some(&mut pt_src),
-        COLORREF(0),
-        Some(&blend),
-        ULW_ALPHA,
-    );
-
-    let _ = SelectObject(mem_dc, old_bmp);
-    let _ = DeleteObject(bitmap.into());
-    let _ = DeleteDC(mem_dc);
-    let _ = ReleaseDC(None, screen_dc);
+fn scale_pixels(
+    source: &[u32],
+    source_width: i32,
+    source_height: i32,
+    destination: &mut [u32],
+    destination_width: i32,
+    destination_height: i32,
+) {
+    for y in 0..destination_height {
+        let source_y = y * source_height / destination_height;
+        for x in 0..destination_width {
+            let source_x = x * source_width / destination_width;
+            destination[(y * destination_width + x) as usize] =
+                source[(source_y * source_width + source_x) as usize];
+        }
+    }
 }
 
 fn truncate_string(s: &str, max_chars: usize) -> String {
@@ -288,10 +426,10 @@ fn blend_over(dst_premul: u32, src_rgb: (u8, u8, u8), src_alpha: u8) -> u32 {
     if src_alpha == 0 {
         return dst_premul;
     }
-    let dst_a = ((dst_premul >> 24) & 0xFF) as u32;
-    let dst_pr = ((dst_premul >> 16) & 0xFF) as u32;
-    let dst_pg = ((dst_premul >> 8) & 0xFF) as u32;
-    let dst_pb = (dst_premul & 0xFF) as u32;
+    let dst_a = (dst_premul >> 24) & 0xFF;
+    let dst_pr = (dst_premul >> 16) & 0xFF;
+    let dst_pg = (dst_premul >> 8) & 0xFF;
+    let dst_pb = dst_premul & 0xFF;
 
     let sa = src_alpha as u32;
     let sr = src_rgb.0 as u32;
@@ -391,12 +529,12 @@ fn draw_speaker_icon(
                     let mut inside = false;
 
                     // 1. Speaker base box (x: 1.5..4.5, y: 5.5..10.5)
-                    if px >= 1.5 && px <= 4.5 && py >= 5.5 && py <= 10.5 {
+                    if (1.5..=4.5).contains(&px) && (5.5..=10.5).contains(&py) {
                         inside = true;
                     }
 
                     // 2. Speaker cone (x: 4.0..8.5, flaring from 5.5..10.5 to 2.5..13.5)
-                    if px >= 4.0 && px <= 8.5 {
+                    if (4.0..=8.5).contains(&px) {
                         let progress = (px - 4.0) / 4.5;
                         let top_y = 5.5 - progress * 3.0;
                         let bot_y = 10.5 + progress * 3.0;
@@ -409,10 +547,8 @@ fn draw_speaker_icon(
                         // Diagonal slash: from (2.5, 2.5) to (13.5, 13.5)
                         let dist_to_line = ((px - py).abs()) / 1.414;
                         if dist_to_line <= 0.85
-                            && px >= 2.0
-                            && px <= 14.0
-                            && py >= 2.0
-                            && py <= 14.0
+                            && (2.0..=14.0).contains(&px)
+                            && (2.0..=14.0).contains(&py)
                         {
                             inside = true;
                         } else if dist_to_line < 1.6 && inside {
@@ -457,18 +593,15 @@ fn draw_speaker_icon(
 fn draw_progress_bar(
     pixels: &mut [u32],
     stride: i32,
-    x_start: i32,
-    x_end: i32,
-    y_start: i32,
-    y_end: i32,
+    bounds: Rect,
     percentage: u32,
     muted: bool,
     is_no_audio: bool,
 ) {
     let radius = 2.5f32;
-    let y_center = (y_start as f32 + y_end as f32) * 0.5;
-    let x_left = x_start as f32 + radius;
-    let x_right = x_end as f32 - radius;
+    let y_center = (bounds.top as f32 + bounds.bottom as f32) * 0.5;
+    let x_left = bounds.left as f32 + radius;
+    let x_right = bounds.right as f32 - radius;
 
     let fill_total_w = x_right - x_left;
     let fill_w = (fill_total_w * (percentage as f32 / 100.0)).clamp(0.0, fill_total_w);
@@ -482,9 +615,9 @@ fn draw_progress_bar(
         (56u8, 189u8, 248u8) // Luminous Sky Blue / Iris
     };
 
-    for y in y_start..=y_end {
+    for y in bounds.top..=bounds.bottom {
         let y_f = y as f32 + 0.5;
-        for x in x_start..=x_end {
+        for x in bounds.left..=bounds.right {
             let x_f = x as f32 + 0.5;
             let idx = (y * stride + x) as usize;
             if idx >= pixels.len() {
@@ -657,4 +790,101 @@ unsafe fn render_typography(pixels: &mut [u32], width: i32, _height: i32, state:
     let _ = DeleteObject(bitmap.into());
     let _ = DeleteDC(text_dc);
     let _ = ReleaseDC(None, screen_dc);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const WORK_AREA: Rect = Rect {
+        left: 0,
+        top: 0,
+        right: 1920,
+        bottom: 1040,
+    };
+
+    #[test]
+    fn positions_osd_inside_each_taskbar_edge() {
+        assert_eq!(
+            position_in_work_area(
+                Rect {
+                    left: -1880,
+                    top: 0,
+                    right: 0,
+                    bottom: 1040,
+                },
+                POINT { x: -1900, y: 520 },
+                OSD_WIDTH,
+                OSD_HEIGHT,
+                96,
+            ),
+            OsdPosition { x: -1864, y: 492 }
+        );
+        assert_eq!(
+            position_in_work_area(
+                Rect {
+                    left: 1920,
+                    top: 0,
+                    right: 3800,
+                    bottom: 1040,
+                },
+                POINT { x: 3820, y: 520 },
+                OSD_WIDTH,
+                OSD_HEIGHT,
+                96,
+            ),
+            OsdPosition { x: 3540, y: 492 }
+        );
+        assert_eq!(
+            position_in_work_area(
+                Rect {
+                    top: 40,
+                    ..WORK_AREA
+                },
+                POINT { x: 960, y: 10 },
+                OSD_WIDTH,
+                OSD_HEIGHT,
+                96,
+            ),
+            OsdPosition { x: 838, y: 56 }
+        );
+        assert_eq!(
+            position_in_work_area(
+                WORK_AREA,
+                POINT { x: 960, y: 1060 },
+                OSD_WIDTH,
+                OSD_HEIGHT,
+                96
+            ),
+            OsdPosition { x: 838, y: 968 }
+        );
+    }
+
+    #[test]
+    fn dimensions_and_offsets_scale_for_monitor_dpi() {
+        let width = scale_for_dpi(OSD_WIDTH, 144);
+        let height = scale_for_dpi(OSD_HEIGHT, 144);
+        assert_eq!((width, height), (366, 84));
+        assert_eq!(
+            position_in_work_area(WORK_AREA, POINT { x: 960, y: 1060 }, width, height, 144),
+            OsdPosition { x: 777, y: 932 }
+        );
+    }
+
+    #[test]
+    fn failed_start_retries_only_when_a_new_request_arrived() {
+        assert!(!should_retry_osd_thread(4, 4));
+        assert!(should_retry_osd_thread(4, 5));
+    }
+
+    #[test]
+    fn pixel_scaling_fills_the_requested_surface() {
+        let source = [1, 2, 3, 4];
+        let mut destination = [0; 16];
+        scale_pixels(&source, 2, 2, &mut destination, 4, 4);
+        assert_eq!(destination[0], 1);
+        assert_eq!(destination[3], 2);
+        assert_eq!(destination[12], 3);
+        assert_eq!(destination[15], 4);
+    }
 }

@@ -12,7 +12,7 @@ Prism is a fast, keyboard-first command palette and Windows taskbar companion. S
 - Open Prism from the configured global shortcut or the Windows Start button.
 - Right-click eligible applications and scripts to run them as administrator.
 - Customize taskbar alignment, icon density, button grouping, auto-hide, and the Start button icon.
-- Follow the Windows theme or choose a light, dark, acrylic, mica, or solid appearance.
+- Follow the Windows theme or choose a light or dark appearance and an accent color.
 - Install signed updates from the Prism footer without downloading a new installer manually.
 
 ## Download

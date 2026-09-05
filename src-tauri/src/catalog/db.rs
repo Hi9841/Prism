@@ -1557,12 +1557,28 @@ impl Database {
         result
     }
 
+    #[cfg(test)]
     pub fn search_candidates(
         &self,
         query: &str,
         limit: usize,
     ) -> Result<Vec<CandidateEntry>, String> {
+        self.search_candidates_until(query, limit, || false)
+    }
+
+    pub fn search_candidates_until<F>(
+        &self,
+        query: &str,
+        limit: usize,
+        is_cancelled: F,
+    ) -> Result<Vec<CandidateEntry>, String>
+    where
+        F: Fn() -> bool,
+    {
         let conn = self.reader.lock().map_err(|e| e.to_string())?;
+        if is_cancelled() {
+            return Ok(Vec::new());
+        }
         let lower = query.to_lowercase();
         let query_len = query.chars().count();
         let mut candidates = Vec::with_capacity(limit * 2);
@@ -1602,10 +1618,15 @@ impl Database {
                 })
                 .map_err(|e| e.to_string())?;
 
-            for row in rows.flatten() {
+            for row in rows {
+                let row = row.map_err(|error| error.to_string())?;
                 if seen_ids.insert(row.id) {
                     candidates.push(row);
                 }
+            }
+
+            if is_cancelled() {
+                return Ok(Vec::new());
             }
 
             // Reserve exact candidates per volume in addition to the
@@ -1637,11 +1658,16 @@ impl Database {
                     })
                 })
                 .map_err(|e| e.to_string())?;
-            for row in fair_rows.flatten() {
+            for row in fair_rows {
+                let row = row.map_err(|error| error.to_string())?;
                 if seen_ids.insert(row.id) {
                     candidates.push(row);
                 }
             }
+        }
+
+        if is_cancelled() {
+            return Ok(Vec::new());
         }
 
         // 2. Prefix match query
@@ -1668,11 +1694,16 @@ impl Database {
                 })
                 .map_err(|e| e.to_string())?;
 
-            for row in rows.flatten() {
+            for row in rows {
+                let row = row.map_err(|error| error.to_string())?;
                 if seen_ids.insert(row.id) {
                     candidates.push(row);
                 }
             }
+        }
+
+        if is_cancelled() {
+            return Ok(Vec::new());
         }
 
         // 3. 3+ characters: FTS5 Trigram MATCH query
@@ -1704,45 +1735,90 @@ impl Database {
                     })
                     .map_err(|e| e.to_string())?;
 
-                for row in rows.flatten() {
+                for row in rows {
+                    let row = row.map_err(|error| error.to_string())?;
                     if seen_ids.insert(row.id) {
                         candidates.push(row);
                     }
                 }
             }
-        } else if query_len == 2 {
-            // For 2 characters: Indexed prefix range query using B-Tree index
-            let prefix_end = format!("{lower}\u{FFFF}");
+        }
+
+        if is_cancelled() {
+            return Ok(Vec::new());
+        }
+
+        // FTS5 trigram matching cannot retrieve noncontiguous fuzzy queries
+        // such as `rpt` -> `report.txt`. Probe a hard-capped slice of the
+        // B-tree range for names beginning with the selected token's first
+        // character, then let the existing scorer validate every token.
+        let probes = subsequence_probes(&lower);
+        if !probes.is_empty() {
+            let scan_limit = ((limit.max(10) * 20).min(5_000) / probes.len()).max(1) as i64;
+            let match_limit = ((limit.max(10) * 3) / probes.len()).max(10) as i64;
             let mut stmt = conn
                 .prepare_cached(
                     "SELECT id, display_path, lower_name, is_directory, extension
-                     FROM files f WHERE lower_name >= ?1 AND lower_name <= ?2
-                       AND NOT EXISTS(SELECT 1 FROM volumes v
-                                      WHERE v.volume_id = f.volume_id AND v.backend = 'ntfs')
-                     LIMIT ?3;",
+                     FROM (
+                         SELECT f.id, f.display_path, f.lower_name, f.is_directory, f.extension
+                         FROM files f
+                         WHERE f.lower_name >= ?1 AND f.lower_name <= ?2
+                           AND NOT EXISTS(SELECT 1 FROM volumes v
+                                          WHERE v.volume_id = f.volume_id AND v.backend = 'ntfs')
+                         ORDER BY f.lower_name
+                         LIMIT ?3
+                     ) bounded
+                     WHERE lower_name LIKE ?4 ESCAPE '!'
+                     LIMIT ?5;",
                 )
                 .map_err(|e| e.to_string())?;
 
-            let rows = stmt
-                .query_map(params![lower, prefix_end, prefix_limit], |row| {
-                    Ok(CandidateEntry {
-                        id: row.get(0)?,
-                        display_path: row.get(1)?,
-                        lower_name: row.get(2)?,
-                        is_directory: row.get::<_, i32>(3)? != 0,
-                        extension: row.get(4)?,
-                    })
-                })
-                .map_err(|e| e.to_string())?;
+            for probe in probes {
+                let rows = stmt
+                    .query_map(
+                        params![
+                            probe.lower_bound,
+                            probe.upper_bound,
+                            scan_limit,
+                            probe.like_pattern,
+                            match_limit
+                        ],
+                        |row| {
+                            Ok(CandidateEntry {
+                                id: row.get(0)?,
+                                display_path: row.get(1)?,
+                                lower_name: row.get(2)?,
+                                is_directory: row.get::<_, i32>(3)? != 0,
+                                extension: row.get(4)?,
+                            })
+                        },
+                    )
+                    .map_err(|e| e.to_string())?;
 
-            for row in rows.flatten() {
-                if seen_ids.insert(row.id) {
-                    candidates.push(row);
+                for row in rows {
+                    let row = row.map_err(|error| error.to_string())?;
+                    if seen_ids.insert(row.id) {
+                        candidates.push(row);
+                    }
+                }
+                if is_cancelled() {
+                    return Ok(Vec::new());
                 }
             }
         }
 
-        append_ntfs_candidates(&conn, &lower, query_len, limit, &mut candidates)?;
+        if is_cancelled() {
+            return Ok(Vec::new());
+        }
+
+        append_ntfs_candidates(
+            &conn,
+            &lower,
+            query_len,
+            limit,
+            &mut candidates,
+            &is_cancelled,
+        )?;
 
         if super::catalog_debug_enabled() {
             Self::debug_search_probe(&conn, &lower, &candidates);
@@ -1815,17 +1891,65 @@ struct NtfsCandidateRow {
     mount_path: String,
 }
 
+struct SubsequenceProbe {
+    lower_bound: String,
+    upper_bound: String,
+    like_pattern: String,
+}
+
+fn subsequence_probes(query: &str) -> Vec<SubsequenceProbe> {
+    if query.chars().count() < 3 {
+        return Vec::new();
+    }
+    query
+        .split_whitespace()
+        .take(4)
+        .filter_map(subsequence_probe)
+        .collect()
+}
+
+fn subsequence_probe(token: &str) -> Option<SubsequenceProbe> {
+    let mut characters = token.chars();
+    let first = characters.next()?;
+    let mut lower_bound = String::new();
+    lower_bound.push(first);
+    let mut upper_bound = lower_bound.clone();
+    upper_bound.push('\u{10ffff}');
+
+    let mut like_pattern = String::new();
+    for (index, character) in token.chars().enumerate() {
+        if index > 0 {
+            like_pattern.push('%');
+        }
+        if matches!(character, '!' | '%' | '_') {
+            like_pattern.push('!');
+        }
+        like_pattern.push(character);
+    }
+    like_pattern.push('%');
+
+    Some(SubsequenceProbe {
+        lower_bound,
+        upper_bound,
+        like_pattern,
+    })
+}
+
 fn append_ntfs_candidates(
     conn: &Connection,
     lower: &str,
     query_len: usize,
     limit: usize,
     candidates: &mut Vec<CandidateEntry>,
+    is_cancelled: &impl Fn() -> bool,
 ) -> Result<(), String> {
     let mut rows = Vec::with_capacity(limit * 2);
     let mut seen = HashSet::new();
 
     let mut collect = |sql: &str, values: &[&dyn rusqlite::ToSql]| -> Result<(), String> {
+        if is_cancelled() {
+            return Ok(());
+        }
         // Cached: this runs on every keystroke-driven search.
         let mut stmt = conn.prepare_cached(sql).map_err(|e| e.to_string())?;
         let mapped = stmt
@@ -1849,7 +1973,8 @@ fn append_ntfs_candidates(
                 })
             })
             .map_err(|e| e.to_string())?;
-        for row in mapped.flatten() {
+        for row in mapped {
+            let row = row.map_err(|error| error.to_string())?;
             if seen.insert(row.id) {
                 rows.push(row);
             }
@@ -1867,6 +1992,9 @@ fn append_ntfs_candidates(
          WHERE v.backend = 'ntfs' AND n.lower_name = ?1 LIMIT ?2;",
         &[&lower, &exact_limit],
     )?;
+    if is_cancelled() {
+        return Ok(());
+    }
     collect(
         "SELECT n.id, n.volume_id, n.frn, n.lower_name, n.is_directory, n.extension, v.mount_path
          FROM (
@@ -1880,6 +2008,9 @@ fn append_ntfs_candidates(
          ORDER BY n.volume_id COLLATE NOCASE;",
         &[&lower, &per_vol_limit],
     )?;
+    if is_cancelled() {
+        return Ok(());
+    }
     let prefix_end = format!("{lower}\u{FFFF}");
     let sql_limit = (limit.max(10) * 3) as i64;
     collect(
@@ -1888,6 +2019,9 @@ fn append_ntfs_candidates(
          WHERE v.backend = 'ntfs' AND n.lower_name >= ?1 AND n.lower_name <= ?2 LIMIT ?3;",
         &[&lower, &prefix_end, &sql_limit],
     )?;
+    if is_cancelled() {
+        return Ok(());
+    }
     if query_len >= 3 {
         let fts_query = sanitize_fts5_trigram_query(lower);
         if !fts_query.is_empty() {
@@ -1903,6 +2037,44 @@ fn append_ntfs_candidates(
         }
     }
 
+    if is_cancelled() {
+        return Ok(());
+    }
+    let probes = subsequence_probes(lower);
+    if !probes.is_empty() {
+        let scan_limit = ((limit.max(10) * 20).min(5_000) / probes.len()).max(1) as i64;
+        let match_limit = ((limit.max(10) * 3) / probes.len()).max(10) as i64;
+        for probe in probes {
+            collect(
+                "SELECT id, volume_id, frn, lower_name, is_directory, extension, mount_path
+             FROM (
+                 SELECT n.id, n.volume_id, n.frn, n.lower_name, n.is_directory, n.extension,
+                        v.mount_path
+                 FROM ntfs_nodes n JOIN volumes v ON v.volume_id = n.volume_id
+                 WHERE v.backend = 'ntfs' AND n.lower_name >= ?1 AND n.lower_name <= ?2
+                 ORDER BY n.lower_name
+                 LIMIT ?3
+             ) bounded
+             WHERE lower_name LIKE ?4 ESCAPE '!'
+             LIMIT ?5;",
+                &[
+                    &probe.lower_bound,
+                    &probe.upper_bound,
+                    &scan_limit,
+                    &probe.like_pattern,
+                    &match_limit,
+                ],
+            )?;
+            if is_cancelled() {
+                return Ok(());
+            }
+        }
+    }
+
+    if is_cancelled() {
+        return Ok(());
+    }
+
     let mut node_cache: std::collections::HashMap<(String, u64), PathNode> =
         std::collections::HashMap::new();
     let mut path_cache: std::collections::HashMap<(String, u64), Option<String>> =
@@ -1915,6 +2087,9 @@ fn append_ntfs_candidates(
         .map_err(|e| e.to_string())?;
 
     for row in rows {
+        if is_cancelled() {
+            return Ok(());
+        }
         let cache_key = (row.volume_id.clone(), row.frn);
         let display_path = if let Some(cached) = path_cache.get(&cache_key) {
             cached.clone()
@@ -2514,6 +2689,90 @@ mod ntfs_tests {
             1
         );
 
+        drop(db);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn subsequence_candidates_cover_fallback_and_ntfs_catalogs() {
+        let path = temp_db_path("subsequence-candidates");
+        let db = Database::open(&path).unwrap();
+
+        let mut fallback = volume();
+        fallback.volume_id = "fallback-volume".into();
+        db.upsert_volume(&fallback, VolumeState::Ready).unwrap();
+        db.insert_batch(
+            &fallback.volume_id,
+            1,
+            &[
+                scanned_file(r"C:\Docs\report.txt", "report.txt"),
+                scanned_file(r"C:\Docs\release-notes.txt", "release-notes.txt"),
+                scanned_file(r"C:\Docs\репорт.txt", "репорт.txt"),
+            ],
+        )
+        .unwrap();
+
+        let mut ntfs = volume();
+        ntfs.volume_id = "ntfs-volume".into();
+        ntfs.drive_letter = Some("D:".into());
+        ntfs.mount_paths = vec![PathBuf::from(r"D:\")];
+        db.upsert_volume(&ntfs, VolumeState::Indexing).unwrap();
+        let generation = db.begin_ntfs_rebuild(&ntfs.volume_id).unwrap();
+        db.insert_ntfs_staging(
+            &ntfs.volume_id,
+            generation,
+            &[
+                node(5, 5, ".", true),
+                node(10, 5, "Docs", true),
+                node(11, 10, "report.txt", false),
+                node(12, 10, "release-notes.txt", false),
+                node(13, 10, "репорт.txt", false),
+            ],
+        )
+        .unwrap();
+        db.finish_ntfs_rebuild(
+            &ntfs.volume_id,
+            generation,
+            JournalCheckpoint {
+                journal_id: 1,
+                next_usn: 1,
+            },
+            5,
+        )
+        .unwrap();
+
+        for (query, filename) in [
+            ("rpt", "report.txt"),
+            ("rl nt", "release-notes.txt"),
+            ("рпт", "репорт.txt"),
+        ] {
+            let candidates = db.search_candidates(query, 20).unwrap();
+            assert!(
+                candidates.iter().any(|candidate| {
+                    candidate.lower_name == filename && candidate.display_path.starts_with(r"C:\")
+                }),
+                "fallback catalog missed {query:?} -> {filename:?}"
+            );
+            assert!(
+                candidates.iter().any(|candidate| {
+                    candidate.lower_name == filename && candidate.display_path.starts_with(r"D:\")
+                }),
+                "NTFS catalog missed {query:?} -> {filename:?}"
+            );
+        }
+
+        drop(db);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn cancelled_candidate_search_stops_before_sql_stages() {
+        let path = temp_db_path("cancelled-candidates");
+        let db = Database::open(&path).unwrap();
+
+        let candidates = db.search_candidates_until("report", 20, || true).unwrap();
+
+        assert!(candidates.is_empty());
         drop(db);
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }

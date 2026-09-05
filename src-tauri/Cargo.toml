@@ -1,6 +1,6 @@
 [package]
 name = "prism"
-version = "0.9.38"
+version = "0.9.39"
 description = "Prism - a keyboard-first command palette for Windows"
 edition = "2021"
 
@@ -51,6 +51,7 @@ windows = { version = "0.61", features = [
   "Win32_System_WindowsProgramming",
   "Win32_UI_Input_KeyboardAndMouse",
   "Win32_UI_Accessibility",
+  "Win32_UI_HiDpi",
   "Win32_UI_Shell",
   "Win32_UI_Shell_Common",
   "Win32_UI_Shell_PropertiesSystem",

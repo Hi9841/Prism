@@ -1,5 +1,9 @@
 mod apps;
+pub mod audio;
+pub mod audio_hook;
+pub mod audio_osd;
 mod catalog;
+pub mod drag;
 mod files;
 mod perf;
 mod power;
@@ -11,10 +15,6 @@ mod taskbar_icon_overlay;
 mod theme;
 mod win_key;
 mod windows_settings;
-pub mod audio;
-pub mod audio_osd;
-pub mod audio_hook;
-pub mod drag;
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -1023,9 +1023,7 @@ async fn start_file_drag(app: tauri::AppHandle, paths: Vec<String>) -> Result<bo
     })
     .map_err(|e| format!("failed to schedule drag on main thread: {e}"))?;
 
-    let drag_result = rx
-        .await
-        .map_err(|_| "drag task cancelled".to_string())??;
+    let drag_result = rx.await.map_err(|_| "drag task cancelled".to_string())??;
     let dropped = drag_result == drag::DragResult::Dropped;
     if dropped {
         let hide_app = app.clone();
@@ -1045,9 +1043,15 @@ async fn search_files(
     let timer = perf::start();
     let query_length = query.chars().count();
     let index = state.file_index.clone();
-    let result = tauri::async_runtime::spawn_blocking(move || index.search(&query, limit))
-        .await
-        .map_err(|error| format!("file search task failed: {error}"));
+    // Allocate the generation before scheduling. Worker start order is not
+    // request order, so allocating inside spawn_blocking lets an older query
+    // supersede a newer one.
+    let generation = index.begin_search();
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        index.search_with_generation(&query, limit, generation)
+    })
+    .await
+    .map_err(|error| format!("file search task failed: {error}"));
     perf::finish(timer, "search_files", || match &result {
         Ok(response) => format!(
             "queryLength={query_length};results={};pathBrowse={}",

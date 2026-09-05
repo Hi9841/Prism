@@ -41,6 +41,20 @@ pub struct QuickAccessEntry {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct FileSearchError {
+    pub kind: FileSearchErrorKind,
+    pub message: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum FileSearchErrorKind {
+    IndexQuery,
+    DirectoryAccess,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct FileSearchResponse {
     pub items: Vec<FileEntry>,
     pub ready: bool,
@@ -48,6 +62,8 @@ pub struct FileSearchResponse {
     pub path_browse: bool,
     pub volumes: Vec<VolumeCoverage>,
     pub total_indexed: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<FileSearchError>,
 }
 
 #[derive(Clone, Debug)]

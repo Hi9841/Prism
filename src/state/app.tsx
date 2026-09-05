@@ -5,6 +5,7 @@ import {
   loadState,
   onSystemThemeChange,
   onWinModeFailed,
+  quitApp,
   saveState,
   setAlwaysOnTop,
   setShortcut,
@@ -43,6 +44,10 @@ interface AppCtx {
   settings: Settings;
   updateSettings: (patch: Partial<Settings>) => void;
   resetSettings: () => Promise<void>;
+  persistenceError: string | null;
+  flushPersistence: () => Promise<void>;
+  retryPersistence: () => Promise<void>;
+  quit: () => Promise<void>;
   openSettings: boolean;
   setOpenSettings: (open: boolean) => void;
   history: HistoryEntry[];
@@ -84,6 +89,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const [openSettings, setOpenSettings] = useState(false);
   const [toasts, setToasts] = useState<Toast[]>([]);
   const [systemTheme, setSystemTheme] = useState<"light" | "dark">("dark");
+  const [persistenceError, setPersistenceError] = useState<string | null>(null);
 
   const settingsRef = useRef(settings);
   settingsRef.current = settings;
@@ -92,6 +98,14 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const toastsRef = useRef(toasts);
   toastsRef.current = toasts;
   const persistTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const persistRequest = useRef<Promise<void> | null>(null);
+  const stateLoadError = useRef<string | null>(null);
+  const stateRead = useRef<Promise<void>>(Promise.resolve());
+  const stateReadComplete = useRef(false);
+  const settingsChangedAfterLoadError = useRef<Partial<Settings>>({});
+  const historyChangedAfterLoadError = useRef(false);
+  const persistRevision = useRef(0);
+  const savedRevision = useRef(0);
   const widthFrame = useRef<number | null>(null);
   const renderedWidth = useRef<number | null>(null);
   const toastTimers = useRef(new Map<number, ReturnType<typeof setTimeout>>());
@@ -99,13 +113,35 @@ export function AppProvider({ children }: { children: ReactNode }) {
   // Initial load from disk: every value is sanitized against known sets so
   // a corrupt or hand-edited file degrades to defaults, never crashes.
   useEffect(() => {
-    loadState()
+    let active = true;
+    stateRead.current = loadState()
       .then((state) => {
-        if (state?.settings) setSettings(sanitizeSettings(state.settings));
-        setHistory(sanitizeHistory(state?.history));
+        if (!active) return;
+        settingsRef.current = {
+          ...sanitizeSettings(state?.settings),
+          ...settingsChangedAfterLoadError.current,
+        };
+        settingsChangedAfterLoadError.current = {};
+        setSettings(settingsRef.current);
+        if (!historyChangedAfterLoadError.current) historyRef.current = sanitizeHistory(state?.history);
+        historyChangedAfterLoadError.current = false;
+        setHistory(historyRef.current);
       })
-      .catch(() => {})
-      .finally(() => setReady(true));
+      .catch((error) => {
+        if (!active) return;
+        const message = `Could not load settings: ${String(error)}. Repair prism.json, then retry. Saving is paused to preserve your file.`;
+        stateLoadError.current = message;
+        setPersistenceError(message);
+      })
+      .finally(() => {
+        if (active) {
+          stateReadComplete.current = true;
+          setReady(true);
+        }
+      });
+    return () => {
+      active = false;
+    };
   }, []);
 
   // Follow the OS theme live (only relevant in "system" mode).
@@ -122,17 +158,67 @@ export function AppProvider({ children }: { children: ReactNode }) {
     return off;
   }, [ready]);
 
-  // Debounced full-state persistence - single writer, no races.
+  // A flush drains changes made during a pending write before resolving.
+  const flushPersistence = useCallback(async () => {
+    if (persistTimer.current) clearTimeout(persistTimer.current);
+    persistTimer.current = null;
+    await stateRead.current;
+    if (persistRevision.current === savedRevision.current) return;
+    if (stateLoadError.current) throw new Error(stateLoadError.current);
+    if (persistRequest.current) return persistRequest.current;
+    const pending = (async () => {
+      try {
+        while (savedRevision.current !== persistRevision.current) {
+          const revision = persistRevision.current;
+          await saveState({ version: 3, settings: settingsRef.current, history: historyRef.current });
+          savedRevision.current = revision;
+        }
+        setPersistenceError(null);
+      } catch (error) {
+        setPersistenceError(
+          `Could not save settings: ${String(error)}. Free disk space or check folder permissions, then retry.`,
+        );
+        throw error;
+      } finally {
+        persistRequest.current = null;
+      }
+    })();
+    persistRequest.current = pending;
+    return pending;
+  }, []);
+
   const schedulePersist = useCallback(() => {
+    persistRevision.current += 1;
     if (persistTimer.current) clearTimeout(persistTimer.current);
     persistTimer.current = setTimeout(() => {
-      saveState({
-        version: 3,
-        settings: settingsRef.current,
-        history: historyRef.current,
-      }).catch(() => {});
+      void flushPersistence().catch(() => {});
     }, 350);
-  }, []);
+  }, [flushPersistence]);
+
+  const retryPersistence = useCallback(async () => {
+    if (stateLoadError.current) {
+      try {
+        const state = await loadState();
+        settingsRef.current = {
+          ...sanitizeSettings(state?.settings),
+          ...settingsChangedAfterLoadError.current,
+        };
+        if (!historyChangedAfterLoadError.current) historyRef.current = sanitizeHistory(state?.history);
+        setSettings(settingsRef.current);
+        setHistory(historyRef.current);
+        stateLoadError.current = null;
+        settingsChangedAfterLoadError.current = {};
+        historyChangedAfterLoadError.current = false;
+        setPersistenceError(null);
+      } catch (error) {
+        const message = `Could not load settings: ${String(error)}. Repair prism.json, then retry. Saving is paused to preserve your file.`;
+        stateLoadError.current = message;
+        setPersistenceError(message);
+        throw error;
+      }
+    }
+    await flushPersistence();
+  }, [flushPersistence]);
 
   useEffect(
     () => () => {
@@ -153,6 +239,9 @@ export function AppProvider({ children }: { children: ReactNode }) {
         (key) => !Object.is(settingsRef.current[key], next[key]),
       );
       if (!changed) return;
+      if (!stateReadComplete.current || stateLoadError.current) {
+        settingsChangedAfterLoadError.current = { ...settingsChangedAfterLoadError.current, ...patch };
+      }
       settingsRef.current = next;
       setSettings(next);
       schedulePersist();
@@ -177,6 +266,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
     let wheelResetTimer: ReturnType<typeof setTimeout> | null = null;
 
     const onKeyDown = (event: KeyboardEvent) => {
+      if (event.isComposing) return;
       if (!event.ctrlKey || event.altKey || event.metaKey) return;
       let direction: -1 | 1 | null = null;
       if (event.key === "ArrowUp" || event.key === "+" || event.key === "=") direction = 1;
@@ -223,6 +313,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
 
   const pushHistory = useCallback(
     (id: string, title: string) => {
+      if (!stateReadComplete.current || stateLoadError.current) historyChangedAfterLoadError.current = true;
       const next = [
         { id, title, ts: Date.now() },
         ...historyRef.current.filter((entry) => entry.id !== id),
@@ -235,6 +326,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
   );
 
   const clearHistory = useCallback(() => {
+    if (!stateReadComplete.current || stateLoadError.current) historyChangedAfterLoadError.current = true;
     historyRef.current = [];
     setHistory([]);
     schedulePersist();
@@ -244,6 +336,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
     (id: string) => {
       const next = historyRef.current.filter((entry) => entry.id !== id);
       if (next.length === historyRef.current.length) return;
+      if (!stateReadComplete.current || stateLoadError.current) historyChangedAfterLoadError.current = true;
       historyRef.current = next;
       setHistory(next);
       schedulePersist();
@@ -252,10 +345,38 @@ export function AppProvider({ children }: { children: ReactNode }) {
   );
 
   const resetSettings = useCallback(async () => {
+    await stateRead.current;
+    if (stateLoadError.current) throw new Error(stateLoadError.current);
     // Apply native registrations first so a failed shortcut or taskbar
     // transition cannot leave the UI claiming that defaults are active.
+    const previous = settingsRef.current;
     await setShortcut(DEFAULT_SETTINGS.shortcut);
-    await setTaskbarAlignment(DEFAULT_SETTINGS.taskbarAlignment);
+    try {
+      await setTaskbarAlignment(DEFAULT_SETTINGS.taskbarAlignment);
+    } catch (error) {
+      let alignmentRollbackError: unknown;
+      try {
+        // A rejected alignment operation may already have moved some HWNDs.
+        await setTaskbarAlignment(previous.taskbarAlignment);
+      } catch (rollbackError) {
+        alignmentRollbackError = rollbackError;
+      }
+      try {
+        await setShortcut(previous.shortcut);
+      } catch (rollbackError) {
+        // The successful registration is the last known native shortcut.
+        updateSettings({ shortcut: DEFAULT_SETTINGS.shortcut });
+        throw new Error(
+          `Reset stopped: ${String(error)}. Shortcut restoration also failed: ${String(rollbackError)}. The shortcut remains ${DEFAULT_SETTINGS.shortcut}.${alignmentRollbackError ? ` Taskbar restoration failed: ${String(alignmentRollbackError)}.` : ""}`,
+        );
+      }
+      if (alignmentRollbackError) {
+        throw new Error(
+          `Reset stopped: ${String(error)}. Could not restore taskbar alignment: ${String(alignmentRollbackError)}. Select the alignment again to retry.`,
+        );
+      }
+      throw error;
+    }
     const next: Settings = {
       ...DEFAULT_SETTINGS,
       quickAccess: [...DEFAULT_SETTINGS.quickAccess],
@@ -266,7 +387,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
     settingsRef.current = next;
     setSettings(next);
     schedulePersist();
-  }, [schedulePersist]);
+  }, [schedulePersist, updateSettings]);
 
   const dismissToast = useCallback((id: number) => {
     const timer = toastTimers.current.get(id);
@@ -302,6 +423,21 @@ export function AppProvider({ children }: { children: ReactNode }) {
     [dismissToast],
   );
 
+  const quit = useCallback(async () => {
+    try {
+      await flushPersistence();
+      await quitApp();
+    } catch (error) {
+      showToast("Could not quit Prism", `Your changes are still open. ${String(error)}`, "error");
+    }
+  }, [flushPersistence, showToast]);
+
+  useEffect(() => {
+    if (persistenceError) {
+      showToast("Settings need attention", "Open Settings to review the error and retry saving.", "error");
+    }
+  }, [persistenceError, showToast]);
+
   // Apply each native side effect only when its own setting changes.
   const effectiveTheme = settings.theme === "system" ? systemTheme : settings.theme;
   useEffect(() => {
@@ -323,7 +459,9 @@ export function AppProvider({ children }: { children: ReactNode }) {
     const from = renderedWidth.current;
     if (from === null || from === target || window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
       renderedWidth.current = target;
-      setWindowWidth(target).catch(() => {});
+      setWindowWidth(target).catch((error) => {
+        showToast("Window width not applied", `Try selecting the width again. ${String(error)}`, "error");
+      });
       return;
     }
 
@@ -339,7 +477,10 @@ export function AppProvider({ children }: { children: ReactNode }) {
       if (progress >= 1 || (now - lastDispatchTime >= 45 && next !== lastDispatched)) {
         lastDispatched = next;
         lastDispatchTime = now;
-        setWindowWidth(next).catch(() => {});
+        setWindowWidth(next).catch((error) => {
+          if (progress >= 1)
+            showToast("Window width not applied", `Try selecting the width again. ${String(error)}`, "error");
+        });
       }
       if (progress < 1) widthFrame.current = requestAnimationFrame(step);
     };
@@ -348,22 +489,32 @@ export function AppProvider({ children }: { children: ReactNode }) {
       if (widthFrame.current !== null) cancelAnimationFrame(widthFrame.current);
       widthFrame.current = null;
     };
-  }, [ready, settings.width]);
+  }, [ready, settings.width, showToast]);
 
   useEffect(() => {
     if (!ready) return;
-    setAlwaysOnTop(settings.alwaysOnTop).catch(() => {});
-  }, [ready, settings.alwaysOnTop]);
+    setAlwaysOnTop(settings.alwaysOnTop).catch((error) => {
+      showToast("Always on top not applied", `Toggle the setting to retry. ${String(error)}`, "error");
+    });
+  }, [ready, settings.alwaysOnTop, showToast]);
 
   useEffect(() => {
     if (!ready) return;
-    setViewZoom(settings.viewZoom).catch(() => {});
-  }, [ready, settings.viewZoom]);
+    setViewZoom(settings.viewZoom).catch((error) => {
+      showToast("Zoom not applied", `Choose a zoom level to retry. ${String(error)}`, "error");
+    });
+  }, [ready, settings.viewZoom, showToast]);
 
   useEffect(() => {
     if (!ready) return;
-    setTaskbarScrollVolume(settings.taskbarScrollVolume ?? true).catch(() => {});
-  }, [ready, settings.taskbarScrollVolume]);
+    setTaskbarScrollVolume(settings.taskbarScrollVolume ?? true).catch((error) => {
+      showToast(
+        "Taskbar volume control not applied",
+        `Toggle the setting to retry. ${String(error)}`,
+        "error",
+      );
+    });
+  }, [ready, settings.taskbarScrollVolume, showToast]);
 
   // Safe recovery: if Win-key interception self-disables (e.g. an elevated
   // app rejected the replay), drop back to the default shortcut so the UI
@@ -383,6 +534,10 @@ export function AppProvider({ children }: { children: ReactNode }) {
       settings,
       updateSettings,
       resetSettings,
+      persistenceError,
+      flushPersistence,
+      retryPersistence,
+      quit,
       openSettings,
       setOpenSettings,
       history,
@@ -398,6 +553,10 @@ export function AppProvider({ children }: { children: ReactNode }) {
       settings,
       updateSettings,
       resetSettings,
+      persistenceError,
+      flushPersistence,
+      retryPersistence,
+      quit,
       openSettings,
       history,
       pushHistory,
