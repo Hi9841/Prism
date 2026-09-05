@@ -9,9 +9,7 @@ use windows::Win32::Foundation::{HWND, LPARAM, RECT};
 use windows::Win32::Graphics::Gdi::{
     GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST,
 };
-use windows::Win32::UI::Shell::{
-    SHAppBarMessage, ABM_ACTIVATE, ABM_GETSTATE, ABS_AUTOHIDE, APPBARDATA,
-};
+use windows::Win32::UI::Shell::{SHAppBarMessage, ABM_ACTIVATE, ABM_GETTASKBARPOS, APPBARDATA};
 use windows::Win32::UI::WindowsAndMessaging::{
     EnumWindows, FindWindowW, GetClassNameW, GetForegroundWindow, GetWindowRect, IsWindowVisible,
     SetWindowPos, ShowWindow, HWND_BOTTOM, HWND_NOTOPMOST, HWND_TOPMOST, SWP_NOACTIVATE,
@@ -35,16 +33,6 @@ static PRESENTED: AtomicBool = AtomicBool::new(false);
 /// slack avoid classifying maximized windows as fullscreen.
 const FULLSCREEN_TOLERANCE: i32 = 4;
 
-/// True when the taskbar is in auto-hide. `rcWork` already covers the full
-/// monitor in that mode, so live tray HWNDs must not be subtracted.
-pub fn auto_hide() -> bool {
-    let mut data = APPBARDATA {
-        cbSize: std::mem::size_of::<APPBARDATA>() as u32,
-        ..Default::default()
-    };
-    unsafe { SHAppBarMessage(ABM_GETSTATE, &mut data) as u32 & ABS_AUTOHIDE != 0 }
-}
-
 /// Primary taskbar HWND, if Explorer has created it.
 pub fn tray_present() -> bool {
     taskbar_window().is_some()
@@ -55,6 +43,9 @@ pub fn tray_present() -> bool {
 /// dock a window to the work area have to subtract these themselves.
 pub fn bar_rects() -> Vec<RECT> {
     let mut rects = Vec::new();
+    if let Some(rect) = appbar_taskbar_rect() {
+        rects.push(rect);
+    }
     unsafe {
         let _ = EnumWindows(
             Some(collect_taskbar_rect),
@@ -62,6 +53,21 @@ pub fn bar_rects() -> Vec<RECT> {
         );
     }
     rects
+}
+
+fn appbar_taskbar_rect() -> Option<RECT> {
+    let hwnd = taskbar_window()?;
+    let mut data = APPBARDATA {
+        cbSize: std::mem::size_of::<APPBARDATA>() as u32,
+        hWnd: hwnd,
+        ..Default::default()
+    };
+    let found = unsafe { SHAppBarMessage(ABM_GETTASKBARPOS, &mut data) };
+    if found == 0 {
+        return None;
+    }
+    let rect = data.rc;
+    (rect.right > rect.left && rect.bottom > rect.top).then_some(rect)
 }
 
 unsafe extern "system" fn collect_taskbar_rect(window: HWND, detail: LPARAM) -> BOOL {

@@ -887,8 +887,8 @@ export function Palette() {
       </div>
 
       {/* ------- footer ------- */}
-      <div className="footer-bar flex h-10 flex-wrap items-center justify-between gap-x-3 gap-y-1 px-4">
-        <div className="flex items-center gap-1.5 text-[11px] text-fg-quiet">
+      <div className="footer-bar flex shrink-0 items-center justify-between gap-2 px-4 py-1.5">
+        <div className="flex min-w-0 items-center gap-1.5 overflow-hidden text-[11px] text-fg-quiet">
           <Kbd>↑</Kbd>
           <Kbd>↓</Kbd>
           <span className="px-1">navigate</span>
@@ -899,7 +899,7 @@ export function Palette() {
           <Kbd>esc</Kbd>
           <span className="px-1">dismiss</span>
         </div>
-        <div className="ms-auto flex max-w-full flex-wrap items-center justify-end gap-1.5">
+        <div className="flex shrink-0 items-center gap-1">
           <UpdateControl />
           {!palette.appsLoaded && palette.query === "" && (
             <span className="flex items-center gap-1.5 text-[11px] text-fg-quiet">
