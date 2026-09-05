@@ -1,7 +1,7 @@
 {
   "name": "prism",
   "private": true,
-  "version": "0.9.42",
+  "version": "0.9.43",
   "packageManager": "bun@1.3.14",
   "type": "module",
   "scripts": {

@@ -389,13 +389,7 @@ fn palette_target(
         .into_iter()
         .map(PhysicalRect::from)
         .collect();
-    let work = usable_work_area(
-        monitor,
-        reported_work,
-        &bars,
-        taskbar::auto_hide(),
-        PALETTE_TASKBAR_GAP,
-    );
+    let work = usable_work_area(monitor, reported_work, &bars, PALETTE_TASKBAR_GAP);
     let mut width = size.width as i32;
     let mut height = size.height as i32;
     // Clamp to the work area (small screens, huge taskbars, 200% DPI).
@@ -496,6 +490,13 @@ fn taskbar_occupies_edge(monitor: PhysicalRect, bar: PhysicalRect) -> Option<Tas
     {
         return None;
     }
+    let thickness = bar.width().min(bar.height());
+    let length = bar.width().max(bar.height());
+    // Shell_TrayWnd can report the full monitor. Ignore anything that is not
+    // a thin strip along an edge.
+    if thickness * 4 > length || thickness > monitor.height().min(monitor.width()) / 3 {
+        return None;
+    }
     const FLUSH: i32 = 4;
     if bar.width() >= bar.height() {
         if bar.width() < monitor.width() / 2 {
@@ -562,19 +563,23 @@ fn apply_taskbar_gap(monitor: PhysicalRect, work: PhysicalRect, gap: i32) -> Phy
 /// Work area used to dock the palette. Windows 11 often reports `rcWork`
 /// equal to the full monitor, so live taskbar HWNDs are subtracted, then a
 /// small gap keeps the footer from sitting on the tray.
+///
+/// Auto-hide peek bars are a couple of pixels thick and are ignored. A
+/// visible 40px+ bar is always subtracted, even if Windows still reports
+/// the auto-hide bit.
 fn usable_work_area(
     monitor: PhysicalRect,
     reported_work: PhysicalRect,
     taskbars: &[PhysicalRect],
-    auto_hide: bool,
     gap: i32,
 ) -> PhysicalRect {
     let mut work = reported_work;
-    if !auto_hide {
-        for bar in taskbars {
-            if let Some(edge) = taskbar_occupies_edge(monitor, *bar) {
-                work = exclude_taskbar(work, *bar, edge);
-            }
+    for bar in taskbars {
+        if bar.width().min(bar.height()) < 24 {
+            continue;
+        }
+        if let Some(edge) = taskbar_occupies_edge(monitor, *bar) {
+            work = exclude_taskbar(work, *bar, edge);
         }
     }
     apply_taskbar_gap(monitor, work, gap)
@@ -2143,13 +2148,7 @@ mod tests {
     #[test]
     fn usable_work_area_lifts_palette_off_a_taskbar_that_rc_work_ignored() {
         let monitor = sample_monitor();
-        let work = usable_work_area(
-            monitor,
-            monitor,
-            &[sample_bottom_bar()],
-            false,
-            PALETTE_TASKBAR_GAP,
-        );
+        let work = usable_work_area(monitor, monitor, &[sample_bottom_bar()], PALETTE_TASKBAR_GAP);
         assert_eq!(work.bottom, 1_032 - PALETTE_TASKBAR_GAP);
         assert_eq!(
             palette_position(
@@ -2170,27 +2169,25 @@ mod tests {
             bottom: 1_032,
             ..monitor
         };
-        let work = usable_work_area(
-            monitor,
-            reported,
-            &[sample_bottom_bar()],
-            false,
-            PALETTE_TASKBAR_GAP,
-        );
+        let work = usable_work_area(monitor, reported, &[sample_bottom_bar()], PALETTE_TASKBAR_GAP);
         assert_eq!(work.bottom, 1_032 - PALETTE_TASKBAR_GAP);
     }
 
     #[test]
-    fn usable_work_area_leaves_auto_hide_taskbar_untouched() {
+    fn usable_work_area_ignores_auto_hide_peek_but_not_a_visible_bar() {
         let monitor = sample_monitor();
-        let work = usable_work_area(
-            monitor,
-            monitor,
-            &[sample_bottom_bar()],
-            true,
-            PALETTE_TASKBAR_GAP,
-        );
-        assert_eq!(work.bottom, monitor.bottom - PALETTE_TASKBAR_GAP);
+        let peek = PhysicalRect {
+            left: 0,
+            top: 1_078,
+            right: 1_920,
+            bottom: 1_080,
+        };
+        let peek_work = usable_work_area(monitor, monitor, &[peek], PALETTE_TASKBAR_GAP);
+        assert_eq!(peek_work.bottom, monitor.bottom - PALETTE_TASKBAR_GAP);
+
+        let visible_work =
+            usable_work_area(monitor, monitor, &[sample_bottom_bar()], PALETTE_TASKBAR_GAP);
+        assert_eq!(visible_work.bottom, 1_032 - PALETTE_TASKBAR_GAP);
     }
 
     #[test]
@@ -2212,6 +2209,7 @@ mod tests {
             ),
             None
         );
+        assert_eq!(taskbar_occupies_edge(monitor, monitor), None);
     }
 
     #[test]
