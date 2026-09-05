@@ -108,6 +108,7 @@ const EVENT_SEARCH_RECT_CONFIGURED: usize = 19;
 const CONTROL_TASKBAR_PIN: usize = 20;
 const CONTROL_TASKBAR_UNPIN: usize = 21;
 const EVENT_TASKBAR_PIN_COMPLETED: usize = 22;
+const EVENT_SHELL_START: usize = 23;
 const WS_POPUP: u32 = 0x8000_0000;
 const SS_BITMAP: u32 = 0x0000_000e;
 const WS_EX_TOOLWINDOW: u32 = 0x0000_0080;
@@ -436,6 +437,10 @@ fn handle_taskbar_pin(pinned: bool) -> isize {
 }
 
 unsafe fn observer_window() -> Hwnd {
+    let top_level = FindWindowW(OBSERVER_CLASS.as_ptr(), std::ptr::null());
+    if !top_level.is_null() {
+        return top_level;
+    }
     FindWindowExW(
         HWND_MESSAGE,
         std::ptr::null_mut(),
@@ -979,8 +984,11 @@ pub unsafe extern "system" fn PrismShellGetMessageHook(
             }
         } else if is_start_command(message) && !observer_window().is_null() {
             // Consume the Start command only while Prism's observer is alive.
-            // The raw-input state machine decides whether the key sequence was
-            // a standalone Win press, so Win+key chords never open Prism.
+            // Notify so a press that never reaches the keyboard observers
+            // (elevated or exclusive-input foreground) can still toggle Prism.
+            // The observer cancels this fallback as soon as it sees Win-down
+            // or a chord key, so Win+key chords do not open Prism.
+            let _ = notify_observer(message_id, EVENT_SHELL_START, 0);
             message.message = WM_NULL;
         } else if message.message == WM_SETTINGCHANGE && has_active_icon() {
             // Wallpaper, theme, or layout changes behind the Start button
@@ -1018,6 +1026,13 @@ mod tests {
         )));
         assert!(!is_start_command(&message(WM_SYSCOMMAND, 0xF000)));
         assert!(!is_start_command(&message(WM_NULL, SC_TASKLIST)));
+    }
+
+    #[test]
+    fn shell_start_event_is_distinct() {
+        assert_eq!(EVENT_SHELL_START, 23);
+        assert_ne!(EVENT_SHELL_START, EVENT_TASKBAR_PIN_COMPLETED);
+        assert_ne!(EVENT_SHELL_START, EVENT_TASKBAR_START_CLICK_Y);
     }
 }
 

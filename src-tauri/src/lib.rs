@@ -2148,7 +2148,12 @@ mod tests {
     #[test]
     fn usable_work_area_lifts_palette_off_a_taskbar_that_rc_work_ignored() {
         let monitor = sample_monitor();
-        let work = usable_work_area(monitor, monitor, &[sample_bottom_bar()], PALETTE_TASKBAR_GAP);
+        let work = usable_work_area(
+            monitor,
+            monitor,
+            &[sample_bottom_bar()],
+            PALETTE_TASKBAR_GAP,
+        );
         assert_eq!(work.bottom, 1_032 - PALETTE_TASKBAR_GAP);
         assert_eq!(
             palette_position(
@@ -2169,7 +2174,12 @@ mod tests {
             bottom: 1_032,
             ..monitor
         };
-        let work = usable_work_area(monitor, reported, &[sample_bottom_bar()], PALETTE_TASKBAR_GAP);
+        let work = usable_work_area(
+            monitor,
+            reported,
+            &[sample_bottom_bar()],
+            PALETTE_TASKBAR_GAP,
+        );
         assert_eq!(work.bottom, 1_032 - PALETTE_TASKBAR_GAP);
     }
 
@@ -2185,8 +2195,12 @@ mod tests {
         let peek_work = usable_work_area(monitor, monitor, &[peek], PALETTE_TASKBAR_GAP);
         assert_eq!(peek_work.bottom, monitor.bottom - PALETTE_TASKBAR_GAP);
 
-        let visible_work =
-            usable_work_area(monitor, monitor, &[sample_bottom_bar()], PALETTE_TASKBAR_GAP);
+        let visible_work = usable_work_area(
+            monitor,
+            monitor,
+            &[sample_bottom_bar()],
+            PALETTE_TASKBAR_GAP,
+        );
         assert_eq!(visible_work.bottom, 1_032 - PALETTE_TASKBAR_GAP);
     }
 
