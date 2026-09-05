@@ -887,7 +887,7 @@ export function Palette() {
       </div>
 
       {/* ------- footer ------- */}
-      <div className="footer-bar flex min-h-12 flex-wrap items-center justify-between gap-x-3 gap-y-1 px-5 py-2.5">
+      <div className="footer-bar flex h-10 flex-wrap items-center justify-between gap-x-3 gap-y-1 px-4">
         <div className="flex items-center gap-1.5 text-[11px] text-fg-quiet">
           <Kbd>↑</Kbd>
           <Kbd>↓</Kbd>

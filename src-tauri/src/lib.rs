@@ -51,9 +51,13 @@ const STATE_VERSION: u32 = 3;
 const PALETTE_HIDE_DELAY: Duration = Duration::from_millis(125);
 const PALETTE_RAISE_RETRY_DELAY: Duration = Duration::from_millis(40);
 const PALETTE_STARTUP_DELAY: Duration = Duration::from_millis(100);
-const STARTUP_SHELL_RETRY_DELAY: Duration = Duration::from_millis(250);
+const STARTUP_SHELL_RETRY_DELAY: Duration = Duration::from_millis(50);
 const STARTUP_SHELL_RETRY_ATTEMPTS: usize = 120;
-const STARTUP_ALIGNMENT_DELAY: Duration = Duration::from_secs(1);
+const STARTUP_TRAY_WAIT: Duration = Duration::from_secs(2);
+const STARTUP_TRAY_POLL: Duration = Duration::from_millis(50);
+/// Gap between the palette and the live taskbar so they do not read as one
+/// extra-tall bar. Physical pixels; matches the Windows 11 Start gap.
+const PALETTE_TASKBAR_GAP: i32 = 12;
 
 static PALETTE_OPEN: AtomicBool = AtomicBool::new(false);
 static PALETTE_TRANSITION: AtomicU64 = AtomicU64::new(0);
@@ -282,7 +286,13 @@ fn launched_for_autostart() -> bool {
 
 fn schedule_startup_taskbar_alignment() {
     tauri::async_runtime::spawn(async move {
-        tokio::time::sleep(STARTUP_ALIGNMENT_DELAY).await;
+        let _ = tauri::async_runtime::spawn_blocking(|| {
+            let deadline = std::time::Instant::now() + STARTUP_TRAY_WAIT;
+            while !taskbar::tray_present() && std::time::Instant::now() < deadline {
+                std::thread::sleep(STARTUP_TRAY_POLL);
+            }
+        })
+        .await;
         let _ = tauri::async_runtime::spawn_blocking(move || {
             let _ = taskbar_alignment::reapply_current();
         })
@@ -374,7 +384,18 @@ fn palette_target(
     let info = anchor
         .and_then(|value| value.monitor.zip(value.work_area))
         .or_else(|| monitor_geometry_for_window(HWND(hwnd.0)));
-    let (monitor, work) = info?;
+    let (monitor, reported_work) = info?;
+    let bars: Vec<PhysicalRect> = taskbar::bar_rects()
+        .into_iter()
+        .map(PhysicalRect::from)
+        .collect();
+    let work = usable_work_area(
+        monitor,
+        reported_work,
+        &bars,
+        taskbar::auto_hide(),
+        PALETTE_TASKBAR_GAP,
+    );
     let mut width = size.width as i32;
     let mut height = size.height as i32;
     // Clamp to the work area (small screens, huge taskbars, 200% DPI).
@@ -462,6 +483,101 @@ fn taskbar_edge(monitor: PhysicalRect, work: PhysicalRect) -> Option<TaskbarEdge
         .filter(|(inset, _)| *inset > 0)
         .max_by_key(|(inset, _)| *inset)
         .map(|(_, edge)| edge)
+}
+
+fn taskbar_occupies_edge(monitor: PhysicalRect, bar: PhysicalRect) -> Option<TaskbarEdge> {
+    if bar.width() <= 0 || bar.height() <= 0 {
+        return None;
+    }
+    if bar.right <= monitor.left
+        || bar.left >= monitor.right
+        || bar.bottom <= monitor.top
+        || bar.top >= monitor.bottom
+    {
+        return None;
+    }
+    const FLUSH: i32 = 4;
+    if bar.width() >= bar.height() {
+        if bar.width() < monitor.width() / 2 {
+            return None;
+        }
+        if (monitor.bottom - bar.bottom).abs() <= FLUSH {
+            return Some(TaskbarEdge::Bottom);
+        }
+        if (bar.top - monitor.top).abs() <= FLUSH {
+            return Some(TaskbarEdge::Top);
+        }
+    } else {
+        if bar.height() < monitor.height() / 2 {
+            return None;
+        }
+        if (bar.left - monitor.left).abs() <= FLUSH {
+            return Some(TaskbarEdge::Left);
+        }
+        if (monitor.right - bar.right).abs() <= FLUSH {
+            return Some(TaskbarEdge::Right);
+        }
+    }
+    None
+}
+
+fn exclude_taskbar(work: PhysicalRect, bar: PhysicalRect, edge: TaskbarEdge) -> PhysicalRect {
+    match edge {
+        TaskbarEdge::Bottom => PhysicalRect {
+            bottom: work.bottom.min(bar.top),
+            ..work
+        },
+        TaskbarEdge::Top => PhysicalRect {
+            top: work.top.max(bar.bottom),
+            ..work
+        },
+        TaskbarEdge::Left => PhysicalRect {
+            left: work.left.max(bar.right),
+            ..work
+        },
+        TaskbarEdge::Right => PhysicalRect {
+            right: work.right.min(bar.left),
+            ..work
+        },
+    }
+}
+
+fn apply_taskbar_gap(monitor: PhysicalRect, work: PhysicalRect, gap: i32) -> PhysicalRect {
+    let mut work = work;
+    match taskbar_edge(monitor, work) {
+        Some(TaskbarEdge::Bottom) => work.bottom -= gap,
+        Some(TaskbarEdge::Top) => work.top += gap,
+        Some(TaskbarEdge::Left) => work.left += gap,
+        Some(TaskbarEdge::Right) => work.right -= gap,
+        None => work.bottom -= gap,
+    }
+    PhysicalRect {
+        left: work.left,
+        top: work.top,
+        right: work.right.max(work.left + 1),
+        bottom: work.bottom.max(work.top + 1),
+    }
+}
+
+/// Work area used to dock the palette. Windows 11 often reports `rcWork`
+/// equal to the full monitor, so live taskbar HWNDs are subtracted, then a
+/// small gap keeps the footer from sitting on the tray.
+fn usable_work_area(
+    monitor: PhysicalRect,
+    reported_work: PhysicalRect,
+    taskbars: &[PhysicalRect],
+    auto_hide: bool,
+    gap: i32,
+) -> PhysicalRect {
+    let mut work = reported_work;
+    if !auto_hide {
+        for bar in taskbars {
+            if let Some(edge) = taskbar_occupies_edge(monitor, *bar) {
+                work = exclude_taskbar(work, *bar, edge);
+            }
+        }
+    }
+    apply_taskbar_gap(monitor, work, gap)
 }
 
 fn palette_position(
@@ -2004,6 +2120,98 @@ mod tests {
         for width in [0, 559, 721, u32::MAX] {
             assert!(!is_animatable_window_width(width));
         }
+    }
+
+    fn sample_monitor() -> PhysicalRect {
+        PhysicalRect {
+            left: 0,
+            top: 0,
+            right: 1_920,
+            bottom: 1_080,
+        }
+    }
+
+    fn sample_bottom_bar() -> PhysicalRect {
+        PhysicalRect {
+            left: 0,
+            top: 1_032,
+            right: 1_920,
+            bottom: 1_080,
+        }
+    }
+
+    #[test]
+    fn usable_work_area_lifts_palette_off_a_taskbar_that_rc_work_ignored() {
+        let monitor = sample_monitor();
+        let work = usable_work_area(
+            monitor,
+            monitor,
+            &[sample_bottom_bar()],
+            false,
+            PALETTE_TASKBAR_GAP,
+        );
+        assert_eq!(work.bottom, 1_032 - PALETTE_TASKBAR_GAP);
+        assert_eq!(
+            palette_position(
+                work,
+                TaskbarEdge::Bottom,
+                taskbar_alignment::Alignment::Center,
+                720,
+                620,
+            ),
+            (600, 1_032 - PALETTE_TASKBAR_GAP - 620)
+        );
+    }
+
+    #[test]
+    fn usable_work_area_still_gaps_when_rc_work_already_excludes_the_tray() {
+        let monitor = sample_monitor();
+        let reported = PhysicalRect {
+            bottom: 1_032,
+            ..monitor
+        };
+        let work = usable_work_area(
+            monitor,
+            reported,
+            &[sample_bottom_bar()],
+            false,
+            PALETTE_TASKBAR_GAP,
+        );
+        assert_eq!(work.bottom, 1_032 - PALETTE_TASKBAR_GAP);
+    }
+
+    #[test]
+    fn usable_work_area_leaves_auto_hide_taskbar_untouched() {
+        let monitor = sample_monitor();
+        let work = usable_work_area(
+            monitor,
+            monitor,
+            &[sample_bottom_bar()],
+            true,
+            PALETTE_TASKBAR_GAP,
+        );
+        assert_eq!(work.bottom, monitor.bottom - PALETTE_TASKBAR_GAP);
+    }
+
+    #[test]
+    fn taskbar_occupies_edge_detects_bottom_and_ignores_unrelated_windows() {
+        let monitor = sample_monitor();
+        assert_eq!(
+            taskbar_occupies_edge(monitor, sample_bottom_bar()),
+            Some(TaskbarEdge::Bottom)
+        );
+        assert_eq!(
+            taskbar_occupies_edge(
+                monitor,
+                PhysicalRect {
+                    left: 20,
+                    top: 20,
+                    right: 80,
+                    bottom: 80,
+                },
+            ),
+            None
+        );
     }
 
     #[test]
