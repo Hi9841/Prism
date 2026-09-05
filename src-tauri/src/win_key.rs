@@ -5,12 +5,15 @@
 //!
 //! - A pure, side-aware state machine (`WinKeyMachine`) decides everything;
 //!   it is unit-tested without Win32 involvement.
-//! - A message-only raw-input observer detects standalone Win in every mode.
-//!   Prism never installs a low-level keyboard hook or modifies physical input.
+//! - A hidden top-level raw-input observer and an observe-only low-level
+//!   keyboard hook both feed that machine. Neither path eats keys.
+//! - Explorer keeps its bare-Win hotkey so the kernel still posts
+//!   `SC_TASKLIST` when an elevated or exclusive-input app has focus.
+//!   The Explorer message hook consumes that command and, if the key
+//!   observers never saw the press, falls back to a deferred Prism toggle.
 //! - StartAllBack integration disables the provider's Win action reversibly.
 //! - A small Explorer message hook takes ownership of `SC_TASKLIST` before
-//!   native Start is launched. Without provider integration, it also releases
-//!   Explorer's bare-Win hotkey. It fails open if Prism's observer disappears.
+//!   native Start is launched. It fails open if Prism's observer disappears.
 //! - The Start button is found by UI Automation ID (with a child-window class
 //!   fallback), and an Explorer-thread mouse hook consumes clicks in its rect.
 //! - Every Win32 result is checked. Registration failures disable observation.
@@ -19,7 +22,7 @@
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicIsize, AtomicU32, AtomicU64, Ordering};
 use std::sync::{mpsc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -50,18 +53,23 @@ use windows::Win32::UI::Input::{
     RAWKEYBOARD, RIDEV_INPUTSINK, RIDEV_REMOVE, RID_INPUT, RIM_TYPEKEYBOARD,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    ChangeWindowMessageFilterEx, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW,
-    EnumChildWindows, FindWindowW, GetClassNameW, GetShellWindow, GetWindowRect,
+    CallNextHookEx, ChangeWindowMessageFilterEx, CreateWindowExW, DefWindowProcW, DestroyWindow,
+    DispatchMessageW, EnumChildWindows, FindWindowW, GetClassNameW, GetShellWindow, GetWindowRect,
     GetWindowThreadProcessId, IsWindowVisible, MsgWaitForMultipleObjectsEx, PeekMessageW,
     PostThreadMessageW, RegisterClassW, RegisterWindowMessageW, SetWindowsHookExW,
-    TranslateMessage, UnhookWindowsHookEx, HHOOK, HWND_MESSAGE, MSG, MSGFLT_ALLOW, PM_REMOVE,
-    QS_ALLINPUT, RI_KEY_BREAK, WH_GETMESSAGE, WH_MOUSE, WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP,
-    WM_INPUT, WM_KEYDOWN, WM_KEYUP, WM_SYSKEYDOWN, WM_SYSKEYUP, WNDCLASSW,
+    TranslateMessage, UnhookWindowsHookEx, HHOOK, KBDLLHOOKSTRUCT, MSG, MSGFLT_ALLOW, PM_REMOVE,
+    QS_ALLINPUT, RI_KEY_BREAK, WH_GETMESSAGE, WH_KEYBOARD_LL, WH_MOUSE, WM_APP, WM_INPUT,
+    WM_KEYDOWN, WM_KEYUP, WM_SYSKEYDOWN, WM_SYSKEYUP, WNDCLASSW, WS_EX_NOACTIVATE,
+    WS_EX_TOOLWINDOW, WS_POPUP,
 };
 
 const ACTION_MESSAGE: u32 = WM_APP + 1;
 const TOGGLE_DEBOUNCE_MS: u64 = 50;
 const WIN_TOGGLE_RELEASE_GRACE: Duration = Duration::from_millis(30);
+/// Kernel `SC_TASKLIST` arrives on Win-down. Wait long enough for the key
+/// observers to claim the press, or for a chord key to cancel, before treating
+/// a silent press (elevated / exclusive-input foreground) as a standalone Win.
+const SHELL_START_FALLBACK_GRACE: Duration = Duration::from_millis(120);
 /// The Start button rect only needs refreshing occasionally; the UIA query is
 /// expensive and runs on Explorer's side.
 const START_RECT_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
@@ -89,6 +97,7 @@ const SHELL_EVENT_SEARCH_RECT_CONFIGURED: usize = 19;
 const SHELL_CONTROL_TASKBAR_PIN: usize = 20;
 const SHELL_CONTROL_TASKBAR_UNPIN: usize = 21;
 const SHELL_EVENT_TASKBAR_PIN_COMPLETED: usize = 22;
+const SHELL_EVENT_SHELL_START: usize = 23;
 
 /// Event the frontend receives when Win observation self-disables.
 pub const FAILED_EVENT: &str = "win-mode-failed";
@@ -340,6 +349,10 @@ static SHELL_TASKBAR_PIN_REQUEST: Mutex<()> = Mutex::new(());
 static LAST_TOGGLE_MS: AtomicU64 = AtomicU64::new(0);
 static TOGGLE_CLOCK: OnceLock<Instant> = OnceLock::new();
 static PENDING_WIN_TOGGLE: Mutex<PendingWinToggle> = Mutex::new(PendingWinToggle::EMPTY);
+static SHELL_START_FALLBACK: Mutex<ShellStartFallback> = Mutex::new(ShellStartFallback::EMPTY);
+static OBSERVER_OWNS_PRESS: AtomicBool = AtomicBool::new(false);
+static KEYBOARD_HOOK: AtomicIsize = AtomicIsize::new(0);
+static LAST_OBSERVED_KEY: Mutex<Option<(KeyKind, bool, Instant)>> = Mutex::new(None);
 /// Set when taskbar geometry changes (alignment moves, resizes) so the pump
 /// refreshes the Start rect immediately instead of up to 5 seconds later.
 static START_RECT_REFRESH_REQUEST: AtomicBool = AtomicBool::new(false);
@@ -425,6 +438,58 @@ impl PendingWinToggle {
     }
 }
 
+/// Deferred Prism toggle for kernel Start commands that never reached the
+/// keyboard observers. The observer cancels this as soon as it sees Win-down
+/// or a chord key, so Win+R still cannot open Prism on a working input path.
+struct ShellStartFallback {
+    armed: bool,
+    deadline: Option<Instant>,
+}
+
+impl ShellStartFallback {
+    const EMPTY: Self = Self {
+        armed: false,
+        deadline: None,
+    };
+
+    fn arm(&mut self, now: Instant) {
+        if self.armed {
+            return;
+        }
+        self.armed = true;
+        self.deadline = Some(now + SHELL_START_FALLBACK_GRACE);
+    }
+
+    fn cancel(&mut self) {
+        self.armed = false;
+        self.deadline = None;
+    }
+
+    fn take_if_ready(&mut self, now: Instant) -> bool {
+        let deadline = match self.deadline {
+            Some(deadline) if self.armed => deadline,
+            _ => return false,
+        };
+        if now < deadline {
+            return false;
+        }
+        self.cancel();
+        true
+    }
+
+    fn wait_duration(&self, now: Instant) -> Option<Duration> {
+        if !self.armed {
+            return None;
+        }
+        self.deadline
+            .map(|deadline| deadline.saturating_duration_since(now))
+    }
+}
+
+fn should_arm_shell_fallback(observer_owns_press: bool) -> bool {
+    !observer_owns_press
+}
+
 static ACTION_TX: OnceLock<mpsc::Sender<Action>> = OnceLock::new();
 static ACTION_RX: Mutex<Option<mpsc::Receiver<Action>>> = Mutex::new(None);
 static STOP_READY: Mutex<Option<StopReady>> = Mutex::new(None);
@@ -437,7 +502,7 @@ pub fn init(app: AppHandle) {
 pub fn set_provider_suppression(active: bool) {
     PROVIDER_SUPPRESSES_START.store(active, Ordering::Release);
     RAW_MACHINE.lock().map(|mut machine| machine.reset()).ok();
-    cancel_pending_win_toggle();
+    reset_press_observation();
     clear_queued_actions();
 }
 
@@ -553,7 +618,7 @@ pub fn set_enabled(on: bool) -> Result<(), String> {
     if !on {
         SHELL_BRIDGE_ACTIVE.store(false, Ordering::Release);
         RAW_MACHINE.lock().map(|mut m| m.reset()).ok();
-        cancel_pending_win_toggle();
+        reset_press_observation();
         clear_queued_actions();
         LAST_TOGGLE_MS.store(0, Ordering::Release);
         let tid = THREAD_ID.load(Ordering::SeqCst);
@@ -624,6 +689,7 @@ fn pump_loop(rx: mpsc::Receiver<HookReady>) {
 /// Registers raw input and the Explorer Start-command bridge.
 unsafe fn run_pump(ready: HookReady) {
     let provider_mode = PROVIDER_SUPPRESSES_START.load(Ordering::Acquire);
+    debug_trace(&format!("provider-mode {provider_mode}"));
     let raw_input_window = match create_raw_input_window() {
         Ok(window) => window,
         Err(error) => {
@@ -633,6 +699,7 @@ unsafe fn run_pump(ready: HookReady) {
         }
     };
     RAW_OBSERVER_ACTIVE.store(true, Ordering::Release);
+    install_keyboard_hook();
     let com_initialized = CoInitializeEx(None, COINIT_MULTITHREADED).is_ok();
     // Observation is live as soon as raw input is registered. Explorer is
     // often still starting at login; attach the shell bridge in this pump
@@ -655,8 +722,9 @@ unsafe fn run_pump(ready: HookReady) {
             let _ = DispatchMessageW(&msg);
         }
         flush_pending_win_toggle();
+        flush_shell_start_fallback();
         if shell_bridge.is_none() && Instant::now() >= next_bridge_attempt {
-            match ShellBridge::install(!provider_mode) {
+            match ShellBridge::install(false) {
                 Ok(bridge) => {
                     SHELL_BRIDGE_ACTIVE.store(true, Ordering::Release);
                     SHELL_TASKBAR_THREAD.store(bridge.taskbar_thread, Ordering::Release);
@@ -671,7 +739,9 @@ unsafe fn run_pump(ready: HookReady) {
             }
         }
         if let Some(bridge) = shell_bridge.as_mut() {
-            bridge.try_attach_app_manager(!provider_mode);
+            // Keep Explorer's Win hotkey registered so elevated and
+            // exclusive-input apps still generate SC_TASKLIST.
+            bridge.try_attach_app_manager(false);
             bridge.refresh_start_rect();
         }
         if let Ok(mut rx_slot) = ACTION_RX.lock() {
@@ -714,7 +784,7 @@ unsafe fn run_pump(ready: HookReady) {
         {
             BRIDGE_RETRY_DELAY
         } else {
-            pending_win_toggle_wait()
+            pending_observer_wait()
                 .unwrap_or(START_RECT_REFRESH_INTERVAL)
                 .min(START_RECT_REFRESH_INTERVAL)
         };
@@ -729,7 +799,8 @@ unsafe fn run_pump(ready: HookReady) {
     SHELL_TASKBAR_THREAD.store(0, Ordering::Release);
     RAW_OBSERVER_ACTIVE.store(false, Ordering::Release);
     RAW_MACHINE.lock().map(|mut machine| machine.reset()).ok();
-    cancel_pending_win_toggle();
+    reset_press_observation();
+    uninstall_keyboard_hook();
     drop(shell_bridge);
     destroy_raw_input_window(raw_input_window);
     if com_initialized {
@@ -765,7 +836,7 @@ fn disable_observation(reason: &str) {
     ACTIVE.store(false, Ordering::SeqCst);
     SHELL_BRIDGE_ACTIVE.store(false, Ordering::Release);
     RAW_MACHINE.lock().map(|mut m| m.reset()).ok();
-    cancel_pending_win_toggle();
+    reset_press_observation();
     clear_queued_actions();
     LAST_TOGGLE_MS.store(0, Ordering::Release);
     if let Some(app) = APP.get() {
@@ -1003,9 +1074,10 @@ impl ShellBridge {
             }
             let progman_thread = GetWindowThreadProcessId(GetShellWindow(), None);
             if self.app_manager_hook.is_none() && app_manager_thread != progman_thread {
-                let Some(proc) =
-                    GetProcAddress(self.module, PCSTR(c"PrismShellGetMessageHook".as_ptr().cast()))
-                else {
+                let Some(proc) = GetProcAddress(
+                    self.module,
+                    PCSTR(c"PrismShellGetMessageHook".as_ptr().cast()),
+                ) else {
                     return;
                 };
                 let hook_proc = std::mem::transmute::<
@@ -1573,16 +1645,19 @@ unsafe fn create_raw_input_window() -> Result<HWND, String> {
     let module = GetModuleHandleW(None).map_err(|error| format!("get Prism module: {error}"))?;
     let instance = HINSTANCE(module.0);
     let class_name = wide(RAW_INPUT_WINDOW_CLASS);
+    // Message-only windows miss keyboard INPUTSINK while some apps (Windows
+    // Terminal, exclusive raw-input games, elevated MMC) hold focus. A hidden
+    // top-level tool window still receives background keyboard reports.
     let window = CreateWindowExW(
-        WINDOW_EX_STYLE::default(),
+        WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
         PCWSTR(class_name.as_ptr()),
         PCWSTR::null(),
-        WINDOW_STYLE::default(),
+        WS_POPUP,
         0,
         0,
         0,
         0,
-        Some(HWND_MESSAGE),
+        None,
         None,
         Some(instance),
         None,
@@ -1656,9 +1731,33 @@ fn classify_raw_key(
     Some((kind, !is_up))
 }
 
+fn reset_press_observation() {
+    cancel_pending_win_toggle();
+    cancel_shell_start_fallback();
+    OBSERVER_OWNS_PRESS.store(false, Ordering::Release);
+    if let Ok(mut last) = LAST_OBSERVED_KEY.lock() {
+        *last = None;
+    }
+}
+
 fn cancel_pending_win_toggle() {
     if let Ok(mut pending) = PENDING_WIN_TOGGLE.lock() {
         pending.cancel();
+    }
+}
+
+fn cancel_shell_start_fallback() {
+    if let Ok(mut pending) = SHELL_START_FALLBACK.lock() {
+        pending.cancel();
+    }
+}
+
+fn arm_shell_start_fallback() {
+    if !should_arm_shell_fallback(OBSERVER_OWNS_PRESS.load(Ordering::Acquire)) {
+        return;
+    }
+    if let Ok(mut pending) = SHELL_START_FALLBACK.lock() {
+        pending.arm(Instant::now());
     }
 }
 
@@ -1685,11 +1784,160 @@ fn flush_pending_win_toggle() {
     }
 }
 
+fn flush_shell_start_fallback() {
+    let ready = SHELL_START_FALLBACK
+        .lock()
+        .ok()
+        .is_some_and(|mut pending| pending.take_if_ready(Instant::now()));
+    if ready
+        && ACTIVE.load(Ordering::Acquire)
+        && SHELL_BRIDGE_ACTIVE.load(Ordering::Acquire)
+        && !OBSERVER_OWNS_PRESS.load(Ordering::Acquire)
+    {
+        queue_action(Action::ToggleWin(WinSide::Left));
+    }
+}
+
 fn pending_win_toggle_wait() -> Option<Duration> {
     PENDING_WIN_TOGGLE
         .lock()
         .ok()
         .and_then(|pending| pending.wait_duration(Instant::now()))
+}
+
+fn pending_observer_wait() -> Option<Duration> {
+    let win = pending_win_toggle_wait();
+    let shell = SHELL_START_FALLBACK
+        .lock()
+        .ok()
+        .and_then(|pending| pending.wait_duration(Instant::now()));
+    match (win, shell) {
+        (Some(left), Some(right)) => Some(left.min(right)),
+        (Some(wait), None) | (None, Some(wait)) => Some(wait),
+        (None, None) => None,
+    }
+}
+
+fn observe_keyboard_event(kind: KeyKind, is_down: bool) {
+    if is_duplicate_observer_event(kind, is_down) {
+        return;
+    }
+    if matches!(kind, KeyKind::Win(_)) && is_down {
+        OBSERVER_OWNS_PRESS.store(true, Ordering::Release);
+        cancel_shell_start_fallback();
+    }
+    if let KeyKind::Other(key) = kind {
+        observe_pending_win_key(key, is_down);
+        if is_down {
+            cancel_shell_start_fallback();
+        }
+    }
+    if matches!(kind, KeyKind::Win(_)) && !is_down {
+        OBSERVER_OWNS_PRESS.store(false, Ordering::Release);
+    }
+    let decision = RAW_MACHINE
+        .lock()
+        .map(|mut machine| machine.feed(kind, is_down))
+        .unwrap_or(Decision::Pass);
+    match decision {
+        Decision::Toggle(side) if should_defer_toggle(kind) => {
+            schedule_win_toggle(side, non_win_keys_down());
+        }
+        Decision::Toggle(side) => {
+            queue_action(Action::ToggleWin(side));
+        }
+        Decision::Mask | Decision::Pass => {}
+    }
+}
+
+const OBSERVER_DEDUPE_WINDOW: Duration = Duration::from_millis(8);
+
+fn is_same_observer_event(
+    last: Option<(KeyKind, bool, Instant)>,
+    kind: KeyKind,
+    is_down: bool,
+    now: Instant,
+) -> bool {
+    last.is_some_and(|(previous_kind, previous_down, previous_at)| {
+        previous_kind == kind
+            && previous_down == is_down
+            && now.duration_since(previous_at) < OBSERVER_DEDUPE_WINDOW
+    })
+}
+
+fn is_duplicate_observer_event(kind: KeyKind, is_down: bool) -> bool {
+    let now = Instant::now();
+    let Ok(mut last) = LAST_OBSERVED_KEY.lock() else {
+        return false;
+    };
+    if is_same_observer_event(*last, kind, is_down, now) {
+        return true;
+    }
+    *last = Some((kind, is_down, now));
+    false
+}
+
+fn classify_ll_key(virtual_key: u32, message: u32) -> Option<(KeyKind, bool)> {
+    if virtual_key >= 255 {
+        return None;
+    }
+    let is_down = message == WM_KEYDOWN || message == WM_SYSKEYDOWN;
+    let is_up = message == WM_KEYUP || message == WM_SYSKEYUP;
+    if !is_down && !is_up {
+        return None;
+    }
+    let virtual_key = virtual_key as u16;
+    let kind = if virtual_key == VK_LWIN.0 {
+        KeyKind::Win(WinSide::Left)
+    } else if virtual_key == VK_RWIN.0 {
+        KeyKind::Win(WinSide::Right)
+    } else {
+        KeyKind::Other(virtual_key)
+    };
+    Some((kind, is_down))
+}
+
+fn install_keyboard_hook() {
+    let module = match unsafe { GetModuleHandleW(None) } {
+        Ok(module) => module,
+        Err(_) => return,
+    };
+    match unsafe {
+        SetWindowsHookExW(
+            WH_KEYBOARD_LL,
+            Some(keyboard_ll_proc),
+            Some(HINSTANCE(module.0)),
+            0,
+        )
+    } {
+        Ok(hook) => KEYBOARD_HOOK.store(hook.0 as isize, Ordering::Release),
+        Err(error) => debug_trace(&format!("keyboard-hook-install-error {error}")),
+    }
+}
+
+fn uninstall_keyboard_hook() {
+    let handle = KEYBOARD_HOOK.swap(0, Ordering::AcqRel);
+    if handle != 0 {
+        unsafe {
+            let _ = UnhookWindowsHookEx(HHOOK(handle as *mut _));
+        }
+    }
+}
+
+unsafe extern "system" fn keyboard_ll_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    if code >= 0 && ACTIVE.load(Ordering::Acquire) && lparam.0 != 0 {
+        let keyboard = &*(lparam.0 as *const KBDLLHOOKSTRUCT);
+        if let Some((kind, is_down)) = classify_ll_key(keyboard.vkCode, wparam.0 as u32) {
+            observe_keyboard_event(kind, is_down);
+        }
+    }
+    let handle = KEYBOARD_HOOK.load(Ordering::Relaxed);
+    let hook = if handle != 0 {
+        Some(HHOOK(handle as *mut _))
+    } else {
+        None
+    };
+    CallNextHookEx(hook, code, wparam, lparam)
 }
 
 fn non_win_keys_down() -> [bool; 256] {
@@ -1748,6 +1996,12 @@ unsafe extern "system" fn raw_input_window_proc(
             SHELL_EVENT_TASKBAR_PIN_COMPLETED => {
                 SHELL_TASKBAR_PIN_ACK.store(if lparam.0 != 0 { 2 } else { 1 }, Ordering::Release);
             }
+            SHELL_EVENT_SHELL_START
+                if ACTIVE.load(Ordering::Acquire)
+                    && SHELL_BRIDGE_ACTIVE.load(Ordering::Acquire) =>
+            {
+                arm_shell_start_fallback();
+            }
             SHELL_EVENT_TASKBAR_START_CLICK_X => {
                 SHELL_START_CLICK_X.store(lparam.0 as i32, Ordering::Release);
             }
@@ -1788,22 +2042,7 @@ unsafe extern "system" fn raw_input_window_proc(
                 keyboard.Flags,
                 keyboard.Message,
             ) {
-                if let KeyKind::Other(key) = kind {
-                    observe_pending_win_key(key, is_down);
-                }
-                let decision = RAW_MACHINE
-                    .lock()
-                    .map(|mut machine| machine.feed(kind, is_down))
-                    .unwrap_or(Decision::Pass);
-                match decision {
-                    Decision::Toggle(side) if should_defer_toggle(kind) => {
-                        schedule_win_toggle(side, non_win_keys_down());
-                    }
-                    Decision::Toggle(side) => {
-                        queue_action(Action::ToggleWin(side));
-                    }
-                    Decision::Mask | Decision::Pass => {}
-                }
+                observe_keyboard_event(kind, is_down);
             }
         }
     }
@@ -2489,5 +2728,82 @@ mod tests {
     fn m_feed_single(kind: KeyKind, is_down: bool) -> Decision {
         let mut m = WinKeyMachine::default();
         m.feed(kind, is_down)
+    }
+
+    #[test]
+    fn shell_fallback_arms_only_when_observers_missed_the_press() {
+        assert!(should_arm_shell_fallback(false));
+        assert!(!should_arm_shell_fallback(true));
+    }
+
+    #[test]
+    fn silent_shell_start_toggles_after_grace() {
+        let mut pending = ShellStartFallback::EMPTY;
+        let now = Instant::now();
+        pending.arm(now);
+        assert!(!pending.take_if_ready(now));
+        assert!(pending.take_if_ready(now + SHELL_START_FALLBACK_GRACE));
+        assert!(!pending.take_if_ready(now + SHELL_START_FALLBACK_GRACE));
+    }
+
+    #[test]
+    fn observer_win_down_cancels_a_pending_shell_start() {
+        let mut pending = ShellStartFallback::EMPTY;
+        let now = Instant::now();
+        pending.arm(now);
+        pending.cancel();
+        assert!(!pending.take_if_ready(now + SHELL_START_FALLBACK_GRACE));
+    }
+
+    #[test]
+    fn shell_start_is_not_rearmed_while_already_waiting() {
+        let mut pending = ShellStartFallback::EMPTY;
+        let now = Instant::now();
+        pending.arm(now);
+        pending.arm(now + Duration::from_millis(50));
+        assert!(!pending.take_if_ready(now + Duration::from_millis(50)));
+        assert!(pending.take_if_ready(now + SHELL_START_FALLBACK_GRACE));
+    }
+
+    #[test]
+    fn observer_duplicates_within_the_window_are_ignored() {
+        let now = Instant::now();
+        let last = Some((win(WinSide::Left), true, now));
+        assert!(is_same_observer_event(
+            last,
+            win(WinSide::Left),
+            true,
+            now + Duration::from_millis(1)
+        ));
+        assert!(!is_same_observer_event(
+            last,
+            win(WinSide::Left),
+            true,
+            now + OBSERVER_DEDUPE_WINDOW
+        ));
+        assert!(!is_same_observer_event(
+            last,
+            win(WinSide::Left),
+            false,
+            now + Duration::from_millis(1)
+        ));
+    }
+
+    #[test]
+    fn low_level_packets_preserve_win_and_other_transitions() {
+        assert_eq!(
+            classify_ll_key(u32::from(VK_LWIN.0), WM_KEYDOWN),
+            Some((KeyKind::Win(WinSide::Left), true))
+        );
+        assert_eq!(
+            classify_ll_key(u32::from(VK_RWIN.0), WM_SYSKEYUP),
+            Some((KeyKind::Win(WinSide::Right), false))
+        );
+        assert_eq!(
+            classify_ll_key(0x52, WM_KEYDOWN),
+            Some((KeyKind::Other(0x52), true))
+        );
+        assert_eq!(classify_ll_key(255, WM_KEYDOWN), None);
+        assert_eq!(classify_ll_key(u32::from(VK_LWIN.0), WM_INPUT), None);
     }
 }
