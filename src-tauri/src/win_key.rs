@@ -64,7 +64,10 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 
 const ACTION_MESSAGE: u32 = WM_APP + 1;
-const TOGGLE_DEBOUNCE_MS: u64 = 50;
+/// Covers one physical Win press that can arrive on the low-level hook, raw
+/// input, and a late Explorer `SC_TASKLIST` fallback. Shorter windows let a
+/// close-toggle reopen the palette before the extra path is dropped.
+const TOGGLE_DEBOUNCE_MS: u64 = 180;
 const WIN_TOGGLE_RELEASE_GRACE: Duration = Duration::from_millis(30);
 /// Kernel `SC_TASKLIST` arrives on Win-down. Wait long enough for the key
 /// observers to claim the press, or for a chord key to cancel, before treating
@@ -350,7 +353,7 @@ static LAST_TOGGLE_MS: AtomicU64 = AtomicU64::new(0);
 static TOGGLE_CLOCK: OnceLock<Instant> = OnceLock::new();
 static PENDING_WIN_TOGGLE: Mutex<PendingWinToggle> = Mutex::new(PendingWinToggle::EMPTY);
 static SHELL_START_FALLBACK: Mutex<ShellStartFallback> = Mutex::new(ShellStartFallback::EMPTY);
-static OBSERVER_OWNS_PRESS: AtomicBool = AtomicBool::new(false);
+static LAST_OBSERVER_WIN: Mutex<Option<Instant>> = Mutex::new(None);
 static KEYBOARD_HOOK: AtomicIsize = AtomicIsize::new(0);
 static LAST_OBSERVED_KEY: Mutex<Option<(KeyKind, bool, Instant)>> = Mutex::new(None);
 /// Set when taskbar geometry changes (alignment moves, resizes) so the pump
@@ -486,8 +489,12 @@ impl ShellStartFallback {
     }
 }
 
-fn should_arm_shell_fallback(observer_owns_press: bool) -> bool {
-    !observer_owns_press
+fn should_arm_shell_fallback(last_observer_win: Option<Instant>, now: Instant) -> bool {
+    last_observer_win.is_none_or(|at| now.duration_since(at) >= SHELL_START_FALLBACK_GRACE)
+}
+
+fn should_feed_raw_keyboard(keyboard_hook_installed: bool) -> bool {
+    !keyboard_hook_installed
 }
 
 static ACTION_TX: OnceLock<mpsc::Sender<Action>> = OnceLock::new();
@@ -1734,7 +1741,9 @@ fn classify_raw_key(
 fn reset_press_observation() {
     cancel_pending_win_toggle();
     cancel_shell_start_fallback();
-    OBSERVER_OWNS_PRESS.store(false, Ordering::Release);
+    if let Ok(mut last) = LAST_OBSERVER_WIN.lock() {
+        *last = None;
+    }
     if let Ok(mut last) = LAST_OBSERVED_KEY.lock() {
         *last = None;
     }
@@ -1752,12 +1761,24 @@ fn cancel_shell_start_fallback() {
     }
 }
 
+fn last_observer_win() -> Option<Instant> {
+    LAST_OBSERVER_WIN.lock().ok().and_then(|last| *last)
+}
+
+fn note_observer_win(now: Instant) {
+    if let Ok(mut last) = LAST_OBSERVER_WIN.lock() {
+        *last = Some(now);
+    }
+    cancel_shell_start_fallback();
+}
+
 fn arm_shell_start_fallback() {
-    if !should_arm_shell_fallback(OBSERVER_OWNS_PRESS.load(Ordering::Acquire)) {
+    let now = Instant::now();
+    if !should_arm_shell_fallback(last_observer_win(), now) {
         return;
     }
     if let Ok(mut pending) = SHELL_START_FALLBACK.lock() {
-        pending.arm(Instant::now());
+        pending.arm(now);
     }
 }
 
@@ -1785,14 +1806,15 @@ fn flush_pending_win_toggle() {
 }
 
 fn flush_shell_start_fallback() {
+    let now = Instant::now();
     let ready = SHELL_START_FALLBACK
         .lock()
         .ok()
-        .is_some_and(|mut pending| pending.take_if_ready(Instant::now()));
+        .is_some_and(|mut pending| pending.take_if_ready(now));
     if ready
         && ACTIVE.load(Ordering::Acquire)
         && SHELL_BRIDGE_ACTIVE.load(Ordering::Acquire)
-        && !OBSERVER_OWNS_PRESS.load(Ordering::Acquire)
+        && should_arm_shell_fallback(last_observer_win(), now)
     {
         queue_action(Action::ToggleWin(WinSide::Left));
     }
@@ -1822,18 +1844,14 @@ fn observe_keyboard_event(kind: KeyKind, is_down: bool) {
     if is_duplicate_observer_event(kind, is_down) {
         return;
     }
-    if matches!(kind, KeyKind::Win(_)) && is_down {
-        OBSERVER_OWNS_PRESS.store(true, Ordering::Release);
-        cancel_shell_start_fallback();
+    if matches!(kind, KeyKind::Win(_)) {
+        note_observer_win(Instant::now());
     }
     if let KeyKind::Other(key) = kind {
         observe_pending_win_key(key, is_down);
         if is_down {
             cancel_shell_start_fallback();
         }
-    }
-    if matches!(kind, KeyKind::Win(_)) && !is_down {
-        OBSERVER_OWNS_PRESS.store(false, Ordering::Release);
     }
     let decision = RAW_MACHINE
         .lock()
@@ -2022,6 +2040,7 @@ unsafe extern "system" fn raw_input_window_proc(
     if message == WM_INPUT
         && ACTIVE.load(Ordering::Acquire)
         && RAW_OBSERVER_ACTIVE.load(Ordering::Acquire)
+        && should_feed_raw_keyboard(KEYBOARD_HOOK.load(Ordering::Acquire) != 0)
     {
         let mut input = RAWINPUT::default();
         let mut size = std::mem::size_of::<RAWINPUT>() as u32;
@@ -2732,8 +2751,34 @@ mod tests {
 
     #[test]
     fn shell_fallback_arms_only_when_observers_missed_the_press() {
-        assert!(should_arm_shell_fallback(false));
-        assert!(!should_arm_shell_fallback(true));
+        let now = Instant::now();
+        assert!(should_arm_shell_fallback(None, now));
+        assert!(!should_arm_shell_fallback(Some(now), now));
+        assert!(!should_arm_shell_fallback(
+            Some(now),
+            now + SHELL_START_FALLBACK_GRACE - Duration::from_millis(1)
+        ));
+        assert!(should_arm_shell_fallback(
+            Some(now),
+            now + SHELL_START_FALLBACK_GRACE
+        ));
+    }
+
+    #[test]
+    fn observer_win_up_still_blocks_a_late_shell_start() {
+        let now = Instant::now();
+        let after_release = now + WIN_TOGGLE_RELEASE_GRACE;
+        assert!(!should_arm_shell_fallback(
+            Some(after_release),
+            after_release
+        ));
+        assert!(TOGGLE_DEBOUNCE_MS as u128 >= SHELL_START_FALLBACK_GRACE.as_millis());
+    }
+
+    #[test]
+    fn raw_keyboard_is_idle_while_the_low_level_hook_is_installed() {
+        assert!(should_feed_raw_keyboard(false));
+        assert!(!should_feed_raw_keyboard(true));
     }
 
     #[test]
