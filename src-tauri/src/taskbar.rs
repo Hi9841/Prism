@@ -4,16 +4,18 @@ use std::os::windows::ffi::OsStrExt;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use windows::core::PCWSTR;
-use windows::Win32::Foundation::{LPARAM, RECT};
+use windows::core::{BOOL, PCWSTR};
+use windows::Win32::Foundation::{HWND, LPARAM, RECT};
 use windows::Win32::Graphics::Gdi::{
     GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST,
 };
-use windows::Win32::UI::Shell::{SHAppBarMessage, ABM_ACTIVATE, APPBARDATA};
+use windows::Win32::UI::Shell::{
+    SHAppBarMessage, ABM_ACTIVATE, ABM_GETSTATE, ABS_AUTOHIDE, APPBARDATA,
+};
 use windows::Win32::UI::WindowsAndMessaging::{
-    FindWindowW, GetForegroundWindow, GetWindowRect, SetWindowPos, ShowWindow, HWND_BOTTOM,
-    HWND_NOTOPMOST, HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW,
-    SW_SHOWNOACTIVATE,
+    EnumWindows, FindWindowW, GetClassNameW, GetForegroundWindow, GetWindowRect, IsWindowVisible,
+    SetWindowPos, ShowWindow, HWND_BOTTOM, HWND_NOTOPMOST, HWND_TOPMOST, SWP_NOACTIVATE,
+    SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW, SW_SHOWNOACTIVATE,
 };
 
 /// Persistent marker proving Prism presented the taskbar over a fullscreen
@@ -32,6 +34,60 @@ static PRESENTED: AtomicBool = AtomicBool::new(false);
 /// Fullscreen windows must not be covered by the taskbar; a few pixels of
 /// slack avoid classifying maximized windows as fullscreen.
 const FULLSCREEN_TOLERANCE: i32 = 4;
+
+/// True when the taskbar is in auto-hide. `rcWork` already covers the full
+/// monitor in that mode, so live tray HWNDs must not be subtracted.
+pub fn auto_hide() -> bool {
+    let mut data = APPBARDATA {
+        cbSize: std::mem::size_of::<APPBARDATA>() as u32,
+        ..Default::default()
+    };
+    unsafe { SHAppBarMessage(ABM_GETSTATE, &mut data) as u32 & ABS_AUTOHIDE != 0 }
+}
+
+/// Primary taskbar HWND, if Explorer has created it.
+pub fn tray_present() -> bool {
+    taskbar_window().is_some()
+}
+
+/// Visible primary and secondary taskbar rectangles. Windows 11's XAML
+/// taskbar often leaves `rcWork` equal to the full monitor, so callers that
+/// dock a window to the work area have to subtract these themselves.
+pub fn bar_rects() -> Vec<RECT> {
+    let mut rects = Vec::new();
+    unsafe {
+        let _ = EnumWindows(
+            Some(collect_taskbar_rect),
+            LPARAM((&mut rects as *mut Vec<RECT>) as isize),
+        );
+    }
+    rects
+}
+
+unsafe extern "system" fn collect_taskbar_rect(window: HWND, detail: LPARAM) -> BOOL {
+    let mut class_name = [0u16; 64];
+    let length = GetClassNameW(window, &mut class_name).max(0) as usize;
+    let is_taskbar = class_name_is(&class_name[..length], "Shell_TrayWnd")
+        || class_name_is(&class_name[..length], "Shell_SecondaryTrayWnd");
+    if is_taskbar && IsWindowVisible(window).as_bool() {
+        let mut rect = RECT::default();
+        if GetWindowRect(window, &mut rect).is_ok()
+            && rect.right > rect.left
+            && rect.bottom > rect.top
+        {
+            (*(detail.0 as *mut Vec<RECT>)).push(rect);
+        }
+    }
+    BOOL(1)
+}
+
+fn class_name_is(actual: &[u16], expected: &str) -> bool {
+    actual.len() == expected.len()
+        && actual
+            .iter()
+            .zip(expected.bytes())
+            .all(|(actual, expected)| (*actual as u8).eq_ignore_ascii_case(&expected))
+}
 
 pub fn present() {
     let Some(taskbar) = taskbar_window() else {

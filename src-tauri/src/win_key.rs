@@ -65,6 +65,8 @@ const WIN_TOGGLE_RELEASE_GRACE: Duration = Duration::from_millis(30);
 /// The Start button rect only needs refreshing occasionally; the UIA query is
 /// expensive and runs on Explorer's side.
 const START_RECT_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
+const BRIDGE_RETRY_DELAY: Duration = Duration::from_millis(50);
+const SHELL_ACK_TIMEOUT: Duration = Duration::from_millis(200);
 const SHELL_BRIDGE_MESSAGE_NAME: &str = "Prism.ShellBridge.v1";
 const SHELL_CONTROL_DISABLE_WIN_HOTKEY: usize = 1;
 const SHELL_EVENT_HOTKEY_DISABLED: usize = 2;
@@ -632,27 +634,14 @@ unsafe fn run_pump(ready: HookReady) {
     };
     RAW_OBSERVER_ACTIVE.store(true, Ordering::Release);
     let com_initialized = CoInitializeEx(None, COINIT_MULTITHREADED).is_ok();
-    let mut shell_bridge = match ShellBridge::install(!provider_mode) {
-        Ok(bridge) => {
-            SHELL_BRIDGE_ACTIVE.store(true, Ordering::Release);
-            bridge
-        }
-        Err(error) => {
-            debug_trace(&format!("bridge-install-error {error}"));
-            RAW_OBSERVER_ACTIVE.store(false, Ordering::Release);
-            destroy_raw_input_window(raw_input_window);
-            let _ = ready.send(Err(error));
-            disable_observation("Explorer Start-command bridge installation failed");
-            if com_initialized {
-                CoUninitialize();
-            }
-            return;
-        }
-    };
-    SHELL_TASKBAR_THREAD.store(shell_bridge.taskbar_thread, Ordering::Release);
-    notify_start_icon_changed();
+    // Observation is live as soon as raw input is registered. Explorer is
+    // often still starting at login; attach the shell bridge in this pump
+    // instead of blocking the handshake for seconds.
     let _ = ready.send(Ok(()));
-    debug_trace("bridge-install-ok");
+    debug_trace("raw-observer-ready");
+
+    let mut shell_bridge: Option<ShellBridge> = None;
+    let mut next_bridge_attempt = Instant::now();
     let mut msg = MSG::default();
     'pump: loop {
         while PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
@@ -666,18 +655,36 @@ unsafe fn run_pump(ready: HookReady) {
             let _ = DispatchMessageW(&msg);
         }
         flush_pending_win_toggle();
-        // Drain native actions outside the callback.
+        if shell_bridge.is_none() && Instant::now() >= next_bridge_attempt {
+            match ShellBridge::install(!provider_mode) {
+                Ok(bridge) => {
+                    SHELL_BRIDGE_ACTIVE.store(true, Ordering::Release);
+                    SHELL_TASKBAR_THREAD.store(bridge.taskbar_thread, Ordering::Release);
+                    notify_start_icon_changed();
+                    debug_trace("bridge-install-ok");
+                    shell_bridge = Some(bridge);
+                }
+                Err(error) => {
+                    debug_trace(&format!("bridge-install-retry {error}"));
+                    next_bridge_attempt = Instant::now() + BRIDGE_RETRY_DELAY;
+                }
+            }
+        }
+        if let Some(bridge) = shell_bridge.as_mut() {
+            bridge.try_attach_app_manager(!provider_mode);
+            bridge.refresh_start_rect();
+        }
         if let Ok(mut rx_slot) = ACTION_RX.lock() {
             if let Some(rx) = rx_slot.as_mut() {
                 while let Ok(action) = rx.try_recv() {
                     if !ACTIVE.load(Ordering::Acquire) {
                         break 'pump;
                     }
+                    let start_rect = shell_bridge.as_ref().and_then(ShellBridge::start_rect);
                     match action {
                         Action::ToggleWin(_side) => {
                             if let Some(app) = APP.get() {
                                 let toggle_app = app.clone();
-                                let start_rect = shell_bridge.start_rect();
                                 let _ = app.run_on_main_thread(move || {
                                     crate::toggle_palette_from_win(&toggle_app, start_rect);
                                 });
@@ -686,7 +693,6 @@ unsafe fn run_pump(ready: HookReady) {
                         Action::ToggleTaskbar(click) => {
                             if let Some(app) = APP.get() {
                                 let toggle_app = app.clone();
-                                let start_rect = shell_bridge.start_rect();
                                 let _ = app.run_on_main_thread(move || {
                                     crate::toggle_palette_from_taskbar(
                                         &toggle_app,
@@ -700,13 +706,18 @@ unsafe fn run_pump(ready: HookReady) {
                 }
             }
         }
-        shell_bridge.refresh_start_rect();
-        // The pump has no timer work faster than the Start-rect refresh
-        // interval; input already wakes the loop through the message queue.
-        // A long timeout removes a permanent 1 Hz wakeup from the hot path.
-        let wait = pending_win_toggle_wait()
-            .unwrap_or(START_RECT_REFRESH_INTERVAL)
-            .min(START_RECT_REFRESH_INTERVAL);
+        let wait = if shell_bridge.is_none() {
+            next_bridge_attempt.saturating_duration_since(Instant::now())
+        } else if shell_bridge
+            .as_ref()
+            .is_some_and(|bridge| !bridge.win_hotkey_released)
+        {
+            BRIDGE_RETRY_DELAY
+        } else {
+            pending_win_toggle_wait()
+                .unwrap_or(START_RECT_REFRESH_INTERVAL)
+                .min(START_RECT_REFRESH_INTERVAL)
+        };
         let _ = MsgWaitForMultipleObjectsEx(
             None,
             wait.as_millis().min(u128::from(u32::MAX)) as u32,
@@ -719,8 +730,6 @@ unsafe fn run_pump(ready: HookReady) {
     RAW_OBSERVER_ACTIVE.store(false, Ordering::Release);
     RAW_MACHINE.lock().map(|mut machine| machine.reset()).ok();
     cancel_pending_win_toggle();
-    // Ask the Explorer-thread renderer to tear down its window while the hook
-    // and observer are still alive, then release the bridge.
     drop(shell_bridge);
     destroy_raw_input_window(raw_input_window);
     if com_initialized {
@@ -787,6 +796,7 @@ struct ShellBridge {
     search_rect: Option<RECT>,
     last_rect_refresh: Option<Instant>,
     library_path: PathBuf,
+    win_hotkey_released: bool,
 }
 
 struct StartButtonLocator {
@@ -947,139 +957,17 @@ impl ShellBridge {
             cleanup_shell_hook(progman_hook, module, &library_path);
             return Err(error);
         }
-        if wait_for_ack(&SHELL_START_RECT_ACK, Duration::from_secs(1)) != 2 {
-            let _ = UnhookWindowsHookEx(taskbar_mouse_hook);
-            if let Some(hook) = taskbar_message_hook {
-                let _ = UnhookWindowsHookEx(hook);
-            }
-            cleanup_shell_hook(progman_hook, module, &library_path);
-            return Err("Explorer did not accept the Start-button rectangle".to_string());
-        }
+        let _ = wait_for_ack(&SHELL_START_RECT_ACK, SHELL_ACK_TIMEOUT);
 
         SHELL_SEARCH_RECT_ACK.store(0, Ordering::Release);
         let _ = post_search_button_rect(taskbar_thread, bridge_message, search_rect);
-        let _ = wait_for_ack(&SHELL_SEARCH_RECT_ACK, Duration::from_millis(250));
+        let _ = wait_for_ack(&SHELL_SEARCH_RECT_ACK, SHELL_ACK_TIMEOUT);
 
-        if !release_win_hotkey {
-            #[cfg(debug_assertions)]
-            eprintln!("[win-key] Explorer Start-command bridge active (Progman thread {progman_thread}, taskbar thread {taskbar_thread})");
-            return Ok(Self {
-                module,
-                progman_hook,
-                taskbar_message_hook,
-                app_manager_hook: None,
-                taskbar_mouse_hook,
-                taskbar_thread,
-                start_button_locator,
-                start_rect,
-                search_button_locator,
-                search_rect,
-                last_rect_refresh: None,
-                library_path,
-            });
-        }
-
-        let app_manager = match find_shell_window("ApplicationManager_ImmersiveShellWindow") {
-            Ok(window) => window,
-            Err(error) => {
-                let _ = UnhookWindowsHookEx(taskbar_mouse_hook);
-                if let Some(hook) = taskbar_message_hook {
-                    let _ = UnhookWindowsHookEx(hook);
-                }
-                cleanup_shell_hook(progman_hook, module, &library_path);
-                return Err(error);
-            }
-        };
-        let app_manager_thread = GetWindowThreadProcessId(app_manager, None);
-        if app_manager_thread == 0 {
-            let _ = UnhookWindowsHookEx(taskbar_mouse_hook);
-            if let Some(hook) = taskbar_message_hook {
-                let _ = UnhookWindowsHookEx(hook);
-            }
-            cleanup_shell_hook(progman_hook, module, &library_path);
-            return Err("Explorer application-manager thread is unavailable".to_string());
-        }
-
-        let app_manager_hook = if app_manager_thread == progman_thread {
-            None
-        } else {
-            match SetWindowsHookExW(
-                WH_GETMESSAGE,
-                Some(hook_proc),
-                Some(HINSTANCE(module.0)),
-                app_manager_thread,
-            ) {
-                Ok(hook) => Some(hook),
-                Err(error) => {
-                    let _ = UnhookWindowsHookEx(taskbar_mouse_hook);
-                    if let Some(hook) = taskbar_message_hook {
-                        let _ = UnhookWindowsHookEx(hook);
-                    }
-                    cleanup_shell_hook(progman_hook, module, &library_path);
-                    return Err(format!("enter Explorer hotkey thread: {error}"));
-                }
-            }
-        };
-
-        SHELL_BRIDGE_ACK.store(0, Ordering::Release);
-        let message = match shell_bridge_message() {
-            Ok(message) => message,
-            Err(error) => {
-                if let Some(hook) = app_manager_hook {
-                    let _ = UnhookWindowsHookEx(hook);
-                }
-                let _ = UnhookWindowsHookEx(taskbar_mouse_hook);
-                if let Some(hook) = taskbar_message_hook {
-                    let _ = UnhookWindowsHookEx(hook);
-                }
-                cleanup_shell_hook(progman_hook, module, &library_path);
-                return Err(error);
-            }
-        };
-        if let Err(error) = PostThreadMessageW(
-            app_manager_thread,
-            message,
-            WPARAM(SHELL_CONTROL_DISABLE_WIN_HOTKEY),
-            LPARAM(0),
-        ) {
-            if let Some(hook) = app_manager_hook {
-                let _ = UnhookWindowsHookEx(hook);
-            }
-            let _ = UnhookWindowsHookEx(taskbar_mouse_hook);
-            if let Some(hook) = taskbar_message_hook {
-                let _ = UnhookWindowsHookEx(hook);
-            }
-            cleanup_shell_hook(progman_hook, module, &library_path);
-            return Err(format!("ask Explorer to release bare Win: {error}"));
-        }
-
-        let acknowledged = wait_for_ack(&SHELL_BRIDGE_ACK, Duration::from_secs(1));
-        if acknowledged == 0 {
-            if let Some(hook) = app_manager_hook {
-                let _ = UnhookWindowsHookEx(hook);
-            }
-            let _ = UnhookWindowsHookEx(taskbar_mouse_hook);
-            if let Some(hook) = taskbar_message_hook {
-                let _ = UnhookWindowsHookEx(hook);
-            }
-            cleanup_shell_hook(progman_hook, module, &library_path);
-            return Err("Explorer did not acknowledge the bare-Win handoff".to_string());
-        }
-
-        #[cfg(debug_assertions)]
-        eprintln!(
-            "[win-key] Explorer bridge active (Progman thread {progman_thread}, hotkey thread {app_manager_thread}, hotkey {})",
-            if acknowledged == 2 {
-                "released"
-            } else {
-                "already released"
-            }
-        );
-        Ok(Self {
+        let mut bridge = Self {
             module,
             progman_hook,
             taskbar_message_hook,
-            app_manager_hook,
+            app_manager_hook: None,
             taskbar_mouse_hook,
             taskbar_thread,
             start_button_locator,
@@ -1088,7 +976,71 @@ impl ShellBridge {
             search_rect,
             last_rect_refresh: None,
             library_path,
-        })
+            win_hotkey_released: !release_win_hotkey,
+        };
+        if release_win_hotkey {
+            bridge.try_attach_app_manager(true);
+        }
+        #[cfg(debug_assertions)]
+        eprintln!(
+            "[win-key] Explorer Start-command bridge active (Progman thread {progman_thread}, taskbar thread {taskbar_thread})"
+        );
+        Ok(bridge)
+    }
+
+    fn try_attach_app_manager(&mut self, release_win_hotkey: bool) {
+        if !release_win_hotkey || self.win_hotkey_released {
+            return;
+        }
+        unsafe {
+            let Ok(app_manager) = find_shell_window("ApplicationManager_ImmersiveShellWindow")
+            else {
+                return;
+            };
+            let app_manager_thread = GetWindowThreadProcessId(app_manager, None);
+            if app_manager_thread == 0 {
+                return;
+            }
+            let progman_thread = GetWindowThreadProcessId(GetShellWindow(), None);
+            if self.app_manager_hook.is_none() && app_manager_thread != progman_thread {
+                let Some(proc) =
+                    GetProcAddress(self.module, PCSTR(c"PrismShellGetMessageHook".as_ptr().cast()))
+                else {
+                    return;
+                };
+                let hook_proc = std::mem::transmute::<
+                    unsafe extern "system" fn() -> isize,
+                    ShellHookProc,
+                >(proc);
+                match SetWindowsHookExW(
+                    WH_GETMESSAGE,
+                    Some(hook_proc),
+                    Some(HINSTANCE(self.module.0)),
+                    app_manager_thread,
+                ) {
+                    Ok(hook) => self.app_manager_hook = Some(hook),
+                    Err(_) => return,
+                }
+            }
+            let Ok(message) = shell_bridge_message() else {
+                return;
+            };
+            SHELL_BRIDGE_ACK.store(0, Ordering::Release);
+            if PostThreadMessageW(
+                app_manager_thread,
+                message,
+                WPARAM(SHELL_CONTROL_DISABLE_WIN_HOTKEY),
+                LPARAM(0),
+            )
+            .is_err()
+            {
+                return;
+            }
+            if wait_for_ack(&SHELL_BRIDGE_ACK, SHELL_ACK_TIMEOUT) != 0 {
+                self.win_hotkey_released = true;
+                debug_trace("win-hotkey-released");
+            }
+        }
     }
 
     fn start_rect(&self) -> Option<RECT> {
@@ -1522,19 +1474,15 @@ unsafe fn find_shell_window(class_name: &str) -> Result<HWND, String> {
         }
     }
     let class_name_wide = wide(class_name);
-    let mut last_error = None;
-    for _ in 0..20 {
-        match FindWindowW(PCWSTR(class_name_wide.as_ptr()), PCWSTR::null()) {
-            Ok(window) if !window.0.is_null() => return Ok(window),
-            Ok(_) => last_error = Some("window handle was null".to_string()),
-            Err(error) => last_error = Some(error.to_string()),
-        }
-        std::thread::sleep(Duration::from_millis(50));
+    match FindWindowW(PCWSTR(class_name_wide.as_ptr()), PCWSTR::null()) {
+        Ok(window) if !window.0.is_null() => Ok(window),
+        Ok(_) => Err(format!(
+            "Explorer window '{class_name}' is unavailable: window handle was null"
+        )),
+        Err(error) => Err(format!(
+            "Explorer window '{class_name}' is unavailable: {error}"
+        )),
     }
-    Err(format!(
-        "Explorer window '{class_name}' is unavailable: {}",
-        last_error.unwrap_or_else(|| "timed out".to_string())
-    ))
 }
 
 fn wait_for_ack(acknowledgement: &AtomicU32, timeout: Duration) -> u32 {
