@@ -96,7 +96,6 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const historyRef = useRef(history);
   historyRef.current = history;
   const toastsRef = useRef(toasts);
-  toastsRef.current = toasts;
   const persistTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const persistRequest = useRef<Promise<void> | null>(null);
   const stateLoadError = useRef<string | null>(null);
@@ -390,19 +389,21 @@ export function AppProvider({ children }: { children: ReactNode }) {
   }, [schedulePersist, updateSettings]);
 
   const dismissToast = useCallback((id: number) => {
+    const toast = toastsRef.current.find((t) => t.id === id);
+    if (!toast || toast.closing) return;
     const timer = toastTimers.current.get(id);
     if (timer) {
       clearTimeout(timer);
       toastTimers.current.delete(id);
     }
-    const toast = toastsRef.current.find((t) => t.id === id);
-    if (!toast || toast.closing) return;
     // Mark the toast as closing so it plays its exit animation, then remove
     // it once the animation has finished.
-    setToasts((prev) => prev.map((t) => (t.id === id ? { ...t, closing: true } : t)));
+    toastsRef.current = toastsRef.current.map((t) => (t.id === id ? { ...t, closing: true } : t));
+    setToasts(toastsRef.current);
     const removeTimer = setTimeout(() => {
       toastTimers.current.delete(id);
-      setToasts((prev) => prev.filter((t) => t.id !== id));
+      toastsRef.current = toastsRef.current.filter((t) => t.id !== id);
+      setToasts(toastsRef.current);
     }, 160);
     toastTimers.current.set(id, removeTimer);
   }, []);
@@ -410,15 +411,18 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const showToast = useCallback(
     (title: string, detail?: string, kind: Toast["kind"] = "success") => {
       const id = toastSeq++;
-      setToasts((prev) => [...prev, { id, title, detail, kind }]);
+      // Publish synchronously so simultaneous failures share the same limit,
+      // even before React commits the next render.
+      toastsRef.current = [...toastsRef.current, { id, title, detail, kind }];
+      setToasts(toastsRef.current);
       if (kind === "success") {
         const timer = setTimeout(() => dismissToast(id), 1900);
         toastTimers.current.set(id, timer);
       }
       // Keep at most two toasts on screen; evict the oldest with its exit
       // animation instead of dropping it instantly.
-      const visible = toastsRef.current;
-      if (visible.length >= 2) dismissToast(visible[0].id);
+      const visible = toastsRef.current.filter((toast) => !toast.closing);
+      for (const toast of visible.slice(0, -2)) dismissToast(toast.id);
     },
     [dismissToast],
   );

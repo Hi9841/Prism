@@ -129,6 +129,7 @@ export function PaletteProvider({ children }: { children: ReactNode }) {
   const iconSettled = useRef<Set<string>>(new Set());
   const iconInFlight = useRef<Set<string>>(new Set());
   const iconAttempts = useRef<Map<string, number>>(new Map());
+  const iconEpoch = useRef(0);
   const iconRetryTimer = useRef<number | null>(null);
   const [iconRetryTick, setIconRetryTick] = useState(0);
   // Mirror of the index status for effects that must not re-run when the
@@ -378,6 +379,8 @@ export function PaletteProvider({ children }: { children: ReactNode }) {
         }
         iconSettled.current.clear();
         iconAttempts.current.clear();
+        iconEpoch.current += 1;
+        iconInFlight.current.clear();
         // Icons captured before the rescan can outlive their apps on disk;
         // dropping them lets the icon effect re-request the visible set.
         setAppIcons({});
@@ -478,8 +481,10 @@ export function PaletteProvider({ children }: { children: ReactNode }) {
       iconAttempts.current.set(id, (iconAttempts.current.get(id) ?? 0) + 1);
     }
 
+    const epoch = iconEpoch.current;
     getAppIcons(missing)
       .then((icons) => {
+        if (epoch !== iconEpoch.current) return;
         // The app cache is ready at this point, so omitted ids are genuinely
         // iconless and should not issue another request on every keystroke.
         for (const id of missing) iconSettled.current.add(id);
@@ -488,6 +493,7 @@ export function PaletteProvider({ children }: { children: ReactNode }) {
         }
       })
       .catch(() => {
+        if (epoch !== iconEpoch.current) return;
         const attempt = Math.max(...missing.map((id) => iconAttempts.current.get(id) ?? 1));
         const delay = appIconRetryDelay(attempt);
         if (delay !== null && iconRetryTimer.current === null) {
@@ -498,6 +504,7 @@ export function PaletteProvider({ children }: { children: ReactNode }) {
         }
       })
       .finally(() => {
+        if (epoch !== iconEpoch.current) return;
         for (const id of missing) iconInFlight.current.delete(id);
       });
   }, [iconRequestIds, appIcons, appsLoaded, iconRetryTick]);
@@ -536,8 +543,12 @@ export function PaletteProvider({ children }: { children: ReactNode }) {
         if (clipboardItem) {
           app.showToast("Copied to clipboard", item.toastDetail ?? item.title);
         }
-      } catch {
-        app.showToast("Couldn’t open item", item.title);
+      } catch (error) {
+        app.showToast(
+          clipboardItem ? "Could not copy to clipboard" : "Could not open item",
+          `${item.title}: ${String(error)}`,
+          "error",
+        );
       }
     },
     [app],
@@ -556,7 +567,7 @@ export function PaletteProvider({ children }: { children: ReactNode }) {
         await item.runAsAdmin();
         app.pushHistory(item.id, item.historyTitle);
       } catch (error) {
-        app.showToast("Could not run as administrator", String(error));
+        app.showToast("Could not run as administrator", String(error), "error");
       }
     },
     [app],
@@ -564,8 +575,11 @@ export function PaletteProvider({ children }: { children: ReactNode }) {
 
   const rebuildIndex = useCallback(() => {
     setFileIndexing(true);
-    rebuildFileIndex().catch(() => {});
-  }, []);
+    rebuildFileIndex().catch((error) => {
+      setFileIndexing(indexStatusRef.current.indexing);
+      app.showToast("Could not rebuild file index", `Retry the rebuild. ${String(error)}`, "error");
+    });
+  }, [app.showToast]);
 
   const retryFileSearch = useCallback(() => {
     setFileIndexTick((tick) => tick + 1);

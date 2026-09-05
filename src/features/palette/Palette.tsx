@@ -133,7 +133,7 @@ export function Palette() {
         return;
       }
       if (settings.pinnedApps.length >= PINNED_APP_LIMIT) {
-        showToast("Pin limit reached", `Unpin an app before adding ${item.title}`);
+        showToast("Pin limit reached", `Unpin an app before adding ${item.title}`, "error");
         return;
       }
       updateSettings({
@@ -855,7 +855,7 @@ export function Palette() {
                 await item.toggleTaskbarPin?.();
                 showToast(wasPinned ? "Unpinned from taskbar" : "Pinned to taskbar", item.title);
               } catch (error) {
-                showToast("Could not update taskbar pin", String(error));
+                showToast("Could not update taskbar pin", String(error), "error");
               }
             })();
           }}
@@ -866,7 +866,7 @@ export function Palette() {
               try {
                 await item.showProperties?.();
               } catch (error) {
-                showToast("Could not open properties", String(error));
+                showToast("Could not open properties", String(error), "error");
               }
             })();
           }}
@@ -1201,7 +1201,7 @@ const ResultRow = memo(function ResultRow({
           onOpenContextMenu(item, index, event.clientX, event.clientY);
         }
       }}
-      className={`group row w-full text-left transition-colors duration-50 ${
+      className={`group/row row w-full text-left transition-colors duration-50 ${
         selected ? "bg-surface-active" : "hover:bg-surface-hover"
       }`}
     >
@@ -1338,7 +1338,7 @@ const ResultRow = memo(function ResultRow({
               title={`${pinned ? "Unpin" : "Pin"} ${item.title}`}
               tabIndex={selected ? 0 : -1}
               onClick={() => onTogglePin(item)}
-              className={`focus-ring press grid h-8 w-8 cursor-pointer place-items-center rounded-[8px] opacity-0 group-hover:opacity-100 focus:opacity-100 ${
+              className={`focus-ring press grid h-8 w-8 cursor-pointer place-items-center rounded-[8px] opacity-0 group-hover/row:opacity-100 focus:opacity-100 ${
                 pinned
                   ? "bg-accent-soft text-accent"
                   : "text-fg-tertiary hover:bg-surface-hover hover:text-fg"
@@ -1364,7 +1364,7 @@ const ResultRow = memo(function ResultRow({
                 title="Remove from Recent"
                 tabIndex={selected ? 0 : -1}
                 onClick={() => onRemoveHistory(item.id)}
-                className="focus-ring press grid h-8 w-8 cursor-pointer place-items-center rounded-[8px] text-fg-tertiary opacity-60 transition-opacity duration-150 group-hover:opacity-100 focus:opacity-100 hover:bg-danger-soft hover:text-danger"
+                className="focus-ring press grid h-8 w-8 cursor-pointer place-items-center rounded-[8px] text-fg-tertiary opacity-60 transition-opacity duration-150 group-hover/row:opacity-100 focus:opacity-100 hover:bg-danger-soft hover:text-danger"
               >
                 <X className="h-4 w-4" />
               </button>
@@ -1377,7 +1377,7 @@ const ResultRow = memo(function ResultRow({
             title="Remove from Recent"
             tabIndex={selected ? 0 : -1}
             onClick={() => onRemoveHistory(item.id)}
-            className="focus-ring press grid h-8 w-8 cursor-pointer place-items-center rounded-[8px] text-fg-tertiary opacity-60 transition-opacity duration-150 group-hover:opacity-100 focus:opacity-100 hover:bg-danger-soft hover:text-danger"
+            className="focus-ring press grid h-8 w-8 cursor-pointer place-items-center rounded-[8px] text-fg-tertiary opacity-60 transition-opacity duration-150 group-hover/row:opacity-100 focus:opacity-100 hover:bg-danger-soft hover:text-danger"
           >
             <X className="h-4 w-4" />
           </button>

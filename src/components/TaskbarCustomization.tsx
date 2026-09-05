@@ -32,7 +32,7 @@ export function TaskbarCustomization() {
     try {
       setSettings(await getTaskbarSettings());
     } catch (error) {
-      showToast("Taskbar settings unavailable", String(error));
+      showToast("Taskbar settings unavailable", String(error), "error");
     } finally {
       setBusy(null);
     }
@@ -50,7 +50,7 @@ export function TaskbarCustomization() {
         await action();
         setSettings(await getTaskbarSettings());
       } catch (error) {
-        showToast("Taskbar not changed", String(error));
+        showToast("Taskbar not changed", String(error), "error");
       } finally {
         setBusy(null);
       }
@@ -59,6 +59,20 @@ export function TaskbarCustomization() {
   );
 
   if (!settings) {
+    if (busy !== "load") {
+      return (
+        <div className="flex flex-wrap items-center justify-between gap-3 text-[12px] text-fg-secondary">
+          <p role="alert">Could not load taskbar settings. Retry to reconnect.</p>
+          <button
+            type="button"
+            onClick={() => void refresh()}
+            className="focus-ring press min-h-11 rounded-[9px] bg-surface px-3 font-medium text-fg hover:bg-surface-hover"
+          >
+            Retry taskbar settings
+          </button>
+        </div>
+      );
+    }
     return (
       <div className="flex min-h-12 items-center justify-center text-fg-tertiary" role="status">
         <LoaderCircle className="h-4 w-4 animate-spin motion-reduce:animate-none" aria-hidden="true" />
