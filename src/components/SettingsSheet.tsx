@@ -70,7 +70,7 @@ function KeybindPicker() {
         updateSettings({ shortcut: combo });
         showToast("Shortcut set", displayShortcut(combo));
       } catch (e) {
-        showToast("Shortcut not changed", String(e));
+        showToast("Shortcut not changed", String(e), "error");
       } finally {
         setBusy(false);
       }
@@ -127,7 +127,7 @@ function TaskbarAlignmentPicker() {
         await setTaskbarAlignment(taskbarAlignment);
         updateSettings({ taskbarAlignment });
       } catch (error) {
-        showToast("Taskbar not changed", String(error));
+        showToast("Taskbar not changed", String(error), "error");
       } finally {
         setBusy(false);
       }
@@ -320,7 +320,7 @@ function AppGroupsPicker() {
     const name = newName.trim();
     if (!name) return;
     if (settings.appGroups.length >= APP_GROUP_LIMIT) {
-      showToast("Collection limit reached", `Prism supports up to ${APP_GROUP_LIMIT} collections`);
+      showToast("Collection limit reached", `Prism supports up to ${APP_GROUP_LIMIT} collections`, "error");
       return;
     }
     const id = `group-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
@@ -353,7 +353,7 @@ function AppGroupsPicker() {
     const target = settings.appGroups.find((group) => group.id === groupId);
     if (!target || target.appIds.includes(appId)) return;
     if (target.appIds.length >= APP_GROUP_APP_LIMIT) {
-      showToast("Collection is full", `Each collection supports up to ${APP_GROUP_APP_LIMIT} apps`);
+      showToast("Collection is full", `Each collection supports up to ${APP_GROUP_APP_LIMIT} apps`, "error");
       return;
     }
     updateSettings({
@@ -681,7 +681,7 @@ export function SettingsSheet() {
       setResetConfirming(false);
       showToast("Settings reset", "Prism is back to its defaults");
     } catch (error) {
-      showToast("Settings not reset", String(error));
+      showToast("Settings not reset", String(error), "error");
     } finally {
       setResetBusy(false);
     }

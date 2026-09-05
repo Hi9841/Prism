@@ -130,6 +130,20 @@ describe("Palette keyboard and accessibility behavior", () => {
     );
   });
 
+  it("scopes result actions to their own row hover state", () => {
+    renderPalette();
+
+    const rows = [
+      screen.getByRole("row", { name: "Calculator, Application" }),
+      screen.getByRole("row", { name: "Calendar, Application" }),
+    ];
+    const pinButtons = screen.getAllByRole("button", { name: /^Pin / });
+
+    expect(rows.every((row) => row.className.includes("group/row"))).toBe(true);
+    expect(pinButtons.every((button) => button.className.includes("group-hover/row:opacity-100"))).toBe(true);
+    expect(pinButtons.every((button) => !button.className.includes("group-hover:opacity-100"))).toBe(true);
+  });
+
   it("ignores launcher commands while IME composition is active", () => {
     const { move, runSelected, setQuery } = renderPalette();
     const input = screen.getByRole("combobox", { name: /search files/i });

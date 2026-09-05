@@ -2,6 +2,7 @@
 
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { setShortcut, setTaskbarAlignment } from "../lib/bridge";
 import { DEFAULT_SETTINGS } from "../lib/types";
 import { useApp } from "../state/app";
 import { usePalette } from "../state/palette";
@@ -79,6 +80,22 @@ afterEach(() => {
 });
 
 describe("SettingsSheet persistence actions", () => {
+  it.each([
+    ["Ctrl + Alt + Space", setShortcut, "Shortcut not changed"],
+    ["Left", setTaskbarAlignment, "Taskbar not changed"],
+  ] as const)("reports a rejected %s change without persisting it", async (label, command, title) => {
+    vi.mocked(command).mockRejectedValueOnce(new Error("shell unavailable"));
+    const { updateSettings } = renderSettings();
+    fireEvent.click(screen.getByRole("button", { name: label }));
+    await waitFor(() =>
+      expect(useApp().showToast).toHaveBeenCalledWith(
+        title,
+        expect.stringContaining("shell unavailable"),
+        "error",
+      ),
+    );
+    expect(updateSettings).not.toHaveBeenCalled();
+  });
   it("keeps a save failure visible and disables Retry save while retrying", async () => {
     let resolveRetry = () => {};
     const pending = new Promise<void>((resolve) => {

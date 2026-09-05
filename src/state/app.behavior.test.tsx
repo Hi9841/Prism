@@ -217,3 +217,29 @@ describe("native reset", () => {
     expect(bridge.saveState).not.toHaveBeenCalled();
   });
 });
+
+describe("notification limits", () => {
+  it("keeps the latest two errors when several failures arrive before a render", async () => {
+    await mount();
+    await act(async () => {
+      for (let i = 0; i < 10; i += 1) app.showToast(`Failure ${i}`, "Retry the action", "error");
+    });
+    expect(app.toasts.filter((toast) => !toast.closing).map((toast) => toast.title)).toEqual([
+      "Failure 8",
+      "Failure 9",
+    ]);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(160);
+    });
+    expect(app.toasts).toHaveLength(2);
+  });
+
+  it("dismisses a toast created in the same render batch", async () => {
+    await mount();
+    await act(async () => {
+      app.showToast("Saved");
+      await vi.advanceTimersByTimeAsync(2100);
+    });
+    expect(app.toasts).toHaveLength(0);
+  });
+});

@@ -91,7 +91,7 @@ export function PowerMenu() {
       setOpen(false);
       document.dispatchEvent(new CustomEvent("prism:close"));
     } catch (error) {
-      showToast(`Could not ${action === "shutdown" ? "shut down" : action}`, String(error));
+      showToast(`Could not ${action === "shutdown" ? "shut down" : action}`, String(error), "error");
     } finally {
       setBusy(null);
     }
