@@ -2082,7 +2082,9 @@ pub fn set_taskbar_pinned(path: &Path, pinned: bool) -> Result<(), String> {
     }
 
     let verb = if pinned { "taskbarpin" } else { "taskbarunpin" };
-    if unsafe { shell_execute_verb(verb, taskband_target) }.is_ok() && wait_for_taskbar_state(path, pinned) {
+    if unsafe { shell_execute_verb(verb, taskband_target) }.is_ok()
+        && wait_for_taskbar_state(path, pinned)
+    {
         return Ok(());
     }
 

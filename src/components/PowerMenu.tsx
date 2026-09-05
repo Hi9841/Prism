@@ -134,7 +134,8 @@ export function PowerMenu() {
               role="menuitem"
               disabled={busy !== null}
               onClick={() => void runAction(action)}
-              className="focus-ring press flex h-9 w-full cursor-pointer items-center gap-2 rounded-[4px] px-2.5 text-left text-[12.5px] font-medium text-fg-secondary hover:bg-surface-hover hover:text-fg disabled:cursor-default disabled:opacity-50"
+              className="focus-ring press flex min-h-11 w-full cursor-pointer items-center gap-2 rounded-[4px] px-2.5 text-left text-[12.5px] font-medium text-fg-secondary hover:bg-surface-hover hover:text-fg disabled:cursor-default disabled:opacity-50"
+              style={{ minHeight: 44 }}
             >
               <ActionIcon
                 className={`h-4 w-4 ${action === "shutdown" ? "text-danger" : "text-fg-tertiary"}`}

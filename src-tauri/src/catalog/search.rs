@@ -3,7 +3,10 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 
 use super::db::Database;
-use super::types::{CandidateEntry, FileEntry, FileSearchResponse, VolumeCoverage};
+use super::types::{
+    CandidateEntry, FileEntry, FileSearchError, FileSearchErrorKind, FileSearchResponse,
+    VolumeCoverage,
+};
 
 const DEFAULT_LIMIT: usize = 10;
 const MAX_LIMIT: usize = 50;
@@ -17,6 +20,7 @@ fn path_depth(path: &str) -> usize {
 }
 
 #[allow(clippy::too_many_arguments)]
+#[cfg(test)]
 pub fn search(
     query: &str,
     limit: Option<usize>,
@@ -27,58 +31,109 @@ pub fn search(
     indexing: bool,
     ready: bool,
 ) -> FileSearchResponse {
+    let generation = search_generation.fetch_add(1, AtomicOrdering::AcqRel) + 1;
+    search_with_generation(
+        query,
+        limit,
+        db,
+        search_generation,
+        generation,
+        volumes,
+        total_indexed,
+        indexing,
+        ready,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn search_with_generation(
+    query: &str,
+    limit: Option<usize>,
+    db: &Database,
+    search_generation: &AtomicU64,
+    generation: u64,
+    volumes: &[VolumeCoverage],
+    total_indexed: u64,
+    indexing: bool,
+    ready: bool,
+) -> FileSearchResponse {
     let query_trimmed = query.trim();
     let limit = clamp_limit(limit);
 
     // Direct absolute path browsing
-    if let Some(items) = browse_path(query_trimmed, limit) {
-        return FileSearchResponse {
-            items,
+    if is_cancelled(search_generation, generation) {
+        return response(
+            Vec::new(),
             ready,
             indexing,
-            path_browse: true,
-            volumes: volumes.to_vec(),
+            false,
+            volumes,
             total_indexed,
+            None,
+        );
+    }
+
+    if let Some(result) = browse_path_with_errors(query_trimmed, limit) {
+        return match result {
+            Ok(items) => response(items, ready, indexing, true, volumes, total_indexed, None),
+            Err(message) => response(
+                Vec::new(),
+                ready,
+                indexing,
+                true,
+                volumes,
+                total_indexed,
+                Some(FileSearchError {
+                    kind: FileSearchErrorKind::DirectoryAccess,
+                    message,
+                }),
+            ),
         };
     }
 
     if query_trimmed.chars().count() < 2 {
-        return FileSearchResponse {
-            items: Vec::new(),
+        return response(
+            Vec::new(),
             ready,
             indexing,
-            path_browse: false,
-            volumes: volumes.to_vec(),
+            false,
+            volumes,
             total_indexed,
-        };
+            None,
+        );
     }
 
-    let generation = search_generation.fetch_add(1, AtomicOrdering::AcqRel) + 1;
-
     let candidate_limit = (limit * 15).max(150);
-    let candidates = match db.search_candidates(query_trimmed, candidate_limit) {
+    let candidates = match db.search_candidates_until(query_trimmed, candidate_limit, || {
+        is_cancelled(search_generation, generation)
+    }) {
         Ok(c) => c,
-        Err(_) => {
-            return FileSearchResponse {
-                items: Vec::new(),
+        Err(message) => {
+            return response(
+                Vec::new(),
                 ready,
                 indexing,
-                path_browse: false,
-                volumes: volumes.to_vec(),
+                false,
+                volumes,
                 total_indexed,
-            };
+                Some(FileSearchError {
+                    kind: FileSearchErrorKind::IndexQuery,
+                    message,
+                }),
+            );
         }
     };
 
-    if search_generation.load(AtomicOrdering::Acquire) != generation {
-        return FileSearchResponse {
-            items: Vec::new(),
+    if is_cancelled(search_generation, generation) {
+        return response(
+            Vec::new(),
             ready,
             indexing,
-            path_browse: false,
-            volumes: volumes.to_vec(),
+            false,
+            volumes,
             total_indexed,
-        };
+            None,
+        );
     }
 
     let query_lower = query_trimmed.to_lowercase();
@@ -87,6 +142,17 @@ pub fn search(
     let mut scored: Vec<(i32, CandidateEntry)> = Vec::with_capacity(candidates.len());
 
     for candidate in candidates {
+        if is_cancelled(search_generation, generation) {
+            return response(
+                Vec::new(),
+                ready,
+                indexing,
+                false,
+                volumes,
+                total_indexed,
+                None,
+            );
+        }
         if let Some(score) = entry_score(&candidate, &tokens, &query_lower) {
             scored.push((score, candidate));
         }
@@ -115,6 +181,17 @@ pub fn search(
     let mut items: Vec<FileEntry> = Vec::with_capacity(limit);
     let mut seen_paths = std::collections::HashSet::new();
     for (_, item) in scored {
+        if is_cancelled(search_generation, generation) {
+            return response(
+                Vec::new(),
+                ready,
+                indexing,
+                false,
+                volumes,
+                total_indexed,
+                None,
+            );
+        }
         if items.len() >= limit {
             break;
         }
@@ -156,13 +233,30 @@ pub fn search(
         });
     }
 
+    response(items, ready, indexing, false, volumes, total_indexed, None)
+}
+
+fn is_cancelled(search_generation: &AtomicU64, generation: u64) -> bool {
+    search_generation.load(AtomicOrdering::Acquire) != generation
+}
+
+fn response(
+    items: Vec<FileEntry>,
+    ready: bool,
+    indexing: bool,
+    path_browse: bool,
+    volumes: &[VolumeCoverage],
+    total_indexed: u64,
+    error: Option<FileSearchError>,
+) -> FileSearchResponse {
     FileSearchResponse {
         items,
         ready,
         indexing,
-        path_browse: false,
+        path_browse,
         volumes: volumes.to_vec(),
         total_indexed,
+        error,
     }
 }
 
@@ -296,23 +390,49 @@ pub fn target_score(query: &str, target: &str) -> Option<i32> {
 }
 
 /// Absolute paths are browsed directly without waiting for index
+#[cfg(test)]
 pub fn browse_path(query: &str, limit: usize) -> Option<Vec<FileEntry>> {
+    browse_path_with_errors(query, limit).map(|result| result.unwrap_or_default())
+}
+
+pub(crate) fn browse_path_with_errors(
+    query: &str,
+    limit: usize,
+) -> Option<Result<Vec<FileEntry>, String>> {
     let limit = limit.clamp(1, MAX_LIMIT);
     let requested = expand_path_input(query)?;
     if !requested.is_absolute() {
         return None;
     }
 
-    if requested.is_dir() {
-        return Some(list_directory(&requested, None, limit));
-    }
-    if requested.is_file() {
-        return Some(path_entry(&requested).into_iter().collect());
+    match std::fs::metadata(&requested) {
+        Ok(metadata) if metadata.is_dir() => {
+            return Some(list_directory(&requested, None, limit));
+        }
+        Ok(metadata) if metadata.is_file() => {
+            return Some(Ok(path_entry(&requested).into_iter().collect()));
+        }
+        Ok(_) => return Some(Ok(Vec::new())),
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+            return Some(Err(format!(
+                "Could not access '{}': {error}",
+                requested.display()
+            )));
+        }
+        Err(_) => {}
     }
 
     let parent = requested.parent()?;
-    if !parent.is_dir() {
-        return Some(Vec::new());
+    match std::fs::metadata(parent) {
+        Ok(metadata) if metadata.is_dir() => {}
+        Ok(_) => return Some(Ok(Vec::new())),
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+            return Some(Err(format!(
+                "Could not access '{}': {error}",
+                parent.display()
+            )));
+        }
+        Err(_) => return Some(Ok(Vec::new())),
     }
     let needle = requested
         .file_name()
@@ -321,14 +441,23 @@ pub fn browse_path(query: &str, limit: usize) -> Option<Vec<FileEntry>> {
     Some(list_directory(parent, Some(&needle), limit))
 }
 
-fn list_directory(directory: &Path, needle: Option<&str>, limit: usize) -> Vec<FileEntry> {
-    let Ok(children) = std::fs::read_dir(directory) else {
-        return Vec::new();
-    };
+fn list_directory(
+    directory: &Path,
+    needle: Option<&str>,
+    limit: usize,
+) -> Result<Vec<FileEntry>, String> {
+    let children = std::fs::read_dir(directory)
+        .map_err(|error| format!("Could not read '{}': {error}", directory.display()))?;
     let parent = directory.to_string_lossy().into_owned();
     let mut entries: Vec<BrowseCandidate> = Vec::with_capacity(limit);
 
-    for child in children.flatten() {
+    for child in children {
+        let child = child.map_err(|error| {
+            format!(
+                "Could not finish reading '{}': {error}",
+                directory.display()
+            )
+        })?;
         let name = child.file_name().to_string_lossy().trim().to_string();
         if name.is_empty() {
             continue;
@@ -367,10 +496,10 @@ fn list_directory(directory: &Path, needle: Option<&str>, limit: usize) -> Vec<F
         }
     }
 
-    entries
+    Ok(entries
         .into_iter()
         .map(|candidate| candidate.entry)
-        .collect()
+        .collect())
 }
 
 struct BrowseCandidate {
@@ -429,4 +558,84 @@ fn path_entry(path: &Path) -> Option<FileEntry> {
         is_directory: path.is_dir(),
         thumbnail: None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_path(name: &str) -> PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        std::env::temp_dir().join(format!("prism-search-{name}-{unique}"))
+    }
+
+    #[test]
+    fn index_query_failures_are_distinct_from_empty_results() {
+        let directory = temp_path("query-error");
+        std::fs::create_dir_all(&directory).unwrap();
+        let database_path = directory.join("catalog.db");
+        let database = Database::open(&database_path).unwrap();
+        let connection = rusqlite::Connection::open(&database_path).unwrap();
+        connection.execute_batch("DROP TABLE file_fts;").unwrap();
+        drop(connection);
+        let generation = AtomicU64::new(1);
+
+        let response = search_with_generation(
+            "rpt",
+            Some(10),
+            &database,
+            &generation,
+            1,
+            &[],
+            0,
+            false,
+            true,
+        );
+
+        assert!(response.items.is_empty());
+        assert_eq!(
+            response.error.as_ref().map(|error| error.kind),
+            Some(FileSearchErrorKind::IndexQuery)
+        );
+        drop(database);
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn directory_enumeration_preserves_access_errors() {
+        let file = temp_path("not-a-directory");
+        std::fs::write(&file, "test").unwrap();
+
+        let result = list_directory(&file, None, 10);
+
+        assert!(result.is_err());
+        let _ = std::fs::remove_file(file);
+    }
+
+    #[test]
+    fn scorer_accepts_subsequences_short_tokens_and_unicode() {
+        for (name, query) in [
+            ("report.txt", "rpt"),
+            ("release-notes.txt", "rl nt"),
+            ("репорт.txt", "рпт"),
+        ] {
+            let entry = CandidateEntry {
+                id: 1,
+                display_path: format!(r"C:\Docs\{name}"),
+                lower_name: name.into(),
+                is_directory: false,
+                extension: Some("txt".into()),
+            };
+            let lowered = query.to_lowercase();
+            let tokens = lowered.split_whitespace().collect::<Vec<_>>();
+            assert!(
+                entry_score(&entry, &tokens, &lowered).is_some(),
+                "scorer rejected {query:?} -> {name:?}"
+            );
+        }
+    }
 }

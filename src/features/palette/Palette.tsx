@@ -1,19 +1,10 @@
-import {
-  ChevronDown,
-  FolderSync,
-  GripVertical,
-  Pin,
-  PinOff,
-  RefreshCw,
-  Search,
-  Settings2,
-  X,
-} from "lucide-react";
+// biome-ignore-all lint/a11y/useSemanticElements: the ARIA grid uses div layout so result rows can contain secondary actions.
+import { ChevronDown, FolderSync, GripVertical, Pin, PinOff, RefreshCw, Search, X } from "lucide-react";
 import { memo, useCallback, useEffect, useRef, useState } from "react";
 import { PowerMenu } from "../../components/PowerMenu";
 import { displayShortcut } from "../../components/SettingsSheet";
 import { IconButton, Kbd, RowIcon, SectionLabel } from "../../components/ui";
-import type { PaletteItem, QuickAccessKind } from "../../lib/types";
+import type { FileSearchError, PaletteItem, QuickAccessKind } from "../../lib/types";
 import {
   PINNED_APP_LIMIT,
   reorderAppGroups,
@@ -24,6 +15,7 @@ import {
 import { useApp } from "../../state/app";
 import { usePalette } from "../../state/palette";
 import { UpdateControl } from "../updater/UpdateControl";
+import { PaletteSearchInput } from "./PaletteSearchInput";
 import { type ContextMenuPosition, clampContextMenuPosition, ResultContextMenu } from "./ResultContextMenu";
 import { isClipboardKind } from "./sections";
 
@@ -432,7 +424,7 @@ export function Palette() {
 
   const startNativeFileDrag = useCallback(
     async (item: PaletteItem, pointerId: number, captureEl?: HTMLElement | null) => {
-      if (captureEl && captureEl.hasPointerCapture(pointerId)) {
+      if (captureEl?.hasPointerCapture(pointerId)) {
         try {
           captureEl.releasePointerCapture(pointerId);
         } catch {
@@ -542,7 +534,14 @@ export function Palette() {
     };
     window.addEventListener("keydown", cancelOnEscape);
     return () => window.removeEventListener("keydown", cancelOnEscape);
-  }, [categoryDrag, fileDrag, reorderDrag, updateCategoryDragState, updateFileDragState, updateReorderDragState]);
+  }, [
+    categoryDrag,
+    fileDrag,
+    reorderDrag,
+    updateCategoryDragState,
+    updateFileDragState,
+    updateReorderDragState,
+  ]);
 
   useEffect(
     () => () => {
@@ -554,72 +553,28 @@ export function Palette() {
     [],
   );
 
-  /* Keyboard-first navigation. */
-  const onKeyDown = useCallback(
-    (e: React.KeyboardEvent) => {
-      if (e.key === "ContextMenu" || (e.key === "F10" && e.shiftKey)) {
-        e.preventDefault();
-        const item = palette.flatItems[palette.selected];
-        if (!hasResultActions(item)) return;
-        const row = document.getElementById(`prism-opt-${palette.selected}`);
-        const bounds = row?.getBoundingClientRect();
-        openResultMenu(
-          item,
-          palette.selected,
-          bounds ? bounds.right - 12 : window.innerWidth / 2,
-          bounds ? bounds.top + 12 : window.innerHeight / 2,
-        );
-        return;
-      }
-      switch (e.key) {
-        case "ArrowDown":
-          e.preventDefault();
-          palette.move(1);
-          break;
-        case "ArrowUp":
-          e.preventDefault();
-          palette.move(-1);
-          break;
-        case "Enter":
-          e.preventDefault();
-          palette.runSelected();
-          break;
-        case "Escape":
-          e.preventDefault();
-          if (app.openSettings) {
-            setOpenSettings(false);
-          } else if (palette.query) {
-            palette.setQuery("");
-          } else {
-            document.dispatchEvent(new CustomEvent("prism:close"));
-          }
-          break;
-        case "k":
-          if (e.ctrlKey || e.metaKey) {
-            e.preventDefault();
-            document.dispatchEvent(new CustomEvent("prism:close"));
-          }
-          break;
-        case "Backspace":
-          if (e.ctrlKey) {
-            e.preventDefault();
-            palette.setQuery("");
-          }
-          break;
-      }
-    },
-    [palette, app.openSettings, setOpenSettings, openResultMenu],
-  );
+  const openSelectedMenu = useCallback(() => {
+    const item = palette.flatItems[palette.selected];
+    if (!hasResultActions(item)) return;
+    const row = document.getElementById(`prism-opt-${palette.selected}`);
+    const bounds = row?.getBoundingClientRect();
+    openResultMenu(
+      item,
+      palette.selected,
+      bounds ? bounds.right - 12 : window.innerWidth / 2,
+      bounds ? bounds.top + 12 : window.innerHeight / 2,
+    );
+  }, [openResultMenu, palette.flatItems, palette.selected]);
 
-  // The component mounts fresh each time the window is shown - grab focus
-  // for keyboard-first interaction, with the caret at the end of the query.
-  useEffect(() => {
-    const input = inputRef.current;
-    if (input) {
-      input.focus();
-      input.setSelectionRange(input.value.length, input.value.length);
+  const dismiss = useCallback(() => {
+    if (app.openSettings) {
+      setOpenSettings(false);
+    } else if (palette.query) {
+      palette.setQuery("");
+    } else {
+      document.dispatchEvent(new CustomEvent("prism:close"));
     }
-  }, []);
+  }, [app.openSettings, palette.query, palette.setQuery, setOpenSettings]);
 
   // Keep the selection in view while scrolling.
   useEffect(() => {
@@ -630,50 +585,48 @@ export function Palette() {
 
   return (
     <div className="shell focus-ring" style={{ height: "100%" }}>
-      {/* ------- header ------- */}
-      <div className="px-5 pb-1 pt-5">
-        <div className="search-field flex items-center gap-3 px-4 py-3">
-          <Search className="h-[18px] w-[18px] shrink-0 text-fg-tertiary" strokeWidth={2} />
-          <input
-            ref={inputRef}
-            data-prism-search
-            type="text"
-            aria-controls="prism-results"
-            aria-label="Search files, folders, or apps, or type a calculation"
-            value={palette.query}
-            onChange={(e) => palette.setQuery(e.target.value)}
-            onKeyDown={onKeyDown}
-            placeholder="Search files, folders, and apps…"
-            spellCheck={false}
-            autoComplete="off"
-            className="min-w-0 flex-1 bg-transparent text-[15px] font-medium text-fg outline-none placeholder:text-fg-quiet"
-          />
-          <Kbd>{displayShortcut(settings.shortcut)}</Kbd>
-          <IconButton
-            label="Settings"
-            data-settings-trigger
-            active={app.openSettings}
-            onClick={() => setOpenSettings(!app.openSettings)}
-          >
-            <Settings2 className="h-4 w-4" strokeWidth={2} />
-          </IconButton>
-        </div>
-      </div>
+      <PaletteSearchInput
+        inputRef={inputRef}
+        query={palette.query}
+        shortcut={displayShortcut(settings.shortcut)}
+        activeResultId={palette.flatItems[palette.selected] ? `prism-opt-${palette.selected}` : undefined}
+        resultCount={palette.flatItems.length}
+        busy={!palette.appsLoaded || palette.filesBusy}
+        settingsOpen={app.openSettings}
+        onQueryChange={palette.setQuery}
+        onMove={palette.move}
+        onRunSelected={palette.runSelected}
+        onOpenSelectedMenu={openSelectedMenu}
+        onDismiss={dismiss}
+        onToggleSettings={() => setOpenSettings(!app.openSettings)}
+      />
 
       {/* ------- results ------- */}
       <div
         ref={listRef}
         id="prism-results"
+        role="grid"
+        aria-label="Search results"
         aria-busy={!palette.appsLoaded || palette.filesBusy}
         className="scroll-thin min-h-0 flex-1 overflow-y-auto px-2.5 pb-2"
       >
+        {palette.fileError && palette.sections.length > 0 ? (
+          <FileSearchErrorNotice
+            error={palette.fileError}
+            onRetry={palette.retryFileSearch}
+            onRebuild={palette.rebuildIndex}
+          />
+        ) : null}
         {palette.sections.length === 0 ? (
           <EmptyState
             query={palette.query}
             loading={palette.query ? palette.filesBusy : !palette.appsLoaded}
-            error={palette.query ? palette.filesError : palette.appsError}
+            appError={palette.appsError}
+            fileError={palette.fileError}
             pathBrowsing={palette.pathBrowsing}
-            onRetry={palette.refreshApps}
+            onRetryApps={palette.refreshApps}
+            onRetryFileSearch={palette.retryFileSearch}
+            onRebuildIndex={palette.rebuildIndex}
           />
         ) : (
           (() => {
@@ -688,6 +641,7 @@ export function Palette() {
               return (
                 <div
                   key={section.id}
+                  role="presentation"
                   {...sectionDragTargetProps}
                   data-category-drop-target={sectionDropTarget || undefined}
                   data-category-dragging={
@@ -696,56 +650,63 @@ export function Palette() {
                   className={sectionDropTarget ? "section-category-drop" : undefined}
                 >
                   {section.collapsible ? (
-                    <div className="flex items-center gap-1 px-3.5 pb-1.5 pt-4">
-                      <button
-                        type="button"
-                        aria-expanded={!section.collapsed}
-                        aria-controls={`prism-section-${section.id}`}
-                        onClick={() =>
-                          app.updateSettings({ quickAccessCollapsed: !settings.quickAccessCollapsed })
-                        }
-                        className="focus-ring group/section flex min-w-0 flex-1 cursor-pointer items-center gap-1 rounded-[6px] text-left text-[11px] font-semibold text-fg-quiet uppercase hover:text-fg-secondary"
-                      >
-                        <ChevronDown
-                          className={`h-3.5 w-3.5 transition-transform duration-150 ${
-                            section.collapsed ? "-rotate-90" : "rotate-0"
-                          }`}
-                        />
-                        <span className="truncate">{section.label}</span>
-                      </button>
-                      {sectionReorderable ? (
+                    <div role="row" tabIndex={-1} className="flex items-center gap-1 px-3.5 pb-1.5 pt-4">
+                      <div role="gridcell" tabIndex={-1} className="min-w-0 flex-1">
                         <button
                           type="button"
-                          aria-label={`Reorder ${section.label} section`}
-                          title={`Reorder ${section.label}`}
-                          className="focus-ring grid h-7 w-7 shrink-0 touch-none cursor-grab place-items-center rounded-[7px] text-fg-quiet hover:bg-surface-hover hover:text-fg active:cursor-grabbing"
-                          {...categoryDragHandlers("section", section.id, section.label)}
+                          aria-expanded={!section.collapsed}
+                          aria-controls={`prism-section-${section.id}`}
+                          onClick={() =>
+                            app.updateSettings({ quickAccessCollapsed: !settings.quickAccessCollapsed })
+                          }
+                          className="focus-ring group/section flex w-full min-w-0 cursor-pointer items-center gap-1 rounded-[6px] text-left text-[11px] font-semibold text-fg-quiet uppercase hover:text-fg-secondary"
                         >
-                          <GripVertical className="h-3.5 w-3.5" />
+                          <ChevronDown
+                            className={`h-3.5 w-3.5 transition-transform duration-150 ${
+                              section.collapsed ? "-rotate-90" : "rotate-0"
+                            }`}
+                          />
+                          <span className="truncate">{section.label}</span>
                         </button>
+                      </div>
+                      {sectionReorderable ? (
+                        <div role="gridcell" tabIndex={-1}>
+                          <button
+                            type="button"
+                            aria-label={`Reorder ${section.label} section`}
+                            title={`Reorder ${section.label}`}
+                            className="focus-ring grid h-7 w-7 shrink-0 touch-none cursor-grab place-items-center rounded-[7px] text-fg-quiet hover:bg-surface-hover hover:text-fg active:cursor-grabbing"
+                            {...categoryDragHandlers("section", section.id, section.label)}
+                          >
+                            <GripVertical className="h-3.5 w-3.5" />
+                          </button>
+                        </div>
                       ) : null}
                     </div>
                   ) : (
-                    <div className="flex items-center gap-1">
-                      <div className="min-w-0 flex-1">
+                    <div role="row" tabIndex={-1} className="flex items-center gap-1">
+                      <div role="gridcell" tabIndex={-1} className="min-w-0 flex-1">
                         <SectionLabel>{section.label}</SectionLabel>
                       </div>
                       {sectionReorderable ? (
-                        <button
-                          type="button"
-                          aria-label={`Reorder ${section.label} section`}
-                          title={`Reorder ${section.label}`}
-                          className="focus-ring mr-3.5 grid h-7 w-7 shrink-0 touch-none cursor-grab place-items-center rounded-[7px] text-fg-quiet hover:bg-surface-hover hover:text-fg active:cursor-grabbing"
-                          {...categoryDragHandlers("section", section.id, section.label)}
-                        >
-                          <GripVertical className="h-3.5 w-3.5" />
-                        </button>
+                        <div role="gridcell" tabIndex={-1}>
+                          <button
+                            type="button"
+                            aria-label={`Reorder ${section.label} section`}
+                            title={`Reorder ${section.label}`}
+                            className="focus-ring mr-3.5 grid h-7 w-7 shrink-0 touch-none cursor-grab place-items-center rounded-[7px] text-fg-quiet hover:bg-surface-hover hover:text-fg active:cursor-grabbing"
+                            {...categoryDragHandlers("section", section.id, section.label)}
+                          >
+                            <GripVertical className="h-3.5 w-3.5" />
+                          </button>
+                        </div>
                       ) : null}
                     </div>
                   )}
                   {section.groups?.map((group, groupIndex) => (
                     <div
                       key={group.id}
+                      role="presentation"
                       data-palette-group-id={palette.query.trim() === "" ? group.groupId : undefined}
                       data-category-drop-target={
                         categoryDrag?.kind === "group" && categoryDrag.targetId === group.groupId
@@ -761,35 +722,40 @@ export function Palette() {
                           : ""
                       }`}
                     >
-                      <div className="flex items-center gap-1 px-3.5 pb-1.5 pt-2">
-                        <button
-                          type="button"
-                          aria-expanded={!group.collapsed}
-                          aria-controls={`prism-section-${group.id}`}
-                          onClick={() => toggleAppGroup(group.groupId)}
-                          className="focus-ring group/section flex min-w-0 flex-1 cursor-pointer items-center gap-1 rounded-[6px] text-left text-[11px] font-semibold text-fg-secondary hover:text-fg"
-                        >
-                          <ChevronDown
-                            className={`h-3.5 w-3.5 transition-transform duration-150 ${
-                              group.collapsed ? "-rotate-90" : "rotate-0"
-                            }`}
-                          />
-                          <span className="truncate">{group.label}</span>
-                        </button>
-                        {palette.query.trim() === "" ? (
+                      <div role="row" tabIndex={-1} className="flex items-center gap-1 px-3.5 pb-1.5 pt-2">
+                        <div role="gridcell" tabIndex={-1} className="min-w-0 flex-1">
                           <button
                             type="button"
-                            aria-label={`Reorder ${group.label} group`}
-                            title={`Reorder ${group.label}`}
-                            className="focus-ring grid h-7 w-7 shrink-0 touch-none cursor-grab place-items-center rounded-[7px] text-fg-quiet hover:bg-surface-hover hover:text-fg active:cursor-grabbing"
-                            {...categoryDragHandlers("group", group.groupId, group.label)}
+                            aria-expanded={!group.collapsed}
+                            aria-controls={`prism-section-${group.id}`}
+                            onClick={() => toggleAppGroup(group.groupId)}
+                            className="focus-ring group/section flex w-full min-w-0 cursor-pointer items-center gap-1 rounded-[6px] text-left text-[11px] font-semibold text-fg-secondary hover:text-fg"
                           >
-                            <GripVertical className="h-3.5 w-3.5" />
+                            <ChevronDown
+                              className={`h-3.5 w-3.5 transition-transform duration-150 ${
+                                group.collapsed ? "-rotate-90" : "rotate-0"
+                              }`}
+                            />
+                            <span className="truncate">{group.label}</span>
                           </button>
+                        </div>
+                        {palette.query.trim() === "" ? (
+                          <div role="gridcell" tabIndex={-1}>
+                            <button
+                              type="button"
+                              aria-label={`Reorder ${group.label} group`}
+                              title={`Reorder ${group.label}`}
+                              className="focus-ring grid h-7 w-7 shrink-0 touch-none cursor-grab place-items-center rounded-[7px] text-fg-quiet hover:bg-surface-hover hover:text-fg active:cursor-grabbing"
+                              {...categoryDragHandlers("group", group.groupId, group.label)}
+                            >
+                              <GripVertical className="h-3.5 w-3.5" />
+                            </button>
+                          </div>
                         ) : null}
                       </div>
-                      <ul
+                      <div
                         id={`prism-section-${group.id}`}
+                        role="rowgroup"
                         aria-label={group.label}
                         className="m-0 flex list-none flex-col gap-[2px] p-0"
                       >
@@ -797,7 +763,7 @@ export function Palette() {
                           const index = flat++;
                           return renderResultRow(item, index, false, false);
                         })}
-                      </ul>
+                      </div>
                     </div>
                   ))}
                   {section.groups && section.groups.length > 0 && section.items.length > 0 ? (
@@ -807,8 +773,9 @@ export function Palette() {
                       <span className="h-px flex-1 bg-line" aria-hidden="true" />
                     </div>
                   ) : null}
-                  <ul
+                  <div
                     id={`prism-section-${section.id}`}
+                    role="rowgroup"
                     aria-label={section.groups?.length ? "Other apps" : section.label}
                     className="m-0 flex list-none flex-col gap-[2px] p-0"
                   >
@@ -817,7 +784,7 @@ export function Palette() {
                       const reorderable = section.id === "pinned" || section.id === "quick";
                       return renderResultRow(item, index, reorderable, section.id === "recent");
                     })}
-                  </ul>
+                  </div>
                 </div>
               );
             });
@@ -840,8 +807,8 @@ export function Palette() {
                     reorderDrag?.active
                       ? reorderItemId(reorderDrag.item)
                       : fileDrag?.active
-                      ? fileDrag.item.id
-                      : null
+                        ? fileDrag.item.id
+                        : null
                   }
                   dropTargetItem={reorderDrag?.active ? reorderDrag.targetItemId : null}
                   onSelect={palette.select}
@@ -920,7 +887,7 @@ export function Palette() {
       </div>
 
       {/* ------- footer ------- */}
-      <div className="footer-bar flex min-h-12 items-center justify-between px-5 py-2.5">
+      <div className="footer-bar flex min-h-12 flex-wrap items-center justify-between gap-x-3 gap-y-1 px-5 py-2.5">
         <div className="flex items-center gap-1.5 text-[11px] text-fg-quiet">
           <Kbd>↑</Kbd>
           <Kbd>↓</Kbd>
@@ -932,7 +899,7 @@ export function Palette() {
           <Kbd>esc</Kbd>
           <span className="px-1">dismiss</span>
         </div>
-        <div className="flex items-center gap-1.5">
+        <div className="ms-auto flex max-w-full flex-wrap items-center justify-end gap-1.5">
           <UpdateControl />
           {!palette.appsLoaded && palette.query === "" && (
             <span className="flex items-center gap-1.5 text-[11px] text-fg-quiet">
@@ -1041,64 +1008,124 @@ function CategoryDragPreview({ drag }: { drag: CategoryDragState }) {
 function EmptyState({
   query,
   loading,
-  error,
+  appError,
+  fileError,
   pathBrowsing,
-  onRetry,
+  onRetryApps,
+  onRetryFileSearch,
+  onRebuildIndex,
 }: {
   query: string;
   loading: boolean;
-  error: boolean;
+  appError: boolean;
+  fileError: FileSearchError | null;
   pathBrowsing: boolean;
-  onRetry: () => void;
+  onRetryApps: () => void;
+  onRetryFileSearch: () => void;
+  onRebuildIndex: () => void;
 }) {
+  const error = query ? fileError : appError ? { kind: "apps" as const } : null;
   return (
-    <div className="flex h-full flex-col items-center justify-center gap-2.5 text-center">
-      <div className="grid h-14 w-14 place-items-center rounded-[20px] bg-surface">
-        <Search className="h-6 w-6 text-fg-quiet" strokeWidth={1.75} />
-      </div>
-      {error ? (
-        <>
-          <div className="text-balance text-[13.5px] font-medium text-fg-secondary">
-            {query ? "File search is unavailable" : "Apps couldn't be loaded"}
-          </div>
-          <div className="max-w-[260px] text-[12px] leading-relaxed text-fg-tertiary">
-            {query
-              ? "Prism couldn't read the local file index. Installed apps are still available."
-              : "The app index failed to scan. Retry now, or keep searching local files."}
-          </div>
-          {!query && (
+    <div role="row" tabIndex={-1} className="h-full">
+      <div
+        role="gridcell"
+        tabIndex={-1}
+        className="flex h-full flex-col items-center justify-center gap-2.5 text-center"
+      >
+        <div className="grid h-14 w-14 place-items-center rounded-[20px] bg-surface">
+          <Search className="h-6 w-6 text-fg-quiet" strokeWidth={1.75} />
+        </div>
+        {error ? (
+          <>
+            <div className="text-balance text-[13.5px] font-medium text-fg-secondary">
+              {error.kind === "directoryAccess"
+                ? "This folder cannot be read"
+                : error.kind === "indexQuery"
+                  ? "File search is unavailable"
+                  : "Apps couldn't be loaded"}
+            </div>
+            <div className="max-w-[260px] text-[12px] leading-relaxed text-fg-tertiary">
+              {error.kind === "directoryAccess"
+                ? "Check that the folder still exists and that Prism has permission to open it."
+                : error.kind === "indexQuery"
+                  ? "Prism couldn't query the local file catalog. Rebuild the index, then search again."
+                  : "The app index failed to scan. Retry now, or keep searching local files."}
+            </div>
             <button
               type="button"
-              onClick={onRetry}
-              className="focus-ring press mt-1 flex cursor-pointer items-center gap-1.5 rounded-[10px] bg-surface px-3 py-1.5 text-[12px] font-medium text-fg-secondary hover:bg-surface-hover hover:text-fg"
+              onClick={
+                error.kind === "directoryAccess"
+                  ? onRetryFileSearch
+                  : error.kind === "indexQuery"
+                    ? onRebuildIndex
+                    : onRetryApps
+              }
+              className="focus-ring press mt-1 flex min-h-11 cursor-pointer items-center gap-1.5 rounded-[10px] bg-surface px-3 text-[12px] font-medium text-fg-secondary hover:bg-surface-hover hover:text-fg"
             >
-              <RefreshCw className="h-3.5 w-3.5" />
-              Retry
+              {error.kind === "indexQuery" ? (
+                <FolderSync className="h-3.5 w-3.5" />
+              ) : (
+                <RefreshCw className="h-3.5 w-3.5" />
+              )}
+              {error.kind === "indexQuery" ? "Rebuild index" : "Retry"}
             </button>
-          )}
-        </>
-      ) : (
-        <>
-          <div className="text-balance text-[13.5px] font-medium text-fg-secondary">
-            {loading
-              ? query
-                ? "Searching local files…"
-                : "Preparing Prism…"
-              : pathBrowsing
-                ? "No matching items"
-                : "Start typing to search"}
-          </div>
-          <div className="max-w-[260px] text-[12px] leading-relaxed text-fg-tertiary">
-            {loading
-              ? query
-                ? "The first file index finishes in the background"
-                : "Loading quick access and installed applications"
-              : pathBrowsing
-                ? "This folder is empty, or no item matches the partial path"
-                : "Find local files, folders, apps, or calculate 12 × 8"}
-          </div>
-        </>
-      )}
+          </>
+        ) : (
+          <>
+            <div className="text-balance text-[13.5px] font-medium text-fg-secondary">
+              {loading
+                ? query
+                  ? "Searching local files…"
+                  : "Preparing Prism…"
+                : pathBrowsing
+                  ? "No matching items"
+                  : "Start typing to search"}
+            </div>
+            <div className="max-w-[260px] text-[12px] leading-relaxed text-fg-tertiary">
+              {loading
+                ? query
+                  ? "The first file index finishes in the background"
+                  : "Loading quick access and installed applications"
+                : pathBrowsing
+                  ? "This folder is empty, or no item matches the partial path"
+                  : "Find local files, folders, apps, or calculate 12 × 8"}
+            </div>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function FileSearchErrorNotice({
+  error,
+  onRetry,
+  onRebuild,
+}: {
+  error: FileSearchError;
+  onRetry: () => void;
+  onRebuild: () => void;
+}) {
+  const indexFailed = error.kind === "indexQuery";
+  return (
+    <div role="row" tabIndex={-1}>
+      <div role="gridcell" tabIndex={-1}>
+        <div
+          role="alert"
+          className="mx-2.5 mt-2 flex min-h-11 items-center justify-between gap-3 rounded-[10px] bg-danger-soft px-3 text-danger"
+        >
+          <span className="min-w-0 truncate text-[11.5px]">
+            {indexFailed ? "File index search failed." : "Prism cannot read this folder."}
+          </span>
+          <button
+            type="button"
+            onClick={indexFailed ? onRebuild : onRetry}
+            className="focus-ring press min-h-11 shrink-0 cursor-pointer px-2 text-[11.5px] font-semibold"
+          >
+            {indexFailed ? "Rebuild index" : "Retry"}
+          </button>
+        </div>
+      </div>
     </div>
   );
 }
@@ -1155,11 +1182,17 @@ const ResultRow = memo(function ResultRow({
   const canDragFile = Boolean(!canReorder && item.shellPath && item.dragFile);
 
   return (
-    <li
+    <div
       id={`prism-opt-${index}`}
+      role="row"
+      tabIndex={-1}
+      aria-label={item.subtitle ? `${item.title}, ${item.subtitle}` : item.title}
+      aria-selected={selected}
       data-selected={selected}
       data-drop-target={canReorder && dropTargetItem === itemReorderId}
-      data-dragging={(canReorder && draggedItem === itemReorderId) || (canDragFile && draggedItem === item.id)}
+      data-dragging={
+        (canReorder && draggedItem === itemReorderId) || (canDragFile && draggedItem === item.id)
+      }
       data-reorder-item-id={canReorder ? (itemReorderId ?? undefined) : undefined}
       onMouseEnter={() => onSelect(index)}
       onContextMenu={(event) => {
@@ -1172,14 +1205,14 @@ const ResultRow = memo(function ResultRow({
         selected ? "bg-surface-active" : "hover:bg-surface-hover"
       }`}
     >
-      <button
-        type="button"
-        tabIndex={-1}
-        aria-label={`Open ${item.title}`}
-        onClick={() => onRun(item)}
-        className="focus-ring absolute inset-0 z-0 cursor-pointer rounded-[14px]"
-      />
-      <div className="pointer-events-none relative z-[1]">
+      <div role="gridcell" tabIndex={-1} className="pointer-events-none z-[1]">
+        <button
+          type="button"
+          tabIndex={-1}
+          aria-label={`Open ${item.title}`}
+          onClick={() => onRun(item)}
+          className="focus-ring pointer-events-auto absolute inset-0 z-0 cursor-pointer rounded-[14px]"
+        />
         <div
           onPointerDown={(event) => {
             if (event.button !== 0) return;
@@ -1236,14 +1269,14 @@ const ResultRow = memo(function ResultRow({
             canReorder
               ? `Reorder ${item.title}`
               : canDragFile
-              ? `Drag ${item.title} into another application`
-              : undefined
+                ? `Drag ${item.title} into another application`
+                : undefined
           }
         >
           <RowIcon icon={item.icon} />
         </div>
       </div>
-      <div className="pointer-events-none relative z-[1] min-w-0">
+      <div role="gridcell" tabIndex={-1} className="pointer-events-none relative z-[1] min-w-0">
         <div
           className={`truncate text-[13.5px] leading-tight font-medium transition-colors duration-150 ${
             selected ? "text-fg" : "text-fg/90"
@@ -1257,7 +1290,7 @@ const ResultRow = memo(function ResultRow({
           </div>
         ) : null}
       </div>
-      <div className="relative z-10 flex items-center gap-0.5">
+      <div role="gridcell" tabIndex={-1} className="relative z-10 flex items-center gap-0.5">
         {canReorder ? (
           <button
             type="button"
@@ -1352,9 +1385,7 @@ const ResultRow = memo(function ResultRow({
           <span className="text-[12px] font-semibold text-accent tabular-nums">Enter to copy</span>
         ) : canDragFile ? (
           <div className="flex items-center gap-1.5">
-            {selected ? (
-              <span className="text-[11px] font-medium text-fg-tertiary">Drag to copy</span>
-            ) : null}
+            {selected ? <span className="text-[11px] font-medium text-fg-tertiary">Drag to copy</span> : null}
             <button
               type="button"
               aria-label={`Drag ${item.title} into another application`}
@@ -1392,6 +1423,6 @@ const ResultRow = memo(function ResultRow({
           <span className="text-[11.5px] font-medium text-fg-tertiary">Enter to open</span>
         ) : null}
       </div>
-    </li>
+    </div>
   );
 });

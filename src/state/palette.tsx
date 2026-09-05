@@ -22,7 +22,14 @@ import {
 } from "../lib/bridge";
 import { appIconRetryDelay, selectAppIconRequestIds } from "../lib/iconLoading";
 import { dedupeApps } from "../lib/search";
-import type { AppEntry, FileEntry, PaletteItem, QuickAccessEntry, VolumeCoverage } from "../lib/types";
+import type {
+  AppEntry,
+  FileEntry,
+  FileSearchError,
+  PaletteItem,
+  QuickAccessEntry,
+  VolumeCoverage,
+} from "../lib/types";
 import { useApp } from "./app";
 
 interface PaletteCtx {
@@ -41,11 +48,13 @@ interface PaletteCtx {
   appsError: boolean;
   filesBusy: boolean;
   filesError: boolean;
+  fileError: FileSearchError | null;
   fileIndexing: boolean;
   pathBrowsing: boolean;
   volumes: VolumeCoverage[];
   totalIndexed: number;
   rebuildIndex: () => void;
+  retryFileSearch: () => void;
   refreshApps: () => void;
   reset: () => void;
 }
@@ -65,6 +74,17 @@ function rememberThumbnail(cache: Map<string, string | null>, path: string, thum
     if (oldest.done) break;
     cache.delete(oldest.value);
   }
+}
+
+function stripThumbnails(entries: FileEntry[]): FileEntry[] {
+  let changed = false;
+  const stripped = entries.map((entry) => {
+    if (!entry.thumbnail) return entry;
+    changed = true;
+    const { thumbnail: _thumbnail, ...withoutThumbnail } = entry;
+    return withoutThumbnail;
+  });
+  return changed ? stripped : entries;
 }
 
 /** Volume status fields that matter to the rendered UI. */
@@ -91,6 +111,7 @@ export function PaletteProvider({ children }: { children: ReactNode }) {
   const [fileResultQuery, setFileResultQuery] = useState("");
   const [filesSearching, setFilesSearching] = useState(false);
   const [filesError, setFilesError] = useState(false);
+  const [fileError, setFileError] = useState<FileSearchError | null>(null);
   const [fileIndexReady, setFileIndexReady] = useState(false);
   const [fileIndexing, setFileIndexing] = useState(true);
   const [filePathBrowse, setFilePathBrowse] = useState(false);
@@ -102,6 +123,7 @@ export function PaletteProvider({ children }: { children: ReactNode }) {
   const fileRequest = useRef(0);
   const fileThumbnailCache = useRef<Map<string, string | null>>(new Map());
   const fileThumbnailInFlight = useRef<Set<string>>(new Set());
+  const fileThumbnailEpoch = useRef(0);
   const historyPathRequest = useRef(0);
   const fileStatusKnown = useRef(false);
   const iconSettled = useRef<Set<string>>(new Set());
@@ -170,6 +192,7 @@ export function PaletteProvider({ children }: { children: ReactNode }) {
   }, [validateHistoryPaths]);
 
   useEffect(() => {
+    void fileIndexTick;
     const imagePaths = new Set<string>();
     for (const entry of app.history) {
       if (!entry.id.startsWith("file::f::")) continue;
@@ -190,8 +213,10 @@ export function PaletteProvider({ children }: { children: ReactNode }) {
     if (pending.length === 0) return;
 
     for (const path of pending) fileThumbnailInFlight.current.add(path);
+    const thumbnailEpoch = fileThumbnailEpoch.current;
     void getFileThumbnails(pending)
       .then((thumbnails) => {
+        if (thumbnailEpoch !== fileThumbnailEpoch.current) return;
         for (const [index, path] of pending.entries()) {
           rememberThumbnail(fileThumbnailCache.current, path, thumbnails[index]);
           fileThumbnailInFlight.current.delete(path);
@@ -199,13 +224,19 @@ export function PaletteProvider({ children }: { children: ReactNode }) {
         setFileThumbnailRevision((revision) => revision + 1);
       })
       .catch(() => {
+        if (thumbnailEpoch !== fileThumbnailEpoch.current) return;
         for (const path of pending) fileThumbnailInFlight.current.delete(path);
       });
-  }, [app.history, existingHistoryPaths]);
+  }, [app.history, existingHistoryPaths, fileIndexTick]);
 
   useEffect(
     () =>
       onFileIndexUpdated(() => {
+        fileThumbnailEpoch.current += 1;
+        fileThumbnailCache.current.clear();
+        fileThumbnailInFlight.current.clear();
+        setFileResults(stripThumbnails);
+        setFileThumbnailRevision((revision) => revision + 1);
         setFileIndexTick((tick) => tick + 1);
         // A refresh may have flipped ready/indexing; re-query the status.
         fileStatusKnown.current = false;
@@ -226,6 +257,7 @@ export function PaletteProvider({ children }: { children: ReactNode }) {
       setFileResultQuery(normalized);
       setFilesSearching(false);
       setFilesError(false);
+      setFileError(null);
       setFilePathBrowse(false);
       // Status is already known and no index refresh happened since - skip
       // the IPC round trip on every backspace/reset.
@@ -251,6 +283,7 @@ export function PaletteProvider({ children }: { children: ReactNode }) {
 
     setFilesSearching(true);
     setFilesError(false);
+    setFileError(null);
     const timer = window.setTimeout(() => {
       searchFiles(searchText, 50)
         .then((response) => {
@@ -272,7 +305,10 @@ export function PaletteProvider({ children }: { children: ReactNode }) {
             current === (response.totalIndexed ?? 0) ? current : (response.totalIndexed ?? 0),
           );
           setFilePathBrowse(response.pathBrowse);
-          setFilesError(!response.pathBrowse && !response.ready && !response.indexing);
+          setFileError(response.error ?? null);
+          setFilesError(
+            Boolean(response.error) || (!response.pathBrowse && !response.ready && !response.indexing),
+          );
 
           const candidates = itemsWithCachedThumbnails.filter((entry) => {
             if (entry.isDirectory || entry.thumbnail || fileThumbnailCache.current.has(entry.path))
@@ -286,8 +322,10 @@ export function PaletteProvider({ children }: { children: ReactNode }) {
           if (pending.length > 0) {
             const paths = pending.map((entry) => entry.path);
             for (const path of paths) fileThumbnailInFlight.current.add(path);
+            const thumbnailEpoch = fileThumbnailEpoch.current;
             void getFileThumbnails(paths)
               .then((thumbnails) => {
+                if (thumbnailEpoch !== fileThumbnailEpoch.current) return;
                 const byPath = new Map<string, string>();
                 for (const [index, path] of paths.entries()) {
                   const thumbnail = thumbnails[index];
@@ -305,12 +343,14 @@ export function PaletteProvider({ children }: { children: ReactNode }) {
                 );
               })
               .catch(() => {
+                if (thumbnailEpoch !== fileThumbnailEpoch.current) return;
                 for (const path of paths) fileThumbnailInFlight.current.delete(path);
               });
           }
         })
-        .catch(() => {
+        .catch((error) => {
           if (request !== fileRequest.current) return;
+          const failure: FileSearchError = { kind: "indexQuery", message: String(error) };
           fileStatusKnown.current = true;
           indexStatusRef.current = { ready: false, indexing: false };
           setFileResults([]);
@@ -318,6 +358,7 @@ export function PaletteProvider({ children }: { children: ReactNode }) {
           setFileIndexReady(false);
           setFileIndexing(false);
           setFilePathBrowse(false);
+          setFileError(failure);
           setFilesError(true);
         })
         .finally(() => {
@@ -526,6 +567,10 @@ export function PaletteProvider({ children }: { children: ReactNode }) {
     rebuildFileIndex().catch(() => {});
   }, []);
 
+  const retryFileSearch = useCallback(() => {
+    setFileIndexTick((tick) => tick + 1);
+  }, []);
+
   const reset = useCallback(() => {
     setQuery("");
     setSelected(0);
@@ -548,11 +593,13 @@ export function PaletteProvider({ children }: { children: ReactNode }) {
       appsError,
       filesBusy,
       filesError,
+      fileError,
       fileIndexing,
       pathBrowsing: filePathBrowse,
       volumes,
       totalIndexed,
       rebuildIndex,
+      retryFileSearch,
       refreshApps,
       reset,
     }),
@@ -571,11 +618,13 @@ export function PaletteProvider({ children }: { children: ReactNode }) {
       appsError,
       filesBusy,
       filesError,
+      fileError,
       fileIndexing,
       filePathBrowse,
       volumes,
       totalIndexed,
       rebuildIndex,
+      retryFileSearch,
       refreshApps,
       reset,
     ],

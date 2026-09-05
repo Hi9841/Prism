@@ -4,22 +4,21 @@
 use std::os::windows::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use windows::core::{implement, BOOL, PCWSTR, HRESULT, Interface};
+use windows::core::{implement, Interface, BOOL, HRESULT, PCWSTR};
 use windows::Win32::Foundation::{
-    COLORREF, DRAGDROP_S_CANCEL, DRAGDROP_S_DROP, DRAGDROP_S_USEDEFAULTCURSORS,
-    POINT, SIZE, S_OK,
+    COLORREF, DRAGDROP_S_CANCEL, DRAGDROP_S_DROP, DRAGDROP_S_USEDEFAULTCURSORS, POINT, SIZE, S_OK,
 };
 use windows::Win32::Graphics::Gdi::{DeleteObject, GetObjectW, BITMAP, HBITMAP};
-use windows::Win32::System::Com::{CoCreateInstance, CLSCTX_INPROC_SERVER, IDataObject};
+use windows::Win32::System::Com::{CoCreateInstance, IDataObject, CLSCTX_INPROC_SERVER};
 use windows::Win32::System::Ole::{
-    DoDragDrop, OleInitialize, IDropSource, IDropSource_Impl,
-    DROPEFFECT, DROPEFFECT_COPY, DROPEFFECT_LINK,
+    DoDragDrop, IDropSource, IDropSource_Impl, OleInitialize, DROPEFFECT, DROPEFFECT_COPY,
+    DROPEFFECT_LINK,
 };
 use windows::Win32::System::SystemServices::{MK_LBUTTON, MODIFIERKEYS_FLAGS};
 use windows::Win32::UI::Shell::{
-    BHID_DataObject, ILCreateFromPathW, ILFree, IShellItem, IShellItemImageFactory,
-    SHCreateItemFromParsingName, SHCreateShellItemArrayFromIDLists, Common::ITEMIDLIST,
-    IDragSourceHelper, SHDRAGIMAGE, SIIGBF_BIGGERSIZEOK, SIIGBF_RESIZETOFIT,
+    BHID_DataObject, IDragSourceHelper, ILCreateFromPathW, ILFree, IShellItem,
+    IShellItemImageFactory, SHCreateItemFromParsingName, SHCreateShellItemArrayFromIDLists,
+    SHDRAGIMAGE, SIIGBF_BIGGERSIZEOK, SIIGBF_RESIZETOFIT,
 };
 
 #[implement(IDropSource)]
@@ -55,7 +54,10 @@ pub fn init_thread_ole() {
 }
 
 fn wide_null(path: &Path) -> Vec<u16> {
-    path.as_os_str().encode_wide().chain(std::iter::once(0)).collect()
+    path.as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect()
 }
 
 pub fn get_file_data_object(paths: &[PathBuf]) -> Result<IDataObject, String> {
@@ -75,8 +77,14 @@ pub fn get_file_data_object(paths: &[PathBuf]) -> Result<IDataObject, String> {
         if paths.len() == 1 {
             let wide = wide_null(&paths[0]);
             let item: IShellItem = SHCreateItemFromParsingName(PCWSTR(wide.as_ptr()), None)
-                .map_err(|e| format!("Failed to create shell item for {}: {e}", paths[0].display()))?;
-            let data_object: IDataObject = item.BindToHandler(None, &BHID_DataObject)
+                .map_err(|e| {
+                    format!(
+                        "Failed to create shell item for {}: {e}",
+                        paths[0].display()
+                    )
+                })?;
+            let data_object: IDataObject = item
+                .BindToHandler(None, &BHID_DataObject)
                 .map_err(|e| format!("Failed to obtain IDataObject from shell item: {e}"))?;
             return Ok(data_object);
         }
@@ -89,20 +97,23 @@ pub fn get_file_data_object(paths: &[PathBuf]) -> Result<IDataObject, String> {
                 for p in &pidls {
                     ILFree(Some(*p));
                 }
-                return Err(format!("Failed to resolve shell ID list for {}", path.display()));
+                return Err(format!(
+                    "Failed to resolve shell ID list for {}",
+                    path.display()
+                ));
             }
             pidls.push(pidl);
         }
 
-        let const_pidls: Vec<*const ITEMIDLIST> = pidls.iter().map(|&p| p as *const ITEMIDLIST).collect();
-        let array_res = SHCreateShellItemArrayFromIDLists(&const_pidls);
+        let array_res = SHCreateShellItemArrayFromIDLists(&pidls);
 
         for pidl in pidls {
             ILFree(Some(pidl));
         }
 
         let array = array_res.map_err(|e| format!("Failed to create shell item array: {e}"))?;
-        let data_object: IDataObject = array.BindToHandler(None, &BHID_DataObject)
+        let data_object: IDataObject = array
+            .BindToHandler(None, &BHID_DataObject)
             .map_err(|e| format!("Failed to obtain IDataObject from shell item array: {e}"))?;
         Ok(data_object)
     }
@@ -112,48 +123,51 @@ const CLSID_DRAG_DROP_HELPER: windows::core::GUID =
     windows::core::GUID::from_u128(0x4657278a_411b_11d2_839a_00c04fd918d0);
 
 fn attach_drag_image(data_object: &IDataObject, paths: &[PathBuf]) {
-    let Some(first_path) = paths.first() else { return; };
-    let wide_path = wide_null(first_path);
-    let shell_item: IShellItem = match unsafe {
-        SHCreateItemFromParsingName(PCWSTR(wide_path.as_ptr()), None)
-    } {
-        Ok(item) => item,
-        Err(_) => return,
+    let Some(first_path) = paths.first() else {
+        return;
     };
+    let wide_path = wide_null(first_path);
+    let shell_item: IShellItem =
+        match unsafe { SHCreateItemFromParsingName(PCWSTR(wide_path.as_ptr()), None) } {
+            Ok(item) => item,
+            Err(_) => return,
+        };
 
-    let Ok(factory): Result<IShellItemImageFactory, _> = shell_item.cast() else { return; };
+    let Ok(factory): Result<IShellItemImageFactory, _> = shell_item.cast() else {
+        return;
+    };
 
     let target_size = SIZE { cx: 96, cy: 96 };
-    let hbitmap: HBITMAP = match unsafe {
-        factory.GetImage(target_size, SIIGBF_BIGGERSIZEOK | SIIGBF_RESIZETOFIT)
-    } {
-        Ok(h) => h,
-        Err(_) => return,
-    };
+    let hbitmap: HBITMAP =
+        match unsafe { factory.GetImage(target_size, SIIGBF_BIGGERSIZEOK | SIIGBF_RESIZETOFIT) } {
+            Ok(h) => h,
+            Err(_) => return,
+        };
 
     let mut bm = BITMAP::default();
     let bm_size = std::mem::size_of::<BITMAP>() as i32;
-    let actual_size = if unsafe {
-        GetObjectW(hbitmap.into(), bm_size, Some(&mut bm as *mut _ as *mut _))
-    } == bm_size {
-        SIZE { cx: bm.bmWidth, cy: bm.bmHeight }
-    } else {
-        target_size
-    };
+    let actual_size =
+        if unsafe { GetObjectW(hbitmap.into(), bm_size, Some(&mut bm as *mut _ as *mut _)) }
+            == bm_size
+        {
+            SIZE {
+                cx: bm.bmWidth,
+                cy: bm.bmHeight,
+            }
+        } else {
+            target_size
+        };
 
-    let helper: IDragSourceHelper = match unsafe {
-        CoCreateInstance(
-            &CLSID_DRAG_DROP_HELPER,
-            None,
-            CLSCTX_INPROC_SERVER,
-        )
-    } {
-        Ok(h) => h,
-        Err(_) => {
-            unsafe { let _ = DeleteObject(hbitmap.into()); }
-            return;
-        }
-    };
+    let helper: IDragSourceHelper =
+        match unsafe { CoCreateInstance(&CLSID_DRAG_DROP_HELPER, None, CLSCTX_INPROC_SERVER) } {
+            Ok(h) => h,
+            Err(_) => {
+                unsafe {
+                    let _ = DeleteObject(hbitmap.into());
+                }
+                return;
+            }
+        };
 
     let offset = POINT {
         x: actual_size.cx / 2,
@@ -167,11 +181,11 @@ fn attach_drag_image(data_object: &IDataObject, paths: &[PathBuf]) {
         crColorKey: COLORREF(0),
     };
 
-    let result = unsafe {
-        helper.InitializeFromBitmap(&shdragimage, Some(data_object))
-    };
+    let result = unsafe { helper.InitializeFromBitmap(&shdragimage, Some(data_object)) };
     if result.is_err() {
-        unsafe { let _ = DeleteObject(hbitmap.into()); }
+        unsafe {
+            let _ = DeleteObject(hbitmap.into());
+        }
     }
 }
 
@@ -200,7 +214,12 @@ pub fn drag_files(paths: &[PathBuf]) -> Result<DragResult, String> {
 
     unsafe {
         let mut effect = DROPEFFECT::default();
-        let hr = DoDragDrop(&data_object, &drop_source, DROPEFFECT_COPY | DROPEFFECT_LINK, &mut effect);
+        let hr = DoDragDrop(
+            &data_object,
+            &drop_source,
+            DROPEFFECT_COPY | DROPEFFECT_LINK,
+            &mut effect,
+        );
         if hr == DRAGDROP_S_DROP {
             Ok(DragResult::Dropped)
         } else {
@@ -241,7 +260,8 @@ mod tests {
 
     #[test]
     fn get_file_data_object_succeeds_for_multiple_files() {
-        let temp_dir = std::env::temp_dir().join(format!("prism-drag-test-multi-{}", std::process::id()));
+        let temp_dir =
+            std::env::temp_dir().join(format!("prism-drag-test-multi-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&temp_dir);
         let f1 = temp_dir.join("img1.png");
         let f2 = temp_dir.join("img2.jpg");
@@ -250,7 +270,10 @@ mod tests {
 
         let obj = get_file_data_object(&[f1, f2]);
         let _ = std::fs::remove_dir_all(&temp_dir);
-        assert!(obj.is_ok(), "Should obtain IDataObject for multiple valid files");
+        assert!(
+            obj.is_ok(),
+            "Should obtain IDataObject for multiple valid files"
+        );
     }
 
     #[test]
@@ -265,7 +288,7 @@ mod tests {
         let file_path = temp_dir.join("sample.png");
         File::create(&file_path).unwrap();
 
-        let obj = get_file_data_object(&[file_path.clone()]).unwrap();
+        let obj = get_file_data_object(std::slice::from_ref(&file_path)).unwrap();
         attach_drag_image(&obj, &[file_path]);
         let _ = std::fs::remove_dir_all(&temp_dir);
     }

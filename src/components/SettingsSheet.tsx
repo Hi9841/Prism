@@ -20,7 +20,7 @@ import {
   X,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { getAppIcons, getAppVersion, quitApp, setShortcut, setTaskbarAlignment } from "../lib/bridge";
+import { getAppIcons, getAppVersion, setShortcut, setTaskbarAlignment } from "../lib/bridge";
 import type {
   AccentId,
   AppGroup,
@@ -381,6 +381,7 @@ function AppGroupsPicker() {
           value={newName}
           onChange={(event) => setNewName(event.target.value)}
           onKeyDown={(event) => {
+            if (event.nativeEvent.isComposing) return;
             if (event.key === "Enter") createGroup();
           }}
           maxLength={64}
@@ -486,6 +487,7 @@ function AppGroupsPicker() {
                       value={appQuery}
                       onChange={(event) => setAppQuery(event.target.value)}
                       onKeyDown={(event) => {
+                        if (event.nativeEvent.isComposing) return;
                         if (event.key === "Escape") {
                           event.preventDefault();
                           event.stopPropagation();
@@ -616,8 +618,18 @@ function AppGroupsPicker() {
 }
 
 export function SettingsSheet() {
-  const { settings, updateSettings, resetSettings, openSettings, setOpenSettings, clearHistory, showToast } =
-    useApp();
+  const {
+    settings,
+    updateSettings,
+    resetSettings,
+    persistenceError,
+    retryPersistence,
+    quit,
+    openSettings,
+    setOpenSettings,
+    clearHistory,
+    showToast,
+  } = useApp();
   const panelRef = useRef<HTMLDivElement>(null);
   const closeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [closing, setClosing] = useState(false);
@@ -625,6 +637,7 @@ export function SettingsSheet() {
   const [version, setVersion] = useState("");
   const [resetConfirming, setResetConfirming] = useState(false);
   const [resetBusy, setResetBusy] = useState(false);
+  const [retrySaveBusy, setRetrySaveBusy] = useState(false);
 
   useEffect(() => {
     void getAppVersion()
@@ -674,6 +687,18 @@ export function SettingsSheet() {
     }
   }, [resetBusy, resetConfirming, resetSettings, showToast]);
 
+  const retrySave = useCallback(async () => {
+    if (retrySaveBusy) return;
+    setRetrySaveBusy(true);
+    try {
+      await retryPersistence();
+    } catch (error) {
+      showToast("Settings still not saved", String(error), "error");
+    } finally {
+      setRetrySaveBusy(false);
+    }
+  }, [retryPersistence, retrySaveBusy, showToast]);
+
   useEffect(
     () => () => {
       if (closeTimerRef.current) clearTimeout(closeTimerRef.current);
@@ -696,6 +721,7 @@ export function SettingsSheet() {
   // Focus trap: Tab/Shift+Tab cycle within the sheet.
   const onPanelKeyDown = useCallback(
     (e: React.KeyboardEvent) => {
+      if (e.nativeEvent.isComposing) return;
       if (e.key === "Escape") {
         e.preventDefault();
         setOpenSettings(false);
@@ -752,7 +778,8 @@ export function SettingsSheet() {
             type="button"
             aria-label="Close settings"
             onClick={() => requestClose()}
-            className="focus-ring press grid h-7 w-7 cursor-pointer place-items-center rounded-[6px] text-fg-tertiary hover:bg-surface-hover hover:text-fg-secondary"
+            className="focus-ring press relative grid cursor-pointer place-items-center rounded-[6px] text-fg-tertiary hover:bg-surface-hover hover:text-fg-secondary"
+            style={{ width: 44, height: 44 }}
           >
             <X className="h-4 w-4" />
           </button>
@@ -793,6 +820,24 @@ export function SettingsSheet() {
             </div>
           ) : null}
         </div>
+
+        {persistenceError ? (
+          <div
+            role="alert"
+            className="mx-5 mb-3 flex items-center justify-between gap-3 rounded-[10px] bg-danger-soft px-3 py-2.5 text-danger"
+          >
+            <span className="min-w-0 text-[11.5px] leading-relaxed">{persistenceError}</span>
+            <button
+              type="button"
+              disabled={retrySaveBusy}
+              aria-busy={retrySaveBusy}
+              onClick={() => void retrySave()}
+              className="focus-ring press min-h-11 shrink-0 cursor-pointer rounded-[8px] bg-surface px-3 text-[11.5px] font-semibold hover:bg-surface-hover disabled:cursor-default disabled:opacity-50"
+            >
+              {retrySaveBusy ? "Saving..." : "Retry save"}
+            </button>
+          </div>
+        ) : null}
 
         <div className="scroll-thin flex-1 overflow-y-auto px-5 pb-6">
           <SectionTitle>Appearance</SectionTitle>
@@ -896,8 +941,8 @@ export function SettingsSheet() {
             </div>
             <button
               type="button"
-              onClick={() => quitApp()}
-              className="focus-ring press flex cursor-pointer items-center gap-1.5 rounded-[10px] bg-danger-soft px-3 py-1.5 text-[12px] font-medium text-danger hover:opacity-90"
+              onClick={() => void quit()}
+              className="focus-ring press flex min-h-11 cursor-pointer items-center gap-1.5 rounded-[10px] bg-danger-soft px-3 text-[12px] font-medium text-danger hover:opacity-90"
             >
               <LogOut className="h-3.5 w-3.5" />
               Quit

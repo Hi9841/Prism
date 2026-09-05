@@ -13,16 +13,18 @@ const DOWNLOAD_TIMEOUT_MS = 10 * 60 * 1000;
 type UpdateViewState =
   | { phase: "hidden" }
   | { phase: "available"; version: string }
+  | { phase: "saving"; version: string }
   | { phase: "downloading"; version: string; downloadedBytes: number; totalBytes?: number }
   | { phase: "installing"; version: string }
   | { phase: "failed"; version: string };
 
 export function UpdateControl() {
-  const { showToast } = useApp();
+  const { showToast, flushPersistence } = useApp();
   const [viewState, setViewState] = useState<UpdateViewState>({ phase: "hidden" });
   const updateRef = useRef<Update | null>(null);
   const checkInFlightRef = useRef<Promise<void> | null>(null);
   const installInFlightRef = useRef(false);
+  const installGenerationRef = useRef(0);
   const disposedRef = useRef(false);
   const lastCheckAtRef = useRef(0);
   const forceCheckPendingRef = useRef(false);
@@ -40,6 +42,7 @@ export function UpdateControl() {
     // presentation.
     if (!shouldCheckForUpdate(lastCheckAtRef.current, now, force)) return;
     lastCheckAtRef.current = now;
+    const generation = installGenerationRef.current;
 
     const pending = check({
       timeout: NETWORK_TIMEOUT_MS,
@@ -47,25 +50,27 @@ export function UpdateControl() {
       headers: force ? { "Cache-Control": "no-cache", Pragma: "no-cache" } : undefined,
     })
       .then(async (availableUpdate) => {
-        if (disposedRef.current) {
-          await availableUpdate?.close();
+        if (disposedRef.current || generation !== installGenerationRef.current) {
+          if (availableUpdate !== updateRef.current) await availableUpdate?.close().catch(() => {});
           return;
         }
         if (!availableUpdate) {
           const previousUpdate = updateRef.current;
           updateRef.current = null;
-          if (previousUpdate) await previousUpdate.close().catch(() => {});
           setViewState({ phase: "hidden" });
+          if (previousUpdate) void previousUpdate.close().catch(() => {});
           return;
         }
         const previousUpdate = updateRef.current;
         updateRef.current = availableUpdate;
-        if (previousUpdate) await previousUpdate.close().catch(() => {});
         setViewState({ phase: "available", version: availableUpdate.version });
+        if (previousUpdate && previousUpdate !== availableUpdate) void previousUpdate.close().catch(() => {});
       })
       .catch((error) => {
-        console.error("Prism update check failed", error);
-        if (!disposedRef.current) setViewState({ phase: "failed", version: "latest" });
+        if (!disposedRef.current && generation === installGenerationRef.current) {
+          console.error("Prism update check failed", error);
+          setViewState({ phase: "failed", version: "latest" });
+        }
       })
       .finally(() => {
         checkInFlightRef.current = null;
@@ -90,12 +95,15 @@ export function UpdateControl() {
       window.clearInterval(interval);
       offToggle();
       const update = updateRef.current;
-      updateRef.current = null;
-      update?.close().catch(() => {});
+      if (!installInFlightRef.current) {
+        updateRef.current = null;
+        update?.close().catch(() => {});
+      }
     };
   }, [checkForUpdate]);
 
   const installUpdate = useCallback(async () => {
+    if (installInFlightRef.current) return;
     const update = updateRef.current;
     if (viewState.phase === "failed" && !update) {
       checkForUpdate(true);
@@ -105,13 +113,19 @@ export function UpdateControl() {
 
     let downloadedBytes = 0;
     installInFlightRef.current = true;
-    setViewState({
-      phase: "downloading",
-      version: update.version,
-      downloadedBytes,
-    });
+    installGenerationRef.current += 1;
+    let saving = true;
+    setViewState({ phase: "saving", version: update.version });
     try {
-      await update.downloadAndInstall(
+      await flushPersistence();
+      if (disposedRef.current) return;
+      saving = false;
+      setViewState({
+        phase: "downloading",
+        version: update.version,
+        downloadedBytes,
+      });
+      await update.download(
         (event) => {
           if (disposedRef.current) return;
           if (event.event === "Started") {
@@ -129,26 +143,37 @@ export function UpdateControl() {
               downloadedBytes,
               totalBytes: current.phase === "downloading" ? current.totalBytes : undefined,
             }));
-          } else {
-            setViewState({ phase: "installing", version: update.version });
           }
         },
         { timeout: DOWNLOAD_TIMEOUT_MS },
       );
+      if (disposedRef.current) return;
+      // Settings can change during a long download. Flush again immediately
+      // before handing control to the native installer, which exits Prism.
+      saving = true;
+      setViewState({ phase: "saving", version: update.version });
+      await flushPersistence();
+      if (disposedRef.current) return;
+      saving = false;
+      setViewState({ phase: "installing", version: update.version });
+      await update.install();
       // On Windows, Tauri's native updater launches the NSIS installer with
       // restart enabled and exits Prism from Rust. This line is only reached
       // by platforms whose updater returns normally; the process must not
       // call relaunch again because that races the installer and can start
       // the old executable while it is being replaced.
     } catch (error) {
-      console.error("Prism update failed", error);
       if (disposedRef.current) return;
       setViewState({ phase: "failed", version: update.version });
-      showToast("Update failed", "Check your connection and try again");
+      showToast(saving ? "Settings not saved" : "Update failed", String(error), "error");
     } finally {
       installInFlightRef.current = false;
+      if (disposedRef.current) {
+        if (updateRef.current === update) updateRef.current = null;
+        await update.close().catch(() => {});
+      }
     }
-  }, [checkForUpdate, showToast, viewState.phase]);
+  }, [checkForUpdate, showToast, flushPersistence, viewState.phase]);
 
   if (viewState.phase === "hidden") {
     return (
@@ -157,7 +182,7 @@ export function UpdateControl() {
         title="Check for updates"
         aria-label="Check for updates"
         onClick={() => checkForUpdate(true)}
-        className="focus-ring press grid h-8 w-8 place-items-center rounded-[7px] text-fg-quiet hover:bg-surface-hover hover:text-fg"
+        className="focus-ring press grid h-11 w-11 place-items-center rounded-[7px] text-fg-quiet hover:bg-surface-hover hover:text-fg"
       >
         <RefreshCw className="h-3.5 w-3.5" />
       </button>
@@ -165,19 +190,22 @@ export function UpdateControl() {
   }
 
   const version = viewState.version.replace(/^v/i, "");
-  const busy = viewState.phase === "downloading" || viewState.phase === "installing";
+  const busy =
+    viewState.phase === "saving" || viewState.phase === "downloading" || viewState.phase === "installing";
   const percent =
     viewState.phase === "downloading" ? updatePercent(viewState.downloadedBytes, viewState.totalBytes) : null;
   const label =
     viewState.phase === "available"
       ? `Update v${version}`
-      : viewState.phase === "downloading"
-        ? percent === null
-          ? "Downloading"
-          : `Update ${percent}%`
-        : viewState.phase === "installing"
-          ? "Installing"
-          : "Retry update";
+      : viewState.phase === "saving"
+        ? "Saving settings"
+        : viewState.phase === "downloading"
+          ? percent === null
+            ? "Downloading"
+            : `Update ${percent}%`
+          : viewState.phase === "installing"
+            ? "Installing"
+            : "Retry update";
   const title =
     viewState.phase === "failed"
       ? `Retry Prism v${version} update`
@@ -193,7 +221,7 @@ export function UpdateControl() {
       aria-busy={busy}
       disabled={busy}
       onClick={installUpdate}
-      className={`focus-ring press inline-flex h-8 w-28 min-w-0 items-center justify-center gap-1.5 rounded-[7px] px-2.5 text-[11px] font-semibold ${
+      className={`focus-ring press inline-flex h-11 w-28 min-w-0 items-center justify-center gap-1.5 rounded-[7px] px-2.5 text-[11px] font-semibold ${
         viewState.phase === "failed"
           ? "bg-danger-soft text-danger hover:opacity-90"
           : busy

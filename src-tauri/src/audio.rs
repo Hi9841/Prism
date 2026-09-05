@@ -3,22 +3,21 @@
 use std::path::PathBuf;
 use windows::core::Interface;
 use windows::Win32::Foundation::{CloseHandle, HWND, POINT};
-use windows::Win32::Media::Audio::{
-    eMultimedia, eRender, DEVICE_STATE_ACTIVE,
-    IAudioSessionControl2, IAudioSessionEnumerator, IAudioSessionManager2,
-    IMMDevice, IMMDeviceCollection, IMMDeviceEnumerator, ISimpleAudioVolume, MMDeviceEnumerator,
-};
 use windows::Win32::Media::Audio::Endpoints::IAudioEndpointVolume;
-use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CLSCTX_ALL, CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED};
+use windows::Win32::Media::Audio::{
+    eMultimedia, eRender, IAudioSessionControl2, IAudioSessionEnumerator, IAudioSessionManager2,
+    IMMDevice, IMMDeviceCollection, IMMDeviceEnumerator, ISimpleAudioVolume, MMDeviceEnumerator,
+    DEVICE_STATE_ACTIVE,
+};
+use windows::Win32::System::Com::{
+    CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_ALL, CLSCTX_INPROC_SERVER,
+    COINIT_MULTITHREADED,
+};
 use windows::Win32::System::Threading::{
     OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
 };
-use windows::Win32::UI::Accessibility::{
-    CUIAutomation, IUIAutomation,
-};
-use windows::Win32::UI::WindowsAndMessaging::{
-    GetAncestor, GetClassNameW, GA_ROOT,
-};
+use windows::Win32::UI::Accessibility::{CUIAutomation, IUIAutomation};
+use windows::Win32::UI::WindowsAndMessaging::{GetAncestor, GetClassNameW, GA_ROOT};
 
 #[derive(Debug, Clone)]
 pub struct AudioSessionEntry {
@@ -27,6 +26,26 @@ pub struct AudioSessionEntry {
     pub process_name: String,
     pub volume: f32,
     pub muted: bool,
+}
+
+/// Owns COM initialization for the dedicated audio worker thread.
+pub(crate) struct ComApartment;
+
+impl ComApartment {
+    pub(crate) fn initialize() -> Result<Self, String> {
+        unsafe {
+            CoInitializeEx(None, COINIT_MULTITHREADED)
+                .ok()
+                .map_err(|error| format!("initialize audio COM apartment: {error}"))?;
+        }
+        Ok(Self)
+    }
+}
+
+impl Drop for ComApartment {
+    fn drop(&mut self) {
+        unsafe { CoUninitialize() };
+    }
 }
 
 pub fn get_process_name(pid: u32) -> Option<String> {
@@ -57,11 +76,11 @@ pub fn get_process_name(pid: u32) -> Option<String> {
 }
 
 /// Retrieves or adjusts the default render device's master volume.
-pub fn adjust_master_volume(delta: f32) -> Result<(f32, bool), String> {
+fn adjust_master_volume(delta: f32) -> Result<(f32, bool), String> {
     unsafe {
-        let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
-        let enumerator: IMMDeviceEnumerator = CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)
-            .map_err(|e| format!("create MMDeviceEnumerator: {e}"))?;
+        let enumerator: IMMDeviceEnumerator =
+            CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)
+                .map_err(|e| format!("create MMDeviceEnumerator: {e}"))?;
         let device: IMMDevice = enumerator
             .GetDefaultAudioEndpoint(eRender, eMultimedia)
             .map_err(|e| format!("get default audio endpoint: {e}"))?;
@@ -78,27 +97,33 @@ pub fn adjust_master_volume(delta: f32) -> Result<(f32, bool), String> {
             .map_err(|e| format!("set master volume: {e}"))?;
 
         if new_vol > 0.0 {
-            let _ = endpoint_vol.SetMute(false, std::ptr::null());
+            endpoint_vol
+                .SetMute(false, std::ptr::null())
+                .map_err(|error| format!("unmute master volume: {error}"))?;
         }
         let muted = endpoint_vol
             .GetMute()
-            .map(|b| b.as_bool())
-            .unwrap_or(false);
+            .map(|value| value.as_bool())
+            .map_err(|error| format!("get master mute state: {error}"))?;
 
         Ok((new_vol, muted))
     }
 }
 
-/// Adjusts the volume of any audio session whose process or window matches any of the tokens.
+/// Adjusts every session that belongs to one exact executable identity.
 /// If no matching session is found, returns Ok(None).
-pub fn adjust_app_volume(tokens: &[String], delta: f32) -> Result<Option<(String, f32, bool)>, String> {
-    if tokens.is_empty() {
+fn adjust_app_volume(
+    executable_stem: &str,
+    delta: f32,
+) -> Result<Option<(String, f32, bool)>, String> {
+    let executable_stem = normalize_executable_stem(executable_stem);
+    if executable_stem.is_empty() {
         return Ok(None);
     }
     unsafe {
-        let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
-        let enumerator: IMMDeviceEnumerator = CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)
-            .map_err(|e| format!("create MMDeviceEnumerator: {e}"))?;
+        let enumerator: IMMDeviceEnumerator =
+            CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)
+                .map_err(|e| format!("create MMDeviceEnumerator: {e}"))?;
 
         let devices: IMMDeviceCollection = enumerator
             .EnumAudioEndpoints(eRender, DEVICE_STATE_ACTIVE)
@@ -119,10 +144,11 @@ pub fn adjust_app_volume(tokens: &[String], delta: f32) -> Result<Option<(String
                 Ok(sm) => sm,
                 Err(_) => continue,
             };
-            let session_enumerator: IAudioSessionEnumerator = match session_manager.GetSessionEnumerator() {
-                Ok(se) => se,
-                Err(_) => continue,
-            };
+            let session_enumerator: IAudioSessionEnumerator =
+                match session_manager.GetSessionEnumerator() {
+                    Ok(se) => se,
+                    Err(_) => continue,
+                };
 
             let count = session_enumerator.GetCount().unwrap_or(0);
             for i in 0..count {
@@ -149,28 +175,23 @@ pub fn adjust_app_volume(tokens: &[String], delta: f32) -> Result<Option<(String
                 }
 
                 let process_name = get_process_name(pid).unwrap_or_default();
-                let proc_lower = process_name.to_ascii_lowercase();
-                let proc_stem = proc_lower.strip_suffix(".exe").unwrap_or(&proc_lower);
-                if proc_stem.is_empty() {
-                    continue;
-                }
-
-                let is_match = tokens.iter().any(|token| {
-                    let t = token.to_ascii_lowercase();
-                    if t.len() < 3 {
-                        return false;
-                    }
-                    proc_stem.contains(&t) || t.contains(proc_stem)
-                });
-
-                if is_match {
-                    let current = simple.GetMasterVolume().unwrap_or(0.5);
+                if process_matches_executable(&process_name, &executable_stem) {
+                    let current = simple
+                        .GetMasterVolume()
+                        .map_err(|error| format!("get {process_name} session volume: {error}"))?;
                     let new_vol = (current + delta).clamp(0.0, 1.0);
-                    let _ = simple.SetMasterVolume(new_vol, std::ptr::null());
+                    simple
+                        .SetMasterVolume(new_vol, std::ptr::null())
+                        .map_err(|error| format!("set {process_name} session volume: {error}"))?;
                     if new_vol > 0.0 {
-                        let _ = simple.SetMute(false, std::ptr::null());
+                        simple
+                            .SetMute(false, std::ptr::null())
+                            .map_err(|error| format!("unmute {process_name} session: {error}"))?;
                     }
-                    let muted = simple.GetMute().map(|b| b.as_bool()).unwrap_or(false);
+                    let muted = simple
+                        .GetMute()
+                        .map(|value| value.as_bool())
+                        .map_err(|error| format!("get {process_name} mute state: {error}"))?;
 
                     matched = true;
                     result_vol = new_vol;
@@ -184,30 +205,49 @@ pub fn adjust_app_volume(tokens: &[String], delta: f32) -> Result<Option<(String
         }
 
         if matched {
-            Ok(Some((matched_title.unwrap_or_else(|| "App".to_string()), result_vol, result_muted)))
+            Ok(Some((
+                matched_title.unwrap_or_else(|| "App".to_string()),
+                result_vol,
+                result_muted,
+            )))
         } else {
             Ok(None)
         }
     }
 }
 
-pub fn inspect_element_at(point: POINT) -> Option<(String, String, String, isize)> {
+fn inspect_element_at(point: POINT) -> Option<InspectedElement> {
     unsafe {
-        let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
-        let uia: IUIAutomation = CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER).ok()?;
+        let uia: IUIAutomation =
+            CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER).ok()?;
         let mut element = uia.ElementFromPoint(point).ok()?;
 
         let walker = uia.ControlViewWalker().ok();
 
         // If hitting a child element (e.g. icon image or running bar), walk up to find the taskbar button
         for _ in 0..4 {
-            let name = element.CurrentName().map(|s| s.to_string()).unwrap_or_default();
-            let auto_id = element.CurrentAutomationId().map(|s| s.to_string()).unwrap_or_default();
-            let class_name = element.CurrentClassName().map(|s| s.to_string()).unwrap_or_default();
-            let hwnd = element.CurrentNativeWindowHandle().map(|h| h.0 as isize).unwrap_or(0);
-
-            if !name.is_empty() || auto_id.starts_with("Appid: ") || class_name.contains("Button") || class_name.contains("TaskList") {
-                return Some((name, class_name, auto_id, hwnd));
+            let name = element
+                .CurrentName()
+                .map(|s| s.to_string())
+                .unwrap_or_default();
+            let auto_id = element
+                .CurrentAutomationId()
+                .map(|s| s.to_string())
+                .unwrap_or_default();
+            let class_name = element
+                .CurrentClassName()
+                .map(|s| s.to_string())
+                .unwrap_or_default();
+            if !name.is_empty()
+                || auto_id.starts_with("Appid: ")
+                || class_name.contains("Button")
+                || class_name.contains("TaskList")
+            {
+                return Some(InspectedElement {
+                    name,
+                    class_name,
+                    automation_id: auto_id,
+                });
             }
 
             if let Some(ref w) = walker {
@@ -221,70 +261,106 @@ pub fn inspect_element_at(point: POINT) -> Option<(String, String, String, isize
             }
         }
 
-        let name = element.CurrentName().map(|s| s.to_string()).unwrap_or_default();
-        let class_name = element.CurrentClassName().map(|s| s.to_string()).unwrap_or_default();
-        let auto_id = element.CurrentAutomationId().map(|s| s.to_string()).unwrap_or_default();
-        let hwnd = element.CurrentNativeWindowHandle().map(|h| h.0 as isize).unwrap_or(0);
-        Some((name, class_name, auto_id, hwnd))
+        let name = element
+            .CurrentName()
+            .map(|s| s.to_string())
+            .unwrap_or_default();
+        let class_name = element
+            .CurrentClassName()
+            .map(|s| s.to_string())
+            .unwrap_or_default();
+        let auto_id = element
+            .CurrentAutomationId()
+            .map(|s| s.to_string())
+            .unwrap_or_default();
+        Some(InspectedElement {
+            name,
+            class_name,
+            automation_id: auto_id,
+        })
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct TaskbarTargetInfo {
-    pub display_title: String,
-    pub tokens: Vec<String>,
-    pub is_master: bool,
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct InspectedElement {
+    name: String,
+    class_name: String,
+    automation_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum TaskbarTarget {
+    Unknown,
+    Master,
+    Application {
+        display_title: String,
+        executable_stem: String,
+    },
 }
 
 /// Identifies the application or taskbar element under the cursor point.
-pub fn identify_taskbar_target_at(point: POINT) -> TaskbarTargetInfo {
-    let (name, class_name, auto_id, _) = inspect_element_at(point).unwrap_or_default();
+pub(crate) fn identify_taskbar_target_at(point: POINT) -> TaskbarTarget {
+    classify_taskbar_element(inspect_element_at(point))
+}
+
+fn classify_taskbar_element(element: Option<InspectedElement>) -> TaskbarTarget {
+    let Some(element) = element else {
+        return TaskbarTarget::Unknown;
+    };
 
     // Check if over system tray volume icon or tray
-    let is_volume_tray = auto_id == "SystemTrayIcon"
-        || name.to_ascii_lowercase().starts_with("volume")
-        || class_name.contains("OmniButtonRight");
+    let is_volume_tray = element.name.to_ascii_lowercase().starts_with("volume")
+        && (element.automation_id == "SystemTrayIcon"
+            || element.class_name.contains("OmniButtonRight"));
 
-    let is_empty_taskbar = auto_id == "TaskbarFrame"
-        || class_name.contains("TaskbarFrame")
-        || (name.is_empty() && auto_id.is_empty());
+    let is_empty_taskbar =
+        element.automation_id == "TaskbarFrame" || element.class_name.contains("TaskbarFrame");
 
     if is_volume_tray || is_empty_taskbar {
-        return TaskbarTargetInfo {
-            display_title: "Master Volume".to_string(),
-            tokens: Vec::new(),
-            is_master: true,
-        };
+        return TaskbarTarget::Master;
     }
 
-    // Extract clean display title from name
-    // e.g. "Google Chrome - 1 running window pinned" -> "Google Chrome"
-    let clean_title = clean_app_display_name(&name, &auto_id);
+    let display_title = clean_app_display_name(&element.name, &element.automation_id);
+    let Some(executable_stem) = executable_stem_from_app_id(&element.automation_id) else {
+        return TaskbarTarget::Unknown;
+    };
 
-    // Extract search tokens from name and auto_id
-    let mut tokens = Vec::new();
-    if auto_id.starts_with("Appid: ") {
-        let id_part = auto_id.trim_start_matches("Appid: ").trim();
-        for segment in id_part.split('.') {
-            if segment.len() > 2 {
-                tokens.push(segment.to_string());
-            }
-        }
-    } else if !auto_id.is_empty() {
-        tokens.push(auto_id);
+    TaskbarTarget::Application {
+        display_title,
+        executable_stem,
+    }
+}
+
+fn normalize_executable_stem(value: &str) -> String {
+    let lowercase = value.trim().to_ascii_lowercase();
+    lowercase
+        .strip_suffix(".exe")
+        .unwrap_or(&lowercase)
+        .to_string()
+}
+
+fn process_matches_executable(process_name: &str, executable_stem: &str) -> bool {
+    normalize_executable_stem(process_name) == normalize_executable_stem(executable_stem)
+}
+
+fn executable_stem_from_app_id(automation_id: &str) -> Option<String> {
+    let app_id = automation_id.strip_prefix("Appid: ")?.trim();
+    if app_id.is_empty() || app_id.contains('!') {
+        return None;
+    }
+    if app_id.to_ascii_lowercase().ends_with(".exe") {
+        return Some(normalize_executable_stem(app_id));
     }
 
-    for word in clean_title.split_whitespace() {
-        let w = word.trim_matches(|c: char| !c.is_alphanumeric());
-        if w.len() > 2 {
-            tokens.push(w.to_string());
-        }
-    }
-
-    TaskbarTargetInfo {
-        display_title: clean_title,
-        tokens,
-        is_master: false,
+    let mut unique_segments = app_id
+        .split('.')
+        .map(normalize_executable_stem)
+        .filter(|segment| !segment.is_empty());
+    let first = unique_segments.next()?;
+    if unique_segments.all(|segment| segment == first) {
+        Some(first)
+    } else {
+        None
     }
 }
 
@@ -317,7 +393,7 @@ fn clean_app_display_name(name: &str, auto_id: &str) -> String {
     }
     if auto_id.starts_with("Appid: ") {
         let part = auto_id.trim_start_matches("Appid: ").trim();
-        return part.split('.').last().unwrap_or(part).to_string();
+        return part.split('.').next_back().unwrap_or(part).to_string();
     }
     "Application".to_string()
 }
@@ -350,43 +426,46 @@ pub struct VolumeChangeResult {
 }
 
 /// Main entry point: called when mouse wheel scrolls over the taskbar.
-pub fn adjust_volume_at_taskbar(point: POINT, delta: f32) -> Option<VolumeChangeResult> {
-    let target = identify_taskbar_target_at(point);
-
-    if target.is_master {
-        let (vol, muted) = adjust_master_volume(delta).ok()?;
-        return Some(VolumeChangeResult {
-            title: "Master Volume".to_string(),
-            volume: vol,
-            percentage: (vol * 100.0).round() as u32,
-            muted,
-            is_master: true,
-        });
-    }
-
-    // Adjust specific application volume (NEVER fall back to master volume on app buttons)
-    match adjust_app_volume(&target.tokens, delta) {
-        Ok(Some((_app_name, vol, muted))) => {
+pub(crate) fn adjust_volume_for_target(
+    target: &TaskbarTarget,
+    delta: f32,
+) -> Option<VolumeChangeResult> {
+    match target {
+        TaskbarTarget::Unknown => None,
+        TaskbarTarget::Master => {
+            let (vol, muted) = adjust_master_volume(delta).ok()?;
             Some(VolumeChangeResult {
-                title: target.display_title,
+                title: "Master Volume".to_string(),
+                volume: vol,
+                percentage: (vol * 100.0).round() as u32,
+                muted,
+                is_master: true,
+            })
+        }
+        TaskbarTarget::Application {
+            display_title,
+            executable_stem,
+        } => match adjust_app_volume(executable_stem, delta) {
+            Ok(Some((_app_name, vol, muted))) => Some(VolumeChangeResult {
+                title: display_title.clone(),
                 volume: vol,
                 percentage: (vol * 100.0).round() as u32,
                 muted,
                 is_master: false,
-            })
-        }
-        Ok(None) => {
-            // The hovered application currently has no active audio session in the Windows Audio Mixer.
-            // Do NOT adjust master volume! Show clear inactive status instead of touching overall volume.
-            Some(VolumeChangeResult {
-                title: format!("{} (No Audio)", target.display_title),
-                volume: 0.0,
-                percentage: 0,
-                muted: true,
-                is_master: false,
-            })
-        }
-        Err(_) => None,
+            }),
+            Ok(None) => {
+                // The hovered application currently has no active audio session in the Windows Audio Mixer.
+                // Do NOT adjust master volume! Show clear inactive status instead of touching overall volume.
+                Some(VolumeChangeResult {
+                    title: format!("{display_title} (No Audio)"),
+                    volume: 0.0,
+                    percentage: 0,
+                    muted: true,
+                    is_master: false,
+                })
+            }
+            Err(_) => None,
+        },
     }
 }
 
@@ -404,42 +483,90 @@ mod tests {
             clean_app_display_name("Discord - 2 running windows", "Appid: Discord"),
             "Discord"
         );
-        assert_eq!(
-            clean_app_display_name("Fortnite  ", ""),
-            "Fortnite"
-        );
+        assert_eq!(clean_app_display_name("Fortnite  ", ""), "Fortnite");
         assert_eq!(
             clean_app_display_name("Spotify Free", "Appid: Spotify.Spotify"),
             "Spotify Free"
         );
+        assert_eq!(clean_app_display_name("", "Appid: Chrome"), "Chrome");
+    }
+
+    #[test]
+    fn inspection_failure_is_unknown_instead_of_master() {
+        assert_eq!(classify_taskbar_element(None), TaskbarTarget::Unknown);
+    }
+
+    #[test]
+    fn only_positive_taskbar_background_identification_is_master() {
+        let blank = InspectedElement {
+            name: String::new(),
+            class_name: String::new(),
+            automation_id: String::new(),
+        };
         assert_eq!(
-            clean_app_display_name("", "Appid: Chrome"),
-            "Chrome"
+            classify_taskbar_element(Some(blank)),
+            TaskbarTarget::Unknown
+        );
+
+        let background = InspectedElement {
+            name: String::new(),
+            class_name: "TaskbarFrame".to_string(),
+            automation_id: "TaskbarFrame".to_string(),
+        };
+        assert_eq!(
+            classify_taskbar_element(Some(background)),
+            TaskbarTarget::Master
+        );
+
+        let unrelated_tray_icon = InspectedElement {
+            name: "Network".to_string(),
+            class_name: "SystemTrayIcon".to_string(),
+            automation_id: "SystemTrayIcon".to_string(),
+        };
+        assert_eq!(
+            classify_taskbar_element(Some(unrelated_tray_icon)),
+            TaskbarTarget::Unknown
+        );
+
+        let volume_tray_icon = InspectedElement {
+            name: "Volume 72%".to_string(),
+            class_name: "SystemTrayIcon".to_string(),
+            automation_id: "SystemTrayIcon".to_string(),
+        };
+        assert_eq!(
+            classify_taskbar_element(Some(volume_tray_icon)),
+            TaskbarTarget::Master
         );
     }
 
     #[test]
-    fn test_adjust_master_volume_query() {
-        let res = adjust_master_volume(0.0);
-        assert!(res.is_ok(), "query master volume failed: {:?}", res.err());
-        let (vol, _muted) = res.unwrap();
-        assert!((0.0..=1.0).contains(&vol));
+    fn unknown_target_returns_before_audio_access() {
+        assert!(adjust_volume_for_target(&TaskbarTarget::Unknown, 0.02).is_none());
     }
 
     #[test]
-    fn test_adjust_app_volume_isolation() {
-        // Query Discord with 0.0 delta
-        let discord_res = adjust_app_volume(&["discord".to_string()], 0.0);
-        println!("adjust_app_volume discord res: {:?}", discord_res);
-        assert!(discord_res.unwrap().is_some());
+    fn executable_matching_is_exact_and_case_insensitive() {
+        assert!(process_matches_executable("Music.exe", "music"));
+        assert!(process_matches_executable("MUSIC.EXE", "music"));
+        assert!(!process_matches_executable("MusicBee.exe", "music"));
+        assert!(!process_matches_executable("Music.exe", "musicbee"));
+    }
 
-        // Query Fortnite with 0.0 delta
-        let fn_res = adjust_app_volume(&["fortnite".to_string()], 0.0);
-        println!("adjust_app_volume fortnite res: {:?}", fn_res);
-        assert!(fn_res.unwrap().is_some());
-
-        // Ensure unknown app returns Ok(None) and does not error or alter master
-        let none_res = adjust_app_volume(&["nonexistent_prism_app_xyz".to_string()], 0.0);
-        assert_eq!(none_res.unwrap(), None);
+    #[test]
+    fn ambiguous_app_ids_do_not_resolve_an_executable() {
+        assert_eq!(
+            executable_stem_from_app_id("Appid: Discord"),
+            Some("discord".to_string())
+        );
+        assert_eq!(
+            executable_stem_from_app_id("Appid: Chrome.exe"),
+            Some("chrome".to_string())
+        );
+        assert_eq!(
+            executable_stem_from_app_id("Appid: Spotify.Spotify"),
+            Some("spotify".to_string())
+        );
+        assert_eq!(executable_stem_from_app_id("Appid: Vendor.Player"), None);
+        assert_eq!(executable_stem_from_app_id("Appid: Package!App"), None);
     }
 }

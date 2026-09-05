@@ -602,7 +602,12 @@ describe("taskbar pin & properties support", () => {
     const video = file("clip.mp4", "C:\\Users\\You\\Videos\\clip.mp4");
     const audio = file("song.mp3", "C:\\Users\\You\\Music\\song.mp3");
     const archive = file("backup.zip", "C:\\Users\\You\\Downloads\\backup.zip");
-    const folder = { name: "Projects", path: "C:\\Users\\You\\Projects", parent: "C:\\Users\\You", isDirectory: true };
+    const folder = {
+      name: "Projects",
+      path: "C:\\Users\\You\\Projects",
+      parent: "C:\\Users\\You",
+      isDirectory: true,
+    };
     const result = buildSections(
       sources({ query: "p", fileResults: [photo, doc, video, audio, archive, folder], fileResultQuery: "p" }),
     );
