@@ -18,8 +18,8 @@ mod windows_settings;
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Mutex;
-use std::time::Duration;
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use tauri::{Emitter, Manager, Theme, WindowEvent};
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
@@ -51,7 +51,10 @@ const LEGACY_STATE_VERSION: u32 = 2;
 const STATE_VERSION: u32 = 3;
 const PALETTE_HIDE_DELAY: Duration = Duration::from_millis(125);
 const PALETTE_RAISE_RETRY_DELAY: Duration = Duration::from_millis(40);
-const PALETTE_RAISE_RETRY_COUNT: u32 = 3;
+const PALETTE_RAISE_RETRY_COUNT: u32 = 1;
+/// Win-key open fires several focus events (show, SetForegroundWindow, webview
+/// input focus). Hide-on-blur must wait until that burst is over.
+const ACTIVATION_GRACE: Duration = Duration::from_millis(400);
 const PALETTE_STARTUP_DELAY: Duration = Duration::from_millis(100);
 const STARTUP_SHELL_RETRY_DELAY: Duration = Duration::from_millis(50);
 const STARTUP_SHELL_RETRY_ATTEMPTS: usize = 120;
@@ -63,7 +66,8 @@ const PALETTE_TASKBAR_GAP: i32 = 12;
 
 static PALETTE_OPEN: AtomicBool = AtomicBool::new(false);
 static PALETTE_TRANSITION: AtomicU64 = AtomicU64::new(0);
-static ACTIVATION_FOCUS_PENDING: AtomicBool = AtomicBool::new(false);
+static ACTIVATION_GRACE_UNTIL_MS: AtomicU64 = AtomicU64::new(0);
+static ACTIVATION_CLOCK: OnceLock<Instant> = OnceLock::new();
 static PRESENTATION_ANCHOR: Mutex<Option<PresentationAnchor>> = Mutex::new(None);
 
 #[derive(Clone, Copy, Debug, serde::Serialize)]
@@ -201,14 +205,7 @@ pub fn run() {
             if window.label() != "main" {
                 return;
             }
-            // The activation guard exists because Windows may report the
-            // palette as unfocused once before granting foreground
-            // activation to an existing process. Once the palette actually
-            // receives focus the pending state is stale: clear it so a real
-            // later unfocus (alt-tab back into a game) is never swallowed,
-            // which would leave the palette open and the taskbar topmost.
             if matches!(event, WindowEvent::Focused(true)) {
-                ACTIVATION_FOCUS_PENDING.store(false, Ordering::Release);
                 return;
             }
             // Clicking away dismisses the launcher, like Raycast.
@@ -217,18 +214,16 @@ pub fn run() {
                 if drag::is_dragging() {
                     return;
                 }
-                // Windows may report the palette as unfocused once before
-                // granting foreground activation to the existing process.
-                if ACTIVATION_FOCUS_PENDING.swap(false, Ordering::AcqRel) {
+                // Opening generates a burst of focus/unfocus. Ignore unfocus
+                // until the grace window ends; a deferred check hides the
+                // palette if it is still unfocused then.
+                if !should_dismiss_on_unfocus(
+                    activation_now_ms(),
+                    ACTIVATION_GRACE_UNTIL_MS.load(Ordering::Acquire),
+                ) {
                     return;
                 }
-                PALETTE_OPEN.store(false, Ordering::Release);
-                PALETTE_TRANSITION.fetch_add(1, Ordering::AcqRel);
-                PRESENTATION_ANCHOR
-                    .lock()
-                    .map(|mut value| *value = None)
-                    .ok();
-                taskbar::release();
+                mark_palette_dismissed();
                 let _ = window.hide();
                 if let Some(webview) = window.app_handle().get_webview_window("main") {
                     set_webview_memory_target(&webview, true);
@@ -339,7 +334,7 @@ fn schedule_initial_palette(app: tauri::AppHandle) {
 fn activate_palette(app: &tauri::AppHandle) {
     // A user-initiated launch should open the reusable palette without
     // creating another WebView window or relying on frontend timing.
-    ACTIVATION_FOCUS_PENDING.store(true, Ordering::Release);
+    arm_activation_grace();
     if !PALETTE_OPEN.load(Ordering::Acquire) {
         toggle_palette(app);
     }
@@ -663,6 +658,48 @@ fn palette_hwnd(window: &tauri::WebviewWindow) -> Result<HWND, String> {
     Ok(HWND(hwnd.0))
 }
 
+fn activation_now_ms() -> u64 {
+    ACTIVATION_CLOCK
+        .get_or_init(Instant::now)
+        .elapsed()
+        .as_millis() as u64
+        + 1
+}
+
+fn arm_activation_grace() {
+    let until = activation_now_ms() + ACTIVATION_GRACE.as_millis() as u64;
+    ACTIVATION_GRACE_UNTIL_MS.store(until, Ordering::Release);
+}
+
+fn clear_activation_grace() {
+    ACTIVATION_GRACE_UNTIL_MS.store(0, Ordering::Release);
+}
+
+fn should_dismiss_on_unfocus(now_ms: u64, grace_until_ms: u64) -> bool {
+    grace_until_ms == 0 || now_ms >= grace_until_ms
+}
+
+fn deferred_unfocus_should_dismiss(
+    open: bool,
+    transition_matches: bool,
+    focused: bool,
+    visible: bool,
+) -> bool {
+    open && transition_matches && visible && !focused
+}
+
+fn mark_palette_dismissed() {
+    PALETTE_OPEN.store(false, Ordering::Release);
+    win_key::end_typeahead(false);
+    clear_activation_grace();
+    PALETTE_TRANSITION.fetch_add(1, Ordering::AcqRel);
+    PRESENTATION_ANCHOR
+        .lock()
+        .map(|mut value| *value = None)
+        .ok();
+    taskbar::release();
+}
+
 /// Ask Windows for keyboard focus. Do not attach to the previous foreground
 /// thread: that can deadlock the UI thread and freeze Prism with the hook
 /// still eating keys.
@@ -673,17 +710,6 @@ fn force_foreground(hwnd: HWND) {
         let _ = SetActiveWindow(hwnd);
         let _ = SetFocus(Some(hwnd));
     }
-}
-
-fn move_webview_focus(window: &tauri::WebviewWindow) {
-    use webview2_com::Microsoft::Web::WebView2::Win32::COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC;
-    let _ = window.with_webview(|webview| {
-        let _ = unsafe {
-            webview
-                .controller()
-                .MoveFocus(COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC)
-        };
-    });
 }
 
 /// Reasserts Prism at the front of the topmost band. `alwaysOnTop` keeps the
@@ -705,8 +731,37 @@ fn raise_palette(window: &tauri::WebviewWindow) -> Result<(), String> {
     }
     force_foreground(hwnd);
     let _ = window.set_focus();
-    move_webview_focus(window);
     Ok(())
+}
+
+fn schedule_activation_grace_check(app: &tauri::AppHandle, transition: u64) {
+    let check_app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(ACTIVATION_GRACE).await;
+        if PALETTE_TRANSITION.load(Ordering::Acquire) != transition
+            || !PALETTE_OPEN.load(Ordering::Acquire)
+        {
+            return;
+        }
+        let main_thread_app = check_app.clone();
+        let _ = check_app.run_on_main_thread(move || {
+            if PALETTE_TRANSITION.load(Ordering::Acquire) != transition
+                || !PALETTE_OPEN.load(Ordering::Acquire)
+            {
+                return;
+            }
+            let Some(window) = main_thread_app.get_webview_window("main") else {
+                return;
+            };
+            let focused = window.is_focused().unwrap_or(false);
+            let visible = window.is_visible().unwrap_or(false);
+            if deferred_unfocus_should_dismiss(true, true, focused, visible) {
+                mark_palette_dismissed();
+                let _ = window.hide();
+                set_webview_memory_target(&window, true);
+            }
+        });
+    });
 }
 
 fn schedule_palette_raise_retry(app: &tauri::AppHandle, transition: u64) {
@@ -807,7 +862,7 @@ fn toggle_palette_with_presentation(
     let opening = toggle_open_state(&PALETTE_OPEN);
     let transition = PALETTE_TRANSITION.fetch_add(1, Ordering::AcqRel) + 1;
     if !opening {
-        ACTIVATION_FOCUS_PENDING.store(false, Ordering::Release);
+        clear_activation_grace();
     }
     if opening {
         win_key::begin_typeahead();
@@ -884,7 +939,7 @@ fn present_palette(app: tauri::AppHandle) -> Result<bool, String> {
     if reconcile_palette_position(&window, anchor).is_err() {
         position_palette(&window, anchor);
     }
-    ACTIVATION_FOCUS_PENDING.store(true, Ordering::Release);
+    arm_activation_grace();
     if let Err(error) = window
         .show()
         .map_err(|error| error.to_string())
@@ -893,7 +948,9 @@ fn present_palette(app: tauri::AppHandle) -> Result<bool, String> {
         win_key::end_typeahead(true);
         return Err(error);
     }
-    schedule_palette_raise_retry(&app, PALETTE_TRANSITION.load(Ordering::Acquire));
+    let transition = PALETTE_TRANSITION.load(Ordering::Acquire);
+    schedule_palette_raise_retry(&app, transition);
+    schedule_activation_grace_check(&app, transition);
     perf::finish(timer, "palette_present", || "window=main".to_string());
     Ok(true)
 }
@@ -907,7 +964,7 @@ fn take_open_typeahead() -> String {
 fn hide_palette(app: tauri::AppHandle) -> Result<(), String> {
     PALETTE_OPEN.store(false, Ordering::Release);
     win_key::end_typeahead(false);
-    ACTIVATION_FOCUS_PENDING.store(false, Ordering::Release);
+    clear_activation_grace();
     PALETTE_TRANSITION.fetch_add(1, Ordering::AcqRel);
     PRESENTATION_ANCHOR
         .lock()
@@ -2351,5 +2408,31 @@ mod tests {
         );
         std::fs::remove_file(&path).expect("remove test file");
         assert!(filter_existing_paths(vec![path_text]).is_empty());
+    }
+
+    #[test]
+    fn unfocus_during_activation_grace_does_not_dismiss() {
+        assert!(!should_dismiss_on_unfocus(10, 410));
+        assert!(!should_dismiss_on_unfocus(409, 410));
+        assert!(should_dismiss_on_unfocus(410, 410));
+        assert!(should_dismiss_on_unfocus(500, 410));
+        assert!(should_dismiss_on_unfocus(10, 0));
+    }
+
+    #[test]
+    fn a_focus_gain_does_not_end_activation_grace() {
+        let grace_until = 400;
+        assert!(!should_dismiss_on_unfocus(40, grace_until));
+        assert!(!should_dismiss_on_unfocus(80, grace_until));
+        assert!(!should_dismiss_on_unfocus(120, grace_until));
+    }
+
+    #[test]
+    fn deferred_unfocus_hides_only_when_the_palette_stayed_unfocused() {
+        assert!(deferred_unfocus_should_dismiss(true, true, false, true));
+        assert!(!deferred_unfocus_should_dismiss(true, true, true, true));
+        assert!(!deferred_unfocus_should_dismiss(false, true, false, true));
+        assert!(!deferred_unfocus_should_dismiss(true, false, false, true));
+        assert!(!deferred_unfocus_should_dismiss(true, true, false, false));
     }
 }
