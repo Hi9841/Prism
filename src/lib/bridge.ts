@@ -63,6 +63,16 @@ export function presentPaletteWindow(): Promise<boolean> {
   return invoke<boolean>("present_palette");
 }
 
+export function takeOpenTypeahead(): Promise<string> {
+  if (!inTauri) return Promise.resolve("");
+  return invoke<string>("take_open_typeahead");
+}
+
+export function mergeTypeaheadQuery(buffer: string, currentQuery: string): string {
+  if (!buffer) return currentQuery;
+  return buffer + currentQuery;
+}
+
 export function hidePaletteWindow(): Promise<void> {
   if (!inTauri) return Promise.resolve();
   return invoke("hide_palette");

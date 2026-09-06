@@ -8,9 +8,11 @@ import {
   hidePaletteWindow,
   inTauri,
   isWindowVisible,
+  mergeTypeaheadQuery,
   onToggleRequest,
   onWindowFocused,
   presentPaletteWindow,
+  takeOpenTypeahead,
 } from "./lib/bridge";
 import { dismissTransientUi } from "./lib/transientUi";
 import { AppProvider, useApp } from "./state/app";
@@ -46,12 +48,14 @@ function refreshStaleBundle(nativeVersion: string) {
 function Launcher() {
   const app = useApp();
   const palette = usePalette();
-  const { reset } = palette;
+  const { reset, setQuery, query } = palette;
   const { setOpenSettings } = app;
   const [phase, setPhase] = useState<"hidden" | "preparing" | "visible">(inTauri ? "hidden" : "visible");
   const visible = phase !== "hidden";
   const visibleRef = useRef(false);
   const blurCheck = useRef<number | null>(null);
+  const queryRef = useRef(query);
+  queryRef.current = query;
 
   useEffect(() => {
     if (!inTauri) return;
@@ -138,6 +142,12 @@ function Launcher() {
           if (cancelled) return;
           setPhase("visible");
           document.querySelector<HTMLInputElement>("[data-prism-search]")?.focus();
+          takeOpenTypeahead()
+            .then((text) => {
+              if (cancelled || !text) return;
+              setQuery(mergeTypeaheadQuery(text, queryRef.current));
+            })
+            .catch(() => {});
         });
       })
       .catch(() => {
@@ -146,7 +156,7 @@ function Launcher() {
     return () => {
       cancelled = true;
     };
-  }, [phase]);
+  }, [phase, setQuery]);
 
   // Open settings action from the palette.
   useEffect(() => {

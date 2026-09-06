@@ -6,7 +6,9 @@
 //! - A pure, side-aware state machine (`WinKeyMachine`) decides everything;
 //!   it is unit-tested without Win32 involvement.
 //! - A hidden top-level raw-input observer and an observe-only low-level
-//!   keyboard hook both feed that machine. Neither path eats keys.
+//!   keyboard hook both feed that machine. Win and combo keys still pass
+//!   through. After a standalone Win-up, character keys are eaten into a
+//!   typeahead buffer until Prism's search field takes them.
 //! - Explorer keeps its bare-Win hotkey so the kernel still posts
 //!   `SC_TASKLIST` when an elevated or exclusive-input app has focus.
 //!   The Explorer message hook consumes that command and, if the key
@@ -45,8 +47,12 @@ use windows::Win32::UI::Accessibility::{
     TreeScope_Descendants, UIA_AutomationIdPropertyId, UIA_ProcessIdPropertyId,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetAsyncKeyState, VK_CONTROL, VK_ESCAPE, VK_LCONTROL, VK_LMENU, VK_LSHIFT, VK_LWIN, VK_MENU,
-    VK_RCONTROL, VK_RMENU, VK_RSHIFT, VK_RWIN, VK_SHIFT,
+    GetAsyncKeyState, GetKeyState, SendInput, ToUnicode, INPUT, INPUT_0, INPUT_KEYBOARD,
+    KEYBDINPUT, KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, VIRTUAL_KEY, VK_APPS, VK_BACK, VK_CAPITAL,
+    VK_CONTROL, VK_DELETE, VK_DOWN, VK_END, VK_ESCAPE, VK_HOME, VK_INSERT, VK_LCONTROL, VK_LEFT,
+    VK_LMENU, VK_LSHIFT, VK_LWIN, VK_MENU, VK_NEXT, VK_NUMLOCK, VK_PAUSE, VK_PRIOR, VK_RCONTROL,
+    VK_RETURN, VK_RIGHT, VK_RMENU, VK_RSHIFT, VK_RWIN, VK_SCROLL, VK_SHIFT, VK_SNAPSHOT, VK_TAB,
+    VK_UP,
 };
 use windows::Win32::UI::Input::{
     GetRawInputData, RegisterRawInputDevices, HRAWINPUT, RAWINPUT, RAWINPUTDEVICE, RAWINPUTHEADER,
@@ -57,10 +63,10 @@ use windows::Win32::UI::WindowsAndMessaging::{
     DispatchMessageW, EnumChildWindows, FindWindowW, GetClassNameW, GetShellWindow, GetWindowRect,
     GetWindowThreadProcessId, IsWindowVisible, MsgWaitForMultipleObjectsEx, PeekMessageW,
     PostThreadMessageW, RegisterClassW, RegisterWindowMessageW, SetWindowsHookExW,
-    TranslateMessage, UnhookWindowsHookEx, HHOOK, KBDLLHOOKSTRUCT, MSG, MSGFLT_ALLOW, PM_REMOVE,
-    QS_ALLINPUT, RI_KEY_BREAK, WH_GETMESSAGE, WH_KEYBOARD_LL, WH_MOUSE, WM_APP, WM_INPUT,
-    WM_KEYDOWN, WM_KEYUP, WM_SYSKEYDOWN, WM_SYSKEYUP, WNDCLASSW, WS_EX_NOACTIVATE,
-    WS_EX_TOOLWINDOW, WS_POPUP,
+    TranslateMessage, UnhookWindowsHookEx, HHOOK, KBDLLHOOKSTRUCT, KBDLLHOOKSTRUCT_FLAGS,
+    LLKHF_INJECTED, LLKHF_LOWER_IL_INJECTED, MSG, MSGFLT_ALLOW, PM_REMOVE, QS_ALLINPUT,
+    RI_KEY_BREAK, WH_GETMESSAGE, WH_KEYBOARD_LL, WH_MOUSE, WM_APP, WM_INPUT, WM_KEYDOWN, WM_KEYUP,
+    WM_SYSKEYDOWN, WM_SYSKEYUP, WNDCLASSW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_POPUP,
 };
 
 const ACTION_MESSAGE: u32 = WM_APP + 1;
@@ -352,6 +358,7 @@ static SHELL_TASKBAR_PIN_REQUEST: Mutex<()> = Mutex::new(());
 static LAST_TOGGLE_MS: AtomicU64 = AtomicU64::new(0);
 static TOGGLE_CLOCK: OnceLock<Instant> = OnceLock::new();
 static PENDING_WIN_TOGGLE: Mutex<PendingWinToggle> = Mutex::new(PendingWinToggle::EMPTY);
+static TYPEAHEAD: Mutex<TypeaheadBuffer> = Mutex::new(TypeaheadBuffer::EMPTY);
 static SHELL_START_FALLBACK: Mutex<ShellStartFallback> = Mutex::new(ShellStartFallback::EMPTY);
 static LAST_OBSERVER_WIN: Mutex<Option<Instant>> = Mutex::new(None);
 static KEYBOARD_HOOK: AtomicIsize = AtomicIsize::new(0);
@@ -438,6 +445,263 @@ impl PendingWinToggle {
         self.side
             .and(self.deadline)
             .map(|deadline| deadline.saturating_duration_since(now))
+    }
+}
+
+const TYPEAHEAD_LIMIT: usize = 192;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TypeaheadClass {
+    Pass,
+    Char,
+    Backspace,
+    Clear,
+}
+
+struct TypeaheadBuffer {
+    armed: bool,
+    text: String,
+}
+
+impl TypeaheadBuffer {
+    const EMPTY: Self = Self {
+        armed: false,
+        text: String::new(),
+    };
+
+    fn arm(&mut self) {
+        if !self.armed {
+            self.text.clear();
+            self.armed = true;
+        }
+    }
+
+    fn push(&mut self, ch: char) {
+        if !self.armed || self.text.len() >= TYPEAHEAD_LIMIT {
+            return;
+        }
+        self.text.push(ch);
+    }
+
+    fn backspace(&mut self) {
+        if !self.armed {
+            return;
+        }
+        self.text.pop();
+    }
+
+    fn clear_text(&mut self) {
+        if self.armed {
+            self.text.clear();
+        }
+    }
+
+    fn disarm(&mut self) -> String {
+        self.armed = false;
+        std::mem::take(&mut self.text)
+    }
+}
+
+fn classify_typeahead_vk(vk: u16, ctrl: bool, alt: bool, win: bool) -> TypeaheadClass {
+    if win || is_modifier_vk(vk) {
+        return TypeaheadClass::Pass;
+    }
+    if vk == VK_BACK.0 {
+        if ctrl && !alt {
+            return TypeaheadClass::Clear;
+        }
+        if alt && !ctrl {
+            return TypeaheadClass::Pass;
+        }
+        return TypeaheadClass::Backspace;
+    }
+    if is_non_text_vk(vk) {
+        return TypeaheadClass::Pass;
+    }
+    if (ctrl && !alt) || (alt && !ctrl) {
+        return TypeaheadClass::Pass;
+    }
+    TypeaheadClass::Char
+}
+
+fn is_modifier_vk(vk: u16) -> bool {
+    vk == VK_SHIFT.0
+        || vk == VK_LSHIFT.0
+        || vk == VK_RSHIFT.0
+        || vk == VK_CONTROL.0
+        || vk == VK_LCONTROL.0
+        || vk == VK_RCONTROL.0
+        || vk == VK_MENU.0
+        || vk == VK_LMENU.0
+        || vk == VK_RMENU.0
+        || vk == VK_LWIN.0
+        || vk == VK_RWIN.0
+        || vk == VK_CAPITAL.0
+        || vk == VK_NUMLOCK.0
+        || vk == VK_SCROLL.0
+}
+
+fn is_non_text_vk(vk: u16) -> bool {
+    vk == VK_TAB.0
+        || vk == VK_RETURN.0
+        || vk == VK_ESCAPE.0
+        || vk == VK_PRIOR.0
+        || vk == VK_NEXT.0
+        || vk == VK_END.0
+        || vk == VK_HOME.0
+        || vk == VK_LEFT.0
+        || vk == VK_UP.0
+        || vk == VK_RIGHT.0
+        || vk == VK_DOWN.0
+        || vk == VK_SNAPSHOT.0
+        || vk == VK_INSERT.0
+        || vk == VK_DELETE.0
+        || vk == VK_APPS.0
+        || vk == VK_PAUSE.0
+        || (0x70..=0x87).contains(&vk)
+}
+
+fn is_injected_key(flags: KBDLLHOOKSTRUCT_FLAGS) -> bool {
+    flags.contains(LLKHF_INJECTED) || flags.contains(LLKHF_LOWER_IL_INJECTED)
+}
+
+fn modifier_down(vk: u16) -> bool {
+    unsafe { GetAsyncKeyState(i32::from(vk)) as u16 & 0x8000 != 0 }
+}
+
+fn snapshot_keyboard_state() -> [u8; 256] {
+    let mut state = [0u8; 256];
+    for (vk, slot) in state.iter_mut().enumerate() {
+        let async_state = unsafe { GetAsyncKeyState(vk as i32) };
+        if async_state as u16 & 0x8000 != 0 {
+            *slot |= 0x80;
+        }
+        let key_state = unsafe { GetKeyState(vk as i32) };
+        if key_state as u16 & 1 != 0 {
+            *slot |= 1;
+        }
+    }
+    state
+}
+
+fn unicode_from_key(virtual_key: u16, scan_code: u16) -> Option<char> {
+    let state = snapshot_keyboard_state();
+    let mut buffer = [0u16; 8];
+    let written = unsafe {
+        ToUnicode(
+            u32::from(virtual_key),
+            u32::from(scan_code),
+            Some(&state),
+            &mut buffer,
+            0,
+        )
+    };
+    if written <= 0 {
+        return None;
+    }
+    char::decode_utf16(buffer[..written as usize].iter().copied())
+        .next()?
+        .ok()
+        .filter(|ch| !ch.is_control())
+}
+
+fn unicode_input(unit: u16, up: bool) -> INPUT {
+    let mut flags = KEYEVENTF_UNICODE;
+    if up {
+        flags |= KEYEVENTF_KEYUP;
+    }
+    INPUT {
+        r#type: INPUT_KEYBOARD,
+        Anonymous: INPUT_0 {
+            ki: KEYBDINPUT {
+                wVk: VIRTUAL_KEY(0),
+                wScan: unit,
+                dwFlags: flags,
+                time: 0,
+                dwExtraInfo: 0,
+            },
+        },
+    }
+}
+
+fn replay_typeahead_text(text: &str) {
+    if text.is_empty() {
+        return;
+    }
+    let units: Vec<u16> = text.encode_utf16().collect();
+    let mut inputs = Vec::with_capacity(units.len() * 2);
+    for unit in units {
+        inputs.push(unicode_input(unit, false));
+        inputs.push(unicode_input(unit, true));
+    }
+    unsafe {
+        SendInput(&inputs, std::mem::size_of::<INPUT>() as i32);
+    }
+}
+
+fn is_typeahead_armed() -> bool {
+    TYPEAHEAD.lock().ok().is_some_and(|buffer| buffer.armed)
+}
+
+pub fn begin_typeahead() {
+    if let Ok(mut buffer) = TYPEAHEAD.lock() {
+        buffer.arm();
+    }
+}
+
+pub fn take_typeahead() -> String {
+    TYPEAHEAD
+        .lock()
+        .ok()
+        .map(|mut buffer| buffer.disarm())
+        .unwrap_or_default()
+}
+
+pub fn end_typeahead(replay: bool) {
+    let text = take_typeahead();
+    if replay {
+        replay_typeahead_text(&text);
+    }
+}
+
+fn intercept_typeahead(keyboard: &KBDLLHOOKSTRUCT, is_down: bool) -> bool {
+    if !is_typeahead_armed() || is_injected_key(keyboard.flags) {
+        return false;
+    }
+    let vk = keyboard.vkCode as u16;
+    let win = modifier_down(VK_LWIN.0) || modifier_down(VK_RWIN.0);
+    let ctrl =
+        modifier_down(VK_CONTROL.0) || modifier_down(VK_LCONTROL.0) || modifier_down(VK_RCONTROL.0);
+    let alt = modifier_down(VK_MENU.0) || modifier_down(VK_LMENU.0) || modifier_down(VK_RMENU.0);
+    match classify_typeahead_vk(vk, ctrl, alt, win) {
+        TypeaheadClass::Pass => false,
+        TypeaheadClass::Backspace => {
+            if is_down {
+                if let Ok(mut buffer) = TYPEAHEAD.lock() {
+                    buffer.backspace();
+                }
+            }
+            true
+        }
+        TypeaheadClass::Clear => {
+            if is_down {
+                if let Ok(mut buffer) = TYPEAHEAD.lock() {
+                    buffer.clear_text();
+                }
+            }
+            true
+        }
+        TypeaheadClass::Char => {
+            if is_down {
+                let Some(ch) = unicode_from_key(vk, keyboard.scanCode as u16) else {
+                    return false;
+                };
+                if let Ok(mut buffer) = TYPEAHEAD.lock() {
+                    buffer.push(ch);
+                }
+            }
+            true
+        }
     }
 }
 
@@ -1750,8 +2014,17 @@ fn reset_press_observation() {
 }
 
 fn cancel_pending_win_toggle() {
-    if let Ok(mut pending) = PENDING_WIN_TOGGLE.lock() {
-        pending.cancel();
+    let cancelled = PENDING_WIN_TOGGLE
+        .lock()
+        .ok()
+        .map(|mut pending| {
+            let cancelled = pending.side.is_some();
+            pending.cancel();
+            cancelled
+        })
+        .unwrap_or(false);
+    if cancelled {
+        end_typeahead(true);
     }
 }
 
@@ -1785,6 +2058,9 @@ fn arm_shell_start_fallback() {
 fn schedule_win_toggle(side: WinSide, blocked_keys: [bool; 256]) {
     if let Ok(mut pending) = PENDING_WIN_TOGGLE.lock() {
         pending.arm(side, blocked_keys, Instant::now());
+    }
+    if !crate::palette_is_open() {
+        begin_typeahead();
     }
 }
 
@@ -1947,6 +2223,9 @@ unsafe extern "system" fn keyboard_ll_proc(code: i32, wparam: WPARAM, lparam: LP
         let keyboard = &*(lparam.0 as *const KBDLLHOOKSTRUCT);
         if let Some((kind, is_down)) = classify_ll_key(keyboard.vkCode, wparam.0 as u32) {
             observe_keyboard_event(kind, is_down);
+            if intercept_typeahead(keyboard, is_down) {
+                return LRESULT(1);
+            }
         }
     }
     let handle = KEYBOARD_HOOK.load(Ordering::Relaxed);
@@ -1979,8 +2258,17 @@ fn canonical_non_win_key(key: u16) -> u16 {
 }
 
 fn observe_pending_win_key(key: u16, is_down: bool) {
-    if let Ok(mut pending) = PENDING_WIN_TOGGLE.lock() {
-        pending.observe_key(key, is_down, Instant::now());
+    let cancelled = PENDING_WIN_TOGGLE
+        .lock()
+        .ok()
+        .map(|mut pending| {
+            let was_armed = pending.side.is_some();
+            pending.observe_key(key, is_down, Instant::now());
+            was_armed && pending.side.is_none()
+        })
+        .unwrap_or(false);
+    if cancelled {
+        end_typeahead(true);
     }
 }
 
@@ -2850,5 +3138,107 @@ mod tests {
         );
         assert_eq!(classify_ll_key(255, WM_KEYDOWN), None);
         assert_eq!(classify_ll_key(u32::from(VK_LWIN.0), WM_INPUT), None);
+    }
+
+    #[test]
+    fn typeahead_letters_are_captured_after_bare_win() {
+        assert_eq!(
+            classify_typeahead_vk(0x41, false, false, false),
+            TypeaheadClass::Char
+        );
+        assert_eq!(
+            classify_typeahead_vk(VK_BACK.0, false, false, false),
+            TypeaheadClass::Backspace
+        );
+        assert_eq!(
+            classify_typeahead_vk(VK_BACK.0, true, false, false),
+            TypeaheadClass::Clear
+        );
+        assert_eq!(
+            classify_typeahead_vk(0x20, false, false, false),
+            TypeaheadClass::Char
+        );
+    }
+
+    #[test]
+    fn typeahead_ignores_shortcuts_and_win_chords() {
+        assert_eq!(
+            classify_typeahead_vk(0x43, true, false, false),
+            TypeaheadClass::Pass
+        );
+        assert_eq!(
+            classify_typeahead_vk(0x46, false, true, false),
+            TypeaheadClass::Pass
+        );
+        assert_eq!(
+            classify_typeahead_vk(0x52, false, false, true),
+            TypeaheadClass::Pass
+        );
+        assert_eq!(
+            classify_typeahead_vk(VK_ESCAPE.0, false, false, false),
+            TypeaheadClass::Pass
+        );
+        assert_eq!(
+            classify_typeahead_vk(VK_RETURN.0, false, false, false),
+            TypeaheadClass::Pass
+        );
+        assert_eq!(
+            classify_typeahead_vk(VK_TAB.0, false, false, false),
+            TypeaheadClass::Pass
+        );
+        assert_eq!(
+            classify_typeahead_vk(VK_LWIN.0, false, false, false),
+            TypeaheadClass::Pass
+        );
+        assert_eq!(
+            classify_typeahead_vk(0x70, false, false, false),
+            TypeaheadClass::Pass
+        );
+    }
+
+    #[test]
+    fn typeahead_altgr_letters_still_count_as_text() {
+        assert_eq!(
+            classify_typeahead_vk(0x51, true, true, false),
+            TypeaheadClass::Char
+        );
+    }
+
+    #[test]
+    fn typeahead_buffer_keeps_text_across_rearm_and_supports_edit() {
+        let mut buffer = TypeaheadBuffer::EMPTY;
+        buffer.push('x');
+        assert_eq!(buffer.disarm(), "");
+
+        buffer.arm();
+        buffer.push('c');
+        buffer.push('h');
+        buffer.arm();
+        buffer.backspace();
+        buffer.push('r');
+        buffer.push('o');
+        assert_eq!(buffer.disarm(), "cro");
+        assert!(!buffer.armed);
+        assert_eq!(buffer.disarm(), "");
+    }
+
+    #[test]
+    fn typeahead_ctrl_backspace_clears_buffered_text() {
+        let mut buffer = TypeaheadBuffer::EMPTY;
+        buffer.arm();
+        buffer.push('a');
+        buffer.push('b');
+        buffer.clear_text();
+        assert_eq!(buffer.disarm(), "");
+    }
+
+    #[test]
+    fn typeahead_stops_growing_at_the_byte_limit() {
+        let mut buffer = TypeaheadBuffer::EMPTY;
+        buffer.arm();
+        for _ in 0..(TYPEAHEAD_LIMIT + 8) {
+            buffer.push('a');
+        }
+        assert_eq!(buffer.disarm().len(), TYPEAHEAD_LIMIT);
     }
 }

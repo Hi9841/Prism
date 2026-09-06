@@ -27,9 +27,14 @@ use windows::Win32::Foundation::{HWND, POINT, RECT};
 use windows::Win32::Graphics::Gdi::{
     GetMonitorInfoW, MonitorFromPoint, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST,
 };
+use windows::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    SendInput, SetActiveWindow, SetFocus, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT,
+    KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, VK_MENU,
+};
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetCursorPos, SetForegroundWindow, SetWindowPos, HWND_TOPMOST, SWP_NOMOVE, SWP_NOSIZE,
-    SWP_SHOWWINDOW,
+    BringWindowToTop, GetCursorPos, GetForegroundWindow, GetWindowThreadProcessId,
+    SetForegroundWindow, SetWindowPos, HWND_TOPMOST, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW,
 };
 
 /// The only accepted global shortcuts. Bare typing keys, reserved keys and
@@ -50,6 +55,7 @@ const LEGACY_STATE_VERSION: u32 = 2;
 const STATE_VERSION: u32 = 3;
 const PALETTE_HIDE_DELAY: Duration = Duration::from_millis(125);
 const PALETTE_RAISE_RETRY_DELAY: Duration = Duration::from_millis(40);
+const PALETTE_RAISE_RETRY_COUNT: u32 = 3;
 const PALETTE_STARTUP_DELAY: Duration = Duration::from_millis(100);
 const STARTUP_SHELL_RETRY_DELAY: Duration = Duration::from_millis(50);
 const STARTUP_SHELL_RETRY_ATTEMPTS: usize = 120;
@@ -253,6 +259,7 @@ pub fn run() {
             show_path_properties,
             start_file_drag,
             present_palette,
+            take_open_typeahead,
             hide_palette,
             set_window_style,
             set_window_width,
@@ -651,14 +658,102 @@ impl From<POINT> for PhysicalPoint {
     }
 }
 
+pub(crate) fn palette_is_open() -> bool {
+    PALETTE_OPEN.load(Ordering::Acquire)
+}
+
+fn palette_hwnd(window: &tauri::WebviewWindow) -> Result<HWND, String> {
+    let hwnd = window.hwnd().map_err(|error| error.to_string())?;
+    Ok(HWND(hwnd.0))
+}
+
+fn synth_alt_key() {
+    let inputs = [
+        INPUT {
+            r#type: INPUT_KEYBOARD,
+            Anonymous: INPUT_0 {
+                ki: KEYBDINPUT {
+                    wVk: VK_MENU,
+                    wScan: 0,
+                    dwFlags: KEYEVENTF_EXTENDEDKEY,
+                    time: 0,
+                    dwExtraInfo: 0,
+                },
+            },
+        },
+        INPUT {
+            r#type: INPUT_KEYBOARD,
+            Anonymous: INPUT_0 {
+                ki: KEYBDINPUT {
+                    wVk: VK_MENU,
+                    wScan: 0,
+                    dwFlags: KEYEVENTF_EXTENDEDKEY | KEYEVENTF_KEYUP,
+                    time: 0,
+                    dwExtraInfo: 0,
+                },
+            },
+        },
+    ];
+    unsafe {
+        SendInput(&inputs, std::mem::size_of::<INPUT>() as i32);
+    }
+}
+
+/// Steals keyboard focus even when Prism did not receive the last input event.
+/// Bare Win is observed, not eaten, so SetForegroundWindow alone is often denied.
+fn force_foreground(hwnd: HWND) {
+    unsafe {
+        let foreground = GetForegroundWindow();
+        if foreground == hwnd {
+            let _ = SetActiveWindow(hwnd);
+            let _ = SetFocus(Some(hwnd));
+            return;
+        }
+
+        let foreground_thread = GetWindowThreadProcessId(foreground, None);
+        let this_thread = GetCurrentThreadId();
+        let attached = !foreground.0.is_null()
+            && foreground_thread != 0
+            && foreground_thread != this_thread
+            && AttachThreadInput(this_thread, foreground_thread, true).as_bool();
+
+        let _ = BringWindowToTop(hwnd);
+        let _ = SetActiveWindow(hwnd);
+        let _ = SetForegroundWindow(hwnd);
+        let _ = SetFocus(Some(hwnd));
+
+        if attached {
+            let _ = AttachThreadInput(this_thread, foreground_thread, false);
+        }
+
+        if GetForegroundWindow() != hwnd {
+            synth_alt_key();
+            let _ = SetForegroundWindow(hwnd);
+            let _ = SetActiveWindow(hwnd);
+            let _ = SetFocus(Some(hwnd));
+        }
+    }
+}
+
+fn move_webview_focus(window: &tauri::WebviewWindow) {
+    use webview2_com::Microsoft::Web::WebView2::Win32::COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC;
+    let _ = window.with_webview(|webview| {
+        let _ = unsafe {
+            webview
+                .controller()
+                .MoveFocus(COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC)
+        };
+    });
+}
+
 /// Reasserts Prism at the front of the topmost band. `alwaysOnTop` keeps the
 /// window in that band, but an already-active topmost window can still sit
 /// above it until Prism is explicitly repositioned.
 fn raise_palette(window: &tauri::WebviewWindow) -> Result<(), String> {
-    let hwnd = window.hwnd().map_err(|error| error.to_string())?;
+    let hwnd = palette_hwnd(window)?;
     unsafe {
         SetWindowPos(
-            HWND(hwnd.0),
+            hwnd,
             Some(HWND_TOPMOST),
             0,
             0,
@@ -667,34 +762,35 @@ fn raise_palette(window: &tauri::WebviewWindow) -> Result<(), String> {
             SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW,
         )
         .map_err(|error| error.to_string())?;
-        // The Win press is the user's current input, so Windows normally grants
-        // this foreground request. SetWindowPos still fixes visibility if focus
-        // is restricted by another process.
-        let _ = SetForegroundWindow(HWND(hwnd.0));
     }
-    window.set_focus().map_err(|error| error.to_string())
+    force_foreground(hwnd);
+    window.set_focus().map_err(|error| error.to_string())?;
+    move_webview_focus(window);
+    Ok(())
 }
 
 fn schedule_palette_raise_retry(app: &tauri::AppHandle, transition: u64) {
-    let retry_app = app.clone();
-    tauri::async_runtime::spawn(async move {
-        tokio::time::sleep(PALETTE_RAISE_RETRY_DELAY).await;
-        if PALETTE_TRANSITION.load(Ordering::Acquire) != transition
-            || !PALETTE_OPEN.load(Ordering::Acquire)
-        {
-            return;
-        }
-        let main_thread_app = retry_app.clone();
-        let _ = retry_app.run_on_main_thread(move || {
-            if PALETTE_TRANSITION.load(Ordering::Acquire) == transition
-                && PALETTE_OPEN.load(Ordering::Acquire)
+    for attempt in 1..=PALETTE_RAISE_RETRY_COUNT {
+        let retry_app = app.clone();
+        tauri::async_runtime::spawn(async move {
+            tokio::time::sleep(PALETTE_RAISE_RETRY_DELAY * attempt).await;
+            if PALETTE_TRANSITION.load(Ordering::Acquire) != transition
+                || !PALETTE_OPEN.load(Ordering::Acquire)
             {
-                if let Some(window) = main_thread_app.get_webview_window("main") {
-                    let _ = raise_palette(&window);
-                }
+                return;
             }
+            let main_thread_app = retry_app.clone();
+            let _ = retry_app.run_on_main_thread(move || {
+                if PALETTE_TRANSITION.load(Ordering::Acquire) == transition
+                    && PALETTE_OPEN.load(Ordering::Acquire)
+                {
+                    if let Some(window) = main_thread_app.get_webview_window("main") {
+                        let _ = raise_palette(&window);
+                    }
+                }
+            });
         });
-    });
+    }
 }
 
 #[cfg(windows)]
@@ -774,11 +870,14 @@ fn toggle_palette_with_presentation(
         ACTIVATION_FOCUS_PENDING.store(false, Ordering::Release);
     }
     if opening {
+        win_key::begin_typeahead();
         set_webview_memory_target(&window, false);
         PRESENTATION_ANCHOR
             .lock()
             .map(|mut value| *value = anchor)
             .ok();
+    } else {
+        win_key::end_typeahead(false);
     }
     if !opening {
         PRESENTATION_ANCHOR
@@ -828,6 +927,7 @@ fn toggle_open_state(open: &AtomicBool) -> bool {
 #[tauri::command]
 fn present_palette(app: tauri::AppHandle) -> Result<bool, String> {
     if !PALETTE_OPEN.load(Ordering::Acquire) {
+        win_key::end_typeahead(true);
         return Ok(false);
     }
     let timer = perf::start();
@@ -843,6 +943,7 @@ fn present_palette(app: tauri::AppHandle) -> Result<bool, String> {
     if reconcile_palette_position(&window, anchor).is_err() {
         position_palette(&window, anchor);
     }
+    ACTIVATION_FOCUS_PENDING.store(true, Ordering::Release);
     window.show().map_err(|error| error.to_string())?;
     raise_palette(&window)?;
     schedule_palette_raise_retry(&app, PALETTE_TRANSITION.load(Ordering::Acquire));
@@ -851,8 +952,14 @@ fn present_palette(app: tauri::AppHandle) -> Result<bool, String> {
 }
 
 #[tauri::command]
+fn take_open_typeahead() -> String {
+    win_key::take_typeahead()
+}
+
+#[tauri::command]
 fn hide_palette(app: tauri::AppHandle) -> Result<(), String> {
     PALETTE_OPEN.store(false, Ordering::Release);
+    win_key::end_typeahead(false);
     ACTIVATION_FOCUS_PENDING.store(false, Ordering::Release);
     PALETTE_TRANSITION.fetch_add(1, Ordering::AcqRel);
     PRESENTATION_ANCHOR
