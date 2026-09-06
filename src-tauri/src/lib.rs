@@ -27,14 +27,10 @@ use windows::Win32::Foundation::{HWND, POINT, RECT};
 use windows::Win32::Graphics::Gdi::{
     GetMonitorInfoW, MonitorFromPoint, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST,
 };
-use windows::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
-use windows::Win32::UI::Input::KeyboardAndMouse::{
-    SendInput, SetActiveWindow, SetFocus, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT,
-    KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, VK_MENU,
-};
+use windows::Win32::UI::Input::KeyboardAndMouse::{SetActiveWindow, SetFocus};
 use windows::Win32::UI::WindowsAndMessaging::{
-    BringWindowToTop, GetCursorPos, GetForegroundWindow, GetWindowThreadProcessId,
-    SetForegroundWindow, SetWindowPos, HWND_TOPMOST, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW,
+    BringWindowToTop, GetCursorPos, SetForegroundWindow, SetWindowPos, HWND_TOPMOST, SWP_NOMOVE,
+    SWP_NOSIZE, SWP_SHOWWINDOW,
 };
 
 /// The only accepted global shortcuts. Bare typing keys, reserved keys and
@@ -667,71 +663,15 @@ fn palette_hwnd(window: &tauri::WebviewWindow) -> Result<HWND, String> {
     Ok(HWND(hwnd.0))
 }
 
-fn synth_alt_key() {
-    let inputs = [
-        INPUT {
-            r#type: INPUT_KEYBOARD,
-            Anonymous: INPUT_0 {
-                ki: KEYBDINPUT {
-                    wVk: VK_MENU,
-                    wScan: 0,
-                    dwFlags: KEYEVENTF_EXTENDEDKEY,
-                    time: 0,
-                    dwExtraInfo: 0,
-                },
-            },
-        },
-        INPUT {
-            r#type: INPUT_KEYBOARD,
-            Anonymous: INPUT_0 {
-                ki: KEYBDINPUT {
-                    wVk: VK_MENU,
-                    wScan: 0,
-                    dwFlags: KEYEVENTF_EXTENDEDKEY | KEYEVENTF_KEYUP,
-                    time: 0,
-                    dwExtraInfo: 0,
-                },
-            },
-        },
-    ];
-    unsafe {
-        SendInput(&inputs, std::mem::size_of::<INPUT>() as i32);
-    }
-}
-
-/// Steals keyboard focus even when Prism did not receive the last input event.
-/// Bare Win is observed, not eaten, so SetForegroundWindow alone is often denied.
+/// Ask Windows for keyboard focus. Do not attach to the previous foreground
+/// thread: that can deadlock the UI thread and freeze Prism with the hook
+/// still eating keys.
 fn force_foreground(hwnd: HWND) {
     unsafe {
-        let foreground = GetForegroundWindow();
-        if foreground == hwnd {
-            let _ = SetActiveWindow(hwnd);
-            let _ = SetFocus(Some(hwnd));
-            return;
-        }
-
-        let foreground_thread = GetWindowThreadProcessId(foreground, None);
-        let this_thread = GetCurrentThreadId();
-        let attached = !foreground.0.is_null()
-            && foreground_thread != 0
-            && foreground_thread != this_thread
-            && AttachThreadInput(this_thread, foreground_thread, true).as_bool();
-
         let _ = BringWindowToTop(hwnd);
-        let _ = SetActiveWindow(hwnd);
         let _ = SetForegroundWindow(hwnd);
+        let _ = SetActiveWindow(hwnd);
         let _ = SetFocus(Some(hwnd));
-
-        if attached {
-            let _ = AttachThreadInput(this_thread, foreground_thread, false);
-        }
-
-        if GetForegroundWindow() != hwnd {
-            synth_alt_key();
-            let _ = SetForegroundWindow(hwnd);
-            let _ = SetActiveWindow(hwnd);
-            let _ = SetFocus(Some(hwnd));
-        }
     }
 }
 
@@ -764,7 +704,7 @@ fn raise_palette(window: &tauri::WebviewWindow) -> Result<(), String> {
         .map_err(|error| error.to_string())?;
     }
     force_foreground(hwnd);
-    window.set_focus().map_err(|error| error.to_string())?;
+    let _ = window.set_focus();
     move_webview_focus(window);
     Ok(())
 }
@@ -931,9 +871,10 @@ fn present_palette(app: tauri::AppHandle) -> Result<bool, String> {
         return Ok(false);
     }
     let timer = perf::start();
-    let window = app
-        .get_webview_window("main")
-        .ok_or_else(|| "main window is unavailable".to_string())?;
+    let Some(window) = app.get_webview_window("main") else {
+        win_key::end_typeahead(true);
+        return Err("main window is unavailable".to_string());
+    };
     set_webview_memory_target(&window, false);
     taskbar::present();
     let anchor = PRESENTATION_ANCHOR.lock().ok().and_then(|value| *value);
@@ -944,8 +885,14 @@ fn present_palette(app: tauri::AppHandle) -> Result<bool, String> {
         position_palette(&window, anchor);
     }
     ACTIVATION_FOCUS_PENDING.store(true, Ordering::Release);
-    window.show().map_err(|error| error.to_string())?;
-    raise_palette(&window)?;
+    if let Err(error) = window
+        .show()
+        .map_err(|error| error.to_string())
+        .and_then(|_| raise_palette(&window))
+    {
+        win_key::end_typeahead(true);
+        return Err(error);
+    }
     schedule_palette_raise_retry(&app, PALETTE_TRANSITION.load(Ordering::Acquire));
     perf::finish(timer, "palette_present", || "window=main".to_string());
     Ok(true)

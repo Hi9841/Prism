@@ -449,6 +449,11 @@ impl PendingWinToggle {
 }
 
 const TYPEAHEAD_LIMIT: usize = 192;
+/// Stop eating keys if the palette never takes the buffer. Covers the 30ms
+/// Win-up grace plus presentation, then fails open so Windows keeps working.
+const TYPEAHEAD_TTL: Duration = Duration::from_millis(350);
+/// Windows 10+: do not mutate the thread keyboard state from a hook.
+const TO_UNICODE_NO_STATE_CHANGE: u32 = 0x04;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum TypeaheadClass {
@@ -461,19 +466,38 @@ enum TypeaheadClass {
 struct TypeaheadBuffer {
     armed: bool,
     text: String,
+    deadline: Option<Instant>,
 }
 
 impl TypeaheadBuffer {
     const EMPTY: Self = Self {
         armed: false,
         text: String::new(),
+        deadline: None,
     };
 
     fn arm(&mut self) {
+        self.arm_at(Instant::now());
+    }
+
+    fn arm_at(&mut self, now: Instant) {
         if !self.armed {
             self.text.clear();
             self.armed = true;
         }
+        self.deadline = Some(now + TYPEAHEAD_TTL);
+    }
+
+    fn capturing_at(&self, now: Instant) -> bool {
+        self.armed && self.deadline.is_none_or(|deadline| now < deadline)
+    }
+
+    fn wait_duration(&self, now: Instant) -> Option<Duration> {
+        if !self.armed {
+            return None;
+        }
+        self.deadline
+            .map(|deadline| deadline.saturating_duration_since(now))
     }
 
     fn push(&mut self, ch: char) {
@@ -498,7 +522,23 @@ impl TypeaheadBuffer {
 
     fn disarm(&mut self) -> String {
         self.armed = false;
+        self.deadline = None;
         std::mem::take(&mut self.text)
+    }
+
+    /// Stop capturing after the TTL. Replay when the palette never opened.
+    /// Keep the text for `take()` if the palette is already visible.
+    fn expire(&mut self, now: Instant, palette_open: bool) -> Option<String> {
+        if !self.armed || self.deadline.is_none_or(|deadline| now < deadline) {
+            return None;
+        }
+        self.armed = false;
+        self.deadline = None;
+        if palette_open {
+            None
+        } else {
+            Some(std::mem::take(&mut self.text))
+        }
     }
 }
 
@@ -593,7 +633,7 @@ fn unicode_from_key(virtual_key: u16, scan_code: u16) -> Option<char> {
             u32::from(scan_code),
             Some(&state),
             &mut buffer,
-            0,
+            TO_UNICODE_NO_STATE_CHANGE,
         )
     };
     if written <= 0 {
@@ -639,8 +679,11 @@ fn replay_typeahead_text(text: &str) {
     }
 }
 
-fn is_typeahead_armed() -> bool {
-    TYPEAHEAD.lock().ok().is_some_and(|buffer| buffer.armed)
+fn is_typeahead_capturing() -> bool {
+    TYPEAHEAD
+        .lock()
+        .ok()
+        .is_some_and(|buffer| buffer.capturing_at(Instant::now()))
 }
 
 pub fn begin_typeahead() {
@@ -665,7 +708,7 @@ pub fn end_typeahead(replay: bool) {
 }
 
 fn intercept_typeahead(keyboard: &KBDLLHOOKSTRUCT, is_down: bool) -> bool {
-    if !is_typeahead_armed() || is_injected_key(keyboard.flags) {
+    if !is_typeahead_capturing() || is_injected_key(keyboard.flags) {
         return false;
     }
     let vk = keyboard.vkCode as u16;
@@ -994,6 +1037,7 @@ unsafe fn run_pump(ready: HookReady) {
         }
         flush_pending_win_toggle();
         flush_shell_start_fallback();
+        flush_typeahead_deadline();
         if shell_bridge.is_none() && Instant::now() >= next_bridge_attempt {
             match ShellBridge::install(false) {
                 Ok(bridge) => {
@@ -2071,11 +2115,12 @@ fn flush_pending_win_toggle() {
             // Keep the pending lock through enqueueing. Disable/reset paths
             // take this same lock after clearing ACTIVE, so a candidate either
             // queues before their final drain or observes inactive.
-            if ACTIVE.load(Ordering::Acquire)
+            let queued = ACTIVE.load(Ordering::Acquire)
                 && RAW_OBSERVER_ACTIVE.load(Ordering::Acquire)
                 && SHELL_BRIDGE_ACTIVE.load(Ordering::Acquire)
-            {
-                queue_action(Action::ToggleWin(side));
+                && queue_action(Action::ToggleWin(side));
+            if !queued {
+                end_typeahead(true);
             }
         }
     }
@@ -2092,7 +2137,19 @@ fn flush_shell_start_fallback() {
         && SHELL_BRIDGE_ACTIVE.load(Ordering::Acquire)
         && should_arm_shell_fallback(last_observer_win(), now)
     {
-        queue_action(Action::ToggleWin(WinSide::Left));
+        if !queue_action(Action::ToggleWin(WinSide::Left)) {
+            end_typeahead(true);
+        }
+    }
+}
+
+fn flush_typeahead_deadline() {
+    let replay = TYPEAHEAD
+        .lock()
+        .ok()
+        .and_then(|mut buffer| buffer.expire(Instant::now(), crate::palette_is_open()));
+    if let Some(text) = replay {
+        replay_typeahead_text(&text);
     }
 }
 
@@ -2104,16 +2161,17 @@ fn pending_win_toggle_wait() -> Option<Duration> {
 }
 
 fn pending_observer_wait() -> Option<Duration> {
+    let now = Instant::now();
     let win = pending_win_toggle_wait();
     let shell = SHELL_START_FALLBACK
         .lock()
         .ok()
-        .and_then(|pending| pending.wait_duration(Instant::now()));
-    match (win, shell) {
-        (Some(left), Some(right)) => Some(left.min(right)),
-        (Some(wait), None) | (None, Some(wait)) => Some(wait),
-        (None, None) => None,
-    }
+        .and_then(|pending| pending.wait_duration(now));
+    let typeahead = TYPEAHEAD
+        .lock()
+        .ok()
+        .and_then(|buffer| buffer.wait_duration(now));
+    [win, shell, typeahead].into_iter().flatten().min()
 }
 
 fn observe_keyboard_event(kind: KeyKind, is_down: bool) {
@@ -2138,7 +2196,9 @@ fn observe_keyboard_event(kind: KeyKind, is_down: bool) {
             schedule_win_toggle(side, non_win_keys_down());
         }
         Decision::Toggle(side) => {
-            queue_action(Action::ToggleWin(side));
+            if !queue_action(Action::ToggleWin(side)) {
+                end_typeahead(true);
+            }
         }
         Decision::Mask | Decision::Pass => {}
     }
@@ -2369,15 +2429,19 @@ fn point_from_message(detail: isize) -> POINT {
     }
 }
 
-fn queue_action(action: Action) {
+fn within_toggle_debounce(previous: u64, now: u64) -> bool {
+    previous != 0 && now.saturating_sub(previous) < TOGGLE_DEBOUNCE_MS
+}
+
+fn queue_action(action: Action) -> bool {
     if !ACTIVE.load(Ordering::Acquire) {
-        return;
+        return false;
     }
     let now = toggle_clock_ms();
     loop {
         let previous = LAST_TOGGLE_MS.load(Ordering::Acquire);
-        if previous != 0 && now.saturating_sub(previous) < TOGGLE_DEBOUNCE_MS {
-            return;
+        if within_toggle_debounce(previous, now) {
+            return false;
         }
         if LAST_TOGGLE_MS
             .compare_exchange(previous, now, Ordering::AcqRel, Ordering::Acquire)
@@ -2386,16 +2450,19 @@ fn queue_action(action: Action) {
             break;
         }
     }
-    if let Some(tx) = ACTION_TX.get() {
-        if tx.send(action).is_ok() {
-            let thread_id = THREAD_ID.load(Ordering::SeqCst);
-            if thread_id != 0 {
-                unsafe {
-                    let _ = PostThreadMessageW(thread_id, ACTION_MESSAGE, WPARAM(0), LPARAM(0));
-                }
-            }
+    let Some(tx) = ACTION_TX.get() else {
+        return false;
+    };
+    if tx.send(action).is_err() {
+        return false;
+    }
+    let thread_id = THREAD_ID.load(Ordering::SeqCst);
+    if thread_id != 0 {
+        unsafe {
+            let _ = PostThreadMessageW(thread_id, ACTION_MESSAGE, WPARAM(0), LPARAM(0));
         }
     }
+    true
 }
 
 fn wide(value: &str) -> Vec<u16> {
@@ -3240,5 +3307,51 @@ mod tests {
             buffer.push('a');
         }
         assert_eq!(buffer.disarm().len(), TYPEAHEAD_LIMIT);
+    }
+
+    #[test]
+    fn typeahead_stops_capturing_after_the_ttl() {
+        let mut buffer = TypeaheadBuffer::EMPTY;
+        let now = Instant::now();
+        buffer.arm_at(now);
+        buffer.push('c');
+        assert!(buffer.capturing_at(now));
+        assert!(!buffer.capturing_at(now + TYPEAHEAD_TTL));
+        assert_eq!(buffer.expire(now + TYPEAHEAD_TTL, false), Some("c".into()));
+        assert!(!buffer.capturing_at(now + TYPEAHEAD_TTL));
+        assert_eq!(buffer.disarm(), "");
+    }
+
+    #[test]
+    fn typeahead_keeps_text_for_an_open_palette_after_ttl() {
+        let mut buffer = TypeaheadBuffer::EMPTY;
+        let now = Instant::now();
+        buffer.arm_at(now);
+        buffer.push('c');
+        buffer.push('h');
+        assert_eq!(buffer.expire(now + TYPEAHEAD_TTL, true), None);
+        assert!(!buffer.capturing_at(now + TYPEAHEAD_TTL));
+        assert_eq!(buffer.disarm(), "ch");
+    }
+
+    #[test]
+    fn a_debounced_win_toggle_must_not_keep_eating_keys() {
+        assert!(within_toggle_debounce(10, 10 + TOGGLE_DEBOUNCE_MS - 1));
+        assert!(!within_toggle_debounce(10, 10 + TOGGLE_DEBOUNCE_MS));
+        assert!(!within_toggle_debounce(0, 1));
+
+        let mut buffer = TypeaheadBuffer::EMPTY;
+        buffer.arm();
+        buffer.push('a');
+        let queued = !within_toggle_debounce(1, 50);
+        if !queued {
+            assert_eq!(buffer.disarm(), "a");
+        }
+        assert!(!buffer.capturing_at(Instant::now()));
+    }
+
+    #[test]
+    fn typeahead_conversion_does_not_mutate_hook_keyboard_state() {
+        assert_eq!(TO_UNICODE_NO_STATE_CHANGE, 0x04);
     }
 }
