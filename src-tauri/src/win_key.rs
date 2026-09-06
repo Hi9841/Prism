@@ -449,9 +449,9 @@ impl PendingWinToggle {
 }
 
 const TYPEAHEAD_LIMIT: usize = 192;
-/// Stop eating keys if the palette never takes the buffer. Covers the 30ms
-/// Win-up grace plus presentation, then fails open so Windows keeps working.
-const TYPEAHEAD_TTL: Duration = Duration::from_millis(350);
+/// Stop eating keys if the palette never takes the buffer. Covers Win-up
+/// grace, presentation, and the 400ms activation raise retry, then fails open.
+const TYPEAHEAD_TTL: Duration = Duration::from_millis(900);
 /// Windows 10+: do not mutate the thread keyboard state from a hook.
 const TO_UNICODE_NO_STATE_CHANGE: u32 = 0x04;
 
@@ -3310,6 +3310,11 @@ mod tests {
             buffer.push('a');
         }
         assert_eq!(buffer.disarm().len(), TYPEAHEAD_LIMIT);
+    }
+
+    #[test]
+    fn typeahead_ttl_outlives_activation_grace() {
+        assert!(TYPEAHEAD_TTL >= Duration::from_millis(400));
     }
 
     #[test]

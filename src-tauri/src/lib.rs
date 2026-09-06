@@ -27,14 +27,12 @@ use windows::Win32::Foundation::{HWND, POINT, RECT};
 use windows::Win32::Graphics::Gdi::{
     GetMonitorInfoW, MonitorFromPoint, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST,
 };
-use windows::Win32::System::Threading::{
-    AttachThreadInput, GetCurrentProcessId, GetCurrentThreadId,
-};
+use windows::Win32::System::Threading::GetCurrentProcessId;
 use windows::Win32::UI::Input::KeyboardAndMouse::{SetActiveWindow, SetFocus};
 use windows::Win32::UI::WindowsAndMessaging::{
-    BringWindowToTop, GetAncestor, GetCursorPos, GetForegroundWindow, GetWindowThreadProcessId,
-    SetForegroundWindow, SetWindowPos, GA_ROOT, HWND_TOPMOST, SWP_NOMOVE, SWP_NOSIZE,
-    SWP_SHOWWINDOW,
+    AllowSetForegroundWindow, BringWindowToTop, GetAncestor, GetCursorPos, GetForegroundWindow,
+    GetWindowThreadProcessId, LockSetForegroundWindow, SetForegroundWindow, SetWindowPos, GA_ROOT,
+    HWND_TOPMOST, LSFW_UNLOCK, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW,
 };
 
 /// The only accepted global shortcuts. Bare typing keys, reserved keys and
@@ -765,37 +763,27 @@ fn mark_palette_dismissed() {
     taskbar::release();
 }
 
+/// Ask Windows for keyboard focus. Do not attach to the previous foreground
+/// thread: that can deadlock the UI thread and freeze Prism with the hook
+/// still eating keys.
 fn force_foreground(hwnd: HWND) {
     #[cfg(windows)]
     unsafe {
-        let foreground = GetForegroundWindow();
-        if foreground == hwnd {
-            let _ = SetActiveWindow(hwnd);
-            let _ = SetFocus(Some(hwnd));
+        if is_prism_foreground() {
             return;
         }
 
-        let foreground_thread = if !foreground.0.is_null() {
-            GetWindowThreadProcessId(foreground, None)
-        } else {
-            0
-        };
-        let current_thread = GetCurrentThreadId();
-
-        if foreground_thread != 0 && foreground_thread != current_thread {
-            let _ = AttachThreadInput(current_thread, foreground_thread, true);
-            let _ = BringWindowToTop(hwnd);
-            let _ = SetForegroundWindow(hwnd);
-            let _ = SetActiveWindow(hwnd);
-            let _ = SetFocus(Some(hwnd));
-            let _ = AttachThreadInput(current_thread, foreground_thread, false);
-        } else {
-            let _ = BringWindowToTop(hwnd);
-            let _ = SetForegroundWindow(hwnd);
-            let _ = SetActiveWindow(hwnd);
-            let _ = SetFocus(Some(hwnd));
-        }
+        let _ = LockSetForegroundWindow(LSFW_UNLOCK);
+        let _ = AllowSetForegroundWindow(GetCurrentProcessId());
+        let _ = BringWindowToTop(hwnd);
+        let _ = SetForegroundWindow(hwnd);
+        let _ = SetActiveWindow(hwnd);
+        let _ = SetFocus(Some(hwnd));
     }
+}
+
+fn should_reassert_foreground(is_prism_fg: bool) -> bool {
+    !is_prism_fg
 }
 
 /// Reasserts Prism at the front of the topmost band. `alwaysOnTop` keeps the
@@ -814,6 +802,9 @@ fn raise_palette(window: &tauri::WebviewWindow) -> Result<(), String> {
             SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW,
         )
         .map_err(|error| error.to_string())?;
+    }
+    if is_prism_foreground() {
+        return Ok(());
     }
     force_foreground(hwnd);
     let _ = window.set_focus();
@@ -836,22 +827,18 @@ fn schedule_activation_grace_check(app: &tauri::AppHandle, transition: u64) {
             {
                 return;
             }
-            if is_prism_foreground() {
+            if !should_reassert_foreground(is_prism_foreground()) {
                 PALETTE_WAS_FOCUSED.store(true, Ordering::Release);
                 return;
             }
             let Some(window) = main_thread_app.get_webview_window("main") else {
                 return;
             };
-            let focused = window.is_focused().unwrap_or(false);
-            if !focused {
-                // If Prism opened while the user was tabbed into another application,
-                // Windows focus-stealing prevention may have delayed or denied the
-                // initial foreground transfer. Do NOT dismiss the palette! Re-assert
-                // raise/foreground so keyboard input goes into Prism.
-                arm_activation_grace();
-                let _ = raise_palette(&window);
-            }
+            // Tauri `is_focused` can be true after `set_focus` even when
+            // Windows still gave foreground to the previous app. Retry on the
+            // Win32 foreground check only.
+            arm_activation_grace();
+            let _ = raise_palette(&window);
         });
     });
 }
@@ -1064,6 +1051,7 @@ fn take_open_typeahead() -> String {
 #[tauri::command]
 fn hide_palette(app: tauri::AppHandle) -> Result<(), String> {
     PALETTE_OPEN.store(false, Ordering::Release);
+    PALETTE_WAS_FOCUSED.store(false, Ordering::Release);
     win_key::end_typeahead(false);
     clear_activation_grace();
     PALETTE_TRANSITION.fetch_add(1, Ordering::AcqRel);
@@ -2553,5 +2541,11 @@ mod tests {
         // Only when Prism was focused, foreground moved to another app, and grace elapsed
         assert!(should_dismiss_palette_on_unfocus(true, false, 400, 400));
         assert!(should_dismiss_palette_on_unfocus(true, false, 500, 400));
+    }
+
+    #[test]
+    fn raise_retry_uses_win32_foreground_not_tauri_focus() {
+        assert!(should_reassert_foreground(false));
+        assert!(!should_reassert_foreground(true));
     }
 }
