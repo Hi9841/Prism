@@ -198,7 +198,9 @@ export function buildSections(sources: PaletteSources): {
       out.push({ id: "files", label: "Folder Contents", items: fileItems });
     }
     const settingsItems = filePathBrowse ? [] : searchWindowsSettings(normalized);
-    const appsSection = buildAppsSection(appHits, appIcons, appGroups, SEARCH_APPS_LIMIT);
+    // Search follows relevance, independent of the idle view's collection
+    // order or collapsed state. Every match must remain keyboard reachable.
+    const appsSection = buildAppsSection(appHits, appIcons, [], SEARCH_APPS_LIMIT);
     if (appsSection) {
       out.push(appsSection);
     }

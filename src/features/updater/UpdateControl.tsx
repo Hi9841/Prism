@@ -226,7 +226,7 @@ export function UpdateControl() {
           ? "bg-danger-soft text-danger hover:opacity-90"
           : busy
             ? "cursor-wait bg-surface text-fg-secondary"
-            : "cursor-pointer bg-accent-soft text-accent hover:bg-surface-active hover:text-fg"
+            : "cursor-pointer bg-accent-soft text-fg hover:bg-surface-active"
       }`}
     >
       <span className="relative grid h-3.5 w-3.5 shrink-0 place-items-center" aria-hidden="true">
