@@ -32,9 +32,9 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     keybd_event, SetActiveWindow, SetFocus, KEYEVENTF_KEYUP, VK_MENU,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    AllowSetForegroundWindow, BringWindowToTop, GetCursorPos, LockSetForegroundWindow,
-    SetForegroundWindow, SetWindowPos, HWND_TOPMOST, LSFW_UNLOCK, SWP_NOMOVE, SWP_NOSIZE,
-    SWP_SHOWWINDOW,
+    AllowSetForegroundWindow, BringWindowToTop, GetCursorPos, GetForegroundWindow,
+    GetWindowThreadProcessId, LockSetForegroundWindow, SetForegroundWindow, SetWindowPos,
+    HWND_TOPMOST, LSFW_UNLOCK, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW,
 };
 
 /// The only accepted global shortcuts. Bare typing keys, reserved keys and
@@ -70,6 +70,7 @@ const PALETTE_TASKBAR_GAP: i32 = 12;
 
 static PALETTE_OPEN: AtomicBool = AtomicBool::new(false);
 static PALETTE_TRANSITION: AtomicU64 = AtomicU64::new(0);
+static PALETTE_WAS_FOCUSED: AtomicBool = AtomicBool::new(false);
 static ACTIVATION_GRACE_UNTIL_MS: AtomicU64 = AtomicU64::new(0);
 static ACTIVATION_CLOCK: OnceLock<Instant> = OnceLock::new();
 static PRESENTATION_ANCHOR: Mutex<Option<PresentationAnchor>> = Mutex::new(None);
@@ -210,6 +211,7 @@ pub fn run() {
                 return;
             }
             if matches!(event, WindowEvent::Focused(true)) {
+                PALETTE_WAS_FOCUSED.store(true, Ordering::Release);
                 return;
             }
             // Clicking away dismisses the launcher, like Raycast.
@@ -218,10 +220,13 @@ pub fn run() {
                 if drag::is_dragging() {
                     return;
                 }
-                // Opening generates a burst of focus/unfocus. Ignore unfocus
-                // until the grace window ends; a deferred check hides the
-                // palette if it is still unfocused then.
-                if !should_dismiss_on_unfocus(
+                let is_foreground = is_prism_foreground();
+                if is_foreground {
+                    PALETTE_WAS_FOCUSED.store(true, Ordering::Release);
+                }
+                if !should_dismiss_palette_on_unfocus(
+                    PALETTE_WAS_FOCUSED.load(Ordering::Acquire),
+                    is_foreground,
                     activation_now_ms(),
                     ACTIVATION_GRACE_UNTIL_MS.load(Ordering::Acquire),
                 ) {
@@ -683,6 +688,41 @@ fn should_dismiss_on_unfocus(now_ms: u64, grace_until_ms: u64) -> bool {
     grace_until_ms == 0 || now_ms >= grace_until_ms
 }
 
+fn is_prism_foreground() -> bool {
+    #[cfg(windows)]
+    unsafe {
+        let foreground = GetForegroundWindow();
+        if foreground.0.is_null() {
+            return false;
+        }
+        let mut pid = 0u32;
+        GetWindowThreadProcessId(foreground, Some(&mut pid));
+        pid != 0 && pid == GetCurrentProcessId()
+    }
+    #[cfg(not(windows))]
+    true
+}
+
+fn should_dismiss_palette_on_unfocus(
+    was_focused: bool,
+    is_foreground: bool,
+    now_ms: u64,
+    grace_until_ms: u64,
+) -> bool {
+    // If the foreground window still belongs to Prism (e.g. WebView2 child control),
+    // this is an internal focus transition, not a dismissal.
+    if is_foreground {
+        return false;
+    }
+    // If Prism was never focused since opening, it may still be acquiring
+    // foreground focus from a background application. Never auto-dismiss.
+    if !was_focused {
+        return false;
+    }
+    // Clicking away dismisses only after activation grace has elapsed.
+    should_dismiss_on_unfocus(now_ms, grace_until_ms)
+}
+
 #[cfg(test)]
 fn deferred_unfocus_should_dismiss(
     _open: bool,
@@ -699,6 +739,7 @@ fn deferred_unfocus_should_dismiss(
 
 fn mark_palette_dismissed() {
     PALETTE_OPEN.store(false, Ordering::Release);
+    PALETTE_WAS_FOCUSED.store(false, Ordering::Release);
     win_key::end_typeahead(false);
     clear_activation_grace();
     PALETTE_TRANSITION.fetch_add(1, Ordering::AcqRel);
@@ -713,17 +754,26 @@ fn mark_palette_dismissed() {
 /// thread: that can deadlock the UI thread and freeze Prism with the hook
 /// still eating keys.
 fn force_foreground(hwnd: HWND) {
+    #[cfg(windows)]
     unsafe {
+        let foreground = GetForegroundWindow();
+        if foreground == hwnd {
+            let _ = SetActiveWindow(hwnd);
+            let _ = SetFocus(Some(hwnd));
+            return;
+        }
+
         let _ = LockSetForegroundWindow(LSFW_UNLOCK);
         let _ = AllowSetForegroundWindow(GetCurrentProcessId());
 
-        // In Windows, a synthetic Alt key down/up marks this thread as receiving
-        // input, satisfying focus-stealing prevention without attaching threads.
+        // Classic Win32 Alt trick:
+        // Hold Alt down -> BringWindowToTop + SetForegroundWindow -> Release Alt.
+        // Holding Alt puts the system into menu mode, allowing foreground transfer.
         keybd_event(VK_MENU.0 as u8, 0, Default::default(), 0);
-        keybd_event(VK_MENU.0 as u8, 0, KEYEVENTF_KEYUP, 0);
-
         let _ = BringWindowToTop(hwnd);
         let _ = SetForegroundWindow(hwnd);
+        keybd_event(VK_MENU.0 as u8, 0, KEYEVENTF_KEYUP, 0);
+
         let _ = SetActiveWindow(hwnd);
         let _ = SetFocus(Some(hwnd));
     }
@@ -767,6 +817,10 @@ fn schedule_activation_grace_check(app: &tauri::AppHandle, transition: u64) {
             {
                 return;
             }
+            if is_prism_foreground() {
+                PALETTE_WAS_FOCUSED.store(true, Ordering::Release);
+                return;
+            }
             let Some(window) = main_thread_app.get_webview_window("main") else {
                 return;
             };
@@ -797,6 +851,10 @@ fn schedule_palette_raise_retry(app: &tauri::AppHandle, transition: u64) {
                 if PALETTE_TRANSITION.load(Ordering::Acquire) == transition
                     && PALETTE_OPEN.load(Ordering::Acquire)
                 {
+                    if is_prism_foreground() {
+                        PALETTE_WAS_FOCUSED.store(true, Ordering::Release);
+                        return;
+                    }
                     if let Some(window) = main_thread_app.get_webview_window("main") {
                         let _ = raise_palette(&window);
                     }
@@ -883,6 +941,8 @@ fn toggle_palette_with_presentation(
         clear_activation_grace();
     }
     if opening {
+        PALETTE_WAS_FOCUSED.store(false, Ordering::Release);
+        arm_activation_grace();
         win_key::begin_typeahead();
         set_webview_memory_target(&window, false);
         PRESENTATION_ANCHOR
@@ -965,6 +1025,9 @@ fn present_palette(app: tauri::AppHandle) -> Result<bool, String> {
     {
         win_key::end_typeahead(true);
         return Err(error);
+    }
+    if is_prism_foreground() {
+        PALETTE_WAS_FOCUSED.store(true, Ordering::Release);
     }
     let transition = PALETTE_TRANSITION.load(Ordering::Acquire);
     schedule_palette_raise_retry(&app, transition);
@@ -2452,5 +2515,23 @@ mod tests {
         assert!(!deferred_unfocus_should_dismiss(false, true, false, true));
         assert!(!deferred_unfocus_should_dismiss(true, false, false, true));
         assert!(!deferred_unfocus_should_dismiss(true, true, false, false));
+    }
+
+    #[test]
+    fn should_dismiss_palette_on_unfocus_behavior() {
+        // If foreground still belongs to Prism (e.g. WebView2 child), never dismiss
+        assert!(!should_dismiss_palette_on_unfocus(true, true, 500, 400));
+        assert!(!should_dismiss_palette_on_unfocus(false, true, 500, 400));
+
+        // If Prism was never focused since opening, never dismiss
+        assert!(!should_dismiss_palette_on_unfocus(false, false, 500, 400));
+        assert!(!should_dismiss_palette_on_unfocus(false, false, 200, 400));
+
+        // If Prism was focused, but activation grace has not elapsed, do not dismiss
+        assert!(!should_dismiss_palette_on_unfocus(true, false, 200, 400));
+
+        // Only when Prism was focused, foreground moved to another app, and grace elapsed
+        assert!(should_dismiss_palette_on_unfocus(true, false, 400, 400));
+        assert!(should_dismiss_palette_on_unfocus(true, false, 500, 400));
     }
 }

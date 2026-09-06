@@ -2135,6 +2135,7 @@ fn flush_shell_start_fallback() {
     if ready
         && ACTIVE.load(Ordering::Acquire)
         && SHELL_BRIDGE_ACTIVE.load(Ordering::Acquire)
+        && !crate::palette_is_open()
         && should_arm_shell_fallback(last_observer_win(), now)
     {
         if !queue_action(Action::ToggleWin(WinSide::Left)) {
@@ -2281,10 +2282,12 @@ fn uninstall_keyboard_hook() {
 unsafe extern "system" fn keyboard_ll_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     if code >= 0 && ACTIVE.load(Ordering::Acquire) && lparam.0 != 0 {
         let keyboard = &*(lparam.0 as *const KBDLLHOOKSTRUCT);
-        if let Some((kind, is_down)) = classify_ll_key(keyboard.vkCode, wparam.0 as u32) {
-            observe_keyboard_event(kind, is_down);
-            if intercept_typeahead(keyboard, is_down) {
-                return LRESULT(1);
+        if !is_injected_key(keyboard.flags) {
+            if let Some((kind, is_down)) = classify_ll_key(keyboard.vkCode, wparam.0 as u32) {
+                observe_keyboard_event(kind, is_down);
+                if intercept_typeahead(keyboard, is_down) {
+                    return LRESULT(1);
+                }
             }
         }
     }
