@@ -9,10 +9,11 @@
 //!   keyboard hook both feed that machine. Win and combo keys still pass
 //!   through. After a standalone Win-up, character keys are eaten into a
 //!   typeahead buffer until Prism's search field takes them.
-//! - Explorer keeps its bare-Win hotkey so the kernel still posts
-//!   `SC_TASKLIST` when an elevated or exclusive-input app has focus.
-//!   The Explorer message hook consumes that command and, if the key
-//!   observers never saw the press, falls back to a deferred Prism toggle.
+//! - The Explorer message hook consumes its `SC_TASKLIST` command on the
+//!   desktop, taskbar, and app-manager threads. Explorer's registered Win
+//!   hotkey stays in place, so the hook can be removed without changing the
+//!   user's shortcut registrations. Provider-managed mode keeps the provider's
+//!   own suppression path and Explorer fallback.
 //! - StartAllBack integration disables the provider's Win action reversibly.
 //! - A small Explorer message hook takes ownership of `SC_TASKLIST` before
 //!   native Start is launched. It fails open if Prism's observer disappears.
@@ -85,8 +86,6 @@ const START_RECT_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
 const BRIDGE_RETRY_DELAY: Duration = Duration::from_millis(50);
 const SHELL_ACK_TIMEOUT: Duration = Duration::from_millis(200);
 const SHELL_BRIDGE_MESSAGE_NAME: &str = "Prism.ShellBridge.v1";
-const SHELL_CONTROL_DISABLE_WIN_HOTKEY: usize = 1;
-const SHELL_EVENT_HOTKEY_DISABLED: usize = 2;
 const SHELL_CONTROL_START_RECT_LEFT: usize = 4;
 const SHELL_CONTROL_START_RECT_TOP: usize = 5;
 const SHELL_CONTROL_START_RECT_RIGHT: usize = 6;
@@ -347,7 +346,6 @@ static SHELL_BRIDGE_ACTIVE: AtomicBool = AtomicBool::new(false);
 /// Registered once; calling RegisterWindowMessageW on every raw-input message
 /// (the window proc path) is wasteful.
 static BRIDGE_MESSAGE_ID: OnceLock<Result<u32, String>> = OnceLock::new();
-static SHELL_BRIDGE_ACK: AtomicU32 = AtomicU32::new(0);
 static SHELL_START_RECT_ACK: AtomicU32 = AtomicU32::new(0);
 static SHELL_SEARCH_RECT_ACK: AtomicU32 = AtomicU32::new(0);
 static SHELL_START_CLICK_X: AtomicI32 = AtomicI32::new(0);
@@ -804,6 +802,18 @@ fn should_feed_raw_keyboard(keyboard_hook_installed: bool) -> bool {
     !keyboard_hook_installed
 }
 
+fn should_attach_app_manager_hook(
+    app_manager_thread: u32,
+    progman_thread: u32,
+    taskbar_thread: u32,
+    already_attached: bool,
+) -> bool {
+    !already_attached
+        && app_manager_thread != 0
+        && app_manager_thread != progman_thread
+        && app_manager_thread != taskbar_thread
+}
+
 static ACTION_TX: OnceLock<mpsc::Sender<Action>> = OnceLock::new();
 static ACTION_RX: Mutex<Option<mpsc::Receiver<Action>>> = Mutex::new(None);
 static STOP_READY: Mutex<Option<StopReady>> = Mutex::new(None);
@@ -1040,7 +1050,7 @@ unsafe fn run_pump(ready: HookReady) {
         flush_shell_start_fallback();
         flush_typeahead_deadline();
         if shell_bridge.is_none() && Instant::now() >= next_bridge_attempt {
-            match ShellBridge::install(false) {
+            match ShellBridge::install() {
                 Ok(bridge) => {
                     SHELL_BRIDGE_ACTIVE.store(true, Ordering::Release);
                     SHELL_TASKBAR_THREAD.store(bridge.taskbar_thread, Ordering::Release);
@@ -1055,9 +1065,10 @@ unsafe fn run_pump(ready: HookReady) {
             }
         }
         if let Some(bridge) = shell_bridge.as_mut() {
-            // Keep Explorer's Win hotkey registered so elevated and
-            // exclusive-input apps still generate SC_TASKLIST.
-            bridge.try_attach_app_manager(false);
+            // Attach to the app-manager thread as well as the desktop and
+            // taskbar threads. The hook consumes only SC_TASKLIST, while
+            // Explorer keeps all registered hotkeys intact.
+            bridge.try_attach_app_manager();
             bridge.refresh_start_rect();
         }
         if let Ok(mut rx_slot) = ACTION_RX.lock() {
@@ -1094,11 +1105,6 @@ unsafe fn run_pump(ready: HookReady) {
         }
         let wait = if shell_bridge.is_none() {
             next_bridge_attempt.saturating_duration_since(Instant::now())
-        } else if shell_bridge
-            .as_ref()
-            .is_some_and(|bridge| !bridge.win_hotkey_released)
-        {
-            BRIDGE_RETRY_DELAY
         } else {
             pending_observer_wait()
                 .unwrap_or(START_RECT_REFRESH_INTERVAL)
@@ -1183,7 +1189,6 @@ struct ShellBridge {
     search_rect: Option<RECT>,
     last_rect_refresh: Option<Instant>,
     library_path: PathBuf,
-    win_hotkey_released: bool,
 }
 
 struct StartButtonLocator {
@@ -1202,7 +1207,7 @@ struct AutomationStartButton {
 }
 
 impl ShellBridge {
-    unsafe fn install(release_win_hotkey: bool) -> Result<Self, String> {
+    unsafe fn install() -> Result<Self, String> {
         let library_path = write_shell_hook_library()?;
         let library_wide = wide(&library_path.to_string_lossy());
         let module = LoadLibraryW(PCWSTR(library_wide.as_ptr()))
@@ -1350,7 +1355,7 @@ impl ShellBridge {
         let _ = post_search_button_rect(taskbar_thread, bridge_message, search_rect);
         let _ = wait_for_ack(&SHELL_SEARCH_RECT_ACK, SHELL_ACK_TIMEOUT);
 
-        let mut bridge = Self {
+        let bridge = Self {
             module,
             progman_hook,
             taskbar_message_hook,
@@ -1363,11 +1368,7 @@ impl ShellBridge {
             search_rect,
             last_rect_refresh: None,
             library_path,
-            win_hotkey_released: !release_win_hotkey,
         };
-        if release_win_hotkey {
-            bridge.try_attach_app_manager(true);
-        }
         #[cfg(debug_assertions)]
         eprintln!(
             "[win-key] Explorer Start-command bridge active (Progman thread {progman_thread}, taskbar thread {taskbar_thread})"
@@ -1375,10 +1376,7 @@ impl ShellBridge {
         Ok(bridge)
     }
 
-    fn try_attach_app_manager(&mut self, release_win_hotkey: bool) {
-        if !release_win_hotkey || self.win_hotkey_released {
-            return;
-        }
+    fn try_attach_app_manager(&mut self) {
         unsafe {
             let Ok(app_manager) = find_shell_window("ApplicationManager_ImmersiveShellWindow")
             else {
@@ -1389,7 +1387,12 @@ impl ShellBridge {
                 return;
             }
             let progman_thread = GetWindowThreadProcessId(GetShellWindow(), None);
-            if self.app_manager_hook.is_none() && app_manager_thread != progman_thread {
+            if should_attach_app_manager_hook(
+                app_manager_thread,
+                progman_thread,
+                self.taskbar_thread,
+                self.app_manager_hook.is_some(),
+            ) {
                 let Some(proc) = GetProcAddress(
                     self.module,
                     PCSTR(c"PrismShellGetMessageHook".as_ptr().cast()),
@@ -1409,24 +1412,6 @@ impl ShellBridge {
                     Ok(hook) => self.app_manager_hook = Some(hook),
                     Err(_) => return,
                 }
-            }
-            let Ok(message) = shell_bridge_message() else {
-                return;
-            };
-            SHELL_BRIDGE_ACK.store(0, Ordering::Release);
-            if PostThreadMessageW(
-                app_manager_thread,
-                message,
-                WPARAM(SHELL_CONTROL_DISABLE_WIN_HOTKEY),
-                LPARAM(0),
-            )
-            .is_err()
-            {
-                return;
-            }
-            if wait_for_ack(&SHELL_BRIDGE_ACK, SHELL_ACK_TIMEOUT) != 0 {
-                self.win_hotkey_released = true;
-                debug_trace("win-hotkey-released");
             }
         }
     }
@@ -2364,9 +2349,6 @@ unsafe extern "system" fn raw_input_window_proc(
 ) -> LRESULT {
     if shell_bridge_message().is_ok_and(|bridge_message| message == bridge_message) {
         match wparam.0 {
-            SHELL_EVENT_HOTKEY_DISABLED => {
-                SHELL_BRIDGE_ACK.store(if lparam.0 != 0 { 2 } else { 1 }, Ordering::Release);
-            }
             SHELL_EVENT_START_RECT_CONFIGURED => {
                 SHELL_START_RECT_ACK.store(if lparam.0 != 0 { 2 } else { 1 }, Ordering::Release);
             }
@@ -3158,6 +3140,14 @@ mod tests {
     fn raw_keyboard_is_idle_while_the_low_level_hook_is_installed() {
         assert!(should_feed_raw_keyboard(false));
         assert!(!should_feed_raw_keyboard(true));
+    }
+
+    #[test]
+    fn app_manager_hook_attaches_only_to_an_uncovered_shell_thread() {
+        assert!(should_attach_app_manager_hook(3, 1, 2, false));
+        assert!(!should_attach_app_manager_hook(1, 1, 2, false));
+        assert!(!should_attach_app_manager_hook(2, 1, 2, false));
+        assert!(!should_attach_app_manager_hook(3, 1, 2, true));
     }
 
     #[test]

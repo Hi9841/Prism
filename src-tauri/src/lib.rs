@@ -31,8 +31,8 @@ use windows::Win32::System::Threading::GetCurrentProcessId;
 use windows::Win32::UI::Input::KeyboardAndMouse::{SetActiveWindow, SetFocus};
 use windows::Win32::UI::WindowsAndMessaging::{
     AllowSetForegroundWindow, BringWindowToTop, GetAncestor, GetCursorPos, GetForegroundWindow,
-    GetWindowThreadProcessId, LockSetForegroundWindow, SetForegroundWindow, SetWindowPos, GA_ROOT,
-    HWND_TOPMOST, LSFW_UNLOCK, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW,
+    GetWindowRect, GetWindowThreadProcessId, LockSetForegroundWindow, SetForegroundWindow,
+    SetWindowPos, GA_ROOT, HWND_TOPMOST, LSFW_UNLOCK, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW,
 };
 
 /// The only accepted global shortcuts. Bare typing keys, reserved keys and
@@ -754,6 +754,44 @@ fn should_dismiss_palette_on_unfocus(
     }
     // Clicking away dismisses only after activation grace has elapsed.
     should_dismiss_on_unfocus(now_ms, grace_until_ms)
+}
+
+fn pointer_is_outside(point: POINT, bounds: RECT) -> bool {
+    point.x < bounds.left
+        || point.x >= bounds.right
+        || point.y < bounds.top
+        || point.y >= bounds.bottom
+}
+
+/// Capture explicit outside-pointer intent before blur or activation retries
+/// can lose it. The existing mouse hook still passes the click to its target.
+pub(crate) fn dismiss_palette_for_outside_pointer(app: &tauri::AppHandle, point: POINT) {
+    if !PALETTE_OPEN.load(Ordering::Acquire) || drag::is_dragging() {
+        return;
+    }
+    let transition = PALETTE_TRANSITION.load(Ordering::Acquire);
+    let hwnd = HWND(MAIN_HWND.load(Ordering::Acquire) as *mut std::ffi::c_void);
+    let mut bounds = RECT::default();
+    if hwnd.0.is_null()
+        || unsafe { GetWindowRect(hwnd, &mut bounds) }.is_err()
+        || !pointer_is_outside(point, bounds)
+    {
+        return;
+    }
+    let close_app = app.clone();
+    let _ = app.run_on_main_thread(move || {
+        if PALETTE_TRANSITION.load(Ordering::Acquire) != transition
+            || !PALETTE_OPEN.load(Ordering::Acquire)
+            || drag::is_dragging()
+        {
+            return;
+        }
+        mark_palette_dismissed();
+        if let Some(window) = close_app.get_webview_window("main") {
+            let _ = window.hide();
+            set_webview_memory_target(&window, true);
+        }
+    });
 }
 
 #[cfg(test)]
@@ -2565,6 +2603,22 @@ mod tests {
         // Only when Prism was focused, foreground moved to another app, and grace elapsed
         assert!(should_dismiss_palette_on_unfocus(true, false, 400, 400));
         assert!(should_dismiss_palette_on_unfocus(true, false, 500, 400));
+    }
+
+    #[test]
+    fn outside_pointer_intent_can_dismiss_during_activation_grace() {
+        let bounds = RECT {
+            left: 100,
+            top: 100,
+            right: 500,
+            bottom: 500,
+        };
+        assert!(pointer_is_outside(POINT { x: 99, y: 200 }, bounds));
+        assert!(pointer_is_outside(POINT { x: 500, y: 200 }, bounds));
+        assert!(pointer_is_outside(POINT { x: 200, y: 99 }, bounds));
+        assert!(pointer_is_outside(POINT { x: 200, y: 500 }, bounds));
+        assert!(!pointer_is_outside(POINT { x: 100, y: 100 }, bounds));
+        assert!(!pointer_is_outside(POINT { x: 499, y: 499 }, bounds));
     }
 
     #[test]

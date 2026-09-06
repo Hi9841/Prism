@@ -79,6 +79,7 @@ const HC_ACTION: i32 = 0;
 const HWND_MESSAGE: Hwnd = -3isize as Hwnd;
 const WM_NULL: u32 = 0;
 const WM_SYSCOMMAND: u32 = 0x0112;
+const WM_HOTKEY: u32 = 0x0312;
 const WM_LBUTTONDOWN: usize = 0x0201;
 const WM_LBUTTONUP: usize = 0x0202;
 const WM_CLOSE: u32 = 0x0010;
@@ -87,8 +88,10 @@ const STM_SETIMAGE: u32 = 0x0172;
 const STM_GETIMAGE: u32 = 0x0173;
 const IMAGE_BITMAP: usize = 0;
 const SC_TASKLIST: usize = 0xF130;
-const CONTROL_DISABLE_WIN_HOTKEY: usize = 1;
-const EVENT_HOTKEY_DISABLED: usize = 2;
+const MOD_WIN: usize = 0x0008;
+const MOD_NOREPEAT: usize = 0x4000;
+const VK_LWIN: usize = 0x005B;
+const VK_RWIN: usize = 0x005C;
 const CONTROL_START_RECT_LEFT: usize = 4;
 const CONTROL_START_RECT_TOP: usize = 5;
 const CONTROL_START_RECT_RIGHT: usize = 6;
@@ -165,7 +168,6 @@ extern "system" {
         -> Hwnd;
     fn PostMessageW(window: Hwnd, message: u32, wparam: usize, lparam: isize) -> i32;
     fn RegisterWindowMessageW(name: *const u16) -> u32;
-    fn UnregisterHotKey(window: Hwnd, id: i32) -> i32;
     fn CreateWindowExW(
         ex_style: u32,
         class_name: *const u16,
@@ -455,7 +457,20 @@ unsafe fn notify_observer(message: u32, event: usize, detail: isize) -> bool {
 }
 
 fn is_start_command(message: &Msg) -> bool {
-    message.message == WM_SYSCOMMAND && message.wparam & 0xFFF0 == SC_TASKLIST
+    (message.message == WM_SYSCOMMAND && message.wparam & 0xFFF0 == SC_TASKLIST)
+        || is_bare_win_hotkey(message)
+}
+
+fn is_bare_win_hotkey(message: &Msg) -> bool {
+    if message.message != WM_HOTKEY {
+        return false;
+    }
+    let detail = message.lparam as usize;
+    let modifiers = detail & 0xFFFF;
+    let virtual_key = (detail >> 16) & 0xFFFF;
+    modifiers & MOD_WIN != 0
+        && modifiers & !(MOD_WIN | MOD_NOREPEAT) == 0
+        && matches!(virtual_key, 0 | VK_LWIN | VK_RWIN)
 }
 
 fn bridge_message_id() -> u32 {
@@ -889,16 +904,6 @@ pub unsafe extern "system" fn PrismShellGetMessageHook(
         let control = message.wparam & u32::MAX as usize;
         if message.message == message_id {
             match control {
-                CONTROL_DISABLE_WIN_HOTKEY => {
-                    let mut disabled = false;
-                    for id in 0..=16 {
-                        if UnregisterHotKey(std::ptr::null_mut(), id) != 0 {
-                            disabled = true;
-                        }
-                    }
-                    let _ = notify_observer(message_id, EVENT_HOTKEY_DISABLED, disabled as isize);
-                    message.message = WM_NULL;
-                }
                 CONTROL_START_RECT_LEFT => {
                     START_RECT_READY.store(false, Ordering::Release);
                     START_PRESS_CAPTURED.store(false, Ordering::Release);
@@ -1026,6 +1031,34 @@ mod tests {
         )));
         assert!(!is_start_command(&message(WM_SYSCOMMAND, 0xF000)));
         assert!(!is_start_command(&message(WM_NULL, SC_TASKLIST)));
+    }
+
+    #[test]
+    fn identifies_only_bare_win_hotkeys() {
+        let mut bare_left = message(WM_HOTKEY, 1);
+        bare_left.lparam = ((VK_LWIN as isize) << 16) | MOD_WIN as isize;
+        assert!(is_bare_win_hotkey(&bare_left));
+        assert!(is_start_command(&bare_left));
+
+        let mut bare_right = message(WM_HOTKEY, 2);
+        bare_right.lparam = ((VK_RWIN as isize) << 16) | MOD_WIN as isize;
+        assert!(is_bare_win_hotkey(&bare_right));
+
+        let mut bare_modifier = message(WM_HOTKEY, 3);
+        bare_modifier.lparam = (MOD_WIN | MOD_NOREPEAT) as isize;
+        assert!(is_bare_win_hotkey(&bare_modifier));
+
+        let mut win_r = message(WM_HOTKEY, 4);
+        win_r.lparam = ((0x52isize) << 16) | MOD_WIN as isize;
+        assert!(!is_bare_win_hotkey(&win_r));
+
+        let mut win_alt = message(WM_HOTKEY, 5);
+        win_alt.lparam = ((0x41isize) << 16) | (MOD_WIN | 0x0001) as isize;
+        assert!(!is_bare_win_hotkey(&win_alt));
+
+        let mut ctrl_esc = message(WM_HOTKEY, 6);
+        ctrl_esc.lparam = (0x1Bisize << 16) | 0x0002;
+        assert!(!is_bare_win_hotkey(&ctrl_esc));
     }
 
     #[test]

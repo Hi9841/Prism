@@ -1,5 +1,17 @@
 # Installed Prism audit
 
+## Follow-up: activation fixes in 0.9.55
+
+The user subsequently reported Windows Start opening alongside Prism and outside clicks failing to dismiss Prism. Both paths received focused fixes after the initial audit:
+
+- Outside pointer presses now use the existing native mouse hook, bypass activation grace, and cancel pending activation retries. The first blur-time button-state candidate was rejected because near-instant clicks still failed.
+- The Explorer bridge now also covers the app-manager thread and recognizes only bare-Win hotkey messages in addition to Start commands. Other shortcut messages pass through. The legacy blanket hotkey-unregister code was removed.
+- Installed regression checks passed at 40, 100, 200, and 900 ms after opening, including near-instant down/up clicks at the first three timings. Before the fix, all three early timings left Prism visible.
+- 213 Rust tests passed, 5 ignored; three shell-hook tests passed. Rust checking, formatting, TypeScript checking, and the production installer build passed.
+- The installed 0.9.55 binary matches the release target binary. Original profile hashes match after restoration. Physical Windows-key confirmation remains a separate user check because injected input is not equivalent to hardware input.
+
+The original audit below describes the earlier build and its evidence.
+
 Date: 2026-09-06. Audited build: 0.9.53. Release version: 0.9.54.
 
 The updated executable is installed at `C:\Users\hi\AppData\Local\Prism\prism.exe` and was launched successfully. Its SHA-256 matches the release build:
