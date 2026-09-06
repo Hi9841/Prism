@@ -17,7 +17,7 @@ mod win_key;
 mod windows_settings;
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -27,14 +27,14 @@ use windows::Win32::Foundation::{HWND, POINT, RECT};
 use windows::Win32::Graphics::Gdi::{
     GetMonitorInfoW, MonitorFromPoint, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST,
 };
-use windows::Win32::System::Threading::GetCurrentProcessId;
-use windows::Win32::UI::Input::KeyboardAndMouse::{
-    keybd_event, SetActiveWindow, SetFocus, KEYEVENTF_KEYUP, VK_MENU,
+use windows::Win32::System::Threading::{
+    AttachThreadInput, GetCurrentProcessId, GetCurrentThreadId,
 };
+use windows::Win32::UI::Input::KeyboardAndMouse::{SetActiveWindow, SetFocus};
 use windows::Win32::UI::WindowsAndMessaging::{
-    AllowSetForegroundWindow, BringWindowToTop, GetCursorPos, GetForegroundWindow,
-    GetWindowThreadProcessId, LockSetForegroundWindow, SetForegroundWindow, SetWindowPos,
-    HWND_TOPMOST, LSFW_UNLOCK, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW,
+    BringWindowToTop, GetAncestor, GetCursorPos, GetForegroundWindow, GetWindowThreadProcessId,
+    SetForegroundWindow, SetWindowPos, GA_ROOT, HWND_TOPMOST, SWP_NOMOVE, SWP_NOSIZE,
+    SWP_SHOWWINDOW,
 };
 
 /// The only accepted global shortcuts. Bare typing keys, reserved keys and
@@ -74,6 +74,7 @@ static PALETTE_WAS_FOCUSED: AtomicBool = AtomicBool::new(false);
 static ACTIVATION_GRACE_UNTIL_MS: AtomicU64 = AtomicU64::new(0);
 static ACTIVATION_CLOCK: OnceLock<Instant> = OnceLock::new();
 static PRESENTATION_ANCHOR: Mutex<Option<PresentationAnchor>> = Mutex::new(None);
+static MAIN_HWND: AtomicIsize = AtomicIsize::new(0);
 
 #[derive(Clone, Copy, Debug, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -211,7 +212,9 @@ pub fn run() {
                 return;
             }
             if matches!(event, WindowEvent::Focused(true)) {
-                PALETTE_WAS_FOCUSED.store(true, Ordering::Release);
+                if is_prism_foreground() {
+                    PALETTE_WAS_FOCUSED.store(true, Ordering::Release);
+                }
                 return;
             }
             // Clicking away dismisses the launcher, like Raycast.
@@ -664,7 +667,9 @@ pub(crate) fn palette_is_open() -> bool {
 
 fn palette_hwnd(window: &tauri::WebviewWindow) -> Result<HWND, String> {
     let hwnd = window.hwnd().map_err(|error| error.to_string())?;
-    Ok(HWND(hwnd.0))
+    let native = HWND(hwnd.0);
+    MAIN_HWND.store(native.0 as isize, Ordering::Release);
+    Ok(native)
 }
 
 fn activation_now_ms() -> u64 {
@@ -697,7 +702,17 @@ fn is_prism_foreground() -> bool {
         }
         let mut pid = 0u32;
         GetWindowThreadProcessId(foreground, Some(&mut pid));
-        pid != 0 && pid == GetCurrentProcessId()
+        if pid != 0 && pid == GetCurrentProcessId() {
+            return true;
+        }
+        let main_raw = MAIN_HWND.load(Ordering::Acquire);
+        if main_raw != 0 {
+            let main = HWND(main_raw as *mut core::ffi::c_void);
+            if foreground == main || GetAncestor(foreground, GA_ROOT) == main {
+                return true;
+            }
+        }
+        false
     }
     #[cfg(not(windows))]
     true
@@ -750,9 +765,6 @@ fn mark_palette_dismissed() {
     taskbar::release();
 }
 
-/// Ask Windows for keyboard focus. Do not attach to the previous foreground
-/// thread: that can deadlock the UI thread and freeze Prism with the hook
-/// still eating keys.
 fn force_foreground(hwnd: HWND) {
     #[cfg(windows)]
     unsafe {
@@ -763,19 +775,26 @@ fn force_foreground(hwnd: HWND) {
             return;
         }
 
-        let _ = LockSetForegroundWindow(LSFW_UNLOCK);
-        let _ = AllowSetForegroundWindow(GetCurrentProcessId());
+        let foreground_thread = if !foreground.0.is_null() {
+            GetWindowThreadProcessId(foreground, None)
+        } else {
+            0
+        };
+        let current_thread = GetCurrentThreadId();
 
-        // Classic Win32 Alt trick:
-        // Hold Alt down -> BringWindowToTop + SetForegroundWindow -> Release Alt.
-        // Holding Alt puts the system into menu mode, allowing foreground transfer.
-        keybd_event(VK_MENU.0 as u8, 0, Default::default(), 0);
-        let _ = BringWindowToTop(hwnd);
-        let _ = SetForegroundWindow(hwnd);
-        keybd_event(VK_MENU.0 as u8, 0, KEYEVENTF_KEYUP, 0);
-
-        let _ = SetActiveWindow(hwnd);
-        let _ = SetFocus(Some(hwnd));
+        if foreground_thread != 0 && foreground_thread != current_thread {
+            let _ = AttachThreadInput(current_thread, foreground_thread, true);
+            let _ = BringWindowToTop(hwnd);
+            let _ = SetForegroundWindow(hwnd);
+            let _ = SetActiveWindow(hwnd);
+            let _ = SetFocus(Some(hwnd));
+            let _ = AttachThreadInput(current_thread, foreground_thread, false);
+        } else {
+            let _ = BringWindowToTop(hwnd);
+            let _ = SetForegroundWindow(hwnd);
+            let _ = SetActiveWindow(hwnd);
+            let _ = SetFocus(Some(hwnd));
+        }
     }
 }
 
@@ -830,6 +849,7 @@ fn schedule_activation_grace_check(app: &tauri::AppHandle, transition: u64) {
                 // Windows focus-stealing prevention may have delayed or denied the
                 // initial foreground transfer. Do NOT dismiss the palette! Re-assert
                 // raise/foreground so keyboard input goes into Prism.
+                arm_activation_grace();
                 let _ = raise_palette(&window);
             }
         });
