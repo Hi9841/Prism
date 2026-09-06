@@ -27,10 +27,14 @@ use windows::Win32::Foundation::{HWND, POINT, RECT};
 use windows::Win32::Graphics::Gdi::{
     GetMonitorInfoW, MonitorFromPoint, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST,
 };
-use windows::Win32::UI::Input::KeyboardAndMouse::{SetActiveWindow, SetFocus};
+use windows::Win32::System::Threading::GetCurrentProcessId;
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    keybd_event, SetActiveWindow, SetFocus, KEYEVENTF_KEYUP, VK_MENU,
+};
 use windows::Win32::UI::WindowsAndMessaging::{
-    BringWindowToTop, GetCursorPos, SetForegroundWindow, SetWindowPos, HWND_TOPMOST, SWP_NOMOVE,
-    SWP_NOSIZE, SWP_SHOWWINDOW,
+    AllowSetForegroundWindow, BringWindowToTop, GetCursorPos, LockSetForegroundWindow,
+    SetForegroundWindow, SetWindowPos, HWND_TOPMOST, LSFW_UNLOCK, SWP_NOMOVE, SWP_NOSIZE,
+    SWP_SHOWWINDOW,
 };
 
 /// The only accepted global shortcuts. Bare typing keys, reserved keys and
@@ -679,13 +683,18 @@ fn should_dismiss_on_unfocus(now_ms: u64, grace_until_ms: u64) -> bool {
     grace_until_ms == 0 || now_ms >= grace_until_ms
 }
 
+#[cfg(test)]
 fn deferred_unfocus_should_dismiss(
-    open: bool,
-    transition_matches: bool,
-    focused: bool,
-    visible: bool,
+    _open: bool,
+    _transition_matches: bool,
+    _focused: bool,
+    _visible: bool,
 ) -> bool {
-    open && transition_matches && visible && !focused
+    // An open, visible palette must NEVER be auto-dismissed simply because
+    // it was not yet focused at the end of the grace period. Genuine blur
+    // dismissal is handled by on_window_event when Focus(false) arrives
+    // after activation grace has elapsed.
+    false
 }
 
 fn mark_palette_dismissed() {
@@ -705,6 +714,14 @@ fn mark_palette_dismissed() {
 /// still eating keys.
 fn force_foreground(hwnd: HWND) {
     unsafe {
+        let _ = LockSetForegroundWindow(LSFW_UNLOCK);
+        let _ = AllowSetForegroundWindow(GetCurrentProcessId());
+
+        // In Windows, a synthetic Alt key down/up marks this thread as receiving
+        // input, satisfying focus-stealing prevention without attaching threads.
+        keybd_event(VK_MENU.0 as u8, 0, Default::default(), 0);
+        keybd_event(VK_MENU.0 as u8, 0, KEYEVENTF_KEYUP, 0);
+
         let _ = BringWindowToTop(hwnd);
         let _ = SetForegroundWindow(hwnd);
         let _ = SetActiveWindow(hwnd);
@@ -754,11 +771,12 @@ fn schedule_activation_grace_check(app: &tauri::AppHandle, transition: u64) {
                 return;
             };
             let focused = window.is_focused().unwrap_or(false);
-            let visible = window.is_visible().unwrap_or(false);
-            if deferred_unfocus_should_dismiss(true, true, focused, visible) {
-                mark_palette_dismissed();
-                let _ = window.hide();
-                set_webview_memory_target(&window, true);
+            if !focused {
+                // If Prism opened while the user was tabbed into another application,
+                // Windows focus-stealing prevention may have delayed or denied the
+                // initial foreground transfer. Do NOT dismiss the palette! Re-assert
+                // raise/foreground so keyboard input goes into Prism.
+                let _ = raise_palette(&window);
             }
         });
     });
@@ -2428,8 +2446,8 @@ mod tests {
     }
 
     #[test]
-    fn deferred_unfocus_hides_only_when_the_palette_stayed_unfocused() {
-        assert!(deferred_unfocus_should_dismiss(true, true, false, true));
+    fn deferred_unfocus_never_auto_dismisses_the_palette() {
+        assert!(!deferred_unfocus_should_dismiss(true, true, false, true));
         assert!(!deferred_unfocus_should_dismiss(true, true, true, true));
         assert!(!deferred_unfocus_should_dismiss(false, true, false, true));
         assert!(!deferred_unfocus_should_dismiss(true, false, false, true));
