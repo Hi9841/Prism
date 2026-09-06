@@ -1726,6 +1726,8 @@ unsafe fn prop_lpwstr(value: &PROPVARIANT) -> Option<String> {
 /// go through shell:AppsFolder by AUMID, everything else runs the resolved
 /// target directly.
 pub fn launch(app: &AppEntry) -> Result<(), String> {
+    crate::attach_to_default_desktop();
+    let _com = ComGuard::init();
     unsafe {
         if let Some(path) = app.path.as_deref().filter(|path| is_executable(path)) {
             if shell_open(path, app.args.as_deref(), app.working_directory.as_deref()) {
@@ -1775,6 +1777,8 @@ pub fn launch_path_elevated(
     args: Option<&str>,
     working_directory: Option<&str>,
 ) -> Result<(), String> {
+    crate::attach_to_default_desktop();
+    let _com = ComGuard::init();
     if !path.is_file() || !is_elevatable_path(path) {
         return Err(format!(
             "{} is not a supported application or script",
@@ -1857,6 +1861,8 @@ fn activate_packaged_app(aumid: &str) -> Result<(), String> {
 }
 
 pub fn open_path(path: &Path) -> Result<(), String> {
+    crate::attach_to_default_desktop();
+    let _com = ComGuard::init();
     let value = path.to_string_lossy();
     if unsafe { shell_open(&value, None, None) } {
         Ok(())

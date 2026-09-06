@@ -534,11 +534,8 @@ export function PaletteProvider({ children }: { children: ReactNode }) {
     async (item: PaletteItem) => {
       const clipboardItem = isClipboardKind(item.id);
       try {
-        if (clipboardItem) {
-          await item.run();
-        } else {
-          await Promise.all([hidePaletteWindow(), item.run()]);
-        }
+        await item.run();
+        if (!clipboardItem) await hidePaletteWindow();
         app.pushHistory(item.id, item.historyTitle);
         if (clipboardItem) {
           app.showToast("Copied to clipboard", item.toastDetail ?? item.title);

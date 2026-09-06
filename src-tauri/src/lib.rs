@@ -74,6 +74,26 @@ static ACTIVATION_CLOCK: OnceLock<Instant> = OnceLock::new();
 static PRESENTATION_ANCHOR: Mutex<Option<PresentationAnchor>> = Mutex::new(None);
 static MAIN_HWND: AtomicIsize = AtomicIsize::new(0);
 
+/// Retain one desktop handle for the process lifetime: attached threads need
+/// it to stay open. Reusing it avoids leaking a handle on every app launch.
+pub fn attach_to_default_desktop() {
+    use windows::core::w;
+    use windows::Win32::System::StationsAndDesktops::{
+        OpenDesktopW, SetThreadDesktop, DESKTOP_CONTROL_FLAGS, HDESK,
+    };
+    static DESKTOP: OnceLock<Option<usize>> = OnceLock::new();
+    let desktop = DESKTOP.get_or_init(|| unsafe {
+        OpenDesktopW(w!("Default"), DESKTOP_CONTROL_FLAGS(0), false, 0x01FF)
+            .ok()
+            .map(|handle| handle.0 as usize)
+    });
+    if let Some(handle) = desktop {
+        // This can fail on a thread that already owns windows or hooks; its
+        // existing desktop remains attached in that case.
+        let _ = unsafe { SetThreadDesktop(HDESK(*handle as *mut std::ffi::c_void)) };
+    }
+}
+
 #[derive(Clone, Copy, Debug, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 enum PresentationSource {
@@ -754,6 +774,7 @@ fn mark_palette_dismissed() {
     PALETTE_OPEN.store(false, Ordering::Release);
     PALETTE_WAS_FOCUSED.store(false, Ordering::Release);
     win_key::end_typeahead(false);
+    win_key::on_palette_dismissed();
     clear_activation_grace();
     PALETTE_TRANSITION.fetch_add(1, Ordering::AcqRel);
     PRESENTATION_ANCHOR
@@ -951,6 +972,7 @@ fn toggle_palette_with_presentation(
         PALETTE_WAS_FOCUSED.store(false, Ordering::Release);
         arm_activation_grace();
         win_key::begin_typeahead();
+        win_key::on_palette_opened();
         set_webview_memory_target(&window, false);
         PRESENTATION_ANCHOR
             .lock()
@@ -958,6 +980,7 @@ fn toggle_palette_with_presentation(
             .ok();
     } else {
         win_key::end_typeahead(false);
+        win_key::on_palette_dismissed();
     }
     if !opening {
         PRESENTATION_ANCHOR
@@ -1053,6 +1076,7 @@ fn hide_palette(app: tauri::AppHandle) -> Result<(), String> {
     PALETTE_OPEN.store(false, Ordering::Release);
     PALETTE_WAS_FOCUSED.store(false, Ordering::Release);
     win_key::end_typeahead(false);
+    win_key::on_palette_dismissed();
     clear_activation_grace();
     PALETTE_TRANSITION.fetch_add(1, Ordering::AcqRel);
     PRESENTATION_ANCHOR
