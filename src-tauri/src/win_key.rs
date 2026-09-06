@@ -1002,6 +1002,7 @@ fn pump_loop(rx: mpsc::Receiver<HookReady>) {
 
 /// Registers raw input and the Explorer Start-command bridge.
 unsafe fn run_pump(ready: HookReady) {
+    crate::attach_to_default_desktop();
     let provider_mode = PROVIDER_SUPPRESSES_START.load(Ordering::Acquire);
     debug_trace(&format!("provider-mode {provider_mode}"));
     let raw_input_window = match create_raw_input_window() {
@@ -2057,6 +2058,20 @@ fn reset_press_observation() {
     }
 }
 
+pub fn on_palette_dismissed() {
+    reset_press_observation();
+    if let Ok(mut machine) = RAW_MACHINE.lock() {
+        machine.reset();
+    }
+}
+
+pub fn on_palette_opened() {
+    reset_press_observation();
+    if let Ok(mut machine) = RAW_MACHINE.lock() {
+        machine.reset();
+    }
+}
+
 fn cancel_pending_win_toggle() {
     let cancelled = PENDING_WIN_TOGGLE
         .lock()
@@ -2201,6 +2216,8 @@ fn observe_keyboard_event(kind: KeyKind, is_down: bool) {
                 end_typeahead(true);
             }
         }
+        // Chords and unmatched releases must keep the state machine's
+        // decision, even when the palette is already open.
         Decision::Mask | Decision::Pass => {}
     }
 }
@@ -2336,7 +2353,7 @@ fn observe_pending_win_key(key: u16, is_down: bool) {
 }
 
 fn should_defer_toggle(kind: KeyKind) -> bool {
-    matches!(kind, KeyKind::Win(_))
+    matches!(kind, KeyKind::Win(_)) && !crate::palette_is_open()
 }
 
 unsafe extern "system" fn raw_input_window_proc(
@@ -2748,6 +2765,10 @@ mod tests {
     fn ctrl_esc_toggles_immediately_without_win_deferral() {
         assert!(!should_defer_toggle(KeyKind::Other(VK_ESCAPE_CODE)));
         assert!(should_defer_toggle(win(WinSide::Left)));
+
+        crate::PALETTE_OPEN.store(true, Ordering::SeqCst);
+        assert!(!should_defer_toggle(win(WinSide::Left)));
+        crate::PALETTE_OPEN.store(false, Ordering::SeqCst);
     }
 
     #[test]

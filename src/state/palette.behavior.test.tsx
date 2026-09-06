@@ -96,6 +96,27 @@ async function mountPalette() {
 }
 
 describe("palette recovery", () => {
+  it("waits for a successful launch before hiding and recording history", async () => {
+    await mountPalette();
+    const launched = deferred<void>();
+    const item: PaletteItem = {
+      id: "app::example",
+      title: "Example",
+      historyTitle: "Example",
+      icon: { kind: "app", name: "Example" },
+      run: () => launched.promise,
+    };
+    const running = palette.runItem(item);
+    expect(bridge.hidePaletteWindow).not.toHaveBeenCalled();
+    expect(mockApp.pushHistory).not.toHaveBeenCalled();
+    await act(async () => {
+      launched.resolve();
+      await running;
+    });
+    expect(bridge.hidePaletteWindow).toHaveBeenCalledTimes(1);
+    expect(mockApp.pushHistory).toHaveBeenCalledWith(item.id, item.historyTitle);
+  });
+
   it("releases the indexing state after a rejected rebuild so the user can retry", async () => {
     await mountPalette();
     vi.mocked(bridge.rebuildFileIndex).mockRejectedValueOnce(new Error("catalog unavailable"));
@@ -137,6 +158,9 @@ describe("palette recovery", () => {
         "error",
       );
       expect(mockApp.pushHistory).not.toHaveBeenCalled();
+      if (kind === "launch") {
+        expect(bridge.hidePaletteWindow).not.toHaveBeenCalled();
+      }
     },
   );
 
