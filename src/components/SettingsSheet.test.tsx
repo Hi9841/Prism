@@ -2,7 +2,8 @@
 
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { setShortcut, setTaskbarAlignment } from "../lib/bridge";
+import { getAppIcons, setShortcut, setTaskbarAlignment } from "../lib/bridge";
+import type { AppEntry, AppGroup } from "../lib/types";
 import { DEFAULT_SETTINGS } from "../lib/types";
 import { useApp } from "../state/app";
 import { usePalette } from "../state/palette";
@@ -21,7 +22,12 @@ vi.mock("../lib/bridge", () => ({
   setTaskbarAlignment: vi.fn().mockResolvedValue(undefined),
 }));
 
-function renderSettings(options?: { retryPersistence?: () => Promise<void>; quit?: () => Promise<void> }) {
+function renderSettings(options?: {
+  retryPersistence?: () => Promise<void>;
+  quit?: () => Promise<void>;
+  apps?: AppEntry[];
+  appGroups?: AppGroup[];
+}) {
   const retryPersistence = vi.fn(options?.retryPersistence ?? (() => Promise.resolve()));
   const quit = vi.fn(options?.quit ?? (() => Promise.resolve()));
   const updateSettings = vi.fn();
@@ -30,7 +36,7 @@ function renderSettings(options?: { retryPersistence?: () => Promise<void>; quit
     setQuery: vi.fn(),
     sections: [],
     flatItems: [],
-    apps: [],
+    apps: options?.apps ?? [],
     selected: 0,
     move: vi.fn(),
     select: vi.fn(),
@@ -53,7 +59,7 @@ function renderSettings(options?: { retryPersistence?: () => Promise<void>; quit
   });
   vi.mocked(useApp).mockReturnValue({
     ready: true,
-    settings: DEFAULT_SETTINGS,
+    settings: { ...DEFAULT_SETTINGS, appGroups: options?.appGroups ?? [] },
     updateSettings,
     resetSettings: vi.fn(),
     persistenceError: "Could not save settings. Check folder permissions.",
@@ -80,6 +86,58 @@ afterEach(() => {
 });
 
 describe("SettingsSheet persistence actions", () => {
+  it("keeps incomplete collection names local until a valid rename is committed", () => {
+    const { updateSettings } = renderSettings({
+      appGroups: [{ id: "tools", name: "Tools", appIds: [], collapsed: false }],
+    });
+    const input = screen.getByRole("textbox", { name: "Tools collection name" });
+    fireEvent.change(input, { target: { value: "" } });
+    expect(updateSettings).not.toHaveBeenCalled();
+    fireEvent.blur(input);
+    expect(updateSettings).not.toHaveBeenCalled();
+    expect(input.getAttribute("aria-invalid")).toBe("true");
+    expect(screen.getByText("Enter a collection name.")).toBeDefined();
+    fireEvent.change(input, { target: { value: "  Utilities  " } });
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(updateSettings).toHaveBeenCalledWith({
+      appGroups: [{ id: "tools", name: "Utilities", appIds: [], collapsed: false }],
+    });
+  });
+  it("bounds collection rows and icon requests while keeping all apps searchable", async () => {
+    const apps = Array.from({ length: 385 }, (_, index) => ({
+      appId: `app-${index}`,
+      name: `Application ${index}`,
+      normalizedName: `application${index}`,
+    }));
+    renderSettings({ apps, appGroups: [{ id: "tools", name: "Tools", appIds: [], collapsed: false }] });
+    fireEvent.click(screen.getByRole("button", { name: "Add app to Tools" }));
+    expect(screen.getAllByRole("option")).toHaveLength(40);
+    expect(vi.mocked(getAppIcons).mock.calls.at(-1)?.[0]).toHaveLength(40);
+    fireEvent.click(screen.getByRole("button", { name: "Show more apps" }));
+    expect(screen.getAllByRole("option")).toHaveLength(80);
+    fireEvent.change(screen.getByRole("textbox", { name: "Filter apps for Tools" }), {
+      target: { value: "Application 384" },
+    });
+    expect(screen.getAllByRole("option")).toHaveLength(1);
+    expect(screen.getByRole("option", { name: "Application 384" })).toBeDefined();
+  });
+
+  it("navigates collection options with arrows and closes only the picker with Escape", () => {
+    renderSettings({
+      apps: ["Alpha", "Beta"].map((name) => ({ appId: name, name, normalizedName: name.toLowerCase() })),
+      appGroups: [{ id: "tools", name: "Tools", appIds: [], collapsed: false }],
+    });
+    const trigger = screen.getByRole("button", { name: "Add app to Tools" });
+    fireEvent.click(trigger);
+    fireEvent.keyDown(screen.getByRole("textbox", { name: "Filter apps for Tools" }), { key: "ArrowDown" });
+    expect(document.activeElement).toBe(screen.getByRole("option", { name: "Alpha" }));
+    fireEvent.keyDown(screen.getByRole("option", { name: "Alpha" }), { key: "ArrowDown" });
+    expect(document.activeElement).toBe(screen.getByRole("option", { name: "Beta" }));
+    fireEvent.keyDown(screen.getByRole("option", { name: "Beta" }), { key: "Escape" });
+    expect(screen.queryByRole("listbox")).toBeNull();
+    expect(useApp().setOpenSettings).not.toHaveBeenCalled();
+    expect(document.activeElement).toBe(trigger);
+  });
   it.each([
     ["Ctrl + Alt + Space", setShortcut, "Shortcut not changed"],
     ["Left", setTaskbarAlignment, "Taskbar not changed"],

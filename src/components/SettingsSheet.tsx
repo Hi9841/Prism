@@ -39,6 +39,7 @@ import {
 } from "../lib/types";
 import { SHORTCUT_OPTIONS, THEME_OPTIONS, useApp } from "../state/app";
 import { usePalette } from "../state/palette";
+import { CollectionNameInput } from "./CollectionNameInput";
 import { TaskbarCustomization } from "./TaskbarCustomization";
 import { RowIcon, Segmented, SettingsRow, Toggle } from "./ui";
 
@@ -266,6 +267,8 @@ function AppGroupsPicker() {
   const [newName, setNewName] = useState("");
   const [openGroupId, setOpenGroupId] = useState<string | null>(null);
   const [appQuery, setAppQuery] = useState("");
+  const [visibleAppCount, setVisibleAppCount] = useState(40);
+  const [focusedAppId, setFocusedAppId] = useState<string | null>(null);
   const [pickerIcons, setPickerIcons] = useState<Record<string, string>>({});
   const appSearchRef = useRef<HTMLInputElement>(null);
   const appPickerRef = useRef<HTMLDivElement>(null);
@@ -280,6 +283,36 @@ function AppGroupsPicker() {
       ? availableApps.filter((entry) => entry.name.toLowerCase().includes(normalized))
       : availableApps;
   }, [appQuery, availableApps]);
+  const visibleApps = useMemo(() => filteredApps.slice(0, visibleAppCount), [filteredApps, visibleAppCount]);
+
+  const closeAppPicker = () => {
+    appPickerRef.current?.querySelector<HTMLButtonElement>("[aria-haspopup='listbox']")?.focus();
+    setOpenGroupId(null);
+  };
+
+  const onPickerKeyDown = (event: React.KeyboardEvent) => {
+    if (event.nativeEvent.isComposing || !openGroupId) return;
+    if (event.key === "Escape") {
+      event.preventDefault();
+      event.stopPropagation();
+      closeAppPicker();
+      return;
+    }
+    const options = Array.from(
+      appPickerRef.current?.querySelectorAll<HTMLButtonElement>("[role='option']:not(:disabled)") ?? [],
+    );
+    const index = options.indexOf(document.activeElement as HTMLButtonElement);
+    const inFilter = document.activeElement === appSearchRef.current;
+    if (index < 0 && !inFilter) return;
+    let next: number;
+    if (event.key === "ArrowDown") next = Math.min(index + 1, options.length - 1);
+    else if (event.key === "ArrowUp") next = index < 0 ? options.length - 1 : Math.max(0, index - 1);
+    else if (event.key === "Home" && !inFilter) next = 0;
+    else if (event.key === "End" && !inFilter) next = options.length - 1;
+    else return;
+    event.preventDefault();
+    options[next]?.focus();
+  };
 
   useEffect(() => {
     if (!openGroupId) return;
@@ -293,8 +326,7 @@ function AppGroupsPicker() {
 
   useEffect(() => {
     if (!openGroupId) return;
-    const missingIds = filteredApps
-      .slice(0, 512)
+    const missingIds = visibleApps
       .map((entry) => entry.appId)
       .filter((appId) => !pickerIcons[appId] && !requestedPickerIconsRef.current.has(appId));
     if (missingIds.length === 0) return;
@@ -309,11 +341,13 @@ function AppGroupsPicker() {
       .catch(() => {
         for (const appId of missingIds) requestedPickerIconsRef.current.delete(appId);
       });
-  }, [filteredApps, openGroupId, pickerIcons]);
+  }, [visibleApps, openGroupId, pickerIcons]);
 
   const toggleAppPicker = (groupId: string) => {
     setOpenGroupId((current) => (current === groupId ? null : groupId));
     setAppQuery("");
+    setVisibleAppCount(40);
+    setFocusedAppId(null);
   };
 
   const createGroup = () => {
@@ -407,12 +441,10 @@ function AppGroupsPicker() {
         return (
           <div key={group.id} className="border-t border-line pt-2">
             <div className="flex items-center gap-1.5">
-              <input
-                value={group.name}
-                maxLength={64}
-                aria-label={`${group.name} collection name`}
-                onChange={(event) => updateGroup(group.id, { name: event.target.value })}
-                className="focus-ring min-w-0 flex-1 bg-transparent text-[12px] font-semibold text-fg outline-none"
+              <CollectionNameInput
+                key={group.name}
+                name={group.name}
+                onCommit={(name) => updateGroup(group.id, { name })}
               />
               <div className="flex shrink-0 items-center gap-0.5">
                 <button
@@ -476,23 +508,21 @@ function AppGroupsPicker() {
                 />
               </button>
               {openGroupId === group.id ? (
-                <div
+                <fieldset
                   id={`app-picker-${group.id}`}
-                  className="mt-1.5 overflow-hidden rounded-[9px] bg-surface shadow-[inset_0_0_0_1px_var(--t-line)]"
+                  aria-label={`Choose apps for ${group.name}`}
+                  onKeyDown={onPickerKeyDown}
+                  className="mt-1.5 min-w-0 overflow-hidden rounded-[9px] bg-surface shadow-[inset_0_0_0_1px_var(--t-line)]"
                 >
                   <div className="m-1.5 flex h-8 items-center gap-2 rounded-[7px] bg-[var(--t-field-bg)] px-2.5 shadow-[inset_0_0_0_1px_var(--t-field-line)] focus-within:shadow-[inset_0_0_0_1px_var(--accent-ring)]">
                     <Search className="h-3.5 w-3.5 shrink-0 text-fg-quiet" />
                     <input
                       ref={appSearchRef}
                       value={appQuery}
-                      onChange={(event) => setAppQuery(event.target.value)}
-                      onKeyDown={(event) => {
-                        if (event.nativeEvent.isComposing) return;
-                        if (event.key === "Escape") {
-                          event.preventDefault();
-                          event.stopPropagation();
-                          setOpenGroupId(null);
-                        }
+                      onChange={(event) => {
+                        setAppQuery(event.target.value);
+                        setVisibleAppCount(40);
+                        setFocusedAppId(null);
                       }}
                       placeholder="Filter apps"
                       aria-label={`Filter apps for ${group.name}`}
@@ -505,6 +535,8 @@ function AppGroupsPicker() {
                         title="Clear filter"
                         onClick={() => {
                           setAppQuery("");
+                          setVisibleAppCount(40);
+                          setFocusedAppId(null);
                           appSearchRef.current?.focus();
                         }}
                         className="focus-ring grid h-6 w-6 shrink-0 cursor-pointer place-items-center rounded-[6px] text-fg-quiet hover:bg-surface-hover hover:text-fg"
@@ -526,7 +558,7 @@ function AppGroupsPicker() {
                     ) : filteredApps.length === 0 ? (
                       <div className="px-2 py-5 text-center text-[11px] text-fg-quiet">No matching apps</div>
                     ) : (
-                      filteredApps.map((entry) => {
+                      visibleApps.map((entry, index) => {
                         const owner = settings.appGroups.find((candidate) =>
                           candidate.appIds.includes(entry.appId),
                         );
@@ -537,7 +569,12 @@ function AppGroupsPicker() {
                             key={entry.appId}
                             type="button"
                             role="option"
+                            aria-label={entry.name}
                             aria-selected={selected}
+                            tabIndex={
+                              focusedAppId === entry.appId || (focusedAppId === null && index === 0) ? 0 : -1
+                            }
+                            onFocus={() => setFocusedAppId(entry.appId)}
                             disabled={disabled}
                             title={disabled ? `${group.name} is full` : undefined}
                             onClick={() =>
@@ -578,19 +615,28 @@ function AppGroupsPicker() {
                       })
                     )}
                   </div>
+                  {visibleAppCount < filteredApps.length ? (
+                    <button
+                      type="button"
+                      onClick={() => setVisibleAppCount((count) => count + 40)}
+                      className="focus-ring min-h-10 w-full cursor-pointer rounded-[7px] px-2.5 text-[11.5px] font-medium text-fg-secondary hover:bg-surface-hover"
+                    >
+                      Show more apps
+                    </button>
+                  ) : null}
                   <div className="flex items-center justify-between border-t border-line px-2.5 py-2">
                     <span className="text-[10.5px] text-fg-quiet tabular-nums">
                       {group.appIds.length} of {APP_GROUP_APP_LIMIT} selected
                     </span>
                     <button
                       type="button"
-                      onClick={() => setOpenGroupId(null)}
+                      onClick={closeAppPicker}
                       className="focus-ring press cursor-pointer rounded-[7px] bg-accent-soft px-2.5 py-1 text-[11px] font-semibold text-fg hover:bg-surface-hover"
                     >
                       Done
                     </button>
                   </div>
-                </div>
+                </fieldset>
               ) : null}
             </div>
             {assigned.length > 0 && openGroupId !== group.id ? (

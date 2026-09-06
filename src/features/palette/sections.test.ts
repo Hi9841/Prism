@@ -79,6 +79,19 @@ function sources(overrides: Partial<PaletteSources> = {}): PaletteSources {
 const ids = (sections: ReturnType<typeof buildSections>["sections"]) => sections.map((s) => s.id);
 
 describe("buildSections - idle layout (empty query)", () => {
+  it("keeps matches in collapsed collections searchable in relevance order", () => {
+    const result = buildSections(
+      sources({
+        query: "Note",
+        apps: [app("Notepad"), app("Note")],
+        appGroups: [
+          { id: "tools", name: "Tools", appIds: ["app-id-Notepad", "app-id-Note"], collapsed: true },
+        ],
+      }),
+    );
+    expect(result.flatItems.map((item) => item.title)).toEqual(["Note", "Notepad"]);
+  });
+
   it("shows Pinned, Recent, Quick Access, Apps in order with caps", () => {
     const names = [
       "Alpha",
