@@ -35,6 +35,21 @@ use windows::Win32::UI::WindowsAndMessaging::{
     SetWindowPos, GA_ROOT, HWND_TOPMOST, LSFW_UNLOCK, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW,
 };
 
+/// Debug-only trace to the same temp log used by win-key observation.
+#[cfg(debug_assertions)]
+fn win_key_debug_trace(message: &str) {
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(std::env::temp_dir().join("Prism").join("semantic-debug.log"))
+    {
+        let _ = std::io::Write::write_all(&mut file, format!("{message}\n").as_bytes());
+    }
+}
+
+#[cfg(not(debug_assertions))]
+fn win_key_debug_trace(_message: &str) {}
+
 /// The only accepted global shortcuts. Bare typing keys, reserved keys and
 /// known system/security combos are never accepted.
 const ALLOWED_SHORTCUTS: &[&str] = &[
@@ -999,9 +1014,11 @@ fn toggle_palette_with_presentation(
 ) {
     let timer = perf::start();
     let Some(window) = app.get_webview_window("main") else {
+        win_key_debug_trace("palette-toggle-main-window-missing");
         return;
     };
     let opening = toggle_open_state(&PALETTE_OPEN);
+    win_key_debug_trace(&format!("palette-toggle open={opening}"));
     let transition = PALETTE_TRANSITION.fetch_add(1, Ordering::AcqRel) + 1;
     if !opening {
         clear_activation_grace();
