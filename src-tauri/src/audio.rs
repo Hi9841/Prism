@@ -534,6 +534,117 @@ fn clean_app_display_name(name: &str, auto_id: &str) -> String {
     "Application".to_string()
 }
 
+/// Known executable stems mapped to their user-facing product names.
+/// Keeping the map small and exact means unknown apps fall through to the
+/// humanized stem or the cleaned window title instead of a wrong name.
+const PRETTY_APP_NAMES: &[(&str, &str)] = &[
+    ("googlechrome", "Google Chrome"),
+    ("chrome", "Google Chrome"),
+    ("msedge", "Microsoft Edge"),
+    ("edge", "Microsoft Edge"),
+    ("firefox", "Firefox"),
+    ("visualstudiocode", "VS Code"),
+    ("code", "VS Code"),
+    ("discord", "Discord"),
+    ("spotify", "Spotify"),
+    ("slack", "Slack"),
+    ("telegram", "Telegram"),
+    ("obsidian", "Obsidian"),
+    ("notion", "Notion"),
+    ("figma", "Figma"),
+    ("steam", "Steam"),
+    ("explorer", "File Explorer"),
+    ("wezterm", "WezTerm"),
+    ("wezterm-gui", "WezTerm"),
+    ("windowsterminal", "Terminal"),
+    ("terminal", "Terminal"),
+    ("powershell", "PowerShell"),
+    ("windowspowershell", "PowerShell"),
+    ("cmd", "Command Prompt"),
+    ("notepad", "Notepad"),
+    ("wsl", "WSL"),
+    ("windows-terminal", "Terminal"),
+    ("onedrive", "OneDrive"),
+    ("word", "Word"),
+    ("excel", "Excel"),
+    ("powerpnt", "PowerPoint"),
+    ("outlook", "Outlook"),
+    ("teams", "Teams"),
+    ("devenv", "Visual Studio"),
+];
+
+/// Humanizes an executable stem into a readable name for the volume OSD.
+/// Splits on separators and camel-case boundaries: "microsoftedge" would
+/// become "Microsoft Edge", "vlc" simply capitalizes to "Vlc".
+fn humanize_app_stem(stem: &str) -> String {
+    let mut words: Vec<String> = Vec::new();
+    let mut current = String::new();
+    for ch in stem.chars() {
+        if ch == '_' || ch == '-' || ch == '.' {
+            if !current.is_empty() {
+                words.push(current.clone());
+                current.clear();
+            }
+            continue;
+        }
+        if ch.is_ascii_uppercase()
+            && !current.is_empty()
+            && current
+                .chars()
+                .last()
+                .is_some_and(|c| c.is_ascii_lowercase())
+        {
+            words.push(current.clone());
+            current.clear();
+        }
+        current.push(ch);
+    }
+    if !current.is_empty() {
+        words.push(current);
+    }
+    let joined = if words.is_empty() {
+        stem.to_string()
+    } else {
+        words.join(" ")
+    };
+    let mut chars = joined.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+        None => joined,
+    }
+}
+
+/// The name shown in the volume OSD for a taskbar target. Prefers the
+/// known-name map, then the humanized executable stem, and only falls back
+/// to the (window-title-derived) display title when nothing better exists.
+fn taskbar_osd_title(target: &TaskbarTarget) -> String {
+    match target {
+        TaskbarTarget::Master => "Master Volume".to_string(),
+        TaskbarTarget::Unknown => "Unknown".to_string(),
+        TaskbarTarget::Application {
+            display_title,
+            executable_stem,
+        } => {
+            let stem = normalize_executable_stem(executable_stem);
+            if let Some((_, pretty)) = PRETTY_APP_NAMES.iter().find(|(candidate, _)| *candidate == stem) {
+                return (*pretty).to_string();
+            }
+            let humanized = humanize_app_stem(&stem);
+            if humanized.len() >= 3
+                && humanized
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == ' ')
+            {
+                return humanized;
+            }
+            if !display_title.trim().is_empty() {
+                return display_title.trim().to_string();
+            }
+            "Application".to_string()
+        }
+    }
+}
+
 /// Checks if an HWND belongs to a taskbar window.
 pub fn is_taskbar_window(hwnd: HWND) -> bool {
     if hwnd.0.is_null() {
@@ -581,37 +692,43 @@ pub(crate) fn adjust_volume_for_target(
         TaskbarTarget::Application {
             display_title,
             executable_stem,
-        } => match adjust_app_volume(executable_stem, delta) {
-            Ok(Some((_app_name, vol, muted))) => Some(VolumeChangeResult {
-                title: display_title.clone(),
-                volume: vol,
-                percentage: (vol * 100.0).round() as u32,
-                muted,
-                is_master: false,
-            }),
-            Ok(None) => {
-                // The hovered application currently has no active audio session in WASAPI.
-                // Fall back gracefully to adjusting master volume so taskbar scrolling never freezes!
-                let (vol, muted) = adjust_master_volume(delta).ok()?;
-                Some(VolumeChangeResult {
-                    title: format!("{display_title} (Master)"),
+        } => {
+            let osd_title = taskbar_osd_title(&TaskbarTarget::Application {
+                display_title: display_title.clone(),
+                executable_stem: executable_stem.clone(),
+            });
+            match adjust_app_volume(executable_stem, delta) {
+                Ok(Some((_app_name, vol, muted))) => Some(VolumeChangeResult {
+                    title: osd_title,
                     volume: vol,
                     percentage: (vol * 100.0).round() as u32,
                     muted,
-                    is_master: true,
-                })
+                    is_master: false,
+                }),
+                Ok(None) => {
+                    // The hovered application currently has no active audio session in WASAPI.
+                    // Fall back gracefully to adjusting master volume so taskbar scrolling never freezes!
+                    let (vol, muted) = adjust_master_volume(delta).ok()?;
+                    Some(VolumeChangeResult {
+                        title: format!("{osd_title} (Master)"),
+                        volume: vol,
+                        percentage: (vol * 100.0).round() as u32,
+                        muted,
+                        is_master: true,
+                    })
+                }
+                Err(_) => {
+                    let (vol, muted) = adjust_master_volume(delta).ok()?;
+                    Some(VolumeChangeResult {
+                        title: "Master Volume".to_string(),
+                        volume: vol,
+                        percentage: (vol * 100.0).round() as u32,
+                        muted,
+                        is_master: true,
+                    })
+                }
             }
-            Err(_) => {
-                let (vol, muted) = adjust_master_volume(delta).ok()?;
-                Some(VolumeChangeResult {
-                    title: "Master Volume".to_string(),
-                    volume: vol,
-                    percentage: (vol * 100.0).round() as u32,
-                    muted,
-                    is_master: true,
-                })
-            }
-        },
+        }
     }
 }
 
@@ -810,5 +927,38 @@ mod tests {
             resolve_app_executable_stem("Appid: Microsoft.VisualStudioCode", "Visual Studio Code"),
             Some("code".to_string())
         );
+    }
+
+    #[test]
+    fn osd_titles_use_clean_product_names() {
+        let app = |stem: &str, title: &str| {
+            TaskbarTarget::Application {
+                display_title: title.to_string(),
+                executable_stem: stem.to_string(),
+            }
+        };
+        assert_eq!(taskbar_osd_title(&app("googlechrome", "Google Chrome and pi docs")), "Google Chrome");
+        assert_eq!(taskbar_osd_title(&app("discord", "General | The ...")), "Discord");
+        assert_eq!(taskbar_osd_title(&app("code", "Prism - Visual Studio Code")), "VS Code");
+        assert_eq!(taskbar_osd_title(&app("windowsterminal", "Windows Terminal")), "Terminal");
+        assert_eq!(taskbar_osd_title(&TaskbarTarget::Master), "Master Volume");
+    }
+
+    #[test]
+    fn osd_titles_humanize_unknown_stems() {
+        let app = |stem: &str| {
+            TaskbarTarget::Application {
+                display_title: "Irrelevant - window title".to_string(),
+                executable_stem: stem.to_string(),
+            }
+        };
+        assert_eq!(taskbar_osd_title(&app("mstsc")), "Mstsc");
+        assert_eq!(taskbar_osd_title(&app("obs64")), "Obs64");
+        // A safe fallback to the cleaned window title when no stem is useful.
+        let weird = TaskbarTarget::Application {
+            display_title: "Some App".to_string(),
+            executable_stem: "<unresolved>".to_string(),
+        };
+        assert_eq!(taskbar_osd_title(&weird), "Some App");
     }
 }
