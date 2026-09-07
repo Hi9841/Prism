@@ -998,6 +998,12 @@ fn toggle_palette_with_presentation(
     anchor: Option<PresentationAnchor>,
 ) {
     let timer = perf::start();
+    if matches!(
+        source,
+        PresentationSource::WinKey | PresentationSource::TaskbarStartClick
+    ) {
+        win_key::dismiss_native_start_soon();
+    }
     let Some(window) = app.get_webview_window("main") else {
         return;
     };
