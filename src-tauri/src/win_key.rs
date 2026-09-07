@@ -61,9 +61,9 @@ use windows::Win32::UI::Input::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, ChangeWindowMessageFilterEx, CreateWindowExW, DefWindowProcW, DestroyWindow,
-    DispatchMessageW, EnumChildWindows, FindWindowW, GetClassNameW, GetShellWindow, GetWindowRect,
-    GetWindowThreadProcessId, IsWindowVisible, MsgWaitForMultipleObjectsEx, PeekMessageW,
-    PostThreadMessageW, RegisterClassW, RegisterWindowMessageW, SetWindowsHookExW,
+    DispatchMessageW, EnumChildWindows, FindWindowW, GetClassNameW, GetMessageTime, GetShellWindow,
+    GetWindowRect, GetWindowThreadProcessId, IsWindowVisible, MsgWaitForMultipleObjectsEx,
+    PeekMessageW, PostThreadMessageW, RegisterClassW, RegisterWindowMessageW, SetWindowsHookExW,
     TranslateMessage, UnhookWindowsHookEx, HHOOK, KBDLLHOOKSTRUCT, KBDLLHOOKSTRUCT_FLAGS,
     LLKHF_INJECTED, LLKHF_LOWER_IL_INJECTED, MSG, MSGFLT_ALLOW, PM_REMOVE, QS_ALLINPUT,
     RI_KEY_BREAK, WH_GETMESSAGE, WH_KEYBOARD_LL, WH_MOUSE, WM_APP, WM_INPUT, WM_KEYDOWN, WM_KEYUP,
@@ -360,6 +360,8 @@ static TYPEAHEAD: Mutex<TypeaheadBuffer> = Mutex::new(TypeaheadBuffer::EMPTY);
 static SHELL_START_FALLBACK: Mutex<ShellStartFallback> = Mutex::new(ShellStartFallback::EMPTY);
 static LAST_OBSERVER_WIN: Mutex<Option<Instant>> = Mutex::new(None);
 static KEYBOARD_HOOK: AtomicIsize = AtomicIsize::new(0);
+static LAST_HOOK_INPUT_TIME: Mutex<Option<u32>> = Mutex::new(None);
+static KEYBOARD_HOOK_RECOVERY: AtomicBool = AtomicBool::new(false);
 static LAST_OBSERVED_KEY: Mutex<Option<(KeyKind, bool, Instant)>> = Mutex::new(None);
 /// Set when taskbar geometry changes (alignment moves, resizes) so the pump
 /// refreshes the Start rect immediately instead of up to 5 seconds later.
@@ -798,8 +800,11 @@ fn should_arm_shell_fallback(last_observer_win: Option<Instant>, now: Instant) -
     last_observer_win.is_none_or(|at| now.duration_since(at) >= SHELL_START_FALLBACK_GRACE)
 }
 
-fn should_feed_raw_keyboard(keyboard_hook_installed: bool) -> bool {
-    !keyboard_hook_installed
+fn should_feed_raw_keyboard(last_hook_input: Option<u32>, raw_input_time: u32) -> bool {
+    // A saved HHOOK does not prove that the callback is still installed.
+    // Both input paths use Windows message timestamps. Ignore raw packets
+    // already covered by the hook, including packets delayed in the queue.
+    last_hook_input.is_none_or(|last| raw_input_time.wrapping_sub(last) as i32 > 0)
 }
 
 fn should_attach_app_manager_hook(
@@ -1024,6 +1029,10 @@ unsafe fn run_pump(ready: HookReady) {
         }
     };
     RAW_OBSERVER_ACTIVE.store(true, Ordering::Release);
+    if let Ok(mut last) = LAST_HOOK_INPUT_TIME.lock() {
+        *last = None;
+    }
+    KEYBOARD_HOOK_RECOVERY.store(false, Ordering::Release);
     install_keyboard_hook();
     let com_initialized = CoInitializeEx(None, COINIT_MULTITHREADED).is_ok();
     // Observation is live as soon as raw input is registered. Explorer is
@@ -1046,9 +1055,13 @@ unsafe fn run_pump(ready: HookReady) {
             let _ = TranslateMessage(&msg);
             let _ = DispatchMessageW(&msg);
         }
-        flush_pending_win_toggle();
+        flush_pending_win_toggle(); 
         flush_shell_start_fallback();
         flush_typeahead_deadline();
+        if KEYBOARD_HOOK_RECOVERY.swap(false, Ordering::AcqRel) {
+            uninstall_keyboard_hook();
+            install_keyboard_hook();
+        }
         if shell_bridge.is_none() && Instant::now() >= next_bridge_attempt {
             match ShellBridge::install() {
                 Ok(bridge) => {
@@ -1146,7 +1159,10 @@ fn debug_trace(message: &str) {
             .join("Prism")
             .join("semantic-debug.log"),
     ) {
-        let _ = writeln!(file, "{message}");
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default();
+        let _ = writeln!(file, "{} {message}", now.as_millis());
     }
 }
 
@@ -2073,8 +2089,17 @@ fn cancel_pending_win_toggle() {
 }
 
 fn cancel_shell_start_fallback() {
-    if let Ok(mut pending) = SHELL_START_FALLBACK.lock() {
-        pending.cancel();
+    let cancelled = SHELL_START_FALLBACK
+        .lock()
+        .ok()
+        .map(|mut pending| {
+            let was = pending.armed;
+            pending.cancel();
+            was
+        })
+        .unwrap_or(false);
+    if cancelled {
+        debug_trace("shell-fallback-cancelled");
     }
 }
 
@@ -2083,6 +2108,7 @@ fn last_observer_win() -> Option<Instant> {
 }
 
 fn note_observer_win(now: Instant) {
+    debug_trace("observer-win-observed");
     if let Ok(mut last) = LAST_OBSERVER_WIN.lock() {
         *last = Some(now);
     }
@@ -2092,10 +2118,12 @@ fn note_observer_win(now: Instant) {
 fn arm_shell_start_fallback() {
     let now = Instant::now();
     if !should_arm_shell_fallback(last_observer_win(), now) {
+        debug_trace("shell-fallback-arm-skipped (observer fresh)");
         return;
     }
     if let Ok(mut pending) = SHELL_START_FALLBACK.lock() {
         pending.arm(now);
+        debug_trace("shell-fallback-armed");
     }
 }
 
@@ -2112,6 +2140,7 @@ fn flush_pending_win_toggle() {
     if let Ok(mut pending) = PENDING_WIN_TOGGLE.lock() {
         let side = pending.take_if_ready(Instant::now());
         if let Some(side) = side {
+            debug_trace(&format!("pending-toggle-ready {side:?}"));
             // Keep the pending lock through enqueueing. Disable/reset paths
             // take this same lock after clearing ACTIVE, so a candidate either
             // queues before their final drain or observes inactive.
@@ -2119,6 +2148,7 @@ fn flush_pending_win_toggle() {
                 && RAW_OBSERVER_ACTIVE.load(Ordering::Acquire)
                 && SHELL_BRIDGE_ACTIVE.load(Ordering::Acquire)
                 && queue_action(Action::ToggleWin(side));
+            debug_trace(&format!("pending-toggle-queued={queued}"));
             if !queued {
                 end_typeahead(true);
             }
@@ -2132,6 +2162,7 @@ fn flush_shell_start_fallback() {
         .lock()
         .ok()
         .is_some_and(|mut pending| pending.take_if_ready(now));
+    debug_trace(&format!("shell-fallback-ready {ready}"));
     if ready
         && ACTIVE.load(Ordering::Acquire)
         && SHELL_BRIDGE_ACTIVE.load(Ordering::Acquire)
@@ -2177,6 +2208,10 @@ fn pending_observer_wait() -> Option<Duration> {
 
 fn observe_keyboard_event(kind: KeyKind, is_down: bool) {
     if is_duplicate_observer_event(kind, is_down) {
+        debug_trace(&format!(
+            "dedupe-skip {:?} down={is_down}",
+            kind
+        ));
         return;
     }
     if matches!(kind, KeyKind::Win(_)) {
@@ -2192,13 +2227,21 @@ fn observe_keyboard_event(kind: KeyKind, is_down: bool) {
         .lock()
         .map(|mut machine| machine.feed(kind, is_down))
         .unwrap_or(Decision::Pass);
+    debug_trace(&format!(
+        "machine {:?} down={is_down} -> {:?}",
+        kind, decision
+    ));
     match decision {
         Decision::Toggle(side) if should_defer_toggle(kind) => {
+            debug_trace(&format!("schedule-win-toggle {side:?}"));
             schedule_win_toggle(side, non_win_keys_down());
         }
         Decision::Toggle(side) => {
             if !queue_action(Action::ToggleWin(side)) {
+                debug_trace("win-toggle-queue-failed");
                 end_typeahead(true);
+            } else {
+                debug_trace("win-toggle-queued");
             }
         }
         // Chords and unmatched releases must keep the state machine's
@@ -2286,6 +2329,13 @@ unsafe extern "system" fn keyboard_ll_proc(code: i32, wparam: WPARAM, lparam: LP
         let keyboard = &*(lparam.0 as *const KBDLLHOOKSTRUCT);
         if !is_injected_key(keyboard.flags) {
             if let Some((kind, is_down)) = classify_ll_key(keyboard.vkCode, wparam.0 as u32) {
+                debug_trace(&format!(
+                    "hook-key {:?} down={is_down}",
+                    kind
+                ));
+                if let Ok(mut last) = LAST_HOOK_INPUT_TIME.lock() {
+                    *last = Some(keyboard.time);
+                }
                 observe_keyboard_event(kind, is_down);
                 if intercept_typeahead(keyboard, is_down) {
                     return LRESULT(1);
@@ -2333,6 +2383,9 @@ fn observe_pending_win_key(key: u16, is_down: bool) {
         })
         .unwrap_or(false);
     if cancelled {
+        debug_trace(&format!(
+            "pending-toggle-cancelled key={key:#x} down={is_down}"
+        ));
         end_typeahead(true);
     }
 }
@@ -2390,8 +2443,12 @@ unsafe extern "system" fn raw_input_window_proc(
     if message == WM_INPUT
         && ACTIVE.load(Ordering::Acquire)
         && RAW_OBSERVER_ACTIVE.load(Ordering::Acquire)
-        && should_feed_raw_keyboard(KEYBOARD_HOOK.load(Ordering::Acquire) != 0)
     {
+        let last_hook_input = LAST_HOOK_INPUT_TIME.lock().ok().and_then(|last| *last);
+        if !should_feed_raw_keyboard(last_hook_input, GetMessageTime() as u32) {
+            debug_trace("raw-skip (hook covered)");
+            return DefWindowProcW(window, message, wparam, lparam);
+        }
         let mut input = RAWINPUT::default();
         let mut size = std::mem::size_of::<RAWINPUT>() as u32;
         let read = GetRawInputData(
@@ -2411,6 +2468,11 @@ unsafe extern "system" fn raw_input_window_proc(
                 keyboard.Flags,
                 keyboard.Message,
             ) {
+                debug_trace(&format!(
+                    "raw-key {:?} down={is_down}",
+                    kind
+                ));
+                KEYBOARD_HOOK_RECOVERY.store(true, Ordering::Release);
                 observe_keyboard_event(kind, is_down);
             }
         }
@@ -2443,6 +2505,7 @@ fn queue_action(action: Action) -> bool {
     loop {
         let previous = LAST_TOGGLE_MS.load(Ordering::Acquire);
         if within_toggle_debounce(previous, now) {
+            debug_trace("toggle-drop-debounce");
             return false;
         }
         if LAST_TOGGLE_MS
@@ -2453,9 +2516,11 @@ fn queue_action(action: Action) -> bool {
         }
     }
     let Some(tx) = ACTION_TX.get() else {
+        debug_trace("toggle-drop-action-tx-missing");
         return false;
     };
     if tx.send(action).is_err() {
+        debug_trace("toggle-drop-action-send-failed");
         return false;
     }
     let thread_id = THREAD_ID.load(Ordering::SeqCst);
@@ -3137,9 +3202,22 @@ mod tests {
     }
 
     #[test]
-    fn raw_keyboard_is_idle_while_the_low_level_hook_is_installed() {
-        assert!(should_feed_raw_keyboard(false));
-        assert!(!should_feed_raw_keyboard(true));
+    fn raw_keyboard_skips_input_already_delivered_by_the_hook() {
+        assert!(!should_feed_raw_keyboard(Some(100), 100));
+        assert!(!should_feed_raw_keyboard(Some(100), 90));
+    }
+
+    #[test]
+    fn raw_keyboard_recovers_when_an_installed_hook_stops_delivering_input() {
+        // A nonzero HHOOK survives Windows silently removing a timed-out hook.
+        assert!(should_feed_raw_keyboard(Some(100), 101));
+        assert!(should_feed_raw_keyboard(None, 101));
+    }
+
+    #[test]
+    fn raw_keyboard_recovery_handles_windows_timestamp_wraparound() {
+        assert!(should_feed_raw_keyboard(Some(u32::MAX), 0));
+        assert!(!should_feed_raw_keyboard(Some(0), u32::MAX));
     }
 
     #[test]
