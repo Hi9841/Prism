@@ -583,6 +583,24 @@ export function Palette() {
     el?.scrollIntoView({ block: "nearest" });
   }, [palette.selected]);
 
+  // Rough page size for PageUp/PageDown: the default palette shows roughly
+  // this many dense rows. Selection clamping handles the edges.
+  const PAGE_SIZE = 8;
+
+  const jumpToEdge = useCallback(
+    (edge: "first" | "last") => {
+      palette.select(edge === "first" ? 0 : Math.max(0, palette.flatItems.length - 1));
+    },
+    [palette],
+  );
+
+  const pageMove = useCallback(
+    (delta: -1 | 1) => {
+      palette.move(delta * PAGE_SIZE);
+    },
+    [palette],
+  );
+
   return (
     <div className="shell focus-ring" style={{ height: "100%" }}>
       <PaletteSearchInput
@@ -595,6 +613,8 @@ export function Palette() {
         settingsOpen={app.openSettings}
         onQueryChange={palette.setQuery}
         onMove={palette.move}
+        onJump={jumpToEdge}
+        onPageMove={pageMove}
         onRunSelected={palette.runSelected}
         onOpenSelectedMenu={openSelectedMenu}
         onDismiss={dismiss}
