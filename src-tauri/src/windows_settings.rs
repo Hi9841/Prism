@@ -76,7 +76,6 @@ const ALLOWED_URIS: &[&str] = &[
 ];
 
 pub fn open(uri: &str) -> Result<(), String> {
-    crate::attach_to_default_desktop();
     if !is_allowed(uri) {
         return Err("unsupported Windows Settings URI".to_string());
     }

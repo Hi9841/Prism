@@ -3,7 +3,7 @@
 import { act, cleanup, render } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as bridge from "../lib/bridge";
-import { DEFAULT_SETTINGS, type FileSearchResponse, type PaletteItem } from "../lib/types";
+import { DEFAULT_SETTINGS, type FileSearchResponse } from "../lib/types";
 import { PaletteProvider, usePalette } from "./palette";
 
 vi.mock("../lib/bridge", () => ({
@@ -58,10 +58,6 @@ function Probe() {
 
 beforeEach(() => {
   vi.clearAllMocks();
-  vi.mocked(bridge.getApps).mockResolvedValue([]);
-  vi.mocked(bridge.getAppIcons).mockResolvedValue({});
-  vi.mocked(bridge.refreshApps).mockResolvedValue([]);
-  vi.mocked(bridge.getFileThumbnails).mockImplementation(async (paths) => paths.map(() => null));
   vi.useFakeTimers();
   indexUpdated = undefined;
   vi.mocked(bridge.onFileIndexUpdated).mockImplementation((callback) => {
@@ -83,105 +79,6 @@ beforeEach(() => {
         }
       : statusResponse,
   );
-});
-
-async function mountPalette() {
-  await act(async () => {
-    render(
-      <PaletteProvider>
-        <Probe />
-      </PaletteProvider>,
-    );
-  });
-}
-
-describe("palette recovery", () => {
-  it("waits for a successful launch before hiding and recording history", async () => {
-    await mountPalette();
-    const launched = deferred<void>();
-    const item: PaletteItem = {
-      id: "app::example",
-      title: "Example",
-      historyTitle: "Example",
-      icon: { kind: "app", name: "Example" },
-      run: () => launched.promise,
-    };
-    const running = palette.runItem(item);
-    expect(bridge.hidePaletteWindow).not.toHaveBeenCalled();
-    expect(mockApp.pushHistory).not.toHaveBeenCalled();
-    await act(async () => {
-      launched.resolve();
-      await running;
-    });
-    expect(bridge.hidePaletteWindow).toHaveBeenCalledTimes(1);
-    expect(mockApp.pushHistory).toHaveBeenCalledWith(item.id, item.historyTitle);
-  });
-
-  it("releases the indexing state after a rejected rebuild so the user can retry", async () => {
-    await mountPalette();
-    vi.mocked(bridge.rebuildFileIndex).mockRejectedValueOnce(new Error("catalog unavailable"));
-    await act(async () => palette.rebuildIndex());
-    expect(palette.fileIndexing).toBe(false);
-    expect(mockApp.showToast).toHaveBeenCalledWith(
-      "Could not rebuild file index",
-      expect.stringContaining("catalog unavailable"),
-      "error",
-    );
-    await act(async () => palette.rebuildIndex());
-    expect(bridge.rebuildFileIndex).toHaveBeenCalledTimes(2);
-  });
-
-  it.each(["launch", "clipboard", "administrator"])(
-    "reports %s failures as persistent errors",
-    async (kind) => {
-      await mountPalette();
-      const fail = vi.fn().mockRejectedValue(new Error("access denied"));
-      const item: PaletteItem = {
-        id: kind === "clipboard" ? "calc::2+2" : "app::example",
-        title: "Example",
-        historyTitle: "Example",
-        icon: { kind: "app", name: "Example" },
-        run: fail,
-        runAsAdmin: fail,
-      };
-      await act(async () => {
-        if (kind === "administrator") await palette.runItemAsAdmin(item);
-        else await palette.runItem(item);
-      });
-      expect(mockApp.showToast).toHaveBeenCalledWith(
-        kind === "clipboard"
-          ? "Could not copy to clipboard"
-          : kind === "administrator"
-            ? "Could not run as administrator"
-            : "Could not open item",
-        expect.stringContaining("access denied"),
-        "error",
-      );
-      expect(mockApp.pushHistory).not.toHaveBeenCalled();
-      if (kind === "launch") {
-        expect(bridge.hidePaletteWindow).not.toHaveBeenCalled();
-      }
-    },
-  );
-
-  it("requests fresh icons after a rescan and ignores the previous in-flight response", async () => {
-    const apps = [{ appId: "example", name: "Example" }];
-    const oldIcons = deferred<Record<string, string>>();
-    const freshIcons = deferred<Record<string, string>>();
-    vi.mocked(bridge.getApps).mockResolvedValueOnce(apps);
-    vi.mocked(bridge.refreshApps).mockResolvedValueOnce(apps);
-    vi.mocked(bridge.getAppIcons)
-      .mockReturnValueOnce(oldIcons.promise)
-      .mockReturnValueOnce(freshIcons.promise);
-    await mountPalette();
-    expect(bridge.getAppIcons).toHaveBeenCalledTimes(1);
-    await act(async () => palette.refreshApps());
-    expect(bridge.getAppIcons).toHaveBeenCalledTimes(2);
-    await act(async () => freshIcons.resolve({ example: "fresh" }));
-    expect(palette.flatItems.find((item) => item.appId === "example")?.icon).toMatchObject({ icon: "fresh" });
-    await act(async () => oldIcons.resolve({ example: "stale" }));
-    expect(palette.flatItems.find((item) => item.appId === "example")?.icon).toMatchObject({ icon: "fresh" });
-  });
 });
 
 afterEach(() => {

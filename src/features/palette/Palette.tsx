@@ -133,7 +133,7 @@ export function Palette() {
         return;
       }
       if (settings.pinnedApps.length >= PINNED_APP_LIMIT) {
-        showToast("Pin limit reached", `Unpin an app before adding ${item.title}`, "error");
+        showToast("Pin limit reached", `Unpin an app before adding ${item.title}`);
         return;
       }
       updateSettings({
@@ -855,7 +855,7 @@ export function Palette() {
                 await item.toggleTaskbarPin?.();
                 showToast(wasPinned ? "Unpinned from taskbar" : "Pinned to taskbar", item.title);
               } catch (error) {
-                showToast("Could not update taskbar pin", String(error), "error");
+                showToast("Could not update taskbar pin", String(error));
               }
             })();
           }}
@@ -866,7 +866,7 @@ export function Palette() {
               try {
                 await item.showProperties?.();
               } catch (error) {
-                showToast("Could not open properties", String(error), "error");
+                showToast("Could not open properties", String(error));
               }
             })();
           }}
@@ -887,8 +887,8 @@ export function Palette() {
       </div>
 
       {/* ------- footer ------- */}
-      <div className="footer-bar flex shrink-0 flex-wrap items-center justify-between gap-x-2 gap-y-1 px-4 py-1.5">
-        <div className="flex shrink-0 items-center gap-1.5 whitespace-nowrap text-[11px] text-fg-quiet">
+      <div className="footer-bar flex min-h-12 flex-wrap items-center justify-between gap-x-3 gap-y-1 px-5 py-2.5">
+        <div className="flex items-center gap-1.5 text-[11px] text-fg-quiet">
           <Kbd>↑</Kbd>
           <Kbd>↓</Kbd>
           <span className="px-1">navigate</span>
@@ -899,7 +899,7 @@ export function Palette() {
           <Kbd>esc</Kbd>
           <span className="px-1">dismiss</span>
         </div>
-        <div className="ms-auto flex min-w-0 flex-wrap items-center justify-end gap-1">
+        <div className="ms-auto flex max-w-full flex-wrap items-center justify-end gap-1.5">
           <UpdateControl />
           {!palette.appsLoaded && palette.query === "" && (
             <span className="flex items-center gap-1.5 text-[11px] text-fg-quiet">
@@ -1201,7 +1201,7 @@ const ResultRow = memo(function ResultRow({
           onOpenContextMenu(item, index, event.clientX, event.clientY);
         }
       }}
-      className={`group/row row w-full text-left transition-colors duration-50 ${
+      className={`group row w-full text-left transition-colors duration-50 ${
         selected ? "bg-surface-active" : "hover:bg-surface-hover"
       }`}
     >
@@ -1338,7 +1338,7 @@ const ResultRow = memo(function ResultRow({
               title={`${pinned ? "Unpin" : "Pin"} ${item.title}`}
               tabIndex={selected ? 0 : -1}
               onClick={() => onTogglePin(item)}
-              className={`focus-ring press grid h-8 w-8 cursor-pointer place-items-center rounded-[8px] opacity-0 group-hover/row:opacity-100 focus:opacity-100 ${
+              className={`focus-ring press grid h-8 w-8 cursor-pointer place-items-center rounded-[8px] opacity-0 group-hover:opacity-100 focus:opacity-100 ${
                 pinned
                   ? "bg-accent-soft text-accent"
                   : "text-fg-tertiary hover:bg-surface-hover hover:text-fg"
@@ -1364,7 +1364,7 @@ const ResultRow = memo(function ResultRow({
                 title="Remove from Recent"
                 tabIndex={selected ? 0 : -1}
                 onClick={() => onRemoveHistory(item.id)}
-                className="focus-ring press grid h-8 w-8 cursor-pointer place-items-center rounded-[8px] text-fg-tertiary opacity-60 transition-opacity duration-150 group-hover/row:opacity-100 focus:opacity-100 hover:bg-danger-soft hover:text-danger"
+                className="focus-ring press grid h-8 w-8 cursor-pointer place-items-center rounded-[8px] text-fg-tertiary opacity-60 transition-opacity duration-150 group-hover:opacity-100 focus:opacity-100 hover:bg-danger-soft hover:text-danger"
               >
                 <X className="h-4 w-4" />
               </button>
@@ -1377,12 +1377,12 @@ const ResultRow = memo(function ResultRow({
             title="Remove from Recent"
             tabIndex={selected ? 0 : -1}
             onClick={() => onRemoveHistory(item.id)}
-            className="focus-ring press grid h-8 w-8 cursor-pointer place-items-center rounded-[8px] text-fg-tertiary opacity-60 transition-opacity duration-150 group-hover/row:opacity-100 focus:opacity-100 hover:bg-danger-soft hover:text-danger"
+            className="focus-ring press grid h-8 w-8 cursor-pointer place-items-center rounded-[8px] text-fg-tertiary opacity-60 transition-opacity duration-150 group-hover:opacity-100 focus:opacity-100 hover:bg-danger-soft hover:text-danger"
           >
             <X className="h-4 w-4" />
           </button>
         ) : isClipboardKind(item.id) && selected ? (
-          <span className="text-[12px] font-semibold text-fg-secondary tabular-nums">Enter to copy</span>
+          <span className="text-[12px] font-semibold text-accent tabular-nums">Enter to copy</span>
         ) : canDragFile ? (
           <div className="flex items-center gap-1.5">
             {selected ? <span className="text-[11px] font-medium text-fg-tertiary">Drag to copy</span> : null}
