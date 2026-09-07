@@ -25,15 +25,20 @@ const fn rgb(r: u8, g: u8, b: u8) -> COLORREF {
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DispatchMessageW, GetMessageW, KillTimer, PostMessageW,
     RegisterClassW, SetTimer, SetWindowPos, ShowWindow, TranslateMessage, UpdateLayeredWindow,
-    CS_HREDRAW, CS_VREDRAW, HWND_TOPMOST, SWP_NOACTIVATE, SW_HIDE, SW_SHOWNOACTIVATE, ULW_ALPHA,
-    WM_APP, WM_DESTROY, WM_TIMER, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
-    WS_EX_TOPMOST, WS_POPUP,
+    CS_HREDRAW, CS_VREDRAW, HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SW_HIDE,
+    SW_SHOWNOACTIVATE, ULW_ALPHA, WM_APP, WM_DESTROY, WM_TIMER, WNDCLASSW, WS_EX_LAYERED,
+    WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 
 const OSD_WIDTH: i32 = 244;
 const OSD_HEIGHT: i32 = 56;
 const TIMER_HIDE: usize = 1;
+const TIMER_TOPMOST: usize = 2;
 const HIDE_DELAY_MS: u32 = 1200;
+/// Re-assert topmost shortly after showing. Other topmost windows that were
+/// activated just before the OSD (Discord call popouts, game overlays) can
+/// otherwise render above it, hiding high-priority feedback behind them.
+const TOPMOST_REASSERT_MS: u32 = 250;
 const WM_UPDATE_OSD: u32 = WM_APP + 50;
 
 static OSD_HWND: AtomicIsize = AtomicIsize::new(0);
@@ -161,16 +166,32 @@ unsafe extern "system" fn osd_wnd_proc(
             if let Some(state) = state {
                 render_and_position(hwnd, &state);
                 let _ = SetTimer(Some(hwnd), TIMER_HIDE, HIDE_DELAY_MS, None);
+                let _ = SetTimer(Some(hwnd), TIMER_TOPMOST, TOPMOST_REASSERT_MS, None);
             }
+            LRESULT(0)
+        }
+        WM_TIMER if wparam.0 == TIMER_TOPMOST => {
+            let _ = KillTimer(Some(hwnd), TIMER_TOPMOST);
+            let _ = SetWindowPos(
+                hwnd,
+                Some(HWND_TOPMOST),
+                0,
+                0,
+                0,
+                0,
+                SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE,
+            );
             LRESULT(0)
         }
         WM_TIMER if wparam.0 == TIMER_HIDE => {
             let _ = KillTimer(Some(hwnd), TIMER_HIDE);
+            let _ = KillTimer(Some(hwnd), TIMER_TOPMOST);
             let _ = ShowWindow(hwnd, SW_HIDE);
             LRESULT(0)
         }
         WM_DESTROY => {
             let _ = KillTimer(Some(hwnd), TIMER_HIDE);
+            let _ = KillTimer(Some(hwnd), TIMER_TOPMOST);
             LRESULT(0)
         }
         _ => DefWindowProcW(hwnd, msg, wparam, lparam),
@@ -705,19 +726,29 @@ unsafe fn render_typography(pixels: &mut [u32], width: i32, _height: i32, state:
     let _ = SetTextColor(text_dc, rgb(255, 255, 255));
 
     let is_no_audio = state.title.ends_with("(No Audio)");
+    let is_master_fallback = state.title.ends_with("(Master)");
     let clean_title = if is_no_audio {
         state.title.trim_end_matches(" (No Audio)").trim()
+    } else if is_master_fallback {
+        state.title.trim_end_matches(" (Master)").trim()
     } else {
         &state.title
     };
 
-    // 1. Draw Title text
+    // 1. Draw Title text. Master-fallback titles swap the percentage for the
+    // word "Master" so a long app name never fights the suffix for space.
     let display_title = truncate_string(clean_title, if is_no_audio { 15 } else { 19 });
     let mut wide_title: Vec<u16> = display_title.encode_utf16().collect();
     let mut title_rect = RECT {
         left: 38,
         top: 10,
-        right: if is_no_audio { width - 82 } else { width - 58 },
+        right: if is_no_audio {
+            width - 82
+        } else if is_master_fallback {
+            width - 68
+        } else {
+            width - 58
+        },
         bottom: 27,
     };
     windows::Win32::Graphics::Gdi::DrawTextW(
@@ -726,7 +757,8 @@ unsafe fn render_typography(pixels: &mut [u32], width: i32, _height: i32, state:
         &mut title_rect,
         windows::Win32::Graphics::Gdi::DT_LEFT
             | windows::Win32::Graphics::Gdi::DT_SINGLELINE
-            | windows::Win32::Graphics::Gdi::DT_VCENTER,
+            | windows::Win32::Graphics::Gdi::DT_VCENTER
+            | windows::Win32::Graphics::Gdi::DT_END_ELLIPSIS,
     );
 
     // Composite Title with pure crisp white (255, 255, 255)
@@ -750,13 +782,19 @@ unsafe fn render_typography(pixels: &mut [u32], width: i32, _height: i32, state:
         ("No Audio".to_string(), (148u8, 163u8, 184u8)) // Slate-400
     } else if state.muted {
         ("Muted".to_string(), (248u8, 113u8, 113u8)) // Rose Coral
+    } else if is_master_fallback {
+        ("Master".to_string(), (148u8, 163u8, 184u8)) // Slate-400
     } else {
         (format!("{}%", state.percentage), (203u8, 213u8, 225u8)) // Slate-300
     };
 
     let mut wide_pct: Vec<u16> = pct_text.encode_utf16().collect();
     let mut pct_rect = RECT {
-        left: if is_no_audio { width - 80 } else { width - 62 },
+        left: if is_no_audio || is_master_fallback {
+            width - 80
+        } else {
+            width - 62
+        },
         top: 10,
         right: width - 16,
         bottom: 27,
