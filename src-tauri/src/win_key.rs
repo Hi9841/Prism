@@ -10,10 +10,11 @@
 //!   through. After a standalone Win-up, character keys are eaten into a
 //!   typeahead buffer until Prism's search field takes them.
 //! - The Explorer message hook consumes its `SC_TASKLIST` command on the
-//!   desktop, taskbar, and app-manager threads. Explorer's registered Win
-//!   hotkey stays in place, so the hook can be removed without changing the
-//!   user's shortcut registrations. Provider-managed mode keeps the provider's
-//!   own suppression path and Explorer fallback.
+//!   desktop, taskbar, and app-manager threads (`ApplicationManager_DesktopShellWindow`
+//!   and the older `ApplicationManager_ImmersiveShellWindow`). Explorer's
+//!   registered Win hotkey stays in place, so the hook can be removed without
+//!   changing the user's shortcut registrations. Provider-managed mode keeps
+//!   the provider's own suppression path and Explorer fallback.
 //! - StartAllBack integration disables the provider's Win action reversibly.
 //! - A small Explorer message hook takes ownership of `SC_TASKLIST` before
 //!   native Start is launched. It fails open if Prism's observer disappears.
@@ -61,13 +62,14 @@ use windows::Win32::UI::Input::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, ChangeWindowMessageFilterEx, CreateWindowExW, DefWindowProcW, DestroyWindow,
-    DispatchMessageW, EnumChildWindows, FindWindowW, GetClassNameW, GetShellWindow, GetWindowRect,
-    GetWindowThreadProcessId, IsWindowVisible, MsgWaitForMultipleObjectsEx, PeekMessageW,
-    PostThreadMessageW, RegisterClassW, RegisterWindowMessageW, SetWindowsHookExW,
-    TranslateMessage, UnhookWindowsHookEx, HHOOK, KBDLLHOOKSTRUCT, KBDLLHOOKSTRUCT_FLAGS,
-    LLKHF_INJECTED, LLKHF_LOWER_IL_INJECTED, MSG, MSGFLT_ALLOW, PM_REMOVE, QS_ALLINPUT,
-    RI_KEY_BREAK, WH_GETMESSAGE, WH_KEYBOARD_LL, WH_MOUSE, WM_APP, WM_INPUT, WM_KEYDOWN, WM_KEYUP,
-    WM_SYSKEYDOWN, WM_SYSKEYUP, WNDCLASSW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_POPUP,
+    DispatchMessageW, EnumChildWindows, EnumWindows, FindWindowW, GetClassNameW, GetShellWindow,
+    GetWindowRect, GetWindowTextW, GetWindowThreadProcessId, IsWindowVisible,
+    MsgWaitForMultipleObjectsEx, PeekMessageW, PostMessageW, PostThreadMessageW, RegisterClassW,
+    RegisterWindowMessageW, SetWindowsHookExW, ShowWindow, TranslateMessage, UnhookWindowsHookEx,
+    HHOOK, KBDLLHOOKSTRUCT, KBDLLHOOKSTRUCT_FLAGS, LLKHF_INJECTED, LLKHF_LOWER_IL_INJECTED, MSG,
+    MSGFLT_ALLOW, PM_REMOVE, QS_ALLINPUT, RI_KEY_BREAK, SC_CLOSE, SW_HIDE, WH_GETMESSAGE,
+    WH_KEYBOARD_LL, WH_MOUSE, WM_APP, WM_INPUT, WM_KEYDOWN, WM_KEYUP, WM_SYSCOMMAND, WM_SYSKEYDOWN,
+    WM_SYSKEYUP, WNDCLASSW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_POPUP,
 };
 
 const ACTION_MESSAGE: u32 = WM_APP + 1;
@@ -106,6 +108,12 @@ const SHELL_CONTROL_TASKBAR_PIN: usize = 20;
 const SHELL_CONTROL_TASKBAR_UNPIN: usize = 21;
 const SHELL_EVENT_TASKBAR_PIN_COMPLETED: usize = 22;
 const SHELL_EVENT_SHELL_START: usize = 23;
+const APP_MANAGER_WINDOW_CLASSES: [&str; 2] = [
+    "ApplicationManager_DesktopShellWindow",
+    "ApplicationManager_ImmersiveShellWindow",
+];
+const NATIVE_START_CORE_CLASS: &str = "Windows.UI.Core.CoreWindow";
+const NATIVE_START_WINDOW_TITLES: [&str; 2] = ["Start", "Search"];
 
 /// Event the frontend receives when Win observation self-disables.
 pub const FAILED_EVENT: &str = "win-mode-failed";
@@ -354,6 +362,7 @@ static SHELL_ICON_SHUTDOWN_ACK: AtomicU32 = AtomicU32::new(0);
 static SHELL_TASKBAR_PIN_ACK: AtomicU32 = AtomicU32::new(0);
 static SHELL_TASKBAR_PIN_REQUEST: Mutex<()> = Mutex::new(());
 static LAST_TOGGLE_MS: AtomicU64 = AtomicU64::new(0);
+static DISMISS_GENERATION: AtomicU64 = AtomicU64::new(0);
 static TOGGLE_CLOCK: OnceLock<Instant> = OnceLock::new();
 static PENDING_WIN_TOGGLE: Mutex<PendingWinToggle> = Mutex::new(PendingWinToggle::EMPTY);
 static TYPEAHEAD: Mutex<TypeaheadBuffer> = Mutex::new(TypeaheadBuffer::EMPTY);
@@ -814,6 +823,65 @@ fn should_attach_app_manager_hook(
         && app_manager_thread != taskbar_thread
 }
 
+fn is_native_start_window(class_name: &[u16], title: &[u16]) -> bool {
+    ascii_class_eq(class_name, NATIVE_START_CORE_CLASS)
+        && NATIVE_START_WINDOW_TITLES
+            .iter()
+            .any(|expected| ascii_class_eq(title, expected))
+}
+
+/// Hide a native Start/Search host that still appeared after the shell
+/// command was consumed. Windows 11 can show `StartMenuExperienceHost` from a
+/// thread Prism has not hooked yet; a short retry covers that race.
+pub(crate) fn dismiss_native_start_soon() {
+    hide_native_start_windows();
+    let generation = DISMISS_GENERATION.fetch_add(1, Ordering::AcqRel) + 1;
+    std::thread::spawn(move || {
+        for delay_ms in [40_u64, 90, 180] {
+            std::thread::sleep(Duration::from_millis(delay_ms));
+            if DISMISS_GENERATION.load(Ordering::Acquire) != generation {
+                return;
+            }
+            hide_native_start_windows();
+        }
+    });
+}
+
+fn hide_native_start_windows() {
+    unsafe {
+        let _ = EnumWindows(Some(hide_native_start_enum), LPARAM(0));
+    }
+}
+
+unsafe extern "system" fn hide_native_start_enum(window: HWND, _detail: LPARAM) -> BOOL {
+    if !IsWindowVisible(window).as_bool() {
+        return BOOL(1);
+    }
+    let mut class_name = [0u16; 64];
+    let class_len = GetClassNameW(window, &mut class_name);
+    if class_len <= 0 {
+        return BOOL(1);
+    }
+    let mut title = [0u16; 64];
+    let title_len = GetWindowTextW(window, &mut title);
+    if title_len <= 0 {
+        return BOOL(1);
+    }
+    if is_native_start_window(
+        &class_name[..class_len as usize],
+        &title[..title_len as usize],
+    ) {
+        let _ = ShowWindow(window, SW_HIDE);
+        let _ = PostMessageW(
+            Some(window),
+            WM_SYSCOMMAND,
+            WPARAM(SC_CLOSE as usize),
+            LPARAM(0),
+        );
+    }
+    BOOL(1)
+}
+
 static ACTION_TX: OnceLock<mpsc::Sender<Action>> = OnceLock::new();
 static ACTION_RX: Mutex<Option<mpsc::Receiver<Action>>> = Mutex::new(None);
 static STOP_READY: Mutex<Option<StopReady>> = Mutex::new(None);
@@ -1180,7 +1248,7 @@ struct ShellBridge {
     module: HMODULE,
     progman_hook: HHOOK,
     taskbar_message_hook: Option<HHOOK>,
-    app_manager_hook: Option<HHOOK>,
+    app_manager_hooks: Vec<(u32, HHOOK)>,
     taskbar_mouse_hook: HHOOK,
     taskbar_thread: u32,
     start_button_locator: StartButtonLocator,
@@ -1359,7 +1427,7 @@ impl ShellBridge {
             module,
             progman_hook,
             taskbar_message_hook,
-            app_manager_hook: None,
+            app_manager_hooks: Vec::new(),
             taskbar_mouse_hook,
             taskbar_thread,
             start_button_locator,
@@ -1378,39 +1446,40 @@ impl ShellBridge {
 
     fn try_attach_app_manager(&mut self) {
         unsafe {
-            let Ok(app_manager) = find_shell_window("ApplicationManager_ImmersiveShellWindow")
-            else {
+            let Some(proc) = GetProcAddress(
+                self.module,
+                PCSTR(c"PrismShellGetMessageHook".as_ptr().cast()),
+            ) else {
                 return;
             };
-            let app_manager_thread = GetWindowThreadProcessId(app_manager, None);
-            if app_manager_thread == 0 {
-                return;
-            }
+            let hook_proc =
+                std::mem::transmute::<unsafe extern "system" fn() -> isize, ShellHookProc>(proc);
             let progman_thread = GetWindowThreadProcessId(GetShellWindow(), None);
-            if should_attach_app_manager_hook(
-                app_manager_thread,
-                progman_thread,
-                self.taskbar_thread,
-                self.app_manager_hook.is_some(),
-            ) {
-                let Some(proc) = GetProcAddress(
-                    self.module,
-                    PCSTR(c"PrismShellGetMessageHook".as_ptr().cast()),
-                ) else {
-                    return;
+            for class_name in APP_MANAGER_WINDOW_CLASSES {
+                let Ok(app_manager) = find_shell_window(class_name) else {
+                    continue;
                 };
-                let hook_proc = std::mem::transmute::<
-                    unsafe extern "system" fn() -> isize,
-                    ShellHookProc,
-                >(proc);
+                let app_manager_thread = GetWindowThreadProcessId(app_manager, None);
+                let already_attached = self
+                    .app_manager_hooks
+                    .iter()
+                    .any(|(thread, _)| *thread == app_manager_thread);
+                if !should_attach_app_manager_hook(
+                    app_manager_thread,
+                    progman_thread,
+                    self.taskbar_thread,
+                    already_attached,
+                ) {
+                    continue;
+                }
                 match SetWindowsHookExW(
                     WH_GETMESSAGE,
                     Some(hook_proc),
                     Some(HINSTANCE(self.module.0)),
                     app_manager_thread,
                 ) {
-                    Ok(hook) => self.app_manager_hook = Some(hook),
-                    Err(_) => return,
+                    Ok(hook) => self.app_manager_hooks.push((app_manager_thread, hook)),
+                    Err(_) => continue,
                 }
             }
         }
@@ -1791,7 +1860,7 @@ impl Drop for ShellBridge {
             if let Some(hook) = self.taskbar_message_hook {
                 let _ = UnhookWindowsHookEx(hook);
             }
-            if let Some(hook) = self.app_manager_hook {
+            for (_, hook) in self.app_manager_hooks.drain(..) {
                 let _ = UnhookWindowsHookEx(hook);
             }
             let _ = UnhookWindowsHookEx(self.taskbar_mouse_hook);
@@ -3145,9 +3214,41 @@ mod tests {
     #[test]
     fn app_manager_hook_attaches_only_to_an_uncovered_shell_thread() {
         assert!(should_attach_app_manager_hook(3, 1, 2, false));
+        assert!(should_attach_app_manager_hook(4, 1, 2, false));
         assert!(!should_attach_app_manager_hook(1, 1, 2, false));
         assert!(!should_attach_app_manager_hook(2, 1, 2, false));
         assert!(!should_attach_app_manager_hook(3, 1, 2, true));
+    }
+
+    #[test]
+    fn app_manager_window_classes_cover_desktop_and_legacy_immersive_shell() {
+        assert_eq!(
+            APP_MANAGER_WINDOW_CLASSES,
+            [
+                "ApplicationManager_DesktopShellWindow",
+                "ApplicationManager_ImmersiveShellWindow",
+            ]
+        );
+    }
+
+    #[test]
+    fn native_start_core_windows_are_start_and_search_only() {
+        fn units(value: &str) -> Vec<u16> {
+            value.encode_utf16().collect()
+        }
+        let core = units("Windows.UI.Core.CoreWindow");
+        assert!(is_native_start_window(&core, &units("Start")));
+        assert!(is_native_start_window(&core, &units("Search")));
+        assert!(is_native_start_window(
+            &units("windows.ui.core.corewindow"),
+            &units("start")
+        ));
+        assert!(!is_native_start_window(&core, &units("Settings")));
+        assert!(!is_native_start_window(
+            &units("Shell_TrayWnd"),
+            &units("Start")
+        ));
+        assert!(!is_native_start_window(&core, &units("")));
     }
 
     #[test]
