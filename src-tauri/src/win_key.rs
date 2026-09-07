@@ -1419,14 +1419,13 @@ impl ShellBridge {
                     unsafe extern "system" fn() -> isize,
                     ShellHookProc,
                 >(proc);
-                match SetWindowsHookExW(
+                if let Ok(hook) = SetWindowsHookExW(
                     WH_GETMESSAGE,
                     Some(hook_proc),
                     Some(HINSTANCE(self.module.0)),
                     app_manager_thread,
                 ) {
-                    Ok(hook) => self.app_manager_hook = Some(hook),
-                    Err(_) => return,
+                    self.app_manager_hook = Some(hook);
                 }
             }
         }
@@ -2168,11 +2167,9 @@ fn flush_shell_start_fallback() {
         && SHELL_BRIDGE_ACTIVE.load(Ordering::Acquire)
         && !crate::palette_is_open()
         && should_arm_shell_fallback(last_observer_win(), now)
-    {
-        if !queue_action(Action::ToggleWin(WinSide::Left)) {
+        && !queue_action(Action::ToggleWin(WinSide::Left)) {
             end_typeahead(true);
         }
-    }
 }
 
 fn flush_typeahead_deadline() {
