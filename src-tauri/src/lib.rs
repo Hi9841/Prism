@@ -14,6 +14,7 @@ mod taskbar_customization;
 mod taskbar_icon_overlay;
 mod theme;
 mod win_key;
+mod launcher_watch;
 mod windows_settings;
 
 use std::path::{Path, PathBuf};
@@ -207,6 +208,7 @@ pub fn run() {
             let _ = taskbar_alignment::initialize(&alignment);
             schedule_startup_taskbar_alignment();
             win_key::init(app.handle().clone());
+            launcher_watch::init();
             let customization_app = app.handle().clone();
             tauri::async_runtime::spawn_blocking(move || {
                 taskbar_customization::init(customization_app);
@@ -1035,6 +1037,7 @@ fn toggle_palette_with_presentation(
     };
     let opening = toggle_open_state(&PALETTE_OPEN);
     win_key_debug_trace(&format!("palette-toggle open={opening}"));
+    launcher_watch::note_own_toggle();
     let transition = PALETTE_TRANSITION.fetch_add(1, Ordering::AcqRel) + 1;
     if !opening {
         clear_activation_grace();
@@ -1808,6 +1811,7 @@ fn apply_shortcut_with_generation(
             let _ = start_menu::restore(app);
             return Err(error);
         }
+        launcher_watch::set_enabled(true);
         if let Ok(old) = prev.parse::<Shortcut>() {
             let _ = gs.unregister(old);
         }
@@ -1823,6 +1827,7 @@ fn apply_shortcut_with_generation(
             }
             return Err(error);
         }
+        launcher_watch::set_enabled(false);
         if let Err(error) = start_menu::restore(app) {
             let _ = win_key::set_enabled(true);
             if let Ok(shortcut) = combo.parse::<Shortcut>() {
