@@ -298,6 +298,7 @@ pub fn run() {
             take_open_typeahead,
             hide_palette,
             set_window_style,
+            set_osd_accent,
             set_window_width,
             set_taskbar_alignment,
             get_taskbar_settings,
@@ -1626,6 +1627,13 @@ fn is_animatable_window_width(width: u32) -> bool {
 }
 
 /// Applies the window style in one IPC round-trip: native theme plus the
+/// Pushes the accent preset to the native volume OSD so its level bar stays
+/// in family with the palette accent.
+#[tauri::command]
+fn set_osd_accent(accent: String) {
+    crate::audio_osd::set_accent(&accent);
+}
+
 /// solid-only surface rule.
 #[tauri::command]
 fn set_window_style(app: tauri::AppHandle, theme: String) -> Result<(), String> {
