@@ -78,13 +78,15 @@ decreased by exactly 1 and the edited line is gone from the site list.
 Run the full gate and confirm it stays green:
 
 ```powershell
-bun run lint
 bun run test
 bun run build
 cargo fmt --manifest-path src-tauri\Cargo.toml --all -- --check
 cargo clippy --manifest-path src-tauri\Cargo.toml --all-targets -- -D warnings
 cargo test --manifest-path src-tauri\Cargo.toml
 ```
+
+Do **not** run `bun run lint`: it is broken at HEAD (no `biome.json` in the repo, plus
+Windows CRLF) and is intentionally excluded from the gate. Do not try to fix it here.
 
 Completion criterion: every command passes. If one fails, fix only what your
 change broke and re-run; if it still fails, name the exact blocker in your

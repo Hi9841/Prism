@@ -12,9 +12,10 @@ Keep durable guidance only — not one-off instructions or single-run logs.
   (`unwrap` / `expect` / `panic!`) toward zero. Currently 25 sites.
 - Scope is `src-tauri/src` non-test code only. Never touch test modules, `src/`,
   or CI files.
-- One site per run. Behavior-preserving changes only. The full gate
-  (`bun run lint` / `test` / `build` + `cargo fmt --check` / `clippy -D warnings` / `test`)
-  must stay green before commit.
+- One site per run. Behavior-preserving changes only. The gate
+  (`bun run test` / `build` + `cargo fmt --check` / `clippy -D warnings` / `test`)
+  must stay green before commit. Do not run `bun run lint`: it is broken at HEAD
+  (no `biome.json`; Windows CRLF) and is excluded from the gate.
 - Selection priority (controller): `lock` → `parse` → `bare` → `expect`.
 - The two startup `.expect("...")` sites (`src-tauri/src/lib.rs:274`,
   `src-tauri/src/power.rs:130`) are documented, unrecoverable-startup panics and
