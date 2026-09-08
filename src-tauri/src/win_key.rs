@@ -54,9 +54,9 @@ use windows::Win32::UI::WindowsAndMessaging::{
     EnumChildWindows, FindWindowW, GetClassNameW, GetShellWindow, GetWindowRect,
     GetWindowThreadProcessId, IsWindowVisible, MsgWaitForMultipleObjectsEx, PeekMessageW,
     PostThreadMessageW, RegisterClassW, RegisterWindowMessageW, SetWindowsHookExW,
-    TranslateMessage, UnhookWindowsHookEx, HHOOK, HWND_MESSAGE, MSG, MSGFLT_ALLOW, PM_REMOVE,
-    QS_ALLINPUT, RI_KEY_BREAK, WH_GETMESSAGE, WH_MOUSE, WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP,
-    WM_INPUT, WM_KEYDOWN, WM_KEYUP, WM_SYSKEYDOWN, WM_SYSKEYUP, WNDCLASSW,
+    TranslateMessage, UnhookWindowsHookEx, HHOOK, MSG, MSGFLT_ALLOW, PM_REMOVE, QS_ALLINPUT,
+    RI_KEY_BREAK, WH_GETMESSAGE, WH_MOUSE, WM_APP, WM_INPUT, WM_KEYDOWN, WM_KEYUP, WM_SYSKEYDOWN,
+    WM_SYSKEYUP, WNDCLASSW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_POPUP,
 };
 
 const ACTION_MESSAGE: u32 = WM_APP + 1;
@@ -1625,16 +1625,20 @@ unsafe fn create_raw_input_window() -> Result<HWND, String> {
     let module = GetModuleHandleW(None).map_err(|error| format!("get Prism module: {error}"))?;
     let instance = HINSTANCE(module.0);
     let class_name = wide(RAW_INPUT_WINDOW_CLASS);
+    // Message-only windows stop receiving keyboard INPUTSINK reports while an
+    // elevated app (for example Task Manager) holds focus, so the Win key never
+    // reaches Prism until focus leaves that window. A hidden top-level tool
+    // window keeps receiving background keyboard reports.
     let window = CreateWindowExW(
-        WINDOW_EX_STYLE::default(),
+        WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
         PCWSTR(class_name.as_ptr()),
         PCWSTR::null(),
-        WINDOW_STYLE::default(),
+        WS_POPUP,
         0,
         0,
         0,
         0,
-        Some(HWND_MESSAGE),
+        None,
         None,
         Some(instance),
         None,

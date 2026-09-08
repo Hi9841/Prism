@@ -1386,14 +1386,14 @@ unsafe fn bitmap_to_png(bitmap: HBITMAP) -> Option<Vec<u8>> {
         return None;
     }
     // GetDIBits yields BGRA; shell bitmaps arrive with premultiplied alpha.
-    let has_alpha = pixels.chunks_exact(4).any(|p| p[3] != 0);
+    let has_alpha = pixels.as_chunks::<4>().0.iter().any(|p| p[3] != 0);
     if !has_alpha {
         // No alpha channel: the 32-bit conversion filled 0s - force opaque.
-        for px in pixels.chunks_exact_mut(4) {
+        for px in pixels.as_chunks_mut::<4>().0 {
             px[3] = 255;
         }
     } else {
-        for px in pixels.chunks_exact_mut(4) {
+        for px in pixels.as_chunks_mut::<4>().0 {
             let (b, g, r, a) = (px[0] as u32, px[1] as u32, px[2] as u32, px[3] as u32);
             let scale = |c: u32| ((c * 255) / a.max(1)).min(255) as u8;
             px[0] = scale(r);
@@ -1455,7 +1455,9 @@ unsafe fn reg_string(hk: HKEY, name: &str) -> Option<String> {
     }
     if value_type.0 == REG_SZ.0 || value_type.0 == REG_EXPAND_SZ.0 {
         let units: Vec<u16> = buf
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|c| u16::from_le_bytes([c[0], c[1]]))
             .collect();
         let end = units.iter().position(|&u| u == 0).unwrap_or(units.len());
