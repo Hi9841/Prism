@@ -60,7 +60,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 
 const ACTION_MESSAGE: u32 = WM_APP + 1;
-const TOGGLE_DEBOUNCE_MS: u64 = 50;
+const TOGGLE_DEBOUNCE_MS: u64 = 80;
 const WIN_TOGGLE_RELEASE_GRACE: Duration = Duration::from_millis(30);
 /// The Start button rect only needs refreshing occasionally; the UIA query is
 /// expensive and runs on Explorer's side.
@@ -90,10 +90,10 @@ const SHELL_EVENT_TASKBAR_PIN_COMPLETED: usize = 22;
 const SHELL_CONTROL_FOREGROUND_WINDOW: usize = 23;
 const SHELL_EVENT_FOREGROUND_RESULT: usize = 24;
 const SHELL_EVENT_SHELL_START_COMMAND: usize = 25;
-/// Grace after a shell Start command before toggling, so a raw Win event that
-/// arrives a moment later can cancel it (avoids a double toggle). The raw Win
-/// path defers at most 30 ms, so 40 ms covers it without a visible delay.
-const SHELL_START_FALLBACK_GRACE: Duration = Duration::from_millis(40);
+/// A shell Start command toggles immediately. The normal case is already
+/// de-duplicated: a raw Win-down sets `LAST_RAW_TOGGLE_MS` ~100 ms before the
+/// Win-up shell command, and a late raw toggle is dropped by the debounce.
+const SHELL_START_FALLBACK_GRACE: Duration = Duration::ZERO;
 /// If the raw observer saw a Win/Ctrl+Esc this recently, a shell Start command
 /// belongs to the same press and is ignored.
 const SHELL_START_DEDUPE_MS: u64 = 400;
@@ -2708,11 +2708,10 @@ mod tests {
     }
 
     #[test]
-    fn shell_start_fallback_waits_for_grace_then_fires_once() {
+    fn shell_start_fallback_fires_once() {
         let now = Instant::now();
         let mut pending = ShellStartFallback::EMPTY;
         pending.arm(now);
-        assert!(!pending.take_if_ready(now));
         assert!(pending.take_if_ready(now + SHELL_START_FALLBACK_GRACE));
         // Fires once; a second flush is a no-op.
         assert!(!pending.take_if_ready(now + SHELL_START_FALLBACK_GRACE));
