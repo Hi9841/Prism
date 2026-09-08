@@ -563,7 +563,15 @@ unsafe fn ensure_icon_window() -> Hwnd {
     if *slot != 0 {
         return *slot as Hwnd;
     }
-    let owner = FindWindowW(TASKBAR_CLASS.as_ptr(), std::ptr::null());
+    // Own the overlay from Prism's observer window when it is reachable:
+    // owned popups are destroyed by Windows when their owner dies, so a dead
+    // Prism removes the overlay (and its click callback) automatically and
+    // the native button returns without any heartbeat round-trip. The taskbar
+    // remains the fallback owner while the observer is not findable.
+    let mut owner = FindWindowW(OBSERVER_CLASS.as_ptr(), std::ptr::null());
+    if owner.is_null() {
+        owner = FindWindowW(TASKBAR_CLASS.as_ptr(), std::ptr::null());
+    }
     if owner.is_null() {
         return std::ptr::null_mut();
     }
@@ -612,7 +620,6 @@ unsafe fn ensure_icon_window() -> Hwnd {
             "overlay-created hwnd={} subclassed={}",
             window as usize, subclassed
         ));
-        let _ = SetTimer(window, TIMER_HEARTBEAT, HEARTBEAT_CHECK_MS, std::ptr::null_mut());
         *slot = window as usize;
     }
     window
@@ -636,46 +643,6 @@ unsafe extern "system" fn overlay_subclass_proc(
             let _ = ClientToScreen(hwnd, &mut point);
             let _ = notify_start_click(bridge_message_id(), &point);
             1
-        }
-        msg if msg == WM_TIMER && wparam == TIMER_HEARTBEAT => {
-            let now = GetTickCount64();
-            let last = LAST_HEARTBEAT_MS.load(Ordering::Relaxed);
-            if heartbeat_stale(last, now) {
-                if !OVERLAY_HIDDEN.swap(true, Ordering::AcqRel) {
-                    hook_trace("heartbeat-hidden");
-                    let _ = ShowWindow(hwnd, SW_HIDE);
-                }
-                return 0;
-            }
-            // Self-heal the position from the latest rect atoms. The message
-            // chain that delivers them can race (a search-rect round or a
-            // partial config between ticks), so the overlay re-reads them
-            // itself instead of trusting a single refresh sequence.
-            if !OVERLAY_HIDDEN.load(Ordering::Relaxed) {
-                let left = START_RECT_LEFT.load(Ordering::Relaxed);
-                let top = START_RECT_TOP.load(Ordering::Relaxed);
-                let right = START_RECT_RIGHT.load(Ordering::Relaxed);
-                let bottom = START_RECT_BOTTOM.load(Ordering::Relaxed);
-                let width = right - left;
-                let height = bottom - top;
-                if width >= 16 && height >= 16 && width < 200 && height < 200 {
-                    let _ = SetWindowPos(
-                        hwnd,
-                        std::ptr::null_mut(),
-                        left,
-                        top,
-                        width,
-                        height,
-                        SWP_NOACTIVATE,
-                    );
-                    // If the render pipeline bailed out while the rect was
-                    // degenerate, repaint now that it is sane again.
-                    if unsafe { IsWindowVisible(hwnd) } == 0 {
-                        let _ = refresh_icon_window();
-                    }
-                }
-            }
-            0
         }
         _ => DefSubclassProc(hwnd, msg, wparam, lparam),
     }
@@ -1032,6 +999,38 @@ unsafe fn notify_start_click(message: u32, point: &Point) -> bool {
         ) != 0
 }
 
+/// Reposition the overlay from the latest rect atoms and repaint when the
+/// render pipeline bailed out on a degenerate rect at startup. Called on every
+/// heartbeat, so a lost rect message heals within one interval.
+fn self_heal_overlay() {
+    if let Ok(slot) = ICON_WINDOW.lock() {
+        if *slot == 0 {
+            return;
+        }
+        let overlay = *slot as Hwnd;
+        let width = START_RECT_RIGHT.load(Ordering::Relaxed)
+            - START_RECT_LEFT.load(Ordering::Relaxed);
+        let height = START_RECT_BOTTOM.load(Ordering::Relaxed)
+            - START_RECT_TOP.load(Ordering::Relaxed);
+        if width >= 16 && height >= 16 && width < 200 && height < 200 {
+            unsafe {
+                let _ = SetWindowPos(
+                    overlay,
+                    std::ptr::null_mut(),
+                    START_RECT_LEFT.load(Ordering::Relaxed),
+                    START_RECT_TOP.load(Ordering::Relaxed),
+                    width,
+                    height,
+                    SWP_NOACTIVATE,
+                );
+                if IsWindowVisible(overlay) == 0 {
+                    let _ = refresh_icon_window();
+                }
+            }
+        }
+    }
+}
+
 /// Explorer invokes this callback in the thread that owns its Start command.
 /// It touches only queued messages and never receives or synthesizes keyboard input.
 #[no_mangle]
@@ -1152,6 +1151,13 @@ pub unsafe extern "system" fn PrismShellGetMessageHook(
                     if OVERLAY_HIDDEN.swap(false, Ordering::AcqRel) {
                         let _ = refresh_icon_window();
                     }
+                    // No window timer exists by design: a recurring callback
+                    // would keep firing into this module after a hard-killed
+                    // Prism let it unload (Explorer crashed with 0xc0000005
+                    // exactly that way). The overlay is owned by Prism's
+                    // observer window, so it is destroyed when Prism dies, and
+                    // the heartbeat hides it if Prism pauses instead.
+                    self_heal_overlay();
                     message.message = WM_NULL;
                 }
                 _ => {}
