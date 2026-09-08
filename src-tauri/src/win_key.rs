@@ -45,7 +45,7 @@ use windows::Win32::System::Threading::GetCurrentThreadId;
 use windows::Win32::System::Variant::VARIANT;
 use windows::Win32::UI::Accessibility::{
     CUIAutomation, IUIAutomation, IUIAutomationCondition, IUIAutomationElement,
-    TreeScope_Descendants, UIA_AutomationIdPropertyId, UIA_ProcessIdPropertyId,
+    TreeScope_Descendants, UIA_AutomationIdPropertyId,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetAsyncKeyState, GetKeyState, SendInput, ToUnicode, INPUT, INPUT_0, INPUT_KEYBOARD,
@@ -955,7 +955,7 @@ pub fn set_enabled(on: bool) -> Result<(), String> {
     ACTIVE.store(on, Ordering::SeqCst);
     if !on {
         // The backstop watcher must never outlive the takeover it guards.
-        launcher_watch::set_enabled(false);
+        crate::launcher_watch::set_enabled(false);
         SHELL_BRIDGE_ACTIVE.store(false, Ordering::Release);
         RAW_MACHINE.lock().map(|mut m| m.reset()).ok();
         reset_press_observation();
@@ -1003,7 +1003,7 @@ pub fn set_enabled(on: bool) -> Result<(), String> {
         Ok(result) => {
             // Only arm the launcher backstop once the takeover is really up;
             // a failed start must leave the native Start menu alone.
-            launcher_watch::set_enabled(result.is_ok());
+            crate::launcher_watch::set_enabled(result.is_ok());
             result
         }
         Err(_) => {
