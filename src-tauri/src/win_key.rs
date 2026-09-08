@@ -87,6 +87,7 @@ const BRIDGE_RETRY_DELAY: Duration = Duration::from_millis(50);
 const SHELL_ACK_TIMEOUT: Duration = Duration::from_millis(200);
 const SHELL_BRIDGE_MESSAGE_NAME: &str = "Prism.ShellBridge.v1";
 const SHELL_CONTROL_START_RECT_LEFT: usize = 4;
+const SHELL_CONTROL_START_RECT_CHANGED: usize = 25;
 const SHELL_CONTROL_START_RECT_TOP: usize = 5;
 const SHELL_CONTROL_START_RECT_RIGHT: usize = 6;
 const SHELL_CONTROL_START_RECT_BOTTOM: usize = 7;
@@ -106,6 +107,9 @@ const SHELL_CONTROL_TASKBAR_PIN: usize = 20;
 const SHELL_CONTROL_TASKBAR_UNPIN: usize = 21;
 const SHELL_EVENT_TASKBAR_PIN_COMPLETED: usize = 22;
 const SHELL_EVENT_SHELL_START: usize = 23;
+/// Regular ping so the shell hook can distinguish a live Prism from a dead
+/// one. If the pings stop, the overlay hides and the native Start returns.
+const SHELL_CONTROL_HEARTBEAT: usize = 24;
 
 /// Event the frontend receives when Win observation self-disables.
 pub const FAILED_EVENT: &str = "win-mode-failed";
@@ -372,7 +376,6 @@ static LAST_OBSERVED_KEY: Mutex<Option<(KeyKind, bool, Instant)>> = Mutex::new(N
 /// refreshes the Start rect immediately instead of up to 5 seconds later.
 static START_RECT_REFRESH_REQUEST: AtomicBool = AtomicBool::new(false);
 
-#[derive(Clone, Copy, Debug)]
 enum Action {
     ToggleWin(WinSide),
     ToggleTaskbar(POINT),
@@ -1089,6 +1092,16 @@ unsafe fn run_pump(ready: HookReady) {
             // Explorer keeps all registered hotkeys intact.
             bridge.try_attach_app_manager();
             bridge.refresh_start_rect();
+            // Heartbeat: proves Prism is alive so the overlay button never
+            // survives a dead Prism (see shell-hook CONTROL_HEARTBEAT).
+            if let Ok(message) = shell_bridge_message() {
+                let _ = PostThreadMessageW(
+                    bridge.taskbar_thread,
+                    message,
+                    WPARAM(SHELL_CONTROL_HEARTBEAT),
+                    LPARAM(0),
+                );
+            }
         }
         if let Ok(mut rx_slot) = ACTION_RX.lock() {
             if let Some(rx) = rx_slot.as_mut() {
@@ -1097,7 +1110,6 @@ unsafe fn run_pump(ready: HookReady) {
                         break 'pump;
                     }
                     let start_rect = shell_bridge.as_ref().and_then(ShellBridge::start_rect);
-                    debug_trace(&format!("execute-action {:?}", action));
                     match action {
                         Action::ToggleWin(_side) => {
                             if let Some(app) = APP.get() {
@@ -1463,18 +1475,28 @@ impl ShellBridge {
             return;
         };
 
-        if let Some(rect) = self.start_button_locator.rect() {
-            debug_trace(&format!(
-                "start-rect-located ({} {} {} {})",
-                rect.left, rect.top, rect.right, rect.bottom
-            ));
+        if let Some(rect) = self
+            .start_button_locator
+            .rect()
+            .filter(|rect| valid_rect(*rect))
+        {
             if !same_rect(rect, self.start_rect)
                 && post_start_button_rect(self.taskbar_thread, message, rect).is_ok()
             {
                 self.start_rect = rect;
             }
         } else {
-            debug_trace("start-rect-locator-empty");
+            // UIA can flake while the XAML island restarts. Repost the last
+            // known-good rectangle so the overlay keeps its position instead
+            // of disappearing with a stale degenerate rect.
+            let cached = CURRENT_START_RECT.lock().ok().and_then(|rect| *rect);
+            if let Some(rect) = cached.filter(|rect| valid_rect(*rect)) {
+                if !same_rect(rect, self.start_rect)
+                    && post_start_button_rect(self.taskbar_thread, message, rect).is_ok()
+                {
+                    self.start_rect = rect;
+                }
+            }
         }
 
         let search_rect = self.search_button_locator.rect();
@@ -1498,9 +1520,16 @@ impl StartButtonLocator {
             taskbar,
             automation,
         };
-        let rect = locator.rect().ok_or_else(|| {
-            "Start button was not found by AutomationId or taskbar child class".to_string()
-        })?;
+        // The XAML island can report a degenerate rectangle while it is still
+        // coming up after an Explorer restart. Accepting it poisons the whole
+        // bridge: the overlay stays hidden at the stale rect until the next
+        // Explorer event. Reject degenerate or aspect-breaking rectangles.
+        let rect = locator
+            .rect()
+            .filter(|rect| valid_rect(*rect))
+            .ok_or_else(|| {
+                "Start button was not found by AutomationId or taskbar child class".to_string()
+            })?;
         Ok((locator, rect))
     }
 
@@ -1539,7 +1568,7 @@ impl StartButtonLocator {
 
 unsafe fn create_automation_start_button(
     taskbar_window: HWND,
-    _taskbar_process_id: u32,
+    taskbar_process_id: u32,
 ) -> Result<AutomationStartButton, String> {
     let uia: IUIAutomation = CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER)
         .map_err(|error| format!("create UI Automation client: {error}"))?;
@@ -1550,13 +1579,16 @@ unsafe fn create_automation_start_button(
     let automation_id_condition = uia
         .CreatePropertyCondition(UIA_AutomationIdPropertyId, &automation_id)
         .map_err(|error| format!("match StartButton AutomationId: {error}"))?;
-    // The Windows 11 Start button is hosted in a separate XAML island
-    // process (ShellExperienceHost, not Explorer.exe). Filtering by the
-    // taskbar's process id makes the query fail on 11, so the identity is
-    // scoped by the taskbar subtree plus this AutomationId only.
+    let process_id: VARIANT = (taskbar_process_id as i32).into();
+    let process_condition = uia
+        .CreatePropertyCondition(UIA_ProcessIdPropertyId, &process_id)
+        .map_err(|error| format!("match Explorer process: {error}"))?;
+    let condition = uia
+        .CreateAndCondition(&automation_id_condition, &process_condition)
+        .map_err(|error| format!("combine StartButton identity conditions: {error}"))?;
     Ok(AutomationStartButton {
         taskbar,
-        condition: automation_id_condition,
+        condition,
         cached: None,
     })
 }
@@ -1611,9 +1643,6 @@ fn same_rect(left: RECT, right: RECT) -> bool {
         && left.bottom == right.bottom
 }
 
-/// True when the point is inside Prism's own taskbar buttons (Start capture
-/// rect or Search button). The shell hook owns clicks there and toggles the
-/// palette; the outside-pointer dismissal must leave them alone.
 pub fn point_on_taskbar_buttons(point: POINT) -> bool {
     fn inside(rect: Option<RECT>, point: POINT) -> bool {
         rect.is_some_and(|rect| {
@@ -1628,27 +1657,51 @@ pub fn point_on_taskbar_buttons(point: POINT) -> bool {
     inside(start, point) || inside(search, point)
 }
 
+
 fn post_start_button_rect(thread: u32, message: u32, rect: RECT) -> Result<(), String> {
     if let Ok(mut current) = CURRENT_START_RECT.lock() {
         *current = Some(rect);
     }
-    for (control, coordinate) in [
-        (SHELL_CONTROL_START_RECT_LEFT, rect.left),
-        (SHELL_CONTROL_START_RECT_TOP, rect.top),
-        (SHELL_CONTROL_START_RECT_RIGHT, rect.right),
-        (SHELL_CONTROL_START_RECT_BOTTOM, rect.bottom),
-    ] {
-        unsafe {
-            PostThreadMessageW(
-                thread,
-                message,
-                WPARAM(control),
-                LPARAM(coordinate as isize),
-            )
-            .map_err(|error| format!("configure Explorer Start-button rectangle: {error}"))?;
-        }
+    // The rectangle travels as a small file plus one signal message instead
+    // of four ordered messages. The four-message sequence was racy: parts
+    // could be observed half-applied, and a message round could be missed
+    // entirely if the shell hook was reinstalled between posts, leaving the
+    // overlay stranded at a degenerate rect. The shell hook re-reads the
+    // file on every tick, so a lost signal heals within one interval.
+    write_start_rect_file(rect)?;
+    unsafe {
+        PostThreadMessageW(
+            thread,
+            message,
+            WPARAM(SHELL_CONTROL_START_RECT_CHANGED),
+            LPARAM(0),
+        )
+        .map_err(|error| format!("signal Explorer Start-button rectangle: {error}"))?;
     }
     Ok(())
+}
+
+/// The start rectangle file lives next to the icon file, where the shell
+/// hook already looks for Prism-owned taskbar state.
+fn start_rect_file_path() -> Result<PathBuf, String> {
+    let mut dir = std::env::var_os("APPDATA")
+        .map(PathBuf::from)
+        .ok_or_else(|| "APPDATA is unavailable".to_string())?;
+    dir.push("app.prism.launcher");
+    Ok(dir.join("taskbar-start-rect.txt"))
+}
+
+fn write_start_rect_file(rect: RECT) -> Result<(), String> {
+    let path = start_rect_file_path()?;
+    let bytes: Vec<u8> = [rect.left, rect.top, rect.right, rect.bottom]
+        .iter()
+        .flat_map(|value| value.to_le_bytes())
+        .collect();
+    let temp = path.with_extension("tmp");
+    std::fs::create_dir_all(path.parent().ok_or("start rect path has no parent")?)
+        .map_err(|error| format!("create start rect directory: {error}"))?;
+    std::fs::write(&temp, &bytes).map_err(|error| format!("write start rect file: {error}"))?;
+    crate::files::replace_file(&temp, &path)
 }
 
 fn post_search_button_rect(thread: u32, message: u32, rect: Option<RECT>) -> Result<(), String> {
@@ -1780,12 +1833,16 @@ unsafe fn create_automation_search_button(
         .CreateOrCondition(&id_or4, &cond_taskbar_search)
         .map_err(|error| format!("combine Search conditions: {error}"))?;
 
-    let _process_id: VARIANT = (taskbar_process_id as i32).into();
-    // The Win11 search button is also XAML-island hosted (not Explorer.exe);
-    // see the Start button locator for why the process filter is omitted.
+    let process_id: VARIANT = (taskbar_process_id as i32).into();
+    let process_condition = uia
+        .CreatePropertyCondition(UIA_ProcessIdPropertyId, &process_id)
+        .map_err(|error| format!("match Explorer process: {error}"))?;
+    let condition = uia
+        .CreateAndCondition(&id_condition, &process_condition)
+        .map_err(|error| format!("combine SearchButton identity conditions: {error}"))?;
     Ok(AutomationSearchButton {
         taskbar,
-        condition: id_condition,
+        condition,
         cached: None,
     })
 }
@@ -1924,25 +1981,17 @@ fn wait_for_ack(acknowledgement: &AtomicU32, timeout: Duration) -> u32 {
 }
 
 fn write_shell_hook_library() -> Result<PathBuf, String> {
+    // NOTE: stale DLLs are intentionally NOT removed here. A killed Prism
+    // leaves its hooks installed in Explorer, and the DLL stays mapped while
+    // those hooks fire. Deleting the file lets Windows lazily unload it the
+    // moment the last reference closes, and any hook callback still in flight
+    // then executes in an unmapped module: Explorer crashes (0xc0000005 in
+    // prism-shell-hook-*.dll, observed repeatedly). Unique nonce-named files
+    // in the temp shell-hooks directory are harmless; they self-clean on
+    // normal exits of the instance that owns them.
     let directory = std::env::temp_dir().join("Prism").join("shell-hooks");
     std::fs::create_dir_all(&directory)
         .map_err(|error| format!("create Explorer bridge directory: {error}"))?;
-    if let Ok(entries) = std::fs::read_dir(&directory) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            let is_stale_hook =
-                path.file_name()
-                    .and_then(|name| name.to_str())
-                    .is_some_and(|name| {
-                        name.starts_with("prism-shell-hook-") && name.ends_with(".dll")
-                    });
-            if is_stale_hook {
-                // Loaded DLLs remain locked on Windows, so this removes only
-                // debris from already-terminated Prism instances.
-                let _ = std::fs::remove_file(path);
-            }
-        }
-    }
     let nonce = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
@@ -2429,7 +2478,6 @@ unsafe extern "system" fn raw_input_window_proc(
     if shell_bridge_message().is_ok_and(|bridge_message| message == bridge_message) {
         match wparam.0 {
             SHELL_EVENT_START_RECT_CONFIGURED => {
-                debug_trace(&format!("start-rect-ack {}", lparam.0));
                 SHELL_START_RECT_ACK.store(if lparam.0 != 0 { 2 } else { 1 }, Ordering::Release);
             }
             SHELL_EVENT_SEARCH_RECT_CONFIGURED => {
@@ -2451,7 +2499,6 @@ unsafe extern "system" fn raw_input_window_proc(
                 arm_shell_start_fallback();
             }
             SHELL_EVENT_TASKBAR_START_CLICK_X => {
-                debug_trace(&format!("start-click-x {}", lparam.0));
                 SHELL_START_CLICK_X.store(lparam.0 as i32, Ordering::Release);
             }
             SHELL_EVENT_TASKBAR_START_CLICK_Y
@@ -2459,11 +2506,10 @@ unsafe extern "system" fn raw_input_window_proc(
                     && RAW_OBSERVER_ACTIVE.load(Ordering::Acquire)
                     && SHELL_BRIDGE_ACTIVE.load(Ordering::Acquire) =>
             {
-                let queued = queue_action(Action::ToggleTaskbar(POINT {
+                queue_action(Action::ToggleTaskbar(POINT {
                     x: SHELL_START_CLICK_X.load(Ordering::Acquire),
                     y: lparam.0 as i32,
                 }));
-                debug_trace(&format!("start-click-queued {queued}"));
             }
             _ => {}
         }

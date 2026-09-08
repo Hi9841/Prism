@@ -2,7 +2,7 @@
 
 use std::ffi::c_void;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 type Hhook = *mut c_void;
@@ -112,6 +112,15 @@ const CONTROL_TASKBAR_PIN: usize = 20;
 const CONTROL_TASKBAR_UNPIN: usize = 21;
 const EVENT_TASKBAR_PIN_COMPLETED: usize = 22;
 const EVENT_SHELL_START: usize = 23;
+const CONTROL_HEARTBEAT: usize = 24;
+const CONTROL_START_RECT_CHANGED: usize = 25;
+const TIMER_HEARTBEAT: usize = 42;
+const WM_TIMER: u32 = 0x0113;
+/// The overlay hides itself when this much time passes without a Prism
+/// heartbeat, so a crashed Prism can never leave a dead button on the
+/// taskbar: the native glyph and Start menu return automatically.
+const HEARTBEAT_DEAD_MS: u64 = 15_000;
+const HEARTBEAT_CHECK_MS: u32 = 5_000;
 const WS_POPUP: u32 = 0x8000_0000;
 const SS_BITMAP: u32 = 0x0000_000e;
 const WS_EX_TOOLWINDOW: u32 = 0x0000_0080;
@@ -143,6 +152,8 @@ static START_PRESS_CAPTURED: AtomicBool = AtomicBool::new(false);
 static ICON_WINDOW: Mutex<usize> = Mutex::new(0);
 static ICON_BITMAP: Mutex<usize> = Mutex::new(0);
 static ICON_BACKGROUND: Mutex<Option<(i32, i32, Vec<u8>)>> = Mutex::new(None);
+static LAST_HEARTBEAT_MS: AtomicU64 = AtomicU64::new(0);
+static OVERLAY_HIDDEN: AtomicBool = AtomicBool::new(false);
 
 const BRIDGE_MESSAGE: &[u16] = &[
     80, 114, 105, 115, 109, 46, 83, 104, 101, 108, 108, 66, 114, 105, 100, 103, 101, 46, 118, 49, 0,
@@ -160,6 +171,14 @@ const ICON_WINDOW_TITLE: &[u16] = &[
 const TASKBAR_CLASS: &[u16] = &[
     83, 104, 101, 108, 108, 95, 84, 114, 97, 121, 87, 110, 100, 0,
 ];
+
+#[link(name = "comctl32")]
+extern "system" {
+    fn SetWindowSubclass(hwnd: Hwnd, proc_: U32Proc, subclass_id: usize, data: usize) -> i32;
+    fn DefSubclassProc(hwnd: Hwnd, msg: u32, wparam: usize, lparam: isize) -> isize;
+}
+
+type U32Proc = unsafe extern "system" fn(Hwnd, u32, usize, isize) -> isize;
 
 #[link(name = "user32")]
 extern "system" {
@@ -184,6 +203,9 @@ extern "system" {
     ) -> Hwnd;
     fn DestroyWindow(window: Hwnd) -> i32;
     fn FindWindowW(class_name: *const u16, window_name: *const u16) -> Hwnd;
+    fn IsWindowVisible(window: Hwnd) -> i32;
+    fn SetTimer(hwnd: Hwnd, id: usize, timeout: u32, proc_: *mut c_void) -> usize;
+    fn ClientToScreen(hwnd: Hwnd, point: *mut Point) -> i32;
     fn GetDC(window: Hwnd) -> *mut c_void;
     fn GetWindowRect(window: Hwnd, rect: *mut Rect) -> i32;
     fn InvalidateRect(window: Hwnd, rect: *const Rect, erase: i32) -> i32;
@@ -231,6 +253,7 @@ extern "system" {
 #[link(name = "kernel32")]
 extern "system" {
     fn GetModuleHandleW(module_name: *const u16) -> *mut c_void;
+    fn GetTickCount64() -> u64;
     fn Sleep(milliseconds: u32);
 }
 
@@ -477,6 +500,25 @@ fn bridge_message_id() -> u32 {
     *BRIDGE_MESSAGE_ID.get_or_init(|| unsafe { RegisterWindowMessageW(BRIDGE_MESSAGE.as_ptr()) })
 }
 
+/// The Prism process writes the Start button rectangle here (16 bytes, four
+/// little-endian i32). The rect travels via file plus a signal message instead
+/// of four ordered messages, which could be observed half-applied or lost
+/// entirely across a shell-hook reinstall.
+fn read_start_rect_file() -> Option<(i32, i32, i32, i32)> {
+    let dir = std::env::var_os("APPDATA")?;
+    let mut path = PathBuf::from(dir);
+    path.push("app.prism.launcher");
+    path.push("taskbar-start-rect.txt");
+    let bytes = std::fs::read(path).ok()?;
+    if bytes.len() != 16 {
+        return None;
+    }
+    let read = |offset: usize| {
+        i32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap_or([0; 4]))
+    };
+    Some((read(0), read(4), read(8), read(12)))
+}
+
 fn icon_file_path() -> Option<PathBuf> {
     std::env::var_os("APPDATA").map(PathBuf::from).map(|path| {
         path.join("app.prism.launcher")
@@ -521,7 +563,15 @@ unsafe fn ensure_icon_window() -> Hwnd {
     if *slot != 0 {
         return *slot as Hwnd;
     }
-    let owner = FindWindowW(TASKBAR_CLASS.as_ptr(), std::ptr::null());
+    // Own the overlay from Prism's observer window when it is reachable:
+    // owned popups are destroyed by Windows when their owner dies, so a dead
+    // Prism removes the overlay (and its click callback) automatically and
+    // the native button returns without any heartbeat round-trip. The taskbar
+    // remains the fallback owner while the observer is not findable.
+    let mut owner = FindWindowW(OBSERVER_CLASS.as_ptr(), std::ptr::null());
+    if owner.is_null() {
+        owner = FindWindowW(TASKBAR_CLASS.as_ptr(), std::ptr::null());
+    }
     if owner.is_null() {
         return std::ptr::null_mut();
     }
@@ -562,10 +612,61 @@ unsafe fn ensure_icon_window() -> Hwnd {
         std::ptr::null_mut(),
     );
     if !window.is_null() {
+        // The overlay window IS the Prism Start button: subclass it so clicks
+        // land here and nowhere near a rectangle lookup, exactly like
+        // OpenShell subclasses the taskbar's Start child.
+        let subclassed = SetWindowSubclass(window, overlay_subclass_proc, 1, 0);
+        hook_trace(&format!(
+            "overlay-created hwnd={} subclassed={}",
+            window as usize, subclassed
+        ));
         *slot = window as usize;
     }
     window
 }
+
+/// Owns clicks on the Prism Start button and keeps the heartbeat.
+unsafe extern "system" fn overlay_subclass_proc(
+    hwnd: Hwnd,
+    msg: u32,
+    wparam: usize,
+    lparam: isize,
+) -> isize {
+    match msg {
+        // Down-fire, matching the standalone hook: press opens Prism
+        // immediately. The native Start menu would open on down too.
+        msg if msg == WM_LBUTTONDOWN as u32 => {
+            let mut point = Point {
+                x: lparam as u16 as i16 as i32,
+                y: (lparam >> 16) as u16 as i16 as i32,
+            };
+            let _ = ClientToScreen(hwnd, &mut point);
+            let _ = notify_start_click(bridge_message_id(), &point);
+            1
+        }
+        _ => DefSubclassProc(hwnd, msg, wparam, lparam),
+    }
+}
+
+/// The Prism observer is considered gone after HEARTBEAT_DEAD_MS without a
+/// ping, or before the first ping ever arrives (last == 0).
+fn heartbeat_stale(last_ms: u64, now_ms: u64) -> bool {
+    last_ms == 0 || now_ms.wrapping_sub(last_ms) > HEARTBEAT_DEAD_MS
+}
+
+/// Debug trace to the same temp directory the observer uses.
+#[cfg(not(test))]
+fn hook_trace(message: &str) {
+    if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(
+        std::env::temp_dir().join("Prism").join("shell-hook.log"),
+    ) {
+        let _ = std::io::Write::write_all(&mut file, format!("{message}
+").as_bytes());
+    }
+}
+
+#[cfg(test)]
+fn hook_trace(_message: &str) {}
 
 unsafe fn capture_background(rect: Rect) -> Option<Vec<u8>> {
     let width = rect.right - rect.left;
@@ -865,13 +966,13 @@ fn point_is_in_search_button(point: &Point) -> bool {
         && point.y < SEARCH_RECT_BOTTOM.load(Ordering::Relaxed)
 }
 
-/// True when the message targets Prism's own Start button overlay. The
-/// overlay window is the injected button: a click on it is a Start click
-/// regardless of the configured rectangle, so a stale rectangle from a
-/// taskbar shift can never drop the press.
-fn is_our_start_button(hwnd: Hwnd) -> bool {
-    !hwnd.is_null()
-        && unsafe { FindWindowW(STATIC_CLASS.as_ptr(), ICON_WINDOW_TITLE.as_ptr()) } == hwnd
+/// True while the Prism Start button overlay is actually rendering. While it
+/// is, the overlay's subclassed WndProc owns Start-button clicks and this
+/// hook must leave the rectangle path alone (consuming the click here would
+/// stop it from ever reaching the overlay).
+fn is_overlay_active() -> bool {
+    let window = ICON_WINDOW.lock().ok().map(|slot| *slot as Hwnd).unwrap_or(std::ptr::null_mut());
+    !window.is_null() && unsafe { IsWindowVisible(window) } != 0
 }
 
 fn has_active_icon() -> bool {
@@ -896,6 +997,38 @@ unsafe fn notify_start_click(message: u32, point: &Point) -> bool {
             EVENT_TASKBAR_START_CLICK_Y,
             point.y as isize,
         ) != 0
+}
+
+/// Reposition the overlay from the latest rect atoms and repaint when the
+/// render pipeline bailed out on a degenerate rect at startup. Called on every
+/// heartbeat, so a lost rect message heals within one interval.
+fn self_heal_overlay() {
+    if let Ok(slot) = ICON_WINDOW.lock() {
+        if *slot == 0 {
+            return;
+        }
+        let overlay = *slot as Hwnd;
+        let width = START_RECT_RIGHT.load(Ordering::Relaxed)
+            - START_RECT_LEFT.load(Ordering::Relaxed);
+        let height = START_RECT_BOTTOM.load(Ordering::Relaxed)
+            - START_RECT_TOP.load(Ordering::Relaxed);
+        if width >= 16 && height >= 16 && width < 200 && height < 200 {
+            unsafe {
+                let _ = SetWindowPos(
+                    overlay,
+                    std::ptr::null_mut(),
+                    START_RECT_LEFT.load(Ordering::Relaxed),
+                    START_RECT_TOP.load(Ordering::Relaxed),
+                    width,
+                    height,
+                    SWP_NOACTIVATE,
+                );
+                if IsWindowVisible(overlay) == 0 {
+                    let _ = refresh_icon_window();
+                }
+            }
+        }
+    }
 }
 
 /// Explorer invokes this callback in the thread that owns its Start command.
@@ -984,6 +1117,25 @@ pub unsafe extern "system" fn PrismShellGetMessageHook(
                         notify_observer(message_id, EVENT_SEARCH_RECT_CONFIGURED, valid as isize);
                     message.message = WM_NULL;
                 }
+                CONTROL_START_RECT_CHANGED => {
+                    if let Some((left, top, right, bottom)) = read_start_rect_file() {
+                        START_RECT_LEFT.store(left, Ordering::Relaxed);
+                        START_RECT_TOP.store(top, Ordering::Relaxed);
+                        START_RECT_RIGHT.store(right, Ordering::Relaxed);
+                        START_RECT_BOTTOM.store(bottom, Ordering::Relaxed);
+                        let valid = right > left && bottom > top;
+                        START_RECT_READY.store(valid, Ordering::Release);
+                        let _ =
+                            notify_observer(message_id, EVENT_START_RECT_CONFIGURED, valid as isize);
+                        if valid && has_active_icon() {
+                            let _ = refresh_icon_window();
+                        }
+                        hook_trace(&format!(
+                            "start-rect-file ({left} {top} {right} {bottom}) valid={valid}"
+                        ));
+                    }
+                    message.message = WM_NULL;
+                }
                 CONTROL_TASKBAR_PIN => {
                     let result = handle_taskbar_pin(true);
                     let _ = notify_observer(message_id, EVENT_TASKBAR_PIN_COMPLETED, result);
@@ -992,6 +1144,20 @@ pub unsafe extern "system" fn PrismShellGetMessageHook(
                 CONTROL_TASKBAR_UNPIN => {
                     let result = handle_taskbar_pin(false);
                     let _ = notify_observer(message_id, EVENT_TASKBAR_PIN_COMPLETED, result);
+                    message.message = WM_NULL;
+                }
+                CONTROL_HEARTBEAT => {
+                    LAST_HEARTBEAT_MS.store(GetTickCount64(), Ordering::Release);
+                    if OVERLAY_HIDDEN.swap(false, Ordering::AcqRel) {
+                        let _ = refresh_icon_window();
+                    }
+                    // No window timer exists by design: a recurring callback
+                    // would keep firing into this module after a hard-killed
+                    // Prism let it unload (Explorer crashed with 0xc0000005
+                    // exactly that way). The overlay is owned by Prism's
+                    // observer window, so it is destroyed when Prism dies, and
+                    // the heartbeat hides it if Prism pauses instead.
+                    self_heal_overlay();
                     message.message = WM_NULL;
                 }
                 _ => {}
@@ -1089,22 +1255,24 @@ pub unsafe extern "system" fn PrismShellMouseHook(
 ) -> isize {
     if code >= HC_ACTION && lparam != 0 {
         let mouse = &*(lparam as *const MouseHookStruct);
-        let in_target = is_our_start_button(mouse.window)
-            || point_is_in_start_button(&mouse.point)
-            || point_is_in_search_button(&mouse.point);
+        // The overlay window owns clicks on the Prism Start button via its
+        // subclassed WndProc. This hook is the fallback only: it must never
+        // consume clicks for the overlay (that would stop the click from
+        // reaching the overlay at all), it covers the rectangle path and the
+        // search button.
+        let in_target = point_is_in_search_button(&mouse.point)
+            || (!is_overlay_active() && point_is_in_start_button(&mouse.point));
         if wparam == WM_LBUTTONDOWN {
             let capture = in_target && !observer_window().is_null();
             START_PRESS_CAPTURED.store(capture, Ordering::Release);
             if capture {
-                // Act on press, like the native Start menu. Firing on down
-                // removes any dependence on the matching up arriving, and
-                // clicking feels instant.
-                let _ = notify_start_click(bridge_message_id(), &mouse.point);
                 return 1;
             }
         } else if wparam == WM_LBUTTONUP && START_PRESS_CAPTURED.swap(false, Ordering::AcqRel) {
-            // The matching down was consumed and already notified; always
-            // consume its up as well so Explorer never sees half a press.
+            if in_target {
+                let _ = notify_start_click(bridge_message_id(), &mouse.point);
+            }
+            // The matching down was consumed, so always consume its up as well.
             return 1;
         }
     }

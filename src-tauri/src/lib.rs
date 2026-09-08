@@ -451,7 +451,15 @@ fn palette_target(
         .and_then(|value| value.taskbar_edge)
         .or_else(|| taskbar_edge(monitor, work))
         .unwrap_or(TaskbarEdge::Bottom);
-    Some(palette_position(work, edge, alignment, width, height))
+    let start_button = anchor.and_then(|value| value.start_button);
+    Some(palette_position(
+        work,
+        edge,
+        alignment,
+        width,
+        height,
+        start_button,
+    ))
 }
 
 fn presentation_anchor(
@@ -635,11 +643,19 @@ fn palette_position(
     alignment: taskbar_alignment::Alignment,
     width: i32,
     height: i32,
+    start_button: Option<PhysicalRect>,
 ) -> (i32, i32) {
-    let aligned_x = match alignment {
-        taskbar_alignment::Alignment::Left => work.left,
-        taskbar_alignment::Alignment::Center => work.left + (work.width() - width) / 2,
-        taskbar_alignment::Alignment::Right => work.right - width,
+    // Start-menu anchor: the palette begins at the Start button so it reads
+    // as the replacement menu, not a centered card. Right-aligned taskbars
+    // mirror (right edge = button right). Without a button (or while the
+    // locator is unavailable) the palette falls back to the alignment-center
+    // position.
+    let aligned_x = match (alignment, start_button) {
+        (taskbar_alignment::Alignment::Right, Some(button)) => button.right - width,
+        (_, Some(button)) => button.left,
+        (taskbar_alignment::Alignment::Left, None) => work.left,
+        (taskbar_alignment::Alignment::Center, None) => work.left + (work.width() - width) / 2,
+        (taskbar_alignment::Alignment::Right, None) => work.right - width,
     };
     let aligned_y = match alignment {
         taskbar_alignment::Alignment::Left => work.top,
@@ -2278,6 +2294,7 @@ mod tests {
                 taskbar_alignment::Alignment::Center,
                 720,
                 620,
+                None,
             ),
             (600, 420)
         );
@@ -2293,6 +2310,7 @@ mod tests {
                 taskbar_alignment::Alignment::Center,
                 720,
                 620,
+                None,
             ),
             (600, 40)
         );
@@ -2307,7 +2325,8 @@ mod tests {
                 TaskbarEdge::Left,
                 taskbar_alignment::Alignment::Center,
                 720,
-                620
+                620,
+                None,
             ),
             (48, 230)
         );
@@ -2321,7 +2340,8 @@ mod tests {
                 TaskbarEdge::Right,
                 taskbar_alignment::Alignment::Center,
                 720,
-                620
+                620,
+                None,
             ),
             (1_152, 230)
         );
@@ -2342,6 +2362,7 @@ mod tests {
                 taskbar_alignment::Alignment::Center,
                 720,
                 620,
+                None,
             ),
             (-1_320, -620)
         );
@@ -2359,8 +2380,87 @@ mod tests {
                 taskbar_alignment::Alignment::Center,
                 480,
                 400,
+                None,
             ),
             (10, 20)
+        );
+    }
+
+    #[test]
+    fn palette_anchors_to_the_start_button_not_the_work_center() {
+        let work = PhysicalRect {
+            left: 0,
+            top: 0,
+            right: 1_920,
+            bottom: 1_032,
+        };
+        // Left-aligned taskbar: palette starts at the button (0..45 wide).
+        assert_eq!(
+            palette_position(
+                work,
+                TaskbarEdge::Bottom,
+                taskbar_alignment::Alignment::Left,
+                560,
+                620,
+                Some(PhysicalRect {
+                    left: 0,
+                    top: 1_032,
+                    right: 45,
+                    bottom: 1_080,
+                }),
+            ),
+            (0, 412)
+        );
+        // Center-aligned taskbar: palette follows the centered button.
+        assert_eq!(
+            palette_position(
+                work,
+                TaskbarEdge::Bottom,
+                taskbar_alignment::Alignment::Center,
+                560,
+                620,
+                Some(PhysicalRect {
+                    left: 784,
+                    top: 1_032,
+                    right: 829,
+                    bottom: 1_080,
+                }),
+            ),
+            (784, 412)
+        );
+        // Right-aligned taskbar: palette ends at the button's right edge.
+        assert_eq!(
+            palette_position(
+                work,
+                TaskbarEdge::Bottom,
+                taskbar_alignment::Alignment::Right,
+                560,
+                620,
+                Some(PhysicalRect {
+                    left: 1_875,
+                    top: 1_032,
+                    right: 1_920,
+                    bottom: 1_080,
+                }),
+            ),
+            (1_360, 412)
+        );
+        // Clamped: a button near the right edge never pushes the palette out.
+        assert_eq!(
+            palette_position(
+                work,
+                TaskbarEdge::Bottom,
+                taskbar_alignment::Alignment::Left,
+                560,
+                620,
+                Some(PhysicalRect {
+                    left: 1_900,
+                    top: 1_032,
+                    right: 1_920,
+                    bottom: 1_080,
+                }),
+            ),
+            (1_360, 412)
         );
     }
 
@@ -2379,6 +2479,7 @@ mod tests {
                 taskbar_alignment::Alignment::Left,
                 560,
                 620,
+                None,
             ),
             (0, 412)
         );
@@ -2389,6 +2490,7 @@ mod tests {
                 taskbar_alignment::Alignment::Center,
                 560,
                 620,
+                None,
             ),
             (680, 412)
         );
@@ -2399,6 +2501,7 @@ mod tests {
                 taskbar_alignment::Alignment::Right,
                 560,
                 620,
+                None,
             ),
             (1_360, 412)
         );
@@ -2449,6 +2552,7 @@ mod tests {
                 taskbar_alignment::Alignment::Center,
                 720,
                 620,
+                None,
             ),
             (600, 1_032 - PALETTE_TASKBAR_GAP - 620)
         );
