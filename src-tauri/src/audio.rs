@@ -17,7 +17,9 @@ use windows::Win32::System::Threading::{
     OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
 };
 use windows::Win32::UI::Accessibility::{CUIAutomation, IUIAutomation};
-use windows::Win32::UI::WindowsAndMessaging::{GetAncestor, GetClassNameW, GA_ROOT};
+use windows::Win32::UI::WindowsAndMessaging::{
+    GetAncestor, GetClassNameW, WindowFromPoint, GA_ROOT,
+};
 
 #[derive(Debug, Clone)]
 pub struct AudioSessionEntry {
@@ -300,7 +302,114 @@ pub(crate) enum TaskbarTarget {
 
 /// Identifies the application or taskbar element under the cursor point.
 pub(crate) fn identify_taskbar_target_at(point: POINT) -> TaskbarTarget {
-    classify_taskbar_element(inspect_element_at(point))
+    let target = classify_taskbar_element(inspect_element_at(point));
+    if matches!(target, TaskbarTarget::Unknown) {
+        // If element inspection failed or was inconclusive, but the cursor point
+        // is physically over a taskbar window, default to Master volume. This is
+        // the honest fallback: never silently do nothing when hovering the taskbar.
+        unsafe {
+            let hwnd = WindowFromPoint(point);
+            if is_taskbar_window(hwnd) {
+                return TaskbarTarget::Master;
+            }
+        }
+    }
+    target
+}
+
+fn is_taskbar_background(element: &InspectedElement) -> bool {
+    let class = &element.class_name;
+    let auto_id = &element.automation_id;
+    let name_lower = element.name.to_ascii_lowercase();
+
+    // Specific taskbar background and container classes across Windows 10 & 11.
+    if auto_id == "TaskbarFrame"
+        || class.contains("TaskbarFrame")
+        || auto_id == "TaskList"
+        || class.contains("TaskList")
+        || class.contains("DesktopWindowContentBridge")
+        || class.contains("Shell_TrayWnd")
+        || class.contains("Shell_SecondaryTrayWnd")
+        || class.contains("MSTaskListWClass")
+        || class.contains("ReBarWindow32")
+        || class.contains("TaskbarListView")
+    {
+        return true;
+    }
+
+    // System controls & buttons (Start, Search, Widgets, Task View, Clock,
+    // Notification Center) are taskbar chrome, not applications.
+    if auto_id == "StartButton"
+        || auto_id == "SearchButton"
+        || auto_id == "WidgetsButton"
+        || auto_id == "TaskViewButton"
+        || auto_id == "ClockButton"
+        || auto_id == "NotificationCenterButton"
+        || auto_id == "ShowDesktopButton"
+        || auto_id == "SystemTrayFrame"
+        || class.contains("OmniButton")
+    {
+        return true;
+    }
+
+    // System tray volume icon or tray controls.
+    if name_lower.starts_with("volume")
+        && (auto_id == "SystemTrayIcon" || class.contains("OmniButtonRight"))
+    {
+        return true;
+    }
+
+    false
+}
+
+/// Resolves an executable stem from a packaged / Store AppUserModelID or a
+/// multi-segment app id, then falls back to the first word of the display
+/// title. Never fabricates a match: ambiguous ids return None so the caller
+/// reports Unknown rather than adjusting the wrong application.
+fn resolve_app_executable_stem(automation_id: &str, display_title: &str) -> Option<String> {
+    if let Some(app_id) = automation_id.strip_prefix("Appid: ") {
+        let app_id = app_id.trim();
+        // Packaged / Store app: "PackageName_hash!AppId"
+        if let Some((package, app)) = app_id.split_once('!') {
+            let app = app.trim();
+            if !app.is_empty() && !app.eq_ignore_ascii_case("app") {
+                return Some(normalize_executable_stem(app));
+            }
+            let pkg_name = package.split('_').next().unwrap_or(package);
+            let name = pkg_name.split('.').next_back().unwrap_or(pkg_name);
+            if !name.is_empty() {
+                return Some(normalize_executable_stem(name));
+            }
+        }
+        // Multi-segment app: "VideoLAN.VLC", "Microsoft.VisualStudioCode"
+        let segments: Vec<&str> = app_id
+            .split('.')
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .collect();
+        if let Some(&last) = segments.last() {
+            if !last.is_empty() {
+                let s = normalize_executable_stem(last);
+                if s == "visualstudiocode" {
+                    return Some("code".to_string());
+                }
+                return Some(s);
+            }
+        }
+    }
+
+    // Try first word of display title if non-empty, recognizable, and not generic placeholder.
+    if display_title != "Application" && !display_title.is_empty() {
+        let first_word = display_title
+            .split_whitespace()
+            .next()?
+            .trim_matches(|c: char| !c.is_alphanumeric());
+        if first_word.len() >= 3 {
+            return Some(normalize_executable_stem(first_word));
+        }
+    }
+
+    None
 }
 
 fn classify_taskbar_element(element: Option<InspectedElement>) -> TaskbarTarget {
@@ -308,27 +417,53 @@ fn classify_taskbar_element(element: Option<InspectedElement>) -> TaskbarTarget 
         return TaskbarTarget::Unknown;
     };
 
-    // Check if over system tray volume icon or tray
-    let is_volume_tray = element.name.to_ascii_lowercase().starts_with("volume")
-        && (element.automation_id == "SystemTrayIcon"
-            || element.class_name.contains("OmniButtonRight"));
+    if element.name.is_empty() && element.automation_id.is_empty() && element.class_name.is_empty()
+    {
+        return TaskbarTarget::Unknown;
+    }
 
-    let is_empty_taskbar =
-        element.automation_id == "TaskbarFrame" || element.class_name.contains("TaskbarFrame");
+    // Only inspect applications for elements that represent taskbar app buttons.
+    let is_app_button = element.automation_id.starts_with("Appid: ")
+        || element.class_name.contains("TaskListButton")
+        || element.class_name.contains("TaskbarItem");
 
-    if is_volume_tray || is_empty_taskbar {
+    if !is_app_button && is_taskbar_background(&element) {
         return TaskbarTarget::Master;
     }
 
-    let display_title = clean_app_display_name(&element.name, &element.automation_id);
-    let Some(executable_stem) = executable_stem_from_app_id(&element.automation_id) else {
-        return TaskbarTarget::Unknown;
-    };
+    if is_app_button {
+        // 1. Exact executable stem (the most trustworthy signal).
+        if let Some(executable_stem) = executable_stem_from_app_id(&element.automation_id) {
+            let display_title = clean_app_display_name(&element.name, &element.automation_id);
+            return TaskbarTarget::Application {
+                display_title,
+                executable_stem,
+            };
+        }
 
-    TaskbarTarget::Application {
-        display_title,
-        executable_stem,
+        let display_title = clean_app_display_name(&element.name, &element.automation_id);
+
+        // 2. Packaged app id, then the first word of the display title.
+        if let Some(executable_stem) =
+            resolve_app_executable_stem(&element.automation_id, &display_title)
+        {
+            return TaskbarTarget::Application {
+                display_title,
+                executable_stem,
+            };
+        }
+
+        // 3. Last resort: use the cleaned title itself as the stem, so a named
+        // button still resolves to *something* rather than being dropped.
+        if display_title != "Application" && !display_title.is_empty() {
+            return TaskbarTarget::Application {
+                display_title: display_title.clone(),
+                executable_stem: normalize_executable_stem(&display_title),
+            };
+        }
     }
+
+    TaskbarTarget::Unknown
 }
 
 fn normalize_executable_stem(value: &str) -> String {
@@ -340,7 +475,14 @@ fn normalize_executable_stem(value: &str) -> String {
 }
 
 fn process_matches_executable(process_name: &str, executable_stem: &str) -> bool {
-    normalize_executable_stem(process_name) == normalize_executable_stem(executable_stem)
+    let p = normalize_executable_stem(process_name);
+    let s = normalize_executable_stem(executable_stem);
+    if p == s {
+        return true;
+    }
+    // VS Code runs as "Code.exe" but its AppUserModelID resolves to
+    // "VisualStudioCode"; both identities name the same application.
+    (s == "visualstudiocode" && p == "code") || (s == "code" && p == "visualstudiocode")
 }
 
 fn executable_stem_from_app_id(automation_id: &str) -> Option<String> {
@@ -398,6 +540,120 @@ fn clean_app_display_name(name: &str, auto_id: &str) -> String {
     "Application".to_string()
 }
 
+/// Known executable stems mapped to their user-facing product names.
+/// Keeping the map small and exact means unknown apps fall through to the
+/// humanized stem or the cleaned window title instead of a wrong name.
+const PRETTY_APP_NAMES: &[(&str, &str)] = &[
+    ("googlechrome", "Google Chrome"),
+    ("chrome", "Google Chrome"),
+    ("msedge", "Microsoft Edge"),
+    ("edge", "Microsoft Edge"),
+    ("firefox", "Firefox"),
+    ("visualstudiocode", "VS Code"),
+    ("code", "VS Code"),
+    ("discord", "Discord"),
+    ("spotify", "Spotify"),
+    ("slack", "Slack"),
+    ("telegram", "Telegram"),
+    ("obsidian", "Obsidian"),
+    ("notion", "Notion"),
+    ("figma", "Figma"),
+    ("steam", "Steam"),
+    ("explorer", "File Explorer"),
+    ("wezterm", "WezTerm"),
+    ("wezterm-gui", "WezTerm"),
+    ("windowsterminal", "Terminal"),
+    ("terminal", "Terminal"),
+    ("powershell", "PowerShell"),
+    ("windowspowershell", "PowerShell"),
+    ("cmd", "Command Prompt"),
+    ("notepad", "Notepad"),
+    ("wsl", "WSL"),
+    ("windows-terminal", "Terminal"),
+    ("onedrive", "OneDrive"),
+    ("word", "Word"),
+    ("excel", "Excel"),
+    ("powerpnt", "PowerPoint"),
+    ("outlook", "Outlook"),
+    ("teams", "Teams"),
+    ("devenv", "Visual Studio"),
+];
+
+/// Humanizes an executable stem into a readable name for the volume OSD.
+/// Splits on separators and camel-case boundaries: "microsoftedge" would
+/// become "Microsoft Edge", "vlc" simply capitalizes to "Vlc".
+fn humanize_app_stem(stem: &str) -> String {
+    let mut words: Vec<String> = Vec::new();
+    let mut current = String::new();
+    for ch in stem.chars() {
+        if ch == '_' || ch == '-' || ch == '.' {
+            if !current.is_empty() {
+                words.push(current.clone());
+                current.clear();
+            }
+            continue;
+        }
+        if ch.is_ascii_uppercase()
+            && !current.is_empty()
+            && current
+                .chars()
+                .last()
+                .is_some_and(|c| c.is_ascii_lowercase())
+        {
+            words.push(current.clone());
+            current.clear();
+        }
+        current.push(ch);
+    }
+    if !current.is_empty() {
+        words.push(current);
+    }
+    let joined = if words.is_empty() {
+        stem.to_string()
+    } else {
+        words.join(" ")
+    };
+    let mut chars = joined.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+        None => joined,
+    }
+}
+
+/// The name shown in the volume OSD for a taskbar target. Prefers the
+/// known-name map, then the humanized executable stem, and only falls back
+/// to the (window-title-derived) display title when nothing better exists.
+fn taskbar_osd_title(target: &TaskbarTarget) -> String {
+    match target {
+        TaskbarTarget::Master => "Master Volume".to_string(),
+        TaskbarTarget::Unknown => "Unknown".to_string(),
+        TaskbarTarget::Application {
+            display_title,
+            executable_stem,
+        } => {
+            let stem = normalize_executable_stem(executable_stem);
+            if let Some((_, pretty)) = PRETTY_APP_NAMES
+                .iter()
+                .find(|(candidate, _)| *candidate == stem)
+            {
+                return (*pretty).to_string();
+            }
+            let humanized = humanize_app_stem(&stem);
+            if humanized.len() >= 3
+                && humanized
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == ' ')
+            {
+                return humanized;
+            }
+            if !display_title.trim().is_empty() {
+                return display_title.trim().to_string();
+            }
+            "Application".to_string()
+        }
+    }
+}
+
 /// Checks if an HWND belongs to a taskbar window.
 pub fn is_taskbar_window(hwnd: HWND) -> bool {
     if hwnd.0.is_null() {
@@ -445,27 +701,35 @@ pub(crate) fn adjust_volume_for_target(
         TaskbarTarget::Application {
             display_title,
             executable_stem,
-        } => match adjust_app_volume(executable_stem, delta) {
-            Ok(Some((_app_name, vol, muted))) => Some(VolumeChangeResult {
-                title: display_title.clone(),
-                volume: vol,
-                percentage: (vol * 100.0).round() as u32,
-                muted,
-                is_master: false,
-            }),
-            Ok(None) => {
-                // The hovered application currently has no active audio session in the Windows Audio Mixer.
-                // Do NOT adjust master volume! Show clear inactive status instead of touching overall volume.
-                Some(VolumeChangeResult {
-                    title: format!("{display_title} (No Audio)"),
-                    volume: 0.0,
-                    percentage: 0,
-                    muted: true,
+        } => {
+            let osd_title = taskbar_osd_title(&TaskbarTarget::Application {
+                display_title: display_title.clone(),
+                executable_stem: executable_stem.clone(),
+            });
+            match adjust_app_volume(executable_stem, delta) {
+                Ok(Some((_app_name, vol, muted))) => Some(VolumeChangeResult {
+                    title: osd_title,
+                    volume: vol,
+                    percentage: (vol * 100.0).round() as u32,
+                    muted,
                     is_master: false,
-                })
+                }),
+                Ok(None) => {
+                    // The hovered application currently has no active audio
+                    // session in the Windows Audio Mixer. Do NOT adjust master
+                    // volume! Show an honest inactive state instead of
+                    // silently touching overall volume or doing nothing.
+                    Some(VolumeChangeResult {
+                        title: format!("{osd_title} (No Audio)"),
+                        volume: 0.0,
+                        percentage: 0,
+                        muted: true,
+                        is_master: false,
+                    })
+                }
+                Err(_) => None,
             }
-            Err(_) => None,
-        },
+        }
     }
 }
 
@@ -494,6 +758,22 @@ mod tests {
     #[test]
     fn inspection_failure_is_unknown_instead_of_master() {
         assert_eq!(classify_taskbar_element(None), TaskbarTarget::Unknown);
+    }
+
+    #[test]
+    fn task_list_buttons_resolve_to_the_application() {
+        let button = InspectedElement {
+            name: "Spotify".to_string(),
+            class_name: "TaskListButton".to_string(),
+            automation_id: "Appid: Spotify.Spotify".to_string(),
+        };
+        assert_eq!(
+            classify_taskbar_element(Some(button)),
+            TaskbarTarget::Application {
+                display_title: "Spotify".to_string(),
+                executable_stem: "spotify".to_string(),
+            }
+        );
     }
 
     #[test]
@@ -568,5 +848,126 @@ mod tests {
         );
         assert_eq!(executable_stem_from_app_id("Appid: Vendor.Player"), None);
         assert_eq!(executable_stem_from_app_id("Appid: Package!App"), None);
+    }
+
+    #[test]
+    fn test_taskbar_background_elements_classify_as_master() {
+        // Windows 11 taskbar bridge
+        let win11_bridge = InspectedElement {
+            name: String::new(),
+            class_name: "Windows.UI.Composition.DesktopWindowContentBridge".to_string(),
+            automation_id: String::new(),
+        };
+        assert_eq!(
+            classify_taskbar_element(Some(win11_bridge)),
+            TaskbarTarget::Master
+        );
+
+        // Windows 10 / 11 TaskList container
+        let tasklist = InspectedElement {
+            name: "Running applications".to_string(),
+            class_name: "TaskListOverlayWnd".to_string(),
+            automation_id: "TaskList".to_string(),
+        };
+        assert_eq!(
+            classify_taskbar_element(Some(tasklist)),
+            TaskbarTarget::Master
+        );
+
+        // Secondary monitor taskbar
+        let secondary = InspectedElement {
+            name: String::new(),
+            class_name: "Shell_SecondaryTrayWnd".to_string(),
+            automation_id: String::new(),
+        };
+        assert_eq!(
+            classify_taskbar_element(Some(secondary)),
+            TaskbarTarget::Master
+        );
+
+        // System controls: Start, Search, Clock
+        for auto_id in [
+            "StartButton",
+            "SearchButton",
+            "ClockButton",
+            "NotificationCenterButton",
+        ] {
+            let sys_button = InspectedElement {
+                name: String::new(),
+                class_name: "Button".to_string(),
+                automation_id: auto_id.to_string(),
+            };
+            assert_eq!(
+                classify_taskbar_element(Some(sys_button)),
+                TaskbarTarget::Master
+            );
+        }
+    }
+
+    #[test]
+    fn test_packaged_and_multisegment_app_resolution() {
+        assert_eq!(
+            resolve_app_executable_stem(
+                "Appid: SpotifyAB.SpotifyMusic_zbprm3161gvg!Spotify",
+                "Spotify"
+            ),
+            Some("spotify".to_string())
+        );
+        assert_eq!(
+            resolve_app_executable_stem(
+                "Appid: Microsoft.WindowsTerminal_8wekyb3d8bbwe!App",
+                "Windows Terminal"
+            ),
+            Some("windowsterminal".to_string())
+        );
+        assert_eq!(
+            resolve_app_executable_stem("Appid: VideoLAN.VLC", "VLC media player"),
+            Some("vlc".to_string())
+        );
+        assert_eq!(
+            resolve_app_executable_stem("Appid: Microsoft.VisualStudioCode", "Visual Studio Code"),
+            Some("code".to_string())
+        );
+    }
+
+    #[test]
+    fn osd_titles_use_clean_product_names() {
+        let app = |stem: &str, title: &str| TaskbarTarget::Application {
+            display_title: title.to_string(),
+            executable_stem: stem.to_string(),
+        };
+        assert_eq!(
+            taskbar_osd_title(&app("googlechrome", "Google Chrome and pi docs")),
+            "Google Chrome"
+        );
+        assert_eq!(
+            taskbar_osd_title(&app("discord", "General | The ...")),
+            "Discord"
+        );
+        assert_eq!(
+            taskbar_osd_title(&app("code", "Prism - Visual Studio Code")),
+            "VS Code"
+        );
+        assert_eq!(
+            taskbar_osd_title(&app("windowsterminal", "Windows Terminal")),
+            "Terminal"
+        );
+        assert_eq!(taskbar_osd_title(&TaskbarTarget::Master), "Master Volume");
+    }
+
+    #[test]
+    fn osd_titles_humanize_unknown_stems() {
+        let app = |stem: &str| TaskbarTarget::Application {
+            display_title: "Irrelevant - window title".to_string(),
+            executable_stem: stem.to_string(),
+        };
+        assert_eq!(taskbar_osd_title(&app("mstsc")), "Mstsc");
+        assert_eq!(taskbar_osd_title(&app("obs64")), "Obs64");
+        // A safe fallback to the cleaned window title when no stem is useful.
+        let weird = TaskbarTarget::Application {
+            display_title: "Some App".to_string(),
+            executable_stem: "<unresolved>".to_string(),
+        };
+        assert_eq!(taskbar_osd_title(&weird), "Some App");
     }
 }
