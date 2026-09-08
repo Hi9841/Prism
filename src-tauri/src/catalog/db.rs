@@ -1389,7 +1389,16 @@ impl Database {
             let old_prefix = format!("{old_normalized}\\");
             let old_prefix_like = escape_like_pattern(&old_prefix);
             let new_prefix = format!("{}\\", new_item.normalized_path);
-            let old_display_prefix = format!("{}\\", old_normalized);
+            let old_display: Option<String> = tx
+                .query_row(
+                    "SELECT display_path FROM files WHERE volume_id = ?1 AND normalized_path = ?2;",
+                    params![volume_id, old_normalized],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(|e| e.to_string())?;
+            let old_display_prefix =
+                format!("{}\\", old_display.as_deref().unwrap_or(old_normalized));
             let new_display_prefix = format!("{}\\", new_item.display_path);
 
             // Update children paths
@@ -1401,9 +1410,9 @@ impl Database {
                  WHERE volume_id = ?5 AND normalized_path LIKE ?6 || '%' ESCAPE '!';",
                 params![
                     new_prefix,
-                    (old_prefix.len() + 1) as i64,
+                    (old_prefix.chars().count() + 1) as i64,
                     new_display_prefix,
-                    (old_display_prefix.len() + 1) as i64,
+                    (old_display_prefix.chars().count() + 1) as i64,
                     volume_id,
                     old_prefix_like,
                 ],

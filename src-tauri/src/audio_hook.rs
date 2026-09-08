@@ -13,7 +13,7 @@ use windows::Win32::Foundation::{LPARAM, LRESULT, POINT, WPARAM};
 use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, DispatchMessageW, GetMessageW, SetWindowsHookExW, TranslateMessage,
     UnhookWindowsHookEx, WindowFromPoint, HHOOK, MSG, MSLLHOOKSTRUCT, WH_MOUSE_LL, WM_APP,
-    WM_MOUSEWHEEL,
+    WM_LBUTTONDOWN, WM_MBUTTONDOWN, WM_MOUSEWHEEL, WM_RBUTTONDOWN, WM_XBUTTONDOWN,
 };
 
 static HOOK_HANDLE: AtomicIsize = AtomicIsize::new(0);
@@ -21,6 +21,7 @@ static HOOK_THREAD_ID: AtomicIsize = AtomicIsize::new(0);
 static HOOK_ENABLED: AtomicBool = AtomicBool::new(true);
 static AUDIO_ENABLE_GENERATION: AtomicU64 = AtomicU64::new(0);
 static AUDIO_REQUESTS: OnceLock<SyncSender<AudioRequest>> = OnceLock::new();
+static APP: OnceLock<AppHandle> = OnceLock::new();
 
 const AUDIO_QUEUE_CAPACITY: usize = 64;
 const MAX_COALESCED_REQUESTS: usize = 16;
@@ -41,6 +42,7 @@ struct ResolvedRequest {
 }
 
 pub fn init(app: AppHandle) {
+    let _ = APP.set(app.clone());
     AUDIO_REQUESTS.get_or_init(|| start_audio_worker(app));
     start_hook_thread();
 }
@@ -208,6 +210,25 @@ unsafe extern "system" fn low_level_mouse_proc(
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> LRESULT {
+    if code >= 0
+        && lparam.0 != 0
+        && matches!(
+            wparam.0 as u32,
+            WM_LBUTTONDOWN | WM_RBUTTONDOWN | WM_MBUTTONDOWN | WM_XBUTTONDOWN
+        )
+    {
+        if let Some(app) = APP.get() {
+            let mouse = &*(lparam.0 as *const MSLLHOOKSTRUCT);
+            // Clicks on Prism's own taskbar buttons (Start overlay, Start
+            // capture rect, Search button) are owned by the Explorer shell
+            // hook, which toggles the palette. Dismissing here first would
+            // double-fire: the palette hides and the toggle immediately
+            // reopens it, so a Start press while open never closes Prism.
+            if !crate::win_key::point_on_taskbar_buttons(mouse.pt) {
+                crate::dismiss_palette_for_outside_pointer(app, mouse.pt);
+            }
+        }
+    }
     if code >= 0 && wparam.0 == WM_MOUSEWHEEL as usize && HOOK_ENABLED.load(Ordering::Relaxed) {
         let mouse = &*(lparam.0 as *const MSLLHOOKSTRUCT);
         let pt = mouse.pt;

@@ -774,6 +774,39 @@ mod tests {
     }
 
     #[test]
+    fn renaming_a_unicode_directory_preserves_searchable_descendant_paths() {
+        let (db, dir) = temp_db("unicode-rename");
+        let original = dir.join("資料");
+        let renamed = dir.join("מסמכים");
+        std::fs::create_dir_all(original.join("nested")).unwrap();
+        std::fs::write(original.join("nested").join("report.txt"), "report").unwrap();
+        let items: Vec<_> = [
+            original.clone(),
+            original.join("nested"),
+            original.join("nested").join("report.txt"),
+        ]
+        .iter()
+        .filter_map(|path| inspect_single_path(path))
+        .collect();
+        db.insert_batch("vol1", 1, &items).unwrap();
+        std::fs::rename(&original, &renamed).unwrap();
+        let queue = Mutex::new(WatcherEventQueue::with_limit(8, dir.clone()));
+        queue.lock().unwrap().push(WatcherEvent::Renamed {
+            from: original,
+            to: renamed.clone(),
+        });
+        let applied = apply_queued_events(&db, &queue, "vol1", &IndexCounts::default(), r"C:\");
+        assert!(applied.changed);
+        let found = db.search_candidates("report", 10).unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(
+            found[0].display_path,
+            renamed.join("nested").join("report.txt").to_string_lossy()
+        );
+        assert!(Path::new(&found[0].display_path).exists());
+    }
+
+    #[test]
     fn queued_events_fold_to_a_final_state_and_report_overflow() {
         let (db, dir) = temp_db("fold");
         std::fs::write(dir.join("kept.txt"), "kept").unwrap();

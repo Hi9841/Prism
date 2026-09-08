@@ -31,7 +31,7 @@ const ALIGNMENT_UNSET: u8 = u8::MAX;
 const ALIGNMENT_WATCH_INTERVAL: Duration = Duration::from_millis(750);
 /// When Explorer keeps reverting a move (layout churn), re-apply at most once
 /// per this window instead of fighting it on every poll.
-const ALIGNMENT_REAPPLY_DEBOUNCE: Duration = Duration::from_secs(3);
+const ALIGNMENT_REAPPLY_DEBOUNCE: Duration = Duration::from_millis(400);
 /// On stock Windows 11 there are no classic taskbar HWNDs to move, so full
 /// desktop enumerations are wasted work. Re-check occasionally in case the
 /// shell is replaced (Explorer restart, StartAllBack install), but poll 20x
