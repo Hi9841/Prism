@@ -1,19 +1,21 @@
-//! Presents the Windows taskbar alongside Prism over fullscreen windows.
+//! Presents the Windows taskbar alongside Prism whenever the palette opens.
 
 use std::os::windows::ffi::OsStrExt;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use windows::core::PCWSTR;
-use windows::Win32::Foundation::{LPARAM, RECT};
+use windows::core::{BOOL, PCWSTR};
+use windows::Win32::Foundation::{HWND, LPARAM, RECT};
 use windows::Win32::Graphics::Gdi::{
     GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST,
 };
-use windows::Win32::UI::Shell::{SHAppBarMessage, ABM_ACTIVATE, APPBARDATA};
+use windows::Win32::UI::Shell::{
+    SHAppBarMessage, ABM_ACTIVATE, ABM_GETSTATE, ABM_GETTASKBARPOS, ABS_AUTOHIDE, APPBARDATA,
+};
 use windows::Win32::UI::WindowsAndMessaging::{
-    FindWindowW, GetForegroundWindow, GetWindowRect, SetWindowPos, ShowWindow, HWND_BOTTOM,
-    HWND_NOTOPMOST, HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW,
-    SW_SHOWNOACTIVATE,
+    EnumWindows, FindWindowW, GetClassNameW, GetForegroundWindow, GetWindowRect, IsWindowVisible,
+    SetWindowPos, ShowWindow, HWND_BOTTOM, HWND_NOTOPMOST, HWND_TOP, HWND_TOPMOST, SWP_NOACTIVATE,
+    SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW, SW_SHOWNOACTIVATE,
 };
 
 /// Persistent marker proving Prism presented the taskbar over a fullscreen
@@ -33,23 +35,98 @@ static PRESENTED: AtomicBool = AtomicBool::new(false);
 /// slack avoid classifying maximized windows as fullscreen.
 const FULLSCREEN_TOLERANCE: i32 = 4;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct TaskbarPresentation {
+    show: bool,
+    topmost: bool,
+}
+
+fn taskbar_presentation(fullscreen: bool, auto_hide: bool) -> TaskbarPresentation {
+    TaskbarPresentation {
+        show: true,
+        topmost: fullscreen || auto_hide,
+    }
+}
+
+fn rect_covers_monitor(window: RECT, monitor: RECT, tolerance: i32) -> bool {
+    window.left <= monitor.left + tolerance
+        && window.top <= monitor.top + tolerance
+        && window.right >= monitor.right - tolerance
+        && window.bottom >= monitor.bottom - tolerance
+}
+
+/// Primary taskbar HWND, if Explorer has created it.
+pub fn tray_present() -> bool {
+    taskbar_window().is_some()
+}
+
+/// Visible primary and secondary taskbar rectangles. Windows 11's XAML
+/// taskbar often leaves `rcWork` equal to the full monitor, so callers that
+/// dock a window to the work area have to subtract these themselves.
+pub fn bar_rects() -> Vec<RECT> {
+    let mut rects = Vec::new();
+    if let Some(rect) = appbar_taskbar_rect() {
+        rects.push(rect);
+    }
+    unsafe {
+        let _ = EnumWindows(
+            Some(collect_taskbar_rect),
+            LPARAM((&mut rects as *mut Vec<RECT>) as isize),
+        );
+    }
+    rects
+}
+
+fn appbar_taskbar_rect() -> Option<RECT> {
+    let hwnd = taskbar_window()?;
+    let mut data = APPBARDATA {
+        cbSize: std::mem::size_of::<APPBARDATA>() as u32,
+        hWnd: hwnd,
+        ..Default::default()
+    };
+    let found = unsafe { SHAppBarMessage(ABM_GETTASKBARPOS, &mut data) };
+    if found == 0 {
+        return None;
+    }
+    let rect = data.rc;
+    (rect.right > rect.left && rect.bottom > rect.top).then_some(rect)
+}
+
+unsafe extern "system" fn collect_taskbar_rect(window: HWND, detail: LPARAM) -> BOOL {
+    let mut class_name = [0u16; 64];
+    let length = GetClassNameW(window, &mut class_name).max(0) as usize;
+    let is_taskbar = class_name_is(&class_name[..length], "Shell_TrayWnd")
+        || class_name_is(&class_name[..length], "Shell_SecondaryTrayWnd");
+    if is_taskbar && IsWindowVisible(window).as_bool() {
+        let mut rect = RECT::default();
+        if GetWindowRect(window, &mut rect).is_ok()
+            && rect.right > rect.left
+            && rect.bottom > rect.top
+        {
+            (*(detail.0 as *mut Vec<RECT>)).push(rect);
+        }
+    }
+    BOOL(1)
+}
+
+fn class_name_is(actual: &[u16], expected: &str) -> bool {
+    actual.len() == expected.len()
+        && actual
+            .iter()
+            .zip(expected.bytes())
+            .all(|(actual, expected)| (*actual as u8).eq_ignore_ascii_case(&expected))
+}
+
 pub fn present() {
     let Some(taskbar) = taskbar_window() else {
         return;
     };
-    // Only assert the topmost band when the foreground app actually covers
-    // the taskbar (fullscreen games and video). In normal desktop use the
-    // taskbar is already visible; forcing topmost then leaves the taskbar
-    // stuck above a fullscreen game later, when the palette closes and the
-    // game cannot hide a topmost taskbar.
-    if !foreground_is_fullscreen() {
-        return;
-    }
+    let presentation = taskbar_presentation(foreground_is_fullscreen(), taskbar_auto_hides());
+    // Preserve ownership across duplicate presentation requests. The taskbar
+    // may already be visible or topmost before Prism opens, but this call
+    // still creates a temporary lease that must be released afterward.
+    PRESENTED.store(true, Ordering::Release);
     unsafe {
-        // Preserve ownership across duplicate presentation requests. The
-        // taskbar may already be topmost before Prism opens, but this call
-        // still creates a temporary lease that must be released afterward.
-        PRESENTED.store(true, Ordering::Release);
         let mut appbar = APPBARDATA {
             cbSize: std::mem::size_of::<APPBARDATA>() as u32,
             hWnd: taskbar,
@@ -58,9 +135,14 @@ pub fn present() {
         };
         let _ = SHAppBarMessage(ABM_ACTIVATE, &mut appbar);
         let _ = ShowWindow(taskbar, SW_SHOWNOACTIVATE);
+        let insert_after = if presentation.topmost {
+            HWND_TOPMOST
+        } else {
+            HWND_TOP
+        };
         let _ = SetWindowPos(
             taskbar,
-            Some(HWND_TOPMOST),
+            Some(insert_after),
             0,
             0,
             0,
@@ -90,11 +172,16 @@ fn foreground_is_fullscreen() -> bool {
         if !GetMonitorInfoW(monitor, &mut info).as_bool() {
             return false;
         }
-        rect.left <= info.rcMonitor.left + FULLSCREEN_TOLERANCE
-            && rect.top <= info.rcMonitor.top + FULLSCREEN_TOLERANCE
-            && rect.right >= info.rcMonitor.right - FULLSCREEN_TOLERANCE
-            && rect.bottom >= info.rcMonitor.bottom - FULLSCREEN_TOLERANCE
+        rect_covers_monitor(rect, info.rcMonitor, FULLSCREEN_TOLERANCE)
     }
+}
+
+fn taskbar_auto_hides() -> bool {
+    let mut data = APPBARDATA {
+        cbSize: std::mem::size_of::<APPBARDATA>() as u32,
+        ..Default::default()
+    };
+    unsafe { SHAppBarMessage(ABM_GETSTATE, &mut data) as u32 & ABS_AUTOHIDE != 0 }
 }
 
 pub fn release() {
@@ -197,4 +284,52 @@ fn wide(value: &str) -> Vec<u16> {
         .encode_wide()
         .chain(Some(0))
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn rect(left: i32, top: i32, right: i32, bottom: i32) -> RECT {
+        RECT {
+            left,
+            top,
+            right,
+            bottom,
+        }
+    }
+
+    #[test]
+    fn palette_open_always_shows_the_taskbar() {
+        assert!(taskbar_presentation(false, false).show);
+        assert!(taskbar_presentation(true, false).show);
+        assert!(taskbar_presentation(false, true).show);
+        assert!(taskbar_presentation(true, true).show);
+    }
+
+    #[test]
+    fn taskbar_is_topmost_only_over_fullscreen_or_auto_hide() {
+        assert!(!taskbar_presentation(false, false).topmost);
+        assert!(taskbar_presentation(true, false).topmost);
+        assert!(taskbar_presentation(false, true).topmost);
+        assert!(taskbar_presentation(true, true).topmost);
+    }
+
+    #[test]
+    fn maximized_work_area_is_not_fullscreen() {
+        let monitor = rect(0, 0, 1920, 1080);
+        let maximized = rect(0, 0, 1920, 1040);
+        assert!(!rect_covers_monitor(
+            maximized,
+            monitor,
+            FULLSCREEN_TOLERANCE
+        ));
+    }
+
+    #[test]
+    fn borderless_cover_is_fullscreen() {
+        let monitor = rect(0, 0, 1920, 1080);
+        let cover = rect(-2, -2, 1922, 1082);
+        assert!(rect_covers_monitor(cover, monitor, FULLSCREEN_TOLERANCE));
+    }
 }

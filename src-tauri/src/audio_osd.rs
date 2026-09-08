@@ -34,38 +34,16 @@ const OSD_WIDTH: i32 = 244;
 const OSD_HEIGHT: i32 = 56;
 const TIMER_HIDE: usize = 1;
 const TIMER_TOPMOST: usize = 2;
-const HIDE_DELAY_MS: u32 = 1200;/// Re-assert topmost shortly after showing and keep re-asserting while
-/// visible. Other topmost windows that were activated just before the OSD
-/// (Discord call popouts, terminals, game overlays) can otherwise render
-/// above it, hiding high-priority feedback behind them.
-const TOPMOST_REASSERT_MS: u32 = 120;
+const HIDE_DELAY_MS: u32 = 1200;
+/// Re-assert topmost shortly after showing. Other topmost windows that were
+/// activated just before the OSD (Discord call popouts, game overlays) can
+/// otherwise render above it, hiding high-priority feedback behind them.
+const TOPMOST_REASSERT_MS: u32 = 250;
 const WM_UPDATE_OSD: u32 = WM_APP + 50;
 
 static OSD_HWND: AtomicIsize = AtomicIsize::new(0);
 static OSD_THREAD_INITIALIZED: AtomicBool = AtomicBool::new(false);
 static OSD_REQUEST_GENERATION: AtomicU64 = AtomicU64::new(0);
-/// Packed accent RGB (r << 16 | g << 8 | b) for the level bar. Mirrors the
-/// frontend accent presets so the native pill stays in family with the
-/// palette; defaults to iris.
-static OSD_ACCENT: AtomicU64 = AtomicU64::new(0x98_7C_F2);
-
-/// Sets the level-bar accent from the frontend accent presets.
-pub fn set_accent(name: &str) {
-    let rgb: u64 = match name {
-        "azure" => 0x31_99_E4,
-        "mint" => 0x46_C2_9A,
-        "amber" => 0xE6_A7_32,
-        "rose" => 0xE8_5F_78,
-        // "iris" and any unknown value keep the default violet.
-        _ => 0x98_7C_F2,
-    };
-    OSD_ACCENT.store(rgb, Ordering::SeqCst);
-}
-
-fn accent_rgb() -> (u8, u8, u8) {
-    let packed = OSD_ACCENT.load(Ordering::SeqCst);
-    ((packed >> 16) as u8, (packed >> 8) as u8, packed as u8)
-}
 
 #[derive(Clone, Debug)]
 struct OsdState {
@@ -327,12 +305,7 @@ fn position_in_work_area(
     } else if point.y < work_area.top {
         (point.x - width / 2, work_area.top + offset)
     } else {
-        // Taskbar-band scrolls anchor above the tray instead of tracking the
-        // cursor horizontally. Floating call popouts and shared-content
-        // previews habitually sit at the bottom center, exactly where a
-        // cursor-tracked pill would collide with them; the tray corner is
-        // the one spot above the taskbar that stays visible.
-        (work_area.right - width - offset, work_area.bottom - height - offset)
+        (point.x - width / 2, work_area.bottom - height - offset)
     };
 
     OsdPosition {
@@ -510,9 +483,7 @@ fn pack_premultiplied(r: u8, g: u8, b: u8, a: u8) -> u32 {
 }
 
 fn draw_liquid_glass_pill(pixels: &mut [u32], width: i32, height: i32) {
-    // Raycast-style surface: one flat near-black panel with a soft 1px
-    // light border. No gradient, no specular rim.
-    let radius = 12.0f32;
+    let radius = 16.0f32;
     let w_f = width as f32;
     let h_f = height as f32;
 
@@ -538,13 +509,19 @@ fn draw_liquid_glass_pill(pixels: &mut [u32], width: i32, height: i32) {
 
             let edge_alpha = (radius - dist + 0.5).clamp(0.0, 1.0);
 
-            // Flat near-black panel, nearly opaque.
-            let mut pix = pack_premultiplied(28, 28, 30, (242.0 * edge_alpha) as u8);
+            // Subtle vertical gradient for physical depth (dark obsidian glass)
+            let t = y_f / h_f;
+            let base_r = (24.0 * (1.0 - t * 0.25)) as u8;
+            let base_g = (24.0 * (1.0 - t * 0.25)) as u8;
+            let base_b = (30.0 * (1.0 - t * 0.25)) as u8;
+            let base_a = (235.0 * edge_alpha) as u8;
 
-            // Soft light border (slightly brighter on top like a subtle rim).
-            if dist >= radius - 1.0 && dist <= radius {
+            let mut pix = pack_premultiplied(base_r, base_g, base_b, base_a);
+
+            // Specular glass rim (1.0px inner light border)
+            if dist >= radius - 1.2 && dist <= radius {
                 let rim_top = y_f < h_f * 0.5;
-                let rim_intensity = if rim_top { 34.0 } else { 20.0 } * edge_alpha;
+                let rim_intensity = if rim_top { 48.0 } else { 18.0 } * edge_alpha;
                 pix = blend_over(pix, (255, 255, 255), rim_intensity as u8);
             }
 
@@ -660,7 +637,7 @@ fn draw_progress_bar(
     } else if is_no_audio {
         (100u8, 116u8, 139u8) // Muted Slate
     } else {
-        accent_rgb()
+        (56u8, 189u8, 248u8) // Luminous Sky Blue / Iris
     };
 
     for y in bounds.top..=bounds.bottom {
@@ -762,14 +739,22 @@ unsafe fn render_typography(pixels: &mut [u32], width: i32, _height: i32, state:
         &state.title
     };
 
-    // 1. Draw Title text. The percentage always takes the right slot; the
-    // title keeps its full width (the master-fallback suffix is trimmed).
+    // 1. Draw Title text. Master-fallback titles swap the percentage for the
+    // word "Master" so a long app name never fights the suffix for space.
     let display_title = truncate_string(clean_title, if is_no_audio { 15 } else { 19 });
     let mut wide_title: Vec<u16> = display_title.encode_utf16().collect();
     let mut title_rect = RECT {
         left: 38,
         top: 10,
-        right: if is_no_audio { width - 82 } else { width - 58 },
+        right: if is_no_audio {
+            width - 82
+        } else if state.muted {
+            width - 88
+        } else if is_master_fallback {
+            width - 98
+        } else {
+            width - 58
+        },
         bottom: 27,
     };
     windows::Win32::Graphics::Gdi::DrawTextW(
@@ -796,21 +781,30 @@ unsafe fn render_typography(pixels: &mut [u32], width: i32, _height: i32, state:
         }
     }
 
-    // 2. Clear buffer for Percentage/Status text. The percentage is always
-    // shown; muted state is conveyed by the rose color and the speaker slash.
+    // 2. Clear buffer for Percentage/Status text
     text_slice.fill(0);
 
     let (pct_text, text_color) = if is_no_audio {
         ("No Audio".to_string(), (148u8, 163u8, 184u8)) // Slate-400
     } else if state.muted {
-        (format!("{}%", state.percentage), (248u8, 113u8, 113u8)) // Rose Coral
+        (format!("Muted {}%", state.percentage), (248u8, 113u8, 113u8)) // Rose Coral
+    } else if is_master_fallback {
+        (format!("Master {}%", state.percentage), (148u8, 163u8, 184u8)) // Slate-400
     } else {
         (format!("{}%", state.percentage), (203u8, 213u8, 225u8)) // Slate-300
     };
 
     let mut wide_pct: Vec<u16> = pct_text.encode_utf16().collect();
     let mut pct_rect = RECT {
-        left: if is_no_audio { width - 80 } else { width - 62 },
+        left: if is_no_audio {
+            width - 80
+        } else if state.muted {
+            width - 88
+        } else if is_master_fallback {
+            width - 98
+        } else {
+            width - 62
+        },
         top: 10,
         right: width - 16,
         bottom: 27,
@@ -910,8 +904,7 @@ mod tests {
                 OSD_HEIGHT,
                 96
             ),
-            // Taskbar-band scrolls anchor above the tray, not at the cursor.
-            OsdPosition { x: 1660, y: 968 }
+            OsdPosition { x: 838, y: 968 }
         );
     }
 
@@ -922,8 +915,7 @@ mod tests {
         assert_eq!((width, height), (366, 84));
         assert_eq!(
             position_in_work_area(WORK_AREA, POINT { x: 960, y: 1060 }, width, height, 144),
-            // Right-anchored above the tray at 1.5x scale.
-            OsdPosition { x: 1530, y: 932 }
+            OsdPosition { x: 777, y: 932 }
         );
     }
 
@@ -942,22 +934,5 @@ mod tests {
         assert_eq!(destination[3], 2);
         assert_eq!(destination[12], 3);
         assert_eq!(destination[15], 4);
-    }
-
-    #[test]
-    fn accent_presets_map_to_family_colors() {
-        set_accent("iris");
-        assert_eq!(accent_rgb(), (0x98, 0x7c, 0xf2));
-        set_accent("azure");
-        assert_eq!(accent_rgb(), (0x31, 0x99, 0xe4));
-        set_accent("mint");
-        assert_eq!(accent_rgb(), (0x46, 0xc2, 0x9a));
-        set_accent("amber");
-        assert_eq!(accent_rgb(), (0xe6, 0xa7, 0x32));
-        set_accent("rose");
-        assert_eq!(accent_rgb(), (0xe8, 0x5f, 0x78));
-        // Unknown values fall back to the default iris.
-        set_accent("bogus");
-        assert_eq!(accent_rgb(), (0x98, 0x7c, 0xf2));
     }
 }
