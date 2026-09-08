@@ -219,7 +219,14 @@ unsafe extern "system" fn low_level_mouse_proc(
     {
         if let Some(app) = APP.get() {
             let mouse = &*(lparam.0 as *const MSLLHOOKSTRUCT);
-            crate::dismiss_palette_for_outside_pointer(app, mouse.pt);
+            // Clicks on Prism's own taskbar buttons (Start overlay, Start
+            // capture rect, Search button) are owned by the Explorer shell
+            // hook, which toggles the palette. Dismissing here first would
+            // double-fire: the palette hides and the toggle immediately
+            // reopens it, so a Start press while open never closes Prism.
+            if !crate::win_key::point_on_taskbar_buttons(mouse.pt) {
+                crate::dismiss_palette_for_outside_pointer(app, mouse.pt);
+            }
         }
     }
     if code >= 0 && wparam.0 == WM_MOUSEWHEEL as usize && HOOK_ENABLED.load(Ordering::Relaxed) {

@@ -865,6 +865,15 @@ fn point_is_in_search_button(point: &Point) -> bool {
         && point.y < SEARCH_RECT_BOTTOM.load(Ordering::Relaxed)
 }
 
+/// True when the message targets Prism's own Start button overlay. The
+/// overlay window is the injected button: a click on it is a Start click
+/// regardless of the configured rectangle, so a stale rectangle from a
+/// taskbar shift can never drop the press.
+fn is_our_start_button(hwnd: Hwnd) -> bool {
+    !hwnd.is_null()
+        && unsafe { FindWindowW(STATIC_CLASS.as_ptr(), ICON_WINDOW_TITLE.as_ptr()) } == hwnd
+}
+
 fn has_active_icon() -> bool {
     ICON_BITMAP
         .lock()
@@ -1080,19 +1089,22 @@ pub unsafe extern "system" fn PrismShellMouseHook(
 ) -> isize {
     if code >= HC_ACTION && lparam != 0 {
         let mouse = &*(lparam as *const MouseHookStruct);
-        let in_target =
-            point_is_in_start_button(&mouse.point) || point_is_in_search_button(&mouse.point);
+        let in_target = is_our_start_button(mouse.window)
+            || point_is_in_start_button(&mouse.point)
+            || point_is_in_search_button(&mouse.point);
         if wparam == WM_LBUTTONDOWN {
             let capture = in_target && !observer_window().is_null();
             START_PRESS_CAPTURED.store(capture, Ordering::Release);
             if capture {
+                // Act on press, like the native Start menu. Firing on down
+                // removes any dependence on the matching up arriving, and
+                // clicking feels instant.
+                let _ = notify_start_click(bridge_message_id(), &mouse.point);
                 return 1;
             }
         } else if wparam == WM_LBUTTONUP && START_PRESS_CAPTURED.swap(false, Ordering::AcqRel) {
-            if in_target {
-                let _ = notify_start_click(bridge_message_id(), &mouse.point);
-            }
-            // The matching down was consumed, so always consume its up as well.
+            // The matching down was consumed and already notified; always
+            // consume its up as well so Explorer never sees half a press.
             return 1;
         }
     }
