@@ -838,6 +838,18 @@ fn present_palette(app: tauri::AppHandle) -> Result<bool, String> {
     }
     schedule_palette_raise_retry(&app, PALETTE_TRANSITION.load(Ordering::Acquire));
     log_foreground("present-after");
+    #[cfg(debug_assertions)]
+    if let (Ok(pos), Ok(size)) = (window.outer_position(), window.outer_size()) {
+        crate::win_key::debug_trace(&format!(
+            "present-geom pos={},{} size={}x{} visible={} focused={}",
+            pos.x,
+            pos.y,
+            size.width,
+            size.height,
+            window.is_visible().unwrap_or(false),
+            window.is_focused().unwrap_or(false)
+        ));
+    }
     perf::finish(timer, "palette_present", || "window=main".to_string());
     Ok(true)
 }
