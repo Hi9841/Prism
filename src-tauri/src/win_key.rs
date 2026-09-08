@@ -953,7 +953,6 @@ pub fn set_enabled(on: bool) -> Result<(), String> {
         return Ok(());
     }
     ACTIVE.store(on, Ordering::SeqCst);
-    ACTIVE.store(on, Ordering::SeqCst);
     if !on {
         // The backstop watcher must never outlive the takeover it guards.
         launcher_watch::set_enabled(false);
@@ -1001,7 +1000,12 @@ pub fn set_enabled(on: bool) -> Result<(), String> {
     }
 
     match ready_rx.recv_timeout(Duration::from_secs(2)) {
-        Ok(result) => result,
+        Ok(result) => {
+            // Only arm the launcher backstop once the takeover is really up;
+            // a failed start must leave the native Start menu alone.
+            launcher_watch::set_enabled(result.is_ok());
+            result
+        }
         Err(_) => {
             ACTIVE.store(false, Ordering::SeqCst);
             let tid = THREAD_ID.load(Ordering::SeqCst);
