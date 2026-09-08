@@ -1347,8 +1347,7 @@ impl ShellBridge {
                     return Err(error);
                 }
             };
-        let (search_button_locator, search_rect) =
-            SearchButtonLocator::new(taskbar, taskbar_process_id);
+        let (search_button_locator, search_rect) = SearchButtonLocator::new(taskbar, taskbar_process_id);
         let taskbar_mouse_hook = match SetWindowsHookExW(
             WH_MOUSE,
             Some(mouse_hook_proc),
@@ -1515,7 +1514,7 @@ impl ShellBridge {
 
 impl StartButtonLocator {
     fn new(taskbar: HWND, process_id: u32) -> Result<(Self, RECT), String> {
-        let automation = unsafe { create_automation_start_button(taskbar, process_id).ok() };
+        let automation = unsafe { create_automation_start_button(taskbar).ok() };
         let mut locator = Self {
             taskbar,
             automation,
@@ -1568,7 +1567,6 @@ impl StartButtonLocator {
 
 unsafe fn create_automation_start_button(
     taskbar_window: HWND,
-    taskbar_process_id: u32,
 ) -> Result<AutomationStartButton, String> {
     let uia: IUIAutomation = CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER)
         .map_err(|error| format!("create UI Automation client: {error}"))?;
@@ -1576,16 +1574,9 @@ unsafe fn create_automation_start_button(
         .ElementFromHandle(taskbar_window)
         .map_err(|error| format!("resolve Explorer taskbar automation root: {error}"))?;
     let automation_id: VARIANT = "StartButton".into();
-    let automation_id_condition = uia
+    let condition = uia
         .CreatePropertyCondition(UIA_AutomationIdPropertyId, &automation_id)
         .map_err(|error| format!("match StartButton AutomationId: {error}"))?;
-    let process_id: VARIANT = (taskbar_process_id as i32).into();
-    let process_condition = uia
-        .CreatePropertyCondition(UIA_ProcessIdPropertyId, &process_id)
-        .map_err(|error| format!("match Explorer process: {error}"))?;
-    let condition = uia
-        .CreateAndCondition(&automation_id_condition, &process_condition)
-        .map_err(|error| format!("combine StartButton identity conditions: {error}"))?;
     Ok(AutomationStartButton {
         taskbar,
         condition,

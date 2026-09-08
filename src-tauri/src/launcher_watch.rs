@@ -22,6 +22,7 @@ use windows::core::PCWSTR;
 use windows::Win32::Foundation::HWND;
 use windows::Win32::UI::WindowsAndMessaging::{
     FindWindowW, GetWindowRect, IsWindowVisible, ShowWindow, SW_HIDE,
+    GetWindowTextLengthW,
 };
 
 const WATCH_INTERVAL: Duration = Duration::from_millis(500);
@@ -33,6 +34,10 @@ const SELF_GRACE: Duration = Duration::from_millis(1_500);
 /// primary monitor); the geometry filter keeps the watcher from touching other
 /// explorer XAML islands.
 const WIN11_START_CLASS: &str = "XamlExplorerHostIslandWindow";
+/// Win11 24H2 hosts the Start menu in StartMenuExperienceHost, whose top
+/// window is a UWP CoreWindow (observed live: empty title, ~858x890 at the
+/// bottom). The empty-title gate keeps other UWP CoreWindows out.
+const WIN11_CORE_START_CLASS: &str = "Windows.UI.Core.CoreWindow";
 /// Windows 10 launcher windows.
 const WIN10_LAUNCHER_CLASSES: &[&str] = &["ImmersiveLauncher", "ModeInputWnd"];
 
@@ -79,10 +84,21 @@ fn watch_loop() {
 }
 
 /// Every launcher class the watcher knows, in scan order.
-const LAUNCHER_CLASSES: &[&str] = &[WIN11_START_CLASS, WIN10_LAUNCHER_CLASSES[0], WIN10_LAUNCHER_CLASSES[1]];
+const LAUNCHER_CLASSES: &[&str] = &[
+    WIN11_START_CLASS,
+    WIN11_CORE_START_CLASS,
+    WIN10_LAUNCHER_CLASSES[0],
+    WIN10_LAUNCHER_CLASSES[1],
+];
 
 fn launcher_classes() -> &'static [&'static str] {
     LAUNCHER_CLASSES
+}
+
+#[cfg(windows)]
+fn window_title_len(window: HWND) -> usize {
+    let len = unsafe { GetWindowTextLengthW(window) };
+    len.max(0) as usize
 }
 
 fn within_self_grace() -> bool {
@@ -109,6 +125,14 @@ fn hide_if_visible(class: &str) {
     // pickers, settings tiles). The native Start menu is the tall one anchored
     // at the bottom; require a plausible menu silhouette before hiding.
     if class == WIN11_START_CLASS && !is_start_menu_silhouette(window) {
+        return;
+    }
+    // UWP CoreWindows run in every packaged app (the class alone is far too
+    // broad). The Start menu's host window is untitled. Require an untitled
+    // window AND a menu silhouette before hiding anything.
+    if class == WIN11_CORE_START_CLASS
+        && (window_title_len(window) > 0 || !is_start_menu_silhouette(window))
+    {
         return;
     }
     let _ = unsafe { ShowWindow(window, SW_HIDE) };
