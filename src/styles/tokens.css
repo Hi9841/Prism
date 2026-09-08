@@ -77,7 +77,7 @@
 :root,
 :root[data-theme="dark"] {
   --t-bg: linear-gradient(180deg, oklch(0.16 0.008 268 / 0.62), oklch(0.135 0.007 268 / 0.58));
-  --t-shell-solid: linear-gradient(180deg, oklch(0.17 0.009 268), oklch(0.152 0.008 268));
+  --t-shell-solid: linear-gradient(180deg, oklch(0.17 0.009 268 / 0.92), oklch(0.152 0.008 268 / 0.9));
   --t-shell-line: rgb(255 255 255 / 0.08);
   --t-shell-hi: rgb(255 255 255 / 0.06);
   --t-field-bg: rgb(255 255 255 / 0.045);
@@ -96,7 +96,7 @@
   --t-divider: rgb(255 255 255 / 0.2);
   --t-backdrop: rgb(5 5 9 / 0.5);
   --t-toast: oklch(0.16 0.008 268 / 0.85);
-  --t-bg-raised: oklch(0.19 0.009 268);
+  --t-bg-raised: oklch(0.19 0.009 268 / 0.85);
   --t-fg: oklch(0.955 0.003 268);
   --t-fg-secondary: oklch(0.78 0.007 268);
   --t-fg-tertiary: oklch(0.66 0.007 268);
@@ -109,7 +109,7 @@
 
 :root[data-theme="light"] {
   --t-bg: linear-gradient(180deg, oklch(0.985 0.003 268 / 0.74), oklch(0.952 0.004 268 / 0.7));
-  --t-shell-solid: linear-gradient(180deg, oklch(0.995 0.002 268), oklch(0.965 0.004 268));
+  --t-shell-solid: linear-gradient(180deg, oklch(0.995 0.002 268 / 0.94), oklch(0.965 0.004 268 / 0.92));
   --t-shell-line: rgb(0 0 0 / 0.08);
   --t-shell-hi: rgb(255 255 255 / 0.85);
   --t-field-bg: rgb(0 0 0 / 0.03);
@@ -128,7 +128,7 @@
   --t-divider: rgb(0 0 0 / 0.15);
   --t-backdrop: rgb(0 0 0 / 0.28);
   --t-toast: oklch(0.995 0.002 268 / 0.9);
-  --t-bg-raised: oklch(0.995 0.002 268);
+  --t-bg-raised: oklch(0.995 0.002 268 / 0.88);
   --t-fg: oklch(0.22 0.012 268);
   --t-fg-secondary: oklch(0.4 0.012 268);
   --t-fg-tertiary: oklch(0.46 0.01 268);
@@ -224,7 +224,7 @@ body {
 /* ------------------------------------------------------------------ */
 
 @layer components {
-  /* Opaque content inside the transparent, rounded native window. */
+  /* The floating window shell - sits on the native acrylic layer */
   .shell {
     position: relative;
     display: flex;
