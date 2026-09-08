@@ -13,9 +13,10 @@ use windows::Win32::UI::Shell::{
     SHAppBarMessage, ABM_ACTIVATE, ABM_GETSTATE, ABM_GETTASKBARPOS, ABS_AUTOHIDE, APPBARDATA,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, FindWindowW, GetClassNameW, GetForegroundWindow, GetWindowRect, IsWindowVisible,
-    SetWindowPos, ShowWindow, HWND_BOTTOM, HWND_NOTOPMOST, HWND_TOP, HWND_TOPMOST, SWP_NOACTIVATE,
-    SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW, SW_SHOWNOACTIVATE,
+    EnumWindows, FindWindowW, GetClassNameW, GetForegroundWindow, GetWindowLongW, GetWindowRect,
+    IsWindowVisible, SetWindowPos, ShowWindow, GWL_EXSTYLE, HWND_BOTTOM, HWND_NOTOPMOST, HWND_TOP,
+    HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW, SW_SHOWNOACTIVATE,
+    WS_EX_TOPMOST,
 };
 
 /// Persistent marker proving Prism presented the taskbar over a fullscreen
@@ -24,12 +25,25 @@ use windows::Win32::UI::WindowsAndMessaging::{
 /// window.
 const TOPMOST_MARKER: &str = "taskbar-topmost";
 
+/// Marker contents recording the band the taskbar wore before Prism's lease:
+/// `topmost` (Windows 11 and StartAllBack defaults) or `normal`. Empty legacy
+/// markers read as the normal band.
+const MARKER_TOPMOST: &[u8] = b"topmost";
+const MARKER_NORMAL: &[u8] = b"normal";
+
 /// Tracks a temporary taskbar z-order lease for the current process. This is
 /// deliberately presentation-based rather than based on the taskbar's
 /// initial `WS_EX_TOPMOST` bit: Explorer commonly starts with that bit set,
 /// but Prism still needs to demote the taskbar when its fullscreen presentation
 /// ends.
 static PRESENTED: AtomicBool = AtomicBool::new(false);
+
+/// The taskbar's z-band when Prism started presenting it. `release()` restores
+/// exactly this band instead of unconditionally demoting: Windows 11 and
+/// StartAllBack both normally keep the taskbar topmost, and forcing
+/// HWND_NOTOPMOST on exit left a taskbar that hid behind maximized windows -
+/// or flickered while StartAllBack re-asserted it - with Prism not running.
+static PRESENTED_WAS_TOPMOST: AtomicBool = AtomicBool::new(false);
 
 /// Fullscreen windows must not be covered by the taskbar; a few pixels of
 /// slack avoid classifying maximized windows as fullscreen.
@@ -125,6 +139,8 @@ pub fn present() {
     // Preserve ownership across duplicate presentation requests. The taskbar
     // may already be visible or topmost before Prism opens, but this call
     // still creates a temporary lease that must be released afterward.
+    let was_topmost = window_band_is_topmost(taskbar);
+    PRESENTED_WAS_TOPMOST.store(was_topmost, Ordering::Release);
     PRESENTED.store(true, Ordering::Release);
     unsafe {
         let mut appbar = APPBARDATA {
@@ -149,7 +165,9 @@ pub fn present() {
             0,
             SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW,
         );
-        write_marker(true);
+        // The marker records the band the taskbar had before this lease so a
+        // crash mid-presentation can still restore it on the next launch.
+        write_marker(was_topmost);
     }
 }
 
@@ -187,7 +205,7 @@ fn taskbar_auto_hides() -> bool {
 pub fn release() {
     let Some(taskbar) = taskbar_window() else {
         PRESENTED.store(false, Ordering::Release);
-        write_marker(false);
+        clear_marker();
         return;
     };
     let fullscreen_foreground = foreground_is_fullscreen();
@@ -199,17 +217,23 @@ pub fn release() {
             ..Default::default()
         };
         let _ = SHAppBarMessage(ABM_ACTIVATE, &mut appbar);
-        // Release even when Explorer had the taskbar in the topmost band
-        // before Prism opened. `present()` owns the temporary presentation,
-        // not only the transition from a non-topmost style. HWND_NOTOPMOST
-        // alone would leave the taskbar at the top of the normal z-order,
-        // still above a borderless fullscreen game, so put it at the bottom
-        // while that game is foreground.
-        if PRESENTED.swap(false, Ordering::AcqRel) || marker_present() {
-            let insert_after = if fullscreen_foreground {
-                HWND_BOTTOM
+        // Restore the band the taskbar had before Prism presented it. The
+        // lease covers the transition from whatever style the taskbar wore
+        // beforehand - Windows 11 and StartAllBack normally run topmost, and
+        // demoting those on exit left the taskbar broken once Prism closed.
+        // While a borderless fullscreen app is foreground, a normal-band
+        // taskbar still goes to the bottom so it never covers the game.
+        let owned = PRESENTED.swap(false, Ordering::AcqRel);
+        if owned || marker_present() {
+            let recorded = if owned {
+                Some(PRESENTED_WAS_TOPMOST.load(Ordering::Acquire))
             } else {
-                HWND_NOTOPMOST
+                marker_band()
+            };
+            let insert_after = match release_band(recorded, fullscreen_foreground) {
+                ReleaseBand::Topmost => HWND_TOPMOST,
+                ReleaseBand::Bottom => HWND_BOTTOM,
+                ReleaseBand::NotTopmost => HWND_NOTOPMOST,
             };
             let _ = SetWindowPos(
                 taskbar,
@@ -221,25 +245,30 @@ pub fn release() {
                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
             );
         }
-        write_marker(false);
+        clear_marker();
     }
 }
 
 /// Startup repair: if a previous Prism instance crashed while the palette was
-/// open, its marker is still on disk - release the taskbar from the topmost
-/// band it left behind.
+/// open, its marker is still on disk - restore the taskbar to the band the
+/// marker recorded instead of leaving it stuck in Prism's presentation band.
 pub fn recover() {
-    if !marker_present() {
+    let Some(recorded) = marker_band() else {
         return;
-    }
+    };
     let Some(taskbar) = taskbar_window() else {
-        write_marker(false);
+        clear_marker();
         return;
+    };
+    let insert_after = match release_band(Some(recorded), foreground_is_fullscreen()) {
+        ReleaseBand::Topmost => HWND_TOPMOST,
+        ReleaseBand::Bottom => HWND_BOTTOM,
+        ReleaseBand::NotTopmost => HWND_NOTOPMOST,
     };
     unsafe {
         let _ = SetWindowPos(
             taskbar,
-            Some(HWND_NOTOPMOST),
+            Some(insert_after),
             0,
             0,
             0,
@@ -247,7 +276,40 @@ pub fn recover() {
             SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
         );
     }
-    write_marker(false);
+    clear_marker();
+}
+
+/// One-shot taskbar repair for `prism.exe --repair-taskbar`: restores a
+/// stranded z-band from the marker and nudges the shell to re-lay out the
+/// taskbar. Runs without the full app so it works when Prism is "off".
+pub fn repair() {
+    recover();
+    crate::taskbar_alignment::notify_taskbars("TraySettings");
+}
+
+/// The z-band the taskbar must be left in after Prism's presentation ends.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ReleaseBand {
+    Topmost,
+    Bottom,
+    NotTopmost,
+}
+
+/// Exactly the band the taskbar wore before Prism presented it. A recorded
+/// topmost taskbar (the Windows 11 and StartAllBack defaults) goes back to
+/// topmost; a recorded normal-band taskbar stays demoted, pinned to the
+/// bottom while a borderless fullscreen app is foreground so it never covers
+/// the game. A missing record takes the safe plain demote.
+fn release_band(recorded_topmost: Option<bool>, fullscreen_foreground: bool) -> ReleaseBand {
+    match recorded_topmost {
+        Some(true) => ReleaseBand::Topmost,
+        Some(false) if fullscreen_foreground => ReleaseBand::Bottom,
+        _ => ReleaseBand::NotTopmost,
+    }
+}
+
+fn window_band_is_topmost(window: HWND) -> bool {
+    unsafe { (GetWindowLongW(window, GWL_EXSTYLE) as u32 & WS_EX_TOPMOST.0) != 0 }
 }
 
 fn marker_path() -> Option<PathBuf> {
@@ -260,18 +322,34 @@ fn marker_present() -> bool {
     marker_path().is_some_and(|path| path.is_file())
 }
 
-fn write_marker(present: bool) {
+/// The band recorded in the marker: `Some(true)` = topmost, `Some(false)` =
+/// normal band. An empty legacy marker reads as the normal band.
+fn marker_band() -> Option<bool> {
+    let path = marker_path()?;
+    if !path.is_file() {
+        return None;
+    }
+    Some(std::fs::read(&path).map(|content| content == MARKER_TOPMOST).unwrap_or(false))
+}
+
+fn write_marker(topmost: bool) {
     let Some(path) = marker_path() else {
         return;
     };
-    if present {
-        if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        let _ = std::fs::write(&path, []);
-    } else {
-        let _ = std::fs::remove_file(&path);
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
     }
+    let _ = std::fs::write(
+        &path,
+        if topmost { MARKER_TOPMOST } else { MARKER_NORMAL },
+    );
+}
+
+fn clear_marker() {
+    let Some(path) = marker_path() else {
+        return;
+    };
+    let _ = std::fs::remove_file(&path);
 }
 
 fn taskbar_window() -> Option<windows::Win32::Foundation::HWND> {
@@ -331,5 +409,29 @@ mod tests {
         let monitor = rect(0, 0, 1920, 1080);
         let cover = rect(-2, -2, 1922, 1082);
         assert!(rect_covers_monitor(cover, monitor, FULLSCREEN_TOLERANCE));
+    }
+
+    #[test]
+    fn a_recorded_topmost_taskbar_is_restored_topmost() {
+        // Windows 11 and StartAllBack run the taskbar topmost by default;
+        // Prism must put it back there, never leave it demoted behind apps.
+        assert_eq!(release_band(Some(true), false), ReleaseBand::Topmost);
+        assert_eq!(release_band(Some(true), true), ReleaseBand::Topmost);
+    }
+
+    #[test]
+    fn a_recorded_normal_taskbar_stays_demoted() {
+        assert_eq!(release_band(Some(false), false), ReleaseBand::NotTopmost);
+        // A normal-band taskbar must never cover a borderless fullscreen game.
+        assert_eq!(release_band(Some(false), true), ReleaseBand::Bottom);
+    }
+
+    #[test]
+    fn a_missing_record_takes_the_safe_demote() {
+        // No record means no lease to unwind; demote to the normal band and
+        // never risk pushing the taskbar to the bottom behind a fullscreen app
+        // without knowing which band it came from.
+        assert_eq!(release_band(None, false), ReleaseBand::NotTopmost);
+        assert_eq!(release_band(None, true), ReleaseBand::NotTopmost);
     }
 }

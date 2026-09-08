@@ -180,6 +180,22 @@ pub fn run_start_restore_watchdog_if_requested() -> bool {
     start_menu::run_watchdog_from_args()
 }
 
+/// One-shot taskbar repair (`prism.exe --repair-taskbar`): restores a
+/// stranded taskbar z-band and nudges the shell to re-lay out, then exits
+/// before the full app initializes. Used by the installer/uninstaller and as
+/// a manual escape hatch when Prism is not running.
+pub fn run_taskbar_repair_if_requested() -> bool {
+    if std::env::args_os()
+        .skip(1)
+        .any(|argument| argument == std::ffi::OsStr::new("--repair-taskbar"))
+    {
+        taskbar::repair();
+        true
+    } else {
+        false
+    }
+}
+
 pub fn run() {
     let startup_timer = perf::start();
     let show_on_start = !launched_for_autostart();

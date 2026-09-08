@@ -819,7 +819,6 @@ mod tests {
         note_alignment_change(None, Alignment::Center);
         assert_eq!(alignment_generation(), before + 2);
     }
-    use super::*;
 
     #[test]
     fn horizontal_alignment_uses_full_center_and_stays_before_notification_area() {
