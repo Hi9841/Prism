@@ -69,6 +69,10 @@ const LEGACY_STATE_VERSION: u32 = 2;
 const STATE_VERSION: u32 = 3;
 const PALETTE_HIDE_DELAY: Duration = Duration::from_millis(125);
 const PALETTE_RAISE_RETRY_DELAY: Duration = Duration::from_millis(40);
+/// Alignment-follow cadence while the palette is open; the alignment watcher
+/// itself accepts changes at 750ms, so polling faster than that only burns
+/// wakeups without reacting sooner.
+const PALETTE_FOLLOW_INTERVAL: Duration = Duration::from_millis(250);
 const PALETTE_RAISE_RETRY_COUNT: u32 = 1;
 /// Win-key open fires several focus events (show, SetForegroundWindow, webview
 /// input focus). Hide-on-blur must wait until that burst is over.
@@ -646,17 +650,19 @@ fn palette_position(
     height: i32,
     start_button: Option<PhysicalRect>,
 ) -> (i32, i32) {
-    // Start-menu anchor: the palette begins at the Start button so it reads
-    // as the replacement menu, not a centered card. Right-aligned taskbars
-    // mirror (right edge = button right). Without a button (or while the
-    // locator is unavailable) the palette falls back to the alignment-center
-    // position.
+    // Start-menu anchor: left/right-aligned taskbars dock the palette against
+    // the Start button (right mirrors: right edge = button right). A centered
+    // taskbar centers its whole Start cluster, and the button sits left of
+    // screen center, so the palette centers on the work area instead - the
+    // same placement as the native Windows 11 Start menu. Without a button
+    // (or while the locator is unavailable) each alignment falls back to its
+    // mirrored work-area position.
     let aligned_x = match (alignment, start_button) {
+        (taskbar_alignment::Alignment::Left, Some(button)) => button.left,
         (taskbar_alignment::Alignment::Right, Some(button)) => button.right - width,
-        (_, Some(button)) => button.left,
         (taskbar_alignment::Alignment::Left, None) => work.left,
-        (taskbar_alignment::Alignment::Center, None) => work.left + (work.width() - width) / 2,
         (taskbar_alignment::Alignment::Right, None) => work.right - width,
+        (taskbar_alignment::Alignment::Center, _) => work.left + (work.width() - width) / 2,
     };
     let aligned_y = match alignment {
         taskbar_alignment::Alignment::Left => work.top,
@@ -903,6 +909,58 @@ fn raise_palette(window: &tauri::WebviewWindow) -> Result<(), String> {
     Ok(())
 }
 
+/// Follows taskbar alignment changes while the palette is open. The watcher
+/// may take up to its poll interval to accept a Windows-side change, and the
+/// palette's position is otherwise only computed at presentation time - so an
+/// open menu would sit still while the taskbar relayouts underneath it. This
+/// task polls the alignment generation and repositions the window (and the
+/// Start-button overlay) as soon as a change lands.
+fn schedule_palette_alignment_follower(app: &tauri::AppHandle, transition: u64) {
+    let follow_app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let mut seen = taskbar_alignment::alignment_generation();
+        loop {
+            tokio::time::sleep(PALETTE_FOLLOW_INTERVAL).await;
+            if PALETTE_TRANSITION.load(Ordering::Acquire) != transition
+                || !PALETTE_OPEN.load(Ordering::Acquire)
+            {
+                return;
+            }
+            let generation = taskbar_alignment::alignment_generation();
+            if generation == seen {
+                continue;
+            }
+            seen = generation;
+            let main_thread_app = follow_app.clone();
+            let _ = follow_app.run_on_main_thread(move || {
+                if PALETTE_TRANSITION.load(Ordering::Acquire) != transition
+                    || !PALETTE_OPEN.load(Ordering::Acquire)
+                {
+                    return;
+                }
+                let Some(window) = main_thread_app.get_webview_window("main") else {
+                    return;
+                };
+                // The anchor's Start-button rect predates the relayout and is
+                // stale by definition here; drop it so the placement derives
+                // from the monitor/work area and the fresh alignment.
+                let anchor = PRESENTATION_ANCHOR
+                    .lock()
+                    .ok()
+                    .and_then(|value| *value)
+                    .map(|value| PresentationAnchor {
+                        start_button: None,
+                        ..value
+                    });
+                position_palette(&window, anchor);
+                // The button moved with the taskbar; refresh its rect so the
+                // glyph overlay follows without waiting for the next poll.
+                win_key::request_start_rect_refresh();
+            });
+        }
+    });
+}
+
 fn schedule_activation_grace_check(app: &tauri::AppHandle, transition: u64) {
     let check_app = app.clone();
     tauri::async_runtime::spawn(async move {
@@ -1136,6 +1194,7 @@ fn present_palette(app: tauri::AppHandle) -> Result<bool, String> {
     let transition = PALETTE_TRANSITION.load(Ordering::Acquire);
     schedule_palette_raise_retry(&app, transition);
     schedule_activation_grace_check(&app, transition);
+    schedule_palette_alignment_follower(&app, transition);
     perf::finish(timer, "palette_present", || "window=main".to_string());
     Ok(true)
 }
@@ -2408,7 +2467,8 @@ mod tests {
             ),
             (0, 412)
         );
-        // Center-aligned taskbar: palette follows the centered button.
+        // Center-aligned taskbar: the menu centers on the work area, matching
+        // the native Start menu, instead of hugging the off-center button.
         assert_eq!(
             palette_position(
                 work,
@@ -2423,7 +2483,7 @@ mod tests {
                     bottom: 1_080,
                 }),
             ),
-            (784, 412)
+            (680, 412)
         );
         // Right-aligned taskbar: palette ends at the button's right edge.
         assert_eq!(

@@ -675,7 +675,7 @@ export function Palette() {
 
       {/* ------- results ------- */}
       {menuActive ? (
-        <StartMenu ref={menuRef} />
+        <StartMenu ref={menuRef} narrow={settings.width === 560} />
       ) : (
         <div
           ref={listRef}
