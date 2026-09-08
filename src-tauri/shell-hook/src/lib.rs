@@ -105,7 +105,6 @@ const HC_ACTION: i32 = 0;
 const HWND_MESSAGE: Hwnd = -3isize as Hwnd;
 const WM_NULL: u32 = 0;
 const WM_SYSCOMMAND: u32 = 0x0112;
-const WM_HOTKEY: u32 = 0x0312;
 const WM_LBUTTONDOWN: usize = 0x0201;
 const WM_LBUTTONUP: usize = 0x0202;
 const WM_CLOSE: u32 = 0x0010;
@@ -114,10 +113,8 @@ const STM_SETIMAGE: u32 = 0x0172;
 const STM_GETIMAGE: u32 = 0x0173;
 const IMAGE_BITMAP: usize = 0;
 const SC_TASKLIST: usize = 0xF130;
-const MOD_WIN: usize = 0x0008;
-const MOD_NOREPEAT: usize = 0x4000;
-const VK_LWIN: usize = 0x005B;
-const VK_RWIN: usize = 0x005C;
+const CONTROL_DISABLE_WIN_HOTKEY: usize = 1;
+const EVENT_HOTKEY_DISABLED: usize = 2;
 const CONTROL_START_RECT_LEFT: usize = 4;
 const CONTROL_START_RECT_TOP: usize = 5;
 const CONTROL_START_RECT_RIGHT: usize = 6;
@@ -137,16 +134,6 @@ const EVENT_SEARCH_RECT_CONFIGURED: usize = 19;
 const CONTROL_TASKBAR_PIN: usize = 20;
 const CONTROL_TASKBAR_UNPIN: usize = 21;
 const EVENT_TASKBAR_PIN_COMPLETED: usize = 22;
-const EVENT_SHELL_START: usize = 23;
-const CONTROL_HEARTBEAT: usize = 24;
-const CONTROL_START_RECT_CHANGED: usize = 25;
-const TIMER_HEARTBEAT: usize = 42;
-const WM_TIMER: u32 = 0x0113;
-/// The overlay hides itself when this much time passes without a Prism
-/// heartbeat, so a crashed Prism can never leave a dead button on the
-/// taskbar: the native glyph and Start menu return automatically.
-const HEARTBEAT_DEAD_MS: u64 = 15_000;
-const HEARTBEAT_CHECK_MS: u32 = 5_000;
 const WS_POPUP: u32 = 0x8000_0000;
 const SS_BITMAP: u32 = 0x0000_000e;
 const WS_EX_TOOLWINDOW: u32 = 0x0000_0080;
@@ -227,6 +214,7 @@ extern "system" {
         -> Hwnd;
     fn PostMessageW(window: Hwnd, message: u32, wparam: usize, lparam: isize) -> i32;
     fn RegisterWindowMessageW(name: *const u16) -> u32;
+    fn UnregisterHotKey(window: Hwnd, id: i32) -> i32;
     fn CreateWindowExW(
         ex_style: u32,
         class_name: *const u16,
@@ -508,10 +496,6 @@ fn handle_taskbar_pin(pinned: bool) -> isize {
 }
 
 unsafe fn observer_window() -> Hwnd {
-    let top_level = FindWindowW(OBSERVER_CLASS.as_ptr(), std::ptr::null());
-    if !top_level.is_null() {
-        return top_level;
-    }
     FindWindowExW(
         HWND_MESSAGE,
         std::ptr::null_mut(),
@@ -526,20 +510,7 @@ unsafe fn notify_observer(message: u32, event: usize, detail: isize) -> bool {
 }
 
 fn is_start_command(message: &Msg) -> bool {
-    (message.message == WM_SYSCOMMAND && message.wparam & 0xFFF0 == SC_TASKLIST)
-        || is_bare_win_hotkey(message)
-}
-
-fn is_bare_win_hotkey(message: &Msg) -> bool {
-    if message.message != WM_HOTKEY {
-        return false;
-    }
-    let detail = message.lparam as usize;
-    let modifiers = detail & 0xFFFF;
-    let virtual_key = (detail >> 16) & 0xFFFF;
-    modifiers & MOD_WIN != 0
-        && modifiers & !(MOD_WIN | MOD_NOREPEAT) == 0
-        && matches!(virtual_key, 0 | VK_LWIN | VK_RWIN)
+    message.message == WM_SYSCOMMAND && message.wparam & 0xFFF0 == SC_TASKLIST
 }
 
 fn bridge_message_id() -> u32 {
@@ -1190,6 +1161,16 @@ pub unsafe extern "system" fn PrismShellGetMessageHook(
         let control = message.wparam & u32::MAX as usize;
         if message.message == message_id {
             match control {
+                CONTROL_DISABLE_WIN_HOTKEY => {
+                    let mut disabled = false;
+                    for id in 0..=16 {
+                        if UnregisterHotKey(std::ptr::null_mut(), id) != 0 {
+                            disabled = true;
+                        }
+                    }
+                    let _ = notify_observer(message_id, EVENT_HOTKEY_DISABLED, disabled as isize);
+                    message.message = WM_NULL;
+                }
                 CONTROL_START_RECT_LEFT => {
                     START_RECT_READY.store(false, Ordering::Release);
                     START_PRESS_CAPTURED.store(false, Ordering::Release);
@@ -1311,11 +1292,8 @@ pub unsafe extern "system" fn PrismShellGetMessageHook(
             }
         } else if is_start_command(message) && !observer_window().is_null() {
             // Consume the Start command only while Prism's observer is alive.
-            // Notify so a press that never reaches the keyboard observers
-            // (elevated or exclusive-input foreground) can still toggle Prism.
-            // The observer cancels this fallback as soon as it sees Win-down
-            // or a chord key, so Win+key chords do not open Prism.
-            let _ = notify_observer(message_id, EVENT_SHELL_START, 0);
+            // The raw-input state machine decides whether the key sequence was
+            // a standalone Win press, so Win+key chords never open Prism.
             message.message = WM_NULL;
         } else if message.message == WM_SETTINGCHANGE && has_active_icon() {
             // Wallpaper, theme, or layout changes behind the Start button
@@ -1353,69 +1331,6 @@ mod tests {
         )));
         assert!(!is_start_command(&message(WM_SYSCOMMAND, 0xF000)));
         assert!(!is_start_command(&message(WM_NULL, SC_TASKLIST)));
-    }
-
-    #[test]
-    fn identifies_only_bare_win_hotkeys() {
-        let mut bare_left = message(WM_HOTKEY, 1);
-        bare_left.lparam = ((VK_LWIN as isize) << 16) | MOD_WIN as isize;
-        assert!(is_bare_win_hotkey(&bare_left));
-        assert!(is_start_command(&bare_left));
-
-        let mut bare_right = message(WM_HOTKEY, 2);
-        bare_right.lparam = ((VK_RWIN as isize) << 16) | MOD_WIN as isize;
-        assert!(is_bare_win_hotkey(&bare_right));
-
-        let mut bare_modifier = message(WM_HOTKEY, 3);
-        bare_modifier.lparam = (MOD_WIN | MOD_NOREPEAT) as isize;
-        assert!(is_bare_win_hotkey(&bare_modifier));
-
-        let mut win_r = message(WM_HOTKEY, 4);
-        win_r.lparam = ((0x52isize) << 16) | MOD_WIN as isize;
-        assert!(!is_bare_win_hotkey(&win_r));
-
-        let mut win_alt = message(WM_HOTKEY, 5);
-        win_alt.lparam = ((0x41isize) << 16) | (MOD_WIN | 0x0001) as isize;
-        assert!(!is_bare_win_hotkey(&win_alt));
-
-        let mut ctrl_esc = message(WM_HOTKEY, 6);
-        ctrl_esc.lparam = (0x1Bisize << 16) | 0x0002;
-        assert!(!is_bare_win_hotkey(&ctrl_esc));
-    }
-
-    #[test]
-    #[test]
-    fn rect_file_parses_exactly_four_little_endian_ints() {
-        let mut bytes = Vec::new();
-        for value in [784i32, 1032, 829, 1080] {
-            bytes.extend_from_slice(&value.to_le_bytes());
-        }
-        assert_eq!(parse_rect_bytes(&bytes), Some((784, 1032, 829, 1080)));
-        assert_eq!(parse_rect_bytes(&bytes[..12]), None);
-        assert_eq!(parse_rect_bytes(&[]), None);
-        let mut negative = Vec::new();
-        for value in [-1920i32, -1040, -1875, -1000] {
-            negative.extend_from_slice(&value.to_le_bytes());
-        }
-        assert_eq!(parse_rect_bytes(&negative), Some((-1920, -1040, -1875, -1000)));
-    }
-
-    #[test]
-    fn heartbeat_dead_only_after_a_missing_interval() {
-        // No ping ever received: dead immediately.
-        assert!(heartbeat_stale(0, 5_000));
-        // Fresh ping: alive.
-        assert!(!heartbeat_stale(5_000, 10_000));
-        // Past the dead threshold: dead.
-        assert!(heartbeat_stale(5_000, 5_000 + HEARTBEAT_DEAD_MS + 1));
-        // Timer wraparound is handled by wrapping subtraction.
-        assert!(!heartbeat_stale(u64::MAX - 1_000, 1_000));
-    }
-
-    fn shell_start_event_is_distinct() {
-        assert_eq!(EVENT_SHELL_START, 23);
-        assert_ne!(EVENT_SHELL_START, EVENT_TASKBAR_PIN_COMPLETED);
-        assert_ne!(EVENT_SHELL_START, EVENT_TASKBAR_START_CLICK_Y);
     }
 }
 
