@@ -171,7 +171,10 @@ unsafe extern "system" fn osd_wnd_proc(
             LRESULT(0)
         }
         WM_TIMER if wparam.0 == TIMER_TOPMOST => {
-            let _ = KillTimer(Some(hwnd), TIMER_TOPMOST);
+            // Re-assert while visible: an already-displayed pill can still be
+            // overtaken by a topmost window activated after the popup built
+            // its z-order (Discord popouts, terminal windows). Keep the pill
+            // above the whole band until it hides.
             let _ = SetWindowPos(
                 hwnd,
                 Some(HWND_TOPMOST),
@@ -181,6 +184,7 @@ unsafe extern "system" fn osd_wnd_proc(
                 0,
                 SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE,
             );
+            let _ = SetTimer(Some(hwnd), TIMER_TOPMOST, TOPMOST_REASSERT_MS, None);
             LRESULT(0)
         }
         WM_TIMER if wparam.0 == TIMER_HIDE => {
@@ -744,8 +748,10 @@ unsafe fn render_typography(pixels: &mut [u32], width: i32, _height: i32, state:
         top: 10,
         right: if is_no_audio {
             width - 82
+        } else if state.muted {
+            width - 88
         } else if is_master_fallback {
-            width - 68
+            width - 98
         } else {
             width - 58
         },
@@ -781,17 +787,21 @@ unsafe fn render_typography(pixels: &mut [u32], width: i32, _height: i32, state:
     let (pct_text, text_color) = if is_no_audio {
         ("No Audio".to_string(), (148u8, 163u8, 184u8)) // Slate-400
     } else if state.muted {
-        ("Muted".to_string(), (248u8, 113u8, 113u8)) // Rose Coral
+        (format!("Muted {}%", state.percentage), (248u8, 113u8, 113u8)) // Rose Coral
     } else if is_master_fallback {
-        ("Master".to_string(), (148u8, 163u8, 184u8)) // Slate-400
+        (format!("Master {}%", state.percentage), (148u8, 163u8, 184u8)) // Slate-400
     } else {
         (format!("{}%", state.percentage), (203u8, 213u8, 225u8)) // Slate-300
     };
 
     let mut wide_pct: Vec<u16> = pct_text.encode_utf16().collect();
     let mut pct_rect = RECT {
-        left: if is_no_audio || is_master_fallback {
+        left: if is_no_audio {
             width - 80
+        } else if state.muted {
+            width - 88
+        } else if is_master_fallback {
+            width - 98
         } else {
             width - 62
         },
