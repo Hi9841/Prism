@@ -1,0 +1,279 @@
+# Agent: Prism quality control loop — recurring, one PR bound
+#
+# Modes:
+#   1. scheduled/manual: sense -> control -> actuate one iteration on a fresh
+#      branch and open a PR. The sensor and controller are deterministic
+#      standalone scripts; the actuator is a headless Claude Code run.
+#   2. /iterate: when a maintainer comments "/iterate" on a PR this workflow
+#      created, update that PR and distill durable guidance back into memory.
+#
+# The /iterate path checks the PR body marker BEFORE checkout/setup so every
+# agent workflow can listen for /iterate while non-matching workflows no-op
+# cheaply.
+
+name: "Agent: Prism quality control loop"
+
+on:
+  schedule:
+    # Weekly, Monday 13:00 UTC. Low-risk, small diffs; weekly keeps review
+    # burden near zero. Bump frequency only after the loop is trusted.
+    - cron: "0 13 * * 1"
+  workflow_dispatch:
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+concurrency:
+  group: agent-quality-control-loop
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: pwsh
+
+jobs:
+  agent-task:
+    # Run all non-comment events. For issue comments, only authorized PR
+    # comments starting with /iterate reach the marker preflight below.
+    if: |
+      github.event_name != 'issue_comment' ||
+      (
+        github.event.issue.pull_request &&
+        startsWith(github.event.comment.body, '/iterate') &&
+        (github.event.comment.author_association == 'OWNER' ||
+         github.event.comment.author_association == 'MEMBER' ||
+         github.event.comment.author_association == 'COLLABORATOR')
+      )
+    runs-on: windows-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Check iterate marker to bound work-in-progress
+        id: gate
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          EVENT_NAME: ${{ github.event_name }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          PR_URL: ${{ github.event.issue.pull_request.url }}
+          WORKFLOW_ID: agent-quality-control-loop
+          AGENT_LABEL: agent-quality-control-loop
+        run: |
+          # Flow control: scheduled runs no-op when an open PR already exists.
+          if ($env:EVENT_NAME -eq 'schedule' -or $env:EVENT_NAME -eq 'workflow_call') {
+            $existing = gh pr list --repo $env:GITHUB_REPOSITORY --state open --label $env:AGENT_LABEL --json number --jq 'length'
+            if ([int]$existing -gt 0) {
+              Write-Host "Open PR already exists for $env:AGENT_LABEL; no-op."
+              Add-Content -Path $env:GITHUB_OUTPUT -Value 'run_agent=false'
+              exit 0
+            }
+          }
+
+          # Manual (workflow_dispatch) and scheduled runs are normal agent runs.
+          if ($env:EVENT_NAME -ne 'issue_comment') {
+            Add-Content -Path $env:GITHUB_OUTPUT -Value 'run_agent=true'
+            exit 0
+          }
+
+          # /iterate comments are shared by all recurring agent workflows. The
+          # hidden PR body marker routes the comment to the workflow that opened
+          # the PR. Non-matching workflows exit before checkout/setup.
+          $body = gh api $env:PR_URL --jq '.body'
+          if ($body -like '*prism-agent:workflow=agent-quality-control-loop*') {
+            Add-Content -Path $env:GITHUB_OUTPUT -Value 'run_agent=true'
+            Add-Content -Path $env:GITHUB_OUTPUT -Value "number=$(gh api $env:PR_URL --jq '.number')"
+            Add-Content -Path $env:GITHUB_OUTPUT -Value "head_ref=$(gh api $env:PR_URL --jq '.head.ref')"
+            Add-Content -Path $env:GITHUB_OUTPUT -Value "head_sha=$(gh api $env:PR_URL --jq '.head.sha')"
+          } else {
+            Add-Content -Path $env:GITHUB_OUTPUT -Value 'run_agent=false'
+            Write-Host "PR was not created by agent-quality-control-loop; no-op."
+          }
+
+      - uses: actions/checkout@v5
+        if: steps.gate.outputs.run_agent == 'true' && github.event_name != 'issue_comment'
+        with:
+          fetch-depth: 0
+
+      - uses: actions/checkout@v5
+        if: steps.gate.outputs.run_agent == 'true' && github.event_name == 'issue_comment'
+        with:
+          ref: ${{ steps.gate.outputs.head_ref }}
+          fetch-depth: 0
+
+      - name: Configure git user & branch
+        if: steps.gate.outputs.run_agent == 'true'
+        run: |
+          if ("${{ github.event_name }}" -ne 'issue_comment') {
+            $branch = "agent/quality-control-loop/${{ github.run_id }}-${{ github.run_attempt }}"
+            git checkout -b $branch
+            Add-Content -Path $env:GITHUB_ENV -Value "BRANCH=$branch"
+          }
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Install Bun
+        if: steps.gate.outputs.run_agent == 'true'
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+
+      - name: Install Node.js (for the Claude Code CLI)
+        if: steps.gate.outputs.run_agent == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Set up Rust
+        if: steps.gate.outputs.run_agent == 'true'
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build data
+        if: steps.gate.outputs.run_agent == 'true'
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+          cache-on-failure: true
+
+      - name: Cache bun dependencies
+        if: steps.gate.outputs.run_agent == 'true'
+        uses: actions/cache@v4
+        with:
+          path: ~/.bun/install/cache
+          key: bun-${{ runner.os }}-${{ hashFiles('**/bun.lock') }}
+          restore-keys: |
+            bun-${{ runner.os }}-
+
+      - name: Install dependencies
+        if: steps.gate.outputs.run_agent == 'true'
+        run: bun install --frozen-lockfile
+
+      - name: Install Claude Code CLI
+        if: steps.gate.outputs.run_agent == 'true'
+        run: npm install -g @anthropic-ai/claude-code
+
+      # --- Scheduled / manual path: one sense -> control -> actuate iteration ---
+      - name: Sensor — measure the panic surface
+        if: steps.gate.outputs.run_agent == 'true' && github.event_name != 'issue_comment'
+        run: |
+          bun scripts/sense-quality.ts > "$env:RUNNER_TEMP\sensor-output.json"
+          Get-Content "$env:RUNNER_TEMP\sensor-output.json" | Select-Object -First 30
+
+      - name: Controller — select the next increment
+        if: steps.gate.outputs.run_agent == 'true' && github.event_name != 'issue_comment'
+        run: |
+          bun scripts/control-quality.ts "$env:RUNNER_TEMP\sensor-output.json" `
+            --feedback .github/agent-memory/quality-control-loop.md `
+            --batch 1 > "$env:RUNNER_TEMP\controller-output.md"
+          Get-Content "$env:RUNNER_TEMP\controller-output.md"
+
+      - name: Actuator — run the coding agent
+        if: steps.gate.outputs.run_agent == 'true' && github.event_name != 'issue_comment'
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          FORCE_COLOR: "3"
+        run: |
+          $memory = Get-Content -Raw -Path ".github/agent-memory/quality-control-loop.md"
+          $controller = Get-Content -Raw -Path "$env:RUNNER_TEMP\controller-output.md"
+          $lines = @(
+            '# Context'
+            'You are the actuator for the Prism quality-control loop in this repository. Begin by reading and using the quality-control-loop skill at .agents/skills/quality-control-loop/SKILL.md, including its references/response-template.md.'
+            ''
+            '# Scope'
+            'Focus only on the selected target in src-tauri/src (see "Selected work" below). You may inspect the golden-pattern files named by the skill. Never edit tests, src/, scripts/, or CI files.'
+            ''
+            '# Instructions'
+            '1. Work the target the controller selected: fix exactly one site, behavior-preserving.'
+            '2. Follow the golden patterns and core requirements in the skill.'
+            '3. Run the full validation gate (see the skill) and confirm it is green before committing.'
+            '4. Commit your changes with a concise message. Do not push.'
+            '5. Format your final answer exactly per the skill references/response-template.md.'
+            ''
+            '## Selected work (controller output)'
+            $controller
+            ''
+            '## Agent Memory'
+            $memory
+          )
+          $prompt = $lines -join [Environment]::NewLine
+          claude -p $prompt --permission-mode bypassPermissions --output-format stream-json --verbose 2>&1 | Tee-Object -FilePath "$env:RUNNER_TEMP\agent-output.txt"
+
+      - name: Extract PR body
+        if: steps.gate.outputs.run_agent == 'true' && github.event_name != 'issue_comment'
+        run: |
+          bun scripts/extract-pr-body.ts "$env:RUNNER_TEMP\agent-output.txt" > "$env:RUNNER_TEMP\pr-body.md"
+
+      - name: Push and create PR
+        if: steps.gate.outputs.run_agent == 'true' && github.event_name != 'issue_comment'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          AGENT_LABEL: agent-quality-control-loop
+          WORKFLOW_ID: agent-quality-control-loop
+        run: |
+          git diff --quiet origin/main...HEAD
+          if ($LASTEXITCODE -eq 0) {
+            Write-Host "No commits were created by the agent; skipping PR creation."
+            exit 0
+          }
+
+          git push --set-upstream origin $env:BRANCH
+
+          # Add visible /iterate instructions + the hidden workflow marker.
+          bun scripts/agent-iteration.ts `
+            --command footer `
+            --workflow $env:WORKFLOW_ID `
+            --memory .github/agent-memory/quality-control-loop.md >> "$env:RUNNER_TEMP\pr-body.md"
+
+          gh label create $env:AGENT_LABEL --description "Recurring quality-control-loop agent PR" --color "0E8A16" 2>$null
+          $title = "[quality-control] remove 1 panic-surface site ($(Get-Date -Format 'MM/dd'))"
+          $pr = gh pr create --title $title --body-file "$env:RUNNER_TEMP\pr-body.md"
+          gh pr edit $pr --add-label $env:AGENT_LABEL
+
+      # --- Iteration path: a /iterate comment refines the existing PR ---
+      - name: Actuator — iterate on feedback
+        if: steps.gate.outputs.run_agent == 'true' && github.event_name == 'issue_comment'
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          FORCE_COLOR: "3"
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          PR_NUMBER: ${{ steps.gate.outputs.number }}
+          COMMENT_BODY: ${{ github.event.comment.body }}
+        run: |
+          bun scripts/agent-iteration.ts `
+            --command prompt `
+            --workflow agent-quality-control-loop `
+            --memory .github/agent-memory/quality-control-loop.md `
+            --repo $env:GITHUB_REPOSITORY `
+            --pr-number $env:PR_NUMBER `
+            --comment-body $env:COMMENT_BODY > "$env:RUNNER_TEMP\agent-prompt.md"
+
+          claude -p (Get-Content -Raw "$env:RUNNER_TEMP\agent-prompt.md") `
+            --permission-mode bypassPermissions `
+            --output-format stream-json `
+            --verbose 2>&1 | Tee-Object -FilePath "$env:RUNNER_TEMP\agent-output.txt"
+
+          bun scripts/extract-pr-body.ts "$env:RUNNER_TEMP\agent-output.txt" > "$env:RUNNER_TEMP\pr-body.md"
+
+      - name: Push iteration changes and comment
+        if: steps.gate.outputs.run_agent == 'true' && github.event_name == 'issue_comment'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git diff --quiet HEAD
+          if ($LASTEXITCODE -ne 0) {
+            git add -A
+            git commit -m "chore: iterate quality-control-loop agent feedback"
+            git push origin HEAD:${{ steps.gate.outputs.head_ref }}
+          }
+          gh pr comment ${{ steps.gate.outputs.number }} --body-file "$env:RUNNER_TEMP\pr-body.md"
+
+      - name: Upload agent output
+        if: always() && steps.gate.outputs.run_agent == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: quality-control-loop-agent-output
+          path: ${{ runner.temp }}/agent-output.txt
