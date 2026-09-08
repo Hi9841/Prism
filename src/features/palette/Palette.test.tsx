@@ -52,6 +52,8 @@ function renderPalette(options?: { fileError?: FileSearchError; keepItemsOnError
     sections: items.length > 0 ? [{ id: "apps", label: "Applications", items }] : [],
     flatItems: items,
     apps: [],
+    quickItems: [],
+    appIcons: {},
     selected: 0,
     move,
     select: vi.fn(),

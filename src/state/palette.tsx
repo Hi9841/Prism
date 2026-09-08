@@ -38,6 +38,10 @@ interface PaletteCtx {
   sections: Section[];
   flatItems: PaletteItem[];
   apps: AppEntry[];
+  /** Resolved quick-access palette items, in user order (start-menu view). */
+  quickItems: PaletteItem[];
+  /** Loaded app icon data URLs by appId (start-menu view tiles). */
+  appIcons: Readonly<Record<string, string>>;
   selected: number;
   move: (delta: number) => void;
   select: (index: number) => void;
@@ -460,8 +464,13 @@ export function PaletteProvider({ children }: { children: ReactNode }) {
       if (item.appId) ids.add(item.appId);
     }
     for (const appId of app.settings.pinnedApps) ids.add(appId);
+    // The start-menu view lists every installed app at once, so its icon set
+    // is the whole catalog rather than the palette's visible rows.
+    if (app.settings.startView === "menu" && query.trim() === "" && appsLoaded) {
+      for (const entry of visibleApps) ids.add(entry.appId);
+    }
     return [...ids];
-  }, [flatItems, app.settings.pinnedApps]);
+  }, [flatItems, app.settings.pinnedApps, app.settings.startView, query, visibleApps, appsLoaded]);
 
   useEffect(() => {
     void iconRetryTick;
@@ -583,6 +592,8 @@ export function PaletteProvider({ children }: { children: ReactNode }) {
       sections,
       flatItems,
       apps: visibleApps,
+      quickItems,
+      appIcons,
       selected,
       move,
       select: setSelected,
@@ -609,6 +620,8 @@ export function PaletteProvider({ children }: { children: ReactNode }) {
       sections,
       flatItems,
       visibleApps,
+      quickItems,
+      appIcons,
       selected,
       move,
       runSelected,
