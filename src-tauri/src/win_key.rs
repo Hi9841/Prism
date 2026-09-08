@@ -95,8 +95,9 @@ const SHELL_EVENT_SHELL_START_COMMAND: usize = 25;
 /// Win-up shell command, and a late raw toggle is dropped by the debounce.
 const SHELL_START_FALLBACK_GRACE: Duration = Duration::ZERO;
 /// If the raw observer saw a Win/Ctrl+Esc this recently, a shell Start command
-/// belongs to the same press and is ignored.
-const SHELL_START_DEDUPE_MS: u64 = 400;
+/// belongs to the same press and is ignored. Kept just above the physical
+/// press duration so a later, separate press is never suppressed.
+const SHELL_START_DEDUPE_MS: u64 = 250;
 
 /// Event the frontend receives when Win observation self-disables.
 pub const FAILED_EVENT: &str = "win-mode-failed";
@@ -1831,7 +1832,10 @@ fn note_shell_start_command() {
         return;
     }
     let now = toggle_clock_ms();
-    let last_raw = LAST_RAW_TOGGLE_MS.load(Ordering::Acquire);
+    // Consume the marker: one raw press may suppress exactly one shell command.
+    // Leaving it set let a later, separate Win press that only reached the shell
+    // be dropped as if it were the earlier raw press.
+    let last_raw = LAST_RAW_TOGGLE_MS.swap(0, Ordering::AcqRel);
     if last_raw != 0 && now.saturating_sub(last_raw) < SHELL_START_DEDUPE_MS {
         debug_trace("shell-start-skipped (raw recent)");
         return;

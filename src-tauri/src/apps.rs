@@ -2049,8 +2049,14 @@ pub fn set_taskbar_pinned(path: &Path, pinned: bool) -> Result<(), String> {
     if !path.exists() {
         return Err(format!("{} does not exist", path.display()));
     }
-    if is_pinned_to_taskbar(path) == pinned {
+    // Unknown state must not be treated as "already in the desired state":
+    // that reported a successful unpin without attempting one.
+    let current = taskbar_pin_state(path);
+    if current == Some(pinned) {
         return Ok(());
+    }
+    if current.is_none() {
+        return Err("Could not read the current taskbar pin state.".to_string());
     }
     crate::win_key::debug_trace(&format!(
         "set-pin begin path={} pinned={pinned}",
@@ -2178,8 +2184,11 @@ fn taskbar_pin_state(path: &Path) -> Option<bool> {
     if hr.is_err() || pinned_list_raw.is_null() {
         return None;
     }
-    let pidl = resolve_shell_pidl(path)?;
     let pinned_list = pinned_list_raw as *mut IPinnedList3;
+    let Some(pidl) = resolve_shell_pidl(path) else {
+        unsafe { ((*(*pinned_list).vtbl).Release)(pinned_list_raw) };
+        return None;
+    };
     let state = unsafe { ((*(*pinned_list).vtbl).IsPinned)(pinned_list_raw, pidl) };
     unsafe {
         ILFree(Some(pidl));
