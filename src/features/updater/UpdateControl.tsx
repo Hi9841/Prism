@@ -3,7 +3,7 @@ import { AlertCircle, ArrowDownToLine, LoaderCircle, RefreshCw } from "lucide-re
 import { useCallback, useEffect, useRef, useState } from "react";
 import { inTauri, onToggleRequest } from "../../lib/bridge";
 import { useApp } from "../../state/app";
-import { shouldCheckForUpdate } from "./update-policy";
+import { isDowngrade, shouldCheckForUpdate } from "./update-policy";
 import { updatePercent } from "./update-progress";
 
 const CHECK_INTERVAL_MS = 60 * 60 * 1000;
@@ -12,11 +12,17 @@ const DOWNLOAD_TIMEOUT_MS = 10 * 60 * 1000;
 
 type UpdateViewState =
   | { phase: "hidden" }
-  | { phase: "available"; version: string }
-  | { phase: "saving"; version: string }
-  | { phase: "downloading"; version: string; downloadedBytes: number; totalBytes?: number }
-  | { phase: "installing"; version: string }
-  | { phase: "failed"; version: string };
+  | { phase: "available"; version: string; downgrade: boolean }
+  | { phase: "saving"; version: string; downgrade: boolean }
+  | {
+      phase: "downloading";
+      version: string;
+      downgrade: boolean;
+      downloadedBytes: number;
+      totalBytes?: number;
+    }
+  | { phase: "installing"; version: string; downgrade: boolean }
+  | { phase: "failed"; version: string; downgrade: boolean };
 
 export function UpdateControl() {
   const { showToast, flushPersistence } = useApp();
@@ -47,6 +53,10 @@ export function UpdateControl() {
     const pending = check({
       timeout: NETWORK_TIMEOUT_MS,
       target: "windows-x86_64-nsis",
+      // Releases can be deleted and the feed repointed lower. Allow the check
+      // to report a version below the installed one so users on a removed
+      // build are offered the roll back instead of staying stuck forever.
+      allowDowngrades: true,
       headers: force ? { "Cache-Control": "no-cache", Pragma: "no-cache" } : undefined,
     })
       .then(async (availableUpdate) => {
@@ -63,13 +73,17 @@ export function UpdateControl() {
         }
         const previousUpdate = updateRef.current;
         updateRef.current = availableUpdate;
-        setViewState({ phase: "available", version: availableUpdate.version });
+        setViewState({
+          phase: "available",
+          version: availableUpdate.version,
+          downgrade: isDowngrade(availableUpdate.currentVersion, availableUpdate.version),
+        });
         if (previousUpdate && previousUpdate !== availableUpdate) void previousUpdate.close().catch(() => {});
       })
       .catch((error) => {
         if (!disposedRef.current && generation === installGenerationRef.current) {
           console.error("Prism update check failed", error);
-          setViewState({ phase: "failed", version: "latest" });
+          setViewState({ phase: "failed", version: "latest", downgrade: false });
         }
       })
       .finally(() => {
@@ -110,12 +124,13 @@ export function UpdateControl() {
       return;
     }
     if (!update || viewState.phase === "downloading" || viewState.phase === "installing") return;
+    const downgrade = isDowngrade(update.currentVersion, update.version);
 
     let downloadedBytes = 0;
     installInFlightRef.current = true;
     installGenerationRef.current += 1;
     let saving = true;
-    setViewState({ phase: "saving", version: update.version });
+    setViewState({ phase: "saving", version: update.version, downgrade });
     try {
       await flushPersistence();
       if (disposedRef.current) return;
@@ -123,6 +138,7 @@ export function UpdateControl() {
       setViewState({
         phase: "downloading",
         version: update.version,
+        downgrade,
         downloadedBytes,
       });
       await update.download(
@@ -132,6 +148,7 @@ export function UpdateControl() {
             setViewState({
               phase: "downloading",
               version: update.version,
+              downgrade,
               downloadedBytes,
               totalBytes: event.data.contentLength,
             });
@@ -140,6 +157,7 @@ export function UpdateControl() {
             setViewState((current) => ({
               phase: "downloading",
               version: update.version,
+              downgrade,
               downloadedBytes,
               totalBytes: current.phase === "downloading" ? current.totalBytes : undefined,
             }));
@@ -151,11 +169,11 @@ export function UpdateControl() {
       // Settings can change during a long download. Flush again immediately
       // before handing control to the native installer, which exits Prism.
       saving = true;
-      setViewState({ phase: "saving", version: update.version });
+      setViewState({ phase: "saving", version: update.version, downgrade });
       await flushPersistence();
       if (disposedRef.current) return;
       saving = false;
-      setViewState({ phase: "installing", version: update.version });
+      setViewState({ phase: "installing", version: update.version, downgrade });
       await update.install();
       // On Windows, Tauri's native updater launches the NSIS installer with
       // restart enabled and exits Prism from Rust. This line is only reached
@@ -164,7 +182,7 @@ export function UpdateControl() {
       // the old executable while it is being replaced.
     } catch (error) {
       if (disposedRef.current) return;
-      setViewState({ phase: "failed", version: update.version });
+      setViewState({ phase: "failed", version: update.version, downgrade });
       showToast(saving ? "Settings not saved" : "Update failed", String(error), "error");
     } finally {
       installInFlightRef.current = false;
@@ -182,7 +200,7 @@ export function UpdateControl() {
         title="Check for updates"
         aria-label="Check for updates"
         onClick={() => checkForUpdate(true)}
-        className="focus-ring press grid h-11 w-11 place-items-center rounded-[7px] text-fg-quiet hover:bg-surface-hover hover:text-fg"
+        className="focus-ring press relative grid h-8 w-8 place-items-center rounded-[10px] text-fg-quiet after:absolute after:-inset-1.5 after:content-[''] hover:bg-surface-hover hover:text-fg"
       >
         <RefreshCw className="h-3.5 w-3.5" />
       </button>
@@ -190,13 +208,14 @@ export function UpdateControl() {
   }
 
   const version = viewState.version.replace(/^v/i, "");
+  const downgrade = viewState.downgrade;
   const busy =
     viewState.phase === "saving" || viewState.phase === "downloading" || viewState.phase === "installing";
   const percent =
     viewState.phase === "downloading" ? updatePercent(viewState.downloadedBytes, viewState.totalBytes) : null;
   const label =
     viewState.phase === "available"
-      ? `Update v${version}`
+      ? `${downgrade ? "Downgrade" : "Update"} v${version}`
       : viewState.phase === "saving"
         ? "Saving settings"
         : viewState.phase === "downloading"
@@ -205,13 +224,17 @@ export function UpdateControl() {
             : `Update ${percent}%`
           : viewState.phase === "installing"
             ? "Installing"
-            : "Retry update";
+            : downgrade
+              ? "Retry downgrade"
+              : "Retry update";
   const title =
     viewState.phase === "failed"
-      ? `Retry Prism v${version} update`
+      ? `Retry Prism v${version} ${downgrade ? "downgrade" : "update"}`
       : busy
         ? `${label} Prism v${version}`
-        : `Install Prism v${version}`;
+        : downgrade
+          ? `Roll back to Prism v${version}`
+          : `Install Prism v${version}`;
 
   return (
     <button
@@ -221,12 +244,12 @@ export function UpdateControl() {
       aria-busy={busy}
       disabled={busy}
       onClick={installUpdate}
-      className={`focus-ring press inline-flex h-11 w-28 min-w-0 items-center justify-center gap-1.5 rounded-[7px] px-2.5 text-[11px] font-semibold ${
+      className={`focus-ring press relative inline-flex h-8 shrink-0 items-center justify-center gap-1.5 whitespace-nowrap rounded-[10px] px-2.5 text-[11px] font-semibold after:absolute after:-inset-y-1.5 after:-inset-x-1 after:content-[''] ${
         viewState.phase === "failed"
           ? "bg-danger-soft text-danger hover:opacity-90"
           : busy
             ? "cursor-wait bg-surface text-fg-secondary"
-            : "cursor-pointer bg-accent-soft text-accent hover:bg-surface-active hover:text-fg"
+            : "cursor-pointer bg-accent-soft text-fg hover:bg-surface-active"
       }`}
     >
       <span className="relative grid h-3.5 w-3.5 shrink-0 place-items-center" aria-hidden="true">
@@ -250,7 +273,7 @@ export function UpdateControl() {
           }`}
         />
       </span>
-      <span className="truncate tabular-nums" aria-live="polite">
+      <span className="tabular-nums" aria-live="polite">
         {label}
       </span>
     </button>
