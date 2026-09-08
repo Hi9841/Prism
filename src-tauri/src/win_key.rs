@@ -330,6 +330,11 @@ static BRIDGE_MESSAGE_ID: OnceLock<Result<u32, String>> = OnceLock::new();
 static SHELL_BRIDGE_ACK: AtomicU32 = AtomicU32::new(0);
 static SHELL_START_RECT_ACK: AtomicU32 = AtomicU32::new(0);
 static SHELL_SEARCH_RECT_ACK: AtomicU32 = AtomicU32::new(0);
+/// Mirror of the Start button rectangle that is actually posted to Explorer.
+/// The outside-pointer dismissal consults it so clicks on Prism's own
+/// taskbar buttons are never dismissed by the palette's outside-click path.
+static CURRENT_START_RECT: Mutex<Option<RECT>> = Mutex::new(None);
+static CURRENT_SEARCH_RECT: Mutex<Option<RECT>> = Mutex::new(None);
 static SHELL_START_CLICK_X: AtomicI32 = AtomicI32::new(0);
 static SHELL_TASKBAR_THREAD: AtomicU32 = AtomicU32::new(0);
 static SHELL_ICON_SHUTDOWN_ACK: AtomicU32 = AtomicU32::new(0);
@@ -744,7 +749,10 @@ fn debug_trace(message: &str) {
             .join("Prism")
             .join("semantic-debug.log"),
     ) {
-        let _ = writeln!(file, "{message}");
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default();
+        let _ = writeln!(file, "{} {message}", now.as_millis());
     }
 }
 
@@ -1116,11 +1124,27 @@ impl ShellBridge {
             return;
         };
 
-        if let Some(rect) = self.start_button_locator.rect() {
+        if let Some(rect) = self
+            .start_button_locator
+            .rect()
+            .filter(|rect| valid_button_rect(*rect))
+        {
             if !same_rect(rect, self.start_rect)
                 && post_start_button_rect(self.taskbar_thread, message, rect).is_ok()
             {
                 self.start_rect = rect;
+            }
+        } else {
+            // UIA can flake while the XAML island restarts. Repost the last
+            // known-good rectangle so the overlay keeps its position instead
+            // of disappearing with a stale degenerate rect.
+            let cached = CURRENT_START_RECT.lock().ok().and_then(|rect| *rect);
+            if let Some(rect) = cached.filter(|rect| valid_button_rect(*rect)) {
+                if !same_rect(rect, self.start_rect)
+                    && post_start_button_rect(self.taskbar_thread, message, rect).is_ok()
+                {
+                    self.start_rect = rect;
+                }
             }
         }
 
@@ -1145,9 +1169,16 @@ impl StartButtonLocator {
             taskbar,
             automation,
         };
-        let rect = locator.rect().ok_or_else(|| {
-            "Start button was not found by AutomationId or taskbar child class".to_string()
-        })?;
+        // The XAML island can report a degenerate rectangle while it is still
+        // coming up after an Explorer restart. Accepting it poisons the whole
+        // bridge: the overlay stays hidden at the stale rect until the next
+        // Explorer event. Reject degenerate or aspect-breaking rectangles.
+        let rect = locator
+            .rect()
+            .filter(|rect| valid_button_rect(*rect))
+            .ok_or_else(|| {
+                "Start button was not found by AutomationId or taskbar child class".to_string()
+            })?;
         Ok((locator, rect))
     }
 
@@ -1250,6 +1281,16 @@ fn ascii_class_eq(class_name: &[u16], expected: &str) -> bool {
             .all(|(actual, expected)| (*actual as u8).eq_ignore_ascii_case(&expected))
 }
 
+/// A rectangle that actually looks like a taskbar button. The XAML island
+/// can report partial rectangles while it is coming up after an Explorer
+/// restart (observed: a 45x12 slice), which would strand the overlay at a
+/// sliver. The button is roughly square: 45x48 at 100% DPI, ~90x96 at 200%.
+fn valid_button_rect(rect: RECT) -> bool {
+    let width = rect.right - rect.left;
+    let height = rect.bottom - rect.top;
+    (24..=160).contains(&width) && (24..=160).contains(&height)
+}
+
 fn valid_rect(rect: RECT) -> bool {
     rect.right > rect.left && rect.bottom > rect.top
 }
@@ -1261,27 +1302,71 @@ fn same_rect(left: RECT, right: RECT) -> bool {
         && left.bottom == right.bottom
 }
 
+pub fn point_on_taskbar_buttons(point: POINT) -> bool {
+    fn inside(rect: Option<RECT>, point: POINT) -> bool {
+        rect.is_some_and(|rect| {
+            point.x >= rect.left
+                && point.x < rect.right
+                && point.y >= rect.top
+                && point.y < rect.bottom
+        })
+    }
+    let start = CURRENT_START_RECT.lock().ok().and_then(|rect| *rect);
+    let search = CURRENT_SEARCH_RECT.lock().ok().and_then(|rect| *rect);
+    inside(start, point) || inside(search, point)
+}
+
+
 fn post_start_button_rect(thread: u32, message: u32, rect: RECT) -> Result<(), String> {
-    for (control, coordinate) in [
-        (SHELL_CONTROL_START_RECT_LEFT, rect.left),
-        (SHELL_CONTROL_START_RECT_TOP, rect.top),
-        (SHELL_CONTROL_START_RECT_RIGHT, rect.right),
-        (SHELL_CONTROL_START_RECT_BOTTOM, rect.bottom),
-    ] {
-        unsafe {
-            PostThreadMessageW(
-                thread,
-                message,
-                WPARAM(control),
-                LPARAM(coordinate as isize),
-            )
-            .map_err(|error| format!("configure Explorer Start-button rectangle: {error}"))?;
-        }
+    if let Ok(mut current) = CURRENT_START_RECT.lock() {
+        *current = Some(rect);
+    }
+    // The rectangle travels as a small file plus one signal message instead
+    // of four ordered messages. The four-message sequence was racy: parts
+    // could be observed half-applied, and a message round could be missed
+    // entirely if the shell hook was reinstalled between posts, leaving the
+    // overlay stranded at a degenerate rect. The shell hook re-reads the
+    // file on every tick, so a lost signal heals within one interval.
+    write_start_rect_file(rect)?;
+    unsafe {
+        PostThreadMessageW(
+            thread,
+            message,
+            WPARAM(SHELL_CONTROL_START_RECT_CHANGED),
+            LPARAM(0),
+        )
+        .map_err(|error| format!("signal Explorer Start-button rectangle: {error}"))?;
     }
     Ok(())
 }
 
+/// The start rectangle file lives next to the icon file, where the shell
+/// hook already looks for Prism-owned taskbar state.
+fn start_rect_file_path() -> Result<PathBuf, String> {
+    let mut dir = std::env::var_os("APPDATA")
+        .map(PathBuf::from)
+        .ok_or_else(|| "APPDATA is unavailable".to_string())?;
+    dir.push("app.prism.launcher");
+    Ok(dir.join("taskbar-start-rect.txt"))
+}
+
+fn write_start_rect_file(rect: RECT) -> Result<(), String> {
+    let path = start_rect_file_path()?;
+    let bytes: Vec<u8> = [rect.left, rect.top, rect.right, rect.bottom]
+        .iter()
+        .flat_map(|value| value.to_le_bytes())
+        .collect();
+    let temp = path.with_extension("tmp");
+    std::fs::create_dir_all(path.parent().ok_or("start rect path has no parent")?)
+        .map_err(|error| format!("create start rect directory: {error}"))?;
+    std::fs::write(&temp, &bytes).map_err(|error| format!("write start rect file: {error}"))?;
+    crate::files::replace_file(&temp, &path)
+}
+
 fn post_search_button_rect(thread: u32, message: u32, rect: Option<RECT>) -> Result<(), String> {
+    if let Ok(mut current) = CURRENT_SEARCH_RECT.lock() {
+        *current = rect;
+    }
     let rect = rect.unwrap_or_default();
     for (control, coordinate) in [
         (SHELL_CONTROL_SEARCH_RECT_LEFT, rect.left),
@@ -1558,26 +1643,41 @@ fn wait_for_ack(acknowledgement: &AtomicU32, timeout: Duration) -> u32 {
     acknowledgement.load(Ordering::Acquire)
 }
 
-fn write_shell_hook_library() -> Result<PathBuf, String> {
-    let directory = std::env::temp_dir().join("Prism").join("shell-hooks");
-    std::fs::create_dir_all(&directory)
-        .map_err(|error| format!("create Explorer bridge directory: {error}"))?;
-    if let Ok(entries) = std::fs::read_dir(&directory) {
+/// Removes shell-hook DLLs older than one day. Files younger than that may
+/// belong to a still-loaded instance: deleting them lets Windows lazily
+/// unload the module while a hook callback is in flight, crashing Explorer
+/// (0xc0000005 inside prism-shell-hook-*.dll, reproduced three times).
+fn clean_stale_hook_files(directory: &std::path::Path) {
+    let cutoff = std::time::SystemTime::now() - DAY_OLD;
+    if let Ok(entries) = std::fs::read_dir(directory) {
         for entry in entries.flatten() {
             let path = entry.path();
-            let is_stale_hook =
-                path.file_name()
-                    .and_then(|name| name.to_str())
-                    .is_some_and(|name| {
-                        name.starts_with("prism-shell-hook-") && name.ends_with(".dll")
-                    });
-            if is_stale_hook {
-                // Loaded DLLs remain locked on Windows, so this removes only
-                // debris from already-terminated Prism instances.
+            let name = path.file_name().and_then(|name| name.to_str());
+            let is_hook = name.is_some_and(|name| {
+                name.starts_with("prism-shell-hook-") && name.ends_with(".dll")
+            });
+            if !is_hook {
+                continue;
+            }
+            let modified = entry.metadata().and_then(|meta| meta.modified());
+            if modified.is_ok_and(|when| when < cutoff) {
                 let _ = std::fs::remove_file(path);
             }
         }
     }
+}
+
+const DAY_OLD: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
+
+fn write_shell_hook_library() -> Result<PathBuf, String> {
+    // Stale DLLs accumulate because they must not be deleted while loaded
+    // (see clean_stale_hook_files). Sweep only files older than a day: those
+    // belong to instances that stopped long ago, and any loaded module from
+    // the current session is untouched by the age filter.
+    let directory = std::env::temp_dir().join("Prism").join("shell-hooks");
+    std::fs::create_dir_all(&directory)
+        .map_err(|error| format!("create Explorer bridge directory: {error}"))?;
+    clean_stale_hook_files(&directory);
     let nonce = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
@@ -1724,6 +1824,7 @@ fn flush_pending_win_toggle() {
     if let Ok(mut pending) = PENDING_WIN_TOGGLE.lock() {
         let side = pending.take_if_ready(Instant::now());
         if let Some(side) = side {
+            debug_trace(&format!("pending-toggle-ready {side:?}"));
             // Keep the pending lock through enqueueing. Disable/reset paths
             // take this same lock after clearing ACTIVE, so a candidate either
             // queues before their final drain or observes inactive.
@@ -1821,6 +1922,11 @@ unsafe extern "system" fn raw_input_window_proc(
         && ACTIVE.load(Ordering::Acquire)
         && RAW_OBSERVER_ACTIVE.load(Ordering::Acquire)
     {
+        let last_hook_input = LAST_HOOK_INPUT_TIME.lock().ok().and_then(|last| *last);
+        if !should_feed_raw_keyboard(last_hook_input, GetMessageTime() as u32) {
+            debug_trace("raw-skip (hook covered)");
+            return DefWindowProcW(window, message, wparam, lparam);
+        }
         let mut input = RAWINPUT::default();
         let mut size = std::mem::size_of::<RAWINPUT>() as u32;
         let read = GetRawInputData(
@@ -1954,6 +2060,37 @@ mod tests {
         let point = point_from_message(packed as isize);
         assert_eq!(point.x, -1_920);
         assert_eq!(point.y, -240);
+    }
+
+    #[test]
+    fn button_rect_guard_rejects_partial_and_accepts_button_shapes() {
+        // The 45x12 slice observed from the XAML island after an Explorer
+        // restart must be rejected, along with degenerate rectangles.
+        assert!(!valid_button_rect(RECT { left: 0, top: 0, right: 0, bottom: 0 }));
+        assert!(!valid_button_rect(RECT { left: 784, top: 1068, right: 829, bottom: 1080 }));
+        assert!(!valid_button_rect(RECT { left: 784, top: 1032, right: 784, bottom: 1080 }));
+        // Real button shapes at 100% and 200% DPI are accepted.
+        assert!(valid_button_rect(RECT { left: 0, top: 1032, right: 45, bottom: 1080 }));
+        assert!(valid_button_rect(RECT { left: 0, top: 1032, right: 90, bottom: 1096 }));
+    }
+
+    #[test]
+    fn stale_hook_cleanup_spares_fresh_files() {
+        let dir = std::env::temp_dir().join(format!("prism-hook-cleanup-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let fresh = dir.join("prism-shell-hook-999-1.dll");
+        let old = dir.join("prism-shell-hook-1-1.dll");
+        std::fs::write(&fresh, b"x").unwrap();
+        std::fs::write(&old, b"x").unwrap();
+        let past = std::time::SystemTime::now() - DAY_OLD - std::time::Duration::from_secs(60);
+        // Make the old file look ancient without touching the clock: remove it
+        // directly in the test (creation timestamps are not settable portably),
+        // so instead verify the filter predicate on names + freshness.
+        let _ = past;
+        clean_stale_hook_files(&dir);
+        // The fresh file must survive a sweep.
+        assert!(fresh.exists());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

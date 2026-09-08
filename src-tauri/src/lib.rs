@@ -14,6 +14,7 @@ mod taskbar_customization;
 mod taskbar_icon_overlay;
 mod theme;
 mod win_key;
+mod launcher_watch;
 mod windows_settings;
 
 use std::path::{Path, PathBuf};
@@ -31,6 +32,21 @@ use windows::Win32::UI::WindowsAndMessaging::{
     GetCursorPos, SetForegroundWindow, SetWindowPos, HWND_TOPMOST, SWP_NOMOVE, SWP_NOSIZE,
     SWP_SHOWWINDOW,
 };
+
+/// Debug-only trace to the same temp log used by win-key observation.
+#[cfg(debug_assertions)]
+fn win_key_debug_trace(message: &str) {
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(std::env::temp_dir().join("Prism").join("semantic-debug.log"))
+    {
+        let _ = std::io::Write::write_all(&mut file, format!("{message}\n").as_bytes());
+    }
+}
+
+#[cfg(not(debug_assertions))]
+fn win_key_debug_trace(_message: &str) {}
 
 /// The only accepted global shortcuts. Bare typing keys, reserved keys and
 /// known system/security combos are never accepted.
@@ -158,6 +174,7 @@ pub fn run() {
             let _ = taskbar_alignment::initialize(&alignment);
             schedule_startup_taskbar_alignment();
             win_key::init(app.handle().clone());
+            launcher_watch::init();
             let customization_app = app.handle().clone();
             tauri::async_runtime::spawn_blocking(move || {
                 taskbar_customization::init(customization_app);
@@ -251,6 +268,7 @@ pub fn run() {
             present_palette,
             hide_palette,
             set_window_style,
+            set_osd_accent,
             set_window_width,
             set_taskbar_alignment,
             get_taskbar_settings,
@@ -392,7 +410,15 @@ fn palette_target(
         .and_then(|value| value.taskbar_edge)
         .or_else(|| taskbar_edge(monitor, work))
         .unwrap_or(TaskbarEdge::Bottom);
-    Some(palette_position(work, edge, alignment, width, height))
+    let start_button = anchor.and_then(|value| value.start_button);
+    Some(palette_position(
+        work,
+        edge,
+        alignment,
+        width,
+        height,
+        start_button,
+    ))
 }
 
 fn presentation_anchor(
@@ -470,11 +496,19 @@ fn palette_position(
     alignment: taskbar_alignment::Alignment,
     width: i32,
     height: i32,
+    start_button: Option<PhysicalRect>,
 ) -> (i32, i32) {
-    let aligned_x = match alignment {
-        taskbar_alignment::Alignment::Left => work.left,
-        taskbar_alignment::Alignment::Center => work.left + (work.width() - width) / 2,
-        taskbar_alignment::Alignment::Right => work.right - width,
+    // Start-menu anchor: the palette begins at the Start button so it reads
+    // as the replacement menu, not a centered card. Right-aligned taskbars
+    // mirror (right edge = button right). Without a button (or while the
+    // locator is unavailable) the palette falls back to the alignment-center
+    // position.
+    let aligned_x = match (alignment, start_button) {
+        (taskbar_alignment::Alignment::Right, Some(button)) => button.right - width,
+        (_, Some(button)) => button.left,
+        (taskbar_alignment::Alignment::Left, None) => work.left,
+        (taskbar_alignment::Alignment::Center, None) => work.left + (work.width() - width) / 2,
+        (taskbar_alignment::Alignment::Right, None) => work.right - width,
     };
     let aligned_y = match alignment {
         taskbar_alignment::Alignment::Left => work.top,
@@ -645,9 +679,12 @@ fn toggle_palette_with_presentation(
 ) {
     let timer = perf::start();
     let Some(window) = app.get_webview_window("main") else {
+        win_key_debug_trace("palette-toggle-main-window-missing");
         return;
     };
     let opening = toggle_open_state(&PALETTE_OPEN);
+    win_key_debug_trace(&format!("palette-toggle open={opening}"));
+    launcher_watch::note_own_toggle();
     let transition = PALETTE_TRANSITION.fetch_add(1, Ordering::AcqRel) + 1;
     if !opening {
         ACTIVATION_FOCUS_PENDING.store(false, Ordering::Release);
@@ -1226,6 +1263,13 @@ fn is_animatable_window_width(width: u32) -> bool {
 }
 
 /// Applies the window style in one IPC round-trip: native theme plus the
+/// Pushes the accent preset to the native volume OSD so its level bar stays
+/// in family with the palette accent.
+#[tauri::command]
+fn set_osd_accent(accent: String) {
+    crate::audio_osd::set_accent(&accent);
+}
+
 /// solid-only surface rule.
 #[tauri::command]
 fn set_window_style(app: tauri::AppHandle, theme: String) -> Result<(), String> {
@@ -1392,6 +1436,7 @@ fn apply_shortcut_with_generation(
             let _ = start_menu::restore(app);
             return Err(error);
         }
+        launcher_watch::set_enabled(true);
         if let Ok(old) = prev.parse::<Shortcut>() {
             let _ = gs.unregister(old);
         }
@@ -1407,6 +1452,7 @@ fn apply_shortcut_with_generation(
             }
             return Err(error);
         }
+        launcher_watch::set_enabled(false);
         if let Err(error) = start_menu::restore(app) {
             let _ = win_key::set_enabled(true);
             if let Ok(shortcut) = combo.parse::<Shortcut>() {
@@ -1870,6 +1916,7 @@ mod tests {
                 taskbar_alignment::Alignment::Center,
                 720,
                 620,
+                None,
             ),
             (600, 420)
         );
@@ -1885,6 +1932,7 @@ mod tests {
                 taskbar_alignment::Alignment::Center,
                 720,
                 620,
+                None,
             ),
             (600, 40)
         );
@@ -1899,7 +1947,8 @@ mod tests {
                 TaskbarEdge::Left,
                 taskbar_alignment::Alignment::Center,
                 720,
-                620
+                620,
+                None,
             ),
             (48, 230)
         );
@@ -1913,7 +1962,8 @@ mod tests {
                 TaskbarEdge::Right,
                 taskbar_alignment::Alignment::Center,
                 720,
-                620
+                620,
+                None,
             ),
             (1_152, 230)
         );
@@ -1934,6 +1984,7 @@ mod tests {
                 taskbar_alignment::Alignment::Center,
                 720,
                 620,
+                None,
             ),
             (-1_320, -620)
         );
@@ -1951,8 +2002,87 @@ mod tests {
                 taskbar_alignment::Alignment::Center,
                 480,
                 400,
+                None,
             ),
             (10, 20)
+        );
+    }
+
+    #[test]
+    fn palette_anchors_to_the_start_button_not_the_work_center() {
+        let work = PhysicalRect {
+            left: 0,
+            top: 0,
+            right: 1_920,
+            bottom: 1_032,
+        };
+        // Left-aligned taskbar: palette starts at the button (0..45 wide).
+        assert_eq!(
+            palette_position(
+                work,
+                TaskbarEdge::Bottom,
+                taskbar_alignment::Alignment::Left,
+                560,
+                620,
+                Some(PhysicalRect {
+                    left: 0,
+                    top: 1_032,
+                    right: 45,
+                    bottom: 1_080,
+                }),
+            ),
+            (0, 412)
+        );
+        // Center-aligned taskbar: palette follows the centered button.
+        assert_eq!(
+            palette_position(
+                work,
+                TaskbarEdge::Bottom,
+                taskbar_alignment::Alignment::Center,
+                560,
+                620,
+                Some(PhysicalRect {
+                    left: 784,
+                    top: 1_032,
+                    right: 829,
+                    bottom: 1_080,
+                }),
+            ),
+            (784, 412)
+        );
+        // Right-aligned taskbar: palette ends at the button's right edge.
+        assert_eq!(
+            palette_position(
+                work,
+                TaskbarEdge::Bottom,
+                taskbar_alignment::Alignment::Right,
+                560,
+                620,
+                Some(PhysicalRect {
+                    left: 1_875,
+                    top: 1_032,
+                    right: 1_920,
+                    bottom: 1_080,
+                }),
+            ),
+            (1_360, 412)
+        );
+        // Clamped: a button near the right edge never pushes the palette out.
+        assert_eq!(
+            palette_position(
+                work,
+                TaskbarEdge::Bottom,
+                taskbar_alignment::Alignment::Left,
+                560,
+                620,
+                Some(PhysicalRect {
+                    left: 1_900,
+                    top: 1_032,
+                    right: 1_920,
+                    bottom: 1_080,
+                }),
+            ),
+            (1_360, 412)
         );
     }
 
@@ -1971,6 +2101,7 @@ mod tests {
                 taskbar_alignment::Alignment::Left,
                 560,
                 620,
+                None,
             ),
             (0, 412)
         );
@@ -1981,6 +2112,7 @@ mod tests {
                 taskbar_alignment::Alignment::Center,
                 560,
                 620,
+                None,
             ),
             (680, 412)
         );
@@ -1991,6 +2123,7 @@ mod tests {
                 taskbar_alignment::Alignment::Right,
                 560,
                 620,
+                None,
             ),
             (1_360, 412)
         );

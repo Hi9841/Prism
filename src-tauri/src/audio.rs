@@ -398,6 +398,117 @@ fn clean_app_display_name(name: &str, auto_id: &str) -> String {
     "Application".to_string()
 }
 
+/// Known executable stems mapped to their user-facing product names.
+/// Keeping the map small and exact means unknown apps fall through to the
+/// humanized stem or the cleaned window title instead of a wrong name.
+const PRETTY_APP_NAMES: &[(&str, &str)] = &[
+    ("googlechrome", "Google Chrome"),
+    ("chrome", "Google Chrome"),
+    ("msedge", "Microsoft Edge"),
+    ("edge", "Microsoft Edge"),
+    ("firefox", "Firefox"),
+    ("visualstudiocode", "VS Code"),
+    ("code", "VS Code"),
+    ("discord", "Discord"),
+    ("spotify", "Spotify"),
+    ("slack", "Slack"),
+    ("telegram", "Telegram"),
+    ("obsidian", "Obsidian"),
+    ("notion", "Notion"),
+    ("figma", "Figma"),
+    ("steam", "Steam"),
+    ("explorer", "File Explorer"),
+    ("wezterm", "WezTerm"),
+    ("wezterm-gui", "WezTerm"),
+    ("windowsterminal", "Terminal"),
+    ("terminal", "Terminal"),
+    ("powershell", "PowerShell"),
+    ("windowspowershell", "PowerShell"),
+    ("cmd", "Command Prompt"),
+    ("notepad", "Notepad"),
+    ("wsl", "WSL"),
+    ("windows-terminal", "Terminal"),
+    ("onedrive", "OneDrive"),
+    ("word", "Word"),
+    ("excel", "Excel"),
+    ("powerpnt", "PowerPoint"),
+    ("outlook", "Outlook"),
+    ("teams", "Teams"),
+    ("devenv", "Visual Studio"),
+];
+
+/// Humanizes an executable stem into a readable name for the volume OSD.
+/// Splits on separators and camel-case boundaries: "microsoftedge" would
+/// become "Microsoft Edge", "vlc" simply capitalizes to "Vlc".
+fn humanize_app_stem(stem: &str) -> String {
+    let mut words: Vec<String> = Vec::new();
+    let mut current = String::new();
+    for ch in stem.chars() {
+        if ch == '_' || ch == '-' || ch == '.' {
+            if !current.is_empty() {
+                words.push(current.clone());
+                current.clear();
+            }
+            continue;
+        }
+        if ch.is_ascii_uppercase()
+            && !current.is_empty()
+            && current
+                .chars()
+                .last()
+                .is_some_and(|c| c.is_ascii_lowercase())
+        {
+            words.push(current.clone());
+            current.clear();
+        }
+        current.push(ch);
+    }
+    if !current.is_empty() {
+        words.push(current);
+    }
+    let joined = if words.is_empty() {
+        stem.to_string()
+    } else {
+        words.join(" ")
+    };
+    let mut chars = joined.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+        None => joined,
+    }
+}
+
+/// The name shown in the volume OSD for a taskbar target. Prefers the
+/// known-name map, then the humanized executable stem, and only falls back
+/// to the (window-title-derived) display title when nothing better exists.
+fn taskbar_osd_title(target: &TaskbarTarget) -> String {
+    match target {
+        TaskbarTarget::Master => "Master Volume".to_string(),
+        TaskbarTarget::Unknown => "Unknown".to_string(),
+        TaskbarTarget::Application {
+            display_title,
+            executable_stem,
+        } => {
+            let stem = normalize_executable_stem(executable_stem);
+            if let Some((_, pretty)) = PRETTY_APP_NAMES.iter().find(|(candidate, _)| *candidate == stem) {
+                return (*pretty).to_string();
+            }
+            let humanized = humanize_app_stem(&stem);
+            if humanized.len() >= 3
+                && humanized
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == ' ')
+            {
+                return humanized;
+            }
+            if !display_title.trim().is_empty() {
+                return display_title.trim().to_string();
+            }
+            "Application".to_string()
+        }
+    }
+}
+
 /// Checks if an HWND belongs to a taskbar window.
 pub fn is_taskbar_window(hwnd: HWND) -> bool {
     if hwnd.0.is_null() {
