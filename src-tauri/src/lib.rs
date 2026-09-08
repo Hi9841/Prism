@@ -268,6 +268,7 @@ pub fn run() {
             perform_power_action,
             set_taskbar_scroll_volume,
             is_taskbar_scroll_volume_enabled,
+            set_osd_accent,
             quit_app
         ])
         .run(tauri::generate_context!())
@@ -1183,6 +1184,13 @@ fn set_taskbar_scroll_volume(enabled: bool) {
 #[tauri::command]
 fn is_taskbar_scroll_volume_enabled() -> bool {
     audio_hook::is_enabled()
+}
+
+/// Pushes the accent preset to the native volume OSD so its level bar stays
+/// in family with the palette accent.
+#[tauri::command]
+fn set_osd_accent(accent: String) {
+    crate::audio_osd::set_accent(&accent);
 }
 
 #[tauri::command]

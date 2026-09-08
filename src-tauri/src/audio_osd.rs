@@ -25,20 +25,48 @@ const fn rgb(r: u8, g: u8, b: u8) -> COLORREF {
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DispatchMessageW, GetMessageW, KillTimer, PostMessageW,
     RegisterClassW, SetTimer, SetWindowPos, ShowWindow, TranslateMessage, UpdateLayeredWindow,
-    CS_HREDRAW, CS_VREDRAW, HWND_TOPMOST, SWP_NOACTIVATE, SW_HIDE, SW_SHOWNOACTIVATE, ULW_ALPHA,
-    WM_APP, WM_DESTROY, WM_TIMER, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
-    WS_EX_TOPMOST, WS_POPUP,
+    CS_HREDRAW, CS_VREDRAW, HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SW_HIDE,
+    SW_SHOWNOACTIVATE, ULW_ALPHA, WM_APP, WM_DESTROY, WM_TIMER, WNDCLASSW, WS_EX_LAYERED,
+    WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 
 const OSD_WIDTH: i32 = 244;
 const OSD_HEIGHT: i32 = 56;
 const TIMER_HIDE: usize = 1;
+const TIMER_TOPMOST: usize = 2;
 const HIDE_DELAY_MS: u32 = 1200;
+/// Re-assert topmost shortly after showing and keep re-asserting while
+/// visible. Other topmost windows that were activated just before the OSD
+/// (Discord call popouts, terminals, game overlays) can otherwise render
+/// above it, hiding high-priority feedback behind them.
+const TOPMOST_REASSERT_MS: u32 = 120;
 const WM_UPDATE_OSD: u32 = WM_APP + 50;
 
 static OSD_HWND: AtomicIsize = AtomicIsize::new(0);
 static OSD_THREAD_INITIALIZED: AtomicBool = AtomicBool::new(false);
 static OSD_REQUEST_GENERATION: AtomicU64 = AtomicU64::new(0);
+/// Packed accent RGB (r << 16 | g << 8 | b) for the level bar. Mirrors the
+/// frontend accent presets so the native pill stays in family with the
+/// palette; defaults to iris.
+static OSD_ACCENT: AtomicU64 = AtomicU64::new(0x98_7C_F2);
+
+/// Sets the level-bar accent from the frontend accent presets.
+pub fn set_accent(name: &str) {
+    let rgb: u64 = match name {
+        "azure" => 0x31_99_E4,
+        "mint" => 0x46_C2_9A,
+        "amber" => 0xE6A732,
+        "rose" => 0xE8_5F_78,
+        // "iris" and any unknown value keep the default violet.
+        _ => 0x98_7C_F2,
+    };
+    OSD_ACCENT.store(rgb, Ordering::SeqCst);
+}
+
+fn accent_rgb() -> (u8, u8, u8) {
+    let packed = OSD_ACCENT.load(Ordering::SeqCst);
+    ((packed >> 16) as u8, (packed >> 8) as u8, packed as u8)
+}
 
 #[derive(Clone, Debug)]
 struct OsdState {
@@ -161,16 +189,36 @@ unsafe extern "system" fn osd_wnd_proc(
             if let Some(state) = state {
                 render_and_position(hwnd, &state);
                 let _ = SetTimer(Some(hwnd), TIMER_HIDE, HIDE_DELAY_MS, None);
+                let _ = SetTimer(Some(hwnd), TIMER_TOPMOST, TOPMOST_REASSERT_MS, None);
             }
+            LRESULT(0)
+        }
+        WM_TIMER if wparam.0 == TIMER_TOPMOST => {
+            // Re-assert while visible: an already-displayed pill can still be
+            // overtaken by a topmost window activated after the popup built
+            // its z-order (Discord popouts, terminal windows). Keep the pill
+            // above the whole band until it hides.
+            let _ = SetWindowPos(
+                hwnd,
+                Some(HWND_TOPMOST),
+                0,
+                0,
+                0,
+                0,
+                SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE,
+            );
+            let _ = SetTimer(Some(hwnd), TIMER_TOPMOST, TOPMOST_REASSERT_MS, None);
             LRESULT(0)
         }
         WM_TIMER if wparam.0 == TIMER_HIDE => {
             let _ = KillTimer(Some(hwnd), TIMER_HIDE);
+            let _ = KillTimer(Some(hwnd), TIMER_TOPMOST);
             let _ = ShowWindow(hwnd, SW_HIDE);
             LRESULT(0)
         }
         WM_DESTROY => {
             let _ = KillTimer(Some(hwnd), TIMER_HIDE);
+            let _ = KillTimer(Some(hwnd), TIMER_TOPMOST);
             LRESULT(0)
         }
         _ => DefWindowProcW(hwnd, msg, wparam, lparam),
@@ -280,7 +328,15 @@ fn position_in_work_area(
     } else if point.y < work_area.top {
         (point.x - width / 2, work_area.top + offset)
     } else {
-        (point.x - width / 2, work_area.bottom - height - offset)
+        // Taskbar-band scrolls anchor above the tray instead of tracking the
+        // cursor horizontally. Floating call popouts and shared-content
+        // previews habitually sit at the bottom center, exactly where a
+        // cursor-tracked pill would collide with them; the tray corner is
+        // the one spot above the taskbar that stays visible.
+        (
+            work_area.right - width - offset,
+            work_area.bottom - height - offset,
+        )
     };
 
     OsdPosition {
@@ -458,7 +514,9 @@ fn pack_premultiplied(r: u8, g: u8, b: u8, a: u8) -> u32 {
 }
 
 fn draw_liquid_glass_pill(pixels: &mut [u32], width: i32, height: i32) {
-    let radius = 16.0f32;
+    // Raycast-style surface: one flat near-black panel with a soft 1px
+    // light border. No gradient, no specular rim.
+    let radius = 12.0f32;
     let w_f = width as f32;
     let h_f = height as f32;
 
@@ -484,19 +542,13 @@ fn draw_liquid_glass_pill(pixels: &mut [u32], width: i32, height: i32) {
 
             let edge_alpha = (radius - dist + 0.5).clamp(0.0, 1.0);
 
-            // Subtle vertical gradient for physical depth (dark obsidian glass)
-            let t = y_f / h_f;
-            let base_r = (24.0 * (1.0 - t * 0.25)) as u8;
-            let base_g = (24.0 * (1.0 - t * 0.25)) as u8;
-            let base_b = (30.0 * (1.0 - t * 0.25)) as u8;
-            let base_a = (235.0 * edge_alpha) as u8;
+            // Flat near-black panel, nearly opaque.
+            let mut pix = pack_premultiplied(28, 28, 30, (242.0 * edge_alpha) as u8);
 
-            let mut pix = pack_premultiplied(base_r, base_g, base_b, base_a);
-
-            // Specular glass rim (1.0px inner light border)
-            if dist >= radius - 1.2 && dist <= radius {
+            // Soft light border (slightly brighter on top like a subtle rim).
+            if dist >= radius - 1.0 && dist <= radius {
                 let rim_top = y_f < h_f * 0.5;
-                let rim_intensity = if rim_top { 48.0 } else { 18.0 } * edge_alpha;
+                let rim_intensity = if rim_top { 34.0 } else { 20.0 } * edge_alpha;
                 pix = blend_over(pix, (255, 255, 255), rim_intensity as u8);
             }
 
@@ -612,7 +664,7 @@ fn draw_progress_bar(
     } else if is_no_audio {
         (100u8, 116u8, 139u8) // Muted Slate
     } else {
-        (56u8, 189u8, 248u8) // Luminous Sky Blue / Iris
+        accent_rgb()
     };
 
     for y in bounds.top..=bounds.bottom {
@@ -726,7 +778,8 @@ unsafe fn render_typography(pixels: &mut [u32], width: i32, _height: i32, state:
         &mut title_rect,
         windows::Win32::Graphics::Gdi::DT_LEFT
             | windows::Win32::Graphics::Gdi::DT_SINGLELINE
-            | windows::Win32::Graphics::Gdi::DT_VCENTER,
+            | windows::Win32::Graphics::Gdi::DT_VCENTER
+            | windows::Win32::Graphics::Gdi::DT_END_ELLIPSIS,
     );
 
     // Composite Title with pure crisp white (255, 255, 255)
@@ -743,13 +796,14 @@ unsafe fn render_typography(pixels: &mut [u32], width: i32, _height: i32, state:
         }
     }
 
-    // 2. Clear buffer for Percentage/Status text
+    // 2. Clear buffer for Percentage/Status text. The percentage is always
+    // shown; muted state is conveyed by the rose color and the speaker slash.
     text_slice.fill(0);
 
     let (pct_text, text_color) = if is_no_audio {
         ("No Audio".to_string(), (148u8, 163u8, 184u8)) // Slate-400
     } else if state.muted {
-        ("Muted".to_string(), (248u8, 113u8, 113u8)) // Rose Coral
+        (format!("{}%", state.percentage), (248u8, 113u8, 113u8)) // Rose Coral
     } else {
         (format!("{}%", state.percentage), (203u8, 213u8, 225u8)) // Slate-300
     };
@@ -856,7 +910,8 @@ mod tests {
                 OSD_HEIGHT,
                 96
             ),
-            OsdPosition { x: 838, y: 968 }
+            // Taskbar-band scrolls anchor above the tray, not at the cursor.
+            OsdPosition { x: 1660, y: 968 }
         );
     }
 
@@ -867,7 +922,8 @@ mod tests {
         assert_eq!((width, height), (366, 84));
         assert_eq!(
             position_in_work_area(WORK_AREA, POINT { x: 960, y: 1060 }, width, height, 144),
-            OsdPosition { x: 777, y: 932 }
+            // Right-anchored above the tray at 1.5x scale.
+            OsdPosition { x: 1530, y: 932 }
         );
     }
 
@@ -886,5 +942,22 @@ mod tests {
         assert_eq!(destination[3], 2);
         assert_eq!(destination[12], 3);
         assert_eq!(destination[15], 4);
+    }
+
+    #[test]
+    fn accent_presets_map_to_family_colors() {
+        set_accent("iris");
+        assert_eq!(accent_rgb(), (0x98, 0x7c, 0xf2));
+        set_accent("azure");
+        assert_eq!(accent_rgb(), (0x31, 0x99, 0xe4));
+        set_accent("mint");
+        assert_eq!(accent_rgb(), (0x46, 0xc2, 0x9a));
+        set_accent("amber");
+        assert_eq!(accent_rgb(), (0xe6, 0xa7, 0x32));
+        set_accent("rose");
+        assert_eq!(accent_rgb(), (0xe8, 0x5f, 0x78));
+        // Unknown values fall back to the default iris.
+        set_accent("bogus");
+        assert_eq!(accent_rgb(), (0x98, 0x7c, 0xf2));
     }
 }
