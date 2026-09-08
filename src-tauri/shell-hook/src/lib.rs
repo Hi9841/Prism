@@ -510,6 +510,11 @@ fn read_start_rect_file() -> Option<(i32, i32, i32, i32)> {
     path.push("app.prism.launcher");
     path.push("taskbar-start-rect.txt");
     let bytes = std::fs::read(path).ok()?;
+    parse_rect_bytes(&bytes)
+}
+
+/// Pure parser for the 16-byte rect file (four little-endian i32).
+fn parse_rect_bytes(bytes: &[u8]) -> Option<(i32, i32, i32, i32)> {
     if bytes.len() != 16 {
         return None;
     }
@@ -1237,6 +1242,34 @@ mod tests {
     }
 
     #[test]
+    #[test]
+    fn rect_file_parses_exactly_four_little_endian_ints() {
+        let mut bytes = Vec::new();
+        for value in [784i32, 1032, 829, 1080] {
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
+        assert_eq!(parse_rect_bytes(&bytes), Some((784, 1032, 829, 1080)));
+        assert_eq!(parse_rect_bytes(&bytes[..12]), None);
+        assert_eq!(parse_rect_bytes(&[]), None);
+        let mut negative = Vec::new();
+        for value in [-1920i32, -1040, -1875, -1000] {
+            negative.extend_from_slice(&value.to_le_bytes());
+        }
+        assert_eq!(parse_rect_bytes(&negative), Some((-1920, -1040, -1875, -1000)));
+    }
+
+    #[test]
+    fn heartbeat_dead_only_after_a_missing_interval() {
+        // No ping ever received: dead immediately.
+        assert!(heartbeat_stale(0, 5_000));
+        // Fresh ping: alive.
+        assert!(!heartbeat_stale(5_000, 10_000));
+        // Past the dead threshold: dead.
+        assert!(heartbeat_stale(5_000, 5_000 + HEARTBEAT_DEAD_MS + 1));
+        // Timer wraparound is handled by wrapping subtraction.
+        assert!(!heartbeat_stale(u64::MAX - 1_000, 1_000));
+    }
+
     fn shell_start_event_is_distinct() {
         assert_eq!(EVENT_SHELL_START, 23);
         assert_ne!(EVENT_SHELL_START, EVENT_TASKBAR_PIN_COMPLETED);
