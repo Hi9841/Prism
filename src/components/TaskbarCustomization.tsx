@@ -2,6 +2,7 @@ import { ImageUp, LoaderCircle, X } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import diamondIcon from "../assets/taskbar-icons/diamond.svg";
 import gemIcon from "../assets/taskbar-icons/gem.svg";
+import prismIcon from "../assets/taskbar-icons/prism.png";
 import {
   base64ToBytes,
   getTaskbarSettings,
@@ -168,6 +169,7 @@ function StartIconControl({
   };
 
   const options: Array<{ value: TaskbarStartIcon; label: string; icon: React.ReactNode }> = [
+    { value: "prism", label: "Prism", icon: <img src={prismIcon} alt="" className="h-5 w-5" /> },
     { value: "system", label: "System", icon: <WindowsGlyph /> },
     { value: "gem", label: "Gem", icon: <img src={gemIcon} alt="" className="h-5 w-5" /> },
     { value: "diamond", label: "Diamond", icon: <img src={diamondIcon} alt="" className="h-5 w-5" /> },
