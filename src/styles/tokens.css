@@ -620,3 +620,14 @@ body {
     scroll-behavior: auto !important;
   }
 }
+
+/* ---------------- Start menu ---------------- */
+
+/* Offscreen All-apps groups skip layout and paint entirely. A full installed
+   catalog is hundreds of rows; without this the first open pays for all of
+   them and the close pays for unmounting all of them. The intrinsic size
+   keeps the scrollbar stable while groups render lazily. */
+.menu-group {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 320px;
+}

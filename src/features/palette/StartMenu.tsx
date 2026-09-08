@@ -49,8 +49,14 @@ function resultMenuHeight(item: PaletteItem): number {
  * The start-menu view: pinned tiles, frequent apps and quick access on the
  * left, the All apps folder tree on the right. Rendered only while the query
  * is empty; any typed character falls back to the normal results palette.
+ *
+ * `narrow` adapts the layout to the 560px window width: a slimmer left
+ * column and a two-wide pinned grid instead of three.
  */
-export const StartMenu = forwardRef<StartMenuHandle>(function StartMenu(_props, ref) {
+export const StartMenu = forwardRef<StartMenuHandle, { narrow?: boolean }>(function StartMenu(
+  { narrow },
+  ref,
+) {
   const palette = usePalette();
   const app = useApp();
   const { settings, updateSettings, showToast } = app;
@@ -170,7 +176,9 @@ export const StartMenu = forwardRef<StartMenuHandle>(function StartMenu(_props, 
   return (
     <div className="flex min-h-0 flex-1 gap-0 px-2.5 pb-2" data-testid="start-menu">
       {/* ----- left column: pinned, frequent, quick access ----- */}
-      <div className="scroll-thin flex w-[46%] min-w-0 flex-col overflow-y-auto pe-2">
+      <div
+        className={`scroll-thin flex min-w-0 flex-col overflow-y-auto pe-2 ${narrow ? "w-[42%]" : "w-[46%]"}`}
+      >
         <div className="px-2 pb-0.5">
           <SectionLabel>Pinned</SectionLabel>
         </div>
@@ -179,7 +187,7 @@ export const StartMenu = forwardRef<StartMenuHandle>(function StartMenu(_props, 
             Right-click an app and choose pin to keep it here.
           </p>
         ) : (
-          <div className="grid grid-cols-3 gap-1">
+          <div className={`grid gap-1 ${narrow ? "grid-cols-2" : "grid-cols-3"}`}>
             {pinnedItems.map((item) => (
               <button
                 key={item.id}
@@ -259,7 +267,7 @@ export const StartMenu = forwardRef<StartMenuHandle>(function StartMenu(_props, 
             <p className="px-2 py-3 text-[12px] text-fg-tertiary">No installed apps found.</p>
           ) : (
             model.programGroups.map((group) => (
-              <div key={group.id} role="presentation">
+              <div key={group.id} role="presentation" className="menu-group">
                 <div className="flex items-center gap-1.5 px-2 pb-1 pt-3 text-[11px] font-semibold uppercase tracking-wide text-fg-quiet">
                   <Folder className="h-3 w-3" aria-hidden="true" />
                   <span className="truncate">{group.label}</span>

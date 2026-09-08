@@ -464,13 +464,15 @@ export function PaletteProvider({ children }: { children: ReactNode }) {
       if (item.appId) ids.add(item.appId);
     }
     for (const appId of app.settings.pinnedApps) ids.add(appId);
-    // The start-menu view lists every installed app at once, so its icon set
-    // is the whole catalog rather than the palette's visible rows.
-    if (app.settings.startView === "menu" && query.trim() === "" && appsLoaded) {
+    // Warm the whole catalog once apps are loaded: Prism starts hidden at
+    // sign-in, so icons are cached before the first open. Without this, the
+    // start-menu's first render shows monograms that visibly swap to real
+    // icons, and the open itself pays the icon-fetch cost.
+    if (appsLoaded) {
       for (const entry of visibleApps) ids.add(entry.appId);
     }
     return [...ids];
-  }, [flatItems, app.settings.pinnedApps, app.settings.startView, query, visibleApps, appsLoaded]);
+  }, [flatItems, app.settings.pinnedApps, visibleApps, appsLoaded]);
 
   useEffect(() => {
     void iconRetryTick;
