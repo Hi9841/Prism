@@ -145,7 +145,7 @@ const CONTROL_START_RECT_CHANGED: usize = 25;
 /// the taskbar: the native glyph and Start menu return automatically.
 const HEARTBEAT_DEAD_MS: u64 = 15_000;
 const WS_POPUP: u32 = 0x8000_0000;
-const SS_BITMAP: u32 = 0x0000_000e;
+const ERROR_CLASS_ALREADY_EXISTS: u32 = 1410;
 const WS_EX_TOOLWINDOW: u32 = 0x0000_0080;
 const WS_EX_TOPMOST: u32 = 0x0000_0008;
 const WS_EX_NOACTIVATE: u32 = 0x0800_0000;
@@ -197,7 +197,6 @@ const OVERLAY_CLASS: &[u16] = &[
     80, 114, 105, 115, 109, 46, 83, 116, 97, 114, 116, 66, 117, 116, 116, 111, 110, 46, 118, 49,
     0,
 ];
-const WM_CREATE: u32 = 0x0001;
 const WM_PAINT: u32 = 0x000F;
 const WM_ERASEBKGND: u32 = 0x0014;
 const WM_NCHITTEST: u32 = 0x0084;
@@ -249,10 +248,8 @@ extern "system" {
     fn BeginPaint(window: Hwnd, paint: *mut PaintStruct) -> *mut c_void;
     fn EndPaint(window: Hwnd, paint: *const PaintStruct) -> i32;
     fn GetClientRect(window: Hwnd, rect: *mut Rect) -> i32;
-    fn SetTimer(hwnd: Hwnd, id: usize, timeout: u32, proc_: *mut c_void) -> usize;
     fn ClientToScreen(hwnd: Hwnd, point: *mut Point) -> i32;
     fn GetDC(window: Hwnd) -> *mut c_void;
-    fn GetWindowRect(window: Hwnd, rect: *mut Rect) -> i32;
     fn InvalidateRect(window: Hwnd, rect: *const Rect, erase: i32) -> i32;
     fn ReleaseDC(window: Hwnd, dc: *mut c_void) -> i32;
     fn SendMessageW(window: Hwnd, message: u32, wparam: usize, lparam: isize) -> isize;
@@ -646,6 +643,18 @@ unsafe fn ensure_icon_window() -> Hwnd {
         }
         let _ = DestroyWindow(stale);
     }
+    loop {
+        let stale = FindWindowExW(
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            OVERLAY_CLASS.as_ptr(),
+            ICON_WINDOW_TITLE.as_ptr(),
+        );
+        if stale.is_null() {
+            break;
+        }
+        let _ = DestroyWindow(stale);
+    }
     if !register_overlay_class() {
         hook_trace("overlay-class-register failed");
         return std::ptr::null_mut();
@@ -765,7 +774,18 @@ fn register_overlay_class() -> bool {
             lpsz_class_name: OVERLAY_CLASS.as_ptr(),
             ..Default::default()
         };
-        RegisterClassW(&class) != 0
+        if RegisterClassW(&class) != 0 {
+            return true;
+        }
+        // An earlier instance's module registered the same class in this
+        // Explorer (every install loads a fresh DLL copy, and the class pin
+        // keeps the old module alive). The old window proc is the same
+        // implementation and stays mapped because the class registration
+        // pins it, so a new overlay can safely run on the existing class.
+        // Only a hard failure other than ALREADY_EXISTS should block the
+        // overlay.
+        let error = GetLastError();
+        error == ERROR_CLASS_ALREADY_EXISTS
     }
 }
 
@@ -1138,15 +1158,6 @@ fn is_our_start_button(hwnd: Hwnd) -> bool {
         FindWindowW(STATIC_CLASS.as_ptr(), ICON_WINDOW_TITLE.as_ptr()) == hwnd
             || FindWindowW(OVERLAY_CLASS.as_ptr(), ICON_WINDOW_TITLE.as_ptr()) == hwnd
     }
-}
-
-/// True while the Prism Start button overlay is actually rendering. While it
-/// is, the overlay's subclassed WndProc owns Start-button clicks and this
-/// hook must leave the rectangle path alone (consuming the click here would
-/// stop it from ever reaching the overlay).
-fn is_overlay_active() -> bool {
-    let window = ICON_WINDOW.lock().ok().map(|slot| *slot as Hwnd).unwrap_or(std::ptr::null_mut());
-    !window.is_null() && unsafe { IsWindowVisible(window) } != 0
 }
 
 fn has_active_icon() -> bool {

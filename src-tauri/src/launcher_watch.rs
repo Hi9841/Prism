@@ -20,6 +20,8 @@ use std::time::{Duration, Instant};
 
 use windows::Win32::Foundation::{HWND, LPARAM};
 use windows::core::BOOL;
+use windows::Win32::System::Threading::{OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION};
+use windows::Win32::Foundation::CloseHandle;
 use windows::Win32::UI::WindowsAndMessaging::{
     EnumWindows, GetWindowRect, GetClassNameW, IsWindowVisible, ShowWindow, SW_HIDE,
     GetWindowTextLengthW,
@@ -72,7 +74,7 @@ fn watch_loop() {
         std::thread::sleep(WATCH_INTERVAL);
         if should_skip_scan(
             ENABLED.load(Ordering::Acquire),
-            crate::palette_is_open(),
+            false,
             within_self_grace(),
         ) {
             continue;
@@ -140,6 +142,31 @@ unsafe extern "system" fn enum_scan_launcher(window: HWND, _detail: LPARAM) -> B
 }
 
 #[cfg(windows)]
+fn process_name_of(window: HWND) -> Option<String> {
+    unsafe {
+        let mut process_id = 0;
+        if GetWindowThreadProcessId(window, Some(&mut process_id)) == 0 || process_id == 0 {
+            return None;
+        }
+        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, process_id).ok()?;
+        let mut buffer = [0u16; 512];
+        let mut size = buffer.len() as u32;
+        let ok = QueryFullProcessImageNameW(
+            handle,
+            PROCESS_NAME_WIN32,
+            windows::core::PWSTR(buffer.as_mut_ptr()),
+            &mut size,
+        );
+        let _ = CloseHandle(handle);
+        if !ok.is_ok() || size == 0 {
+            return None;
+        }
+        let path = String::from_utf16_lossy(&buffer[..size as usize]);
+        path.rsplit('\\').next().map(|name| name.to_string())
+    }
+}
+
+#[cfg(windows)]
 fn reveal_launcher_window(class: &str, window: HWND) {
     if class_name_of(window).as_deref() != Some(class) {
         return;
@@ -150,11 +177,12 @@ fn reveal_launcher_window(class: &str, window: HWND) {
     if class == WIN11_START_CLASS && !is_start_menu_silhouette(window) {
         return;
     }
-    // UWP CoreWindows run in every packaged app (the class alone is far too
-    // broad). The Start menu's host window is untitled. Require an untitled
-    // window AND a menu silhouette before hiding anything.
+    // UWP CoreWindows run in every packaged app. The Start menu's host
+    // window belongs to StartMenuExperienceHost.exe - the process name is
+    // the exact gate (the host's window title is not empty, so title gates
+    // reject the very window they should hide).
     if class == WIN11_CORE_START_CLASS
-        && (window_title_len(window) > 0 || !is_start_menu_silhouette(window))
+        && process_name_of(window).as_deref() != Some("StartMenuExperienceHost.exe")
     {
         return;
     }
@@ -187,10 +215,13 @@ fn is_start_menu_silhouette(_window: HWND) -> bool {
     false
 }
 
-/// Pure decision helper for the watch loop: skip when disabled, in our own
-/// grace, or while the palette is open. Unit-tested without the Win32 parts.
-pub fn should_skip_scan(enabled: bool, palette_open: bool, in_grace: bool) -> bool {
-    !enabled || in_grace || palette_open
+/// Pure decision helper for the watch loop: skip when disabled or inside the
+/// grace window after Prism's own toggle. The palette is never hidden by a
+/// class match (the launcher classes belong to StartMenuExperienceHost or
+/// ShellExperienceHost), so its open state must not gate the scan: a leaked
+/// menu can appear while the palette is open.
+pub fn should_skip_scan(enabled: bool, _palette_open: bool, in_grace: bool) -> bool {
+    !enabled || in_grace
 }
 
 #[cfg(test)]
@@ -198,10 +229,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn scan_skips_unless_enabled_outside_grace() {
+    fn scan_skips_only_when_disabled_or_in_grace() {
         assert!(should_skip_scan(false, false, false));
         assert!(should_skip_scan(true, false, true));
-        assert!(should_skip_scan(true, true, false));
+        assert!(!should_skip_scan(true, true, false));
         assert!(!should_skip_scan(true, false, false));
     }
 
