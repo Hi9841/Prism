@@ -953,7 +953,10 @@ pub fn set_enabled(on: bool) -> Result<(), String> {
         return Ok(());
     }
     ACTIVE.store(on, Ordering::SeqCst);
+    ACTIVE.store(on, Ordering::SeqCst);
     if !on {
+        // The backstop watcher must never outlive the takeover it guards.
+        launcher_watch::set_enabled(false);
         SHELL_BRIDGE_ACTIVE.store(false, Ordering::Release);
         RAW_MACHINE.lock().map(|mut m| m.reset()).ok();
         reset_press_observation();
