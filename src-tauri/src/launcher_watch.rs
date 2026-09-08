@@ -18,9 +18,8 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
-use tauri::AppHandle;
 use windows::core::PCWSTR;
-use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
+use windows::Win32::Foundation::HWND;
 use windows::Win32::UI::WindowsAndMessaging::{
     FindWindowW, GetWindowRect, IsWindowVisible, ShowWindow, SW_HIDE,
 };
@@ -60,19 +59,17 @@ pub fn init() {
     if THREAD_STARTED.swap(true, Ordering::AcqRel) {
         return;
     }
-    std::thread::spawn(|| watch_loop());
+    std::thread::spawn(watch_loop);
 }
 
 fn watch_loop() {
     loop {
         std::thread::sleep(WATCH_INTERVAL);
-        if !ENABLED.load(Ordering::Acquire) {
-            continue;
-        }
-        if within_self_grace() {
-            continue;
-        }
-        if crate::palette_is_open() {
+        if should_skip_scan(
+            ENABLED.load(Ordering::Acquire),
+            crate::palette_is_open(),
+            within_self_grace(),
+        ) {
             continue;
         }
         for class in launcher_classes() {
