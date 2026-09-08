@@ -13,7 +13,6 @@ vi.mock("../lib/bridge", () => ({
   onSystemThemeChange: vi.fn(() => () => {}),
   onWinModeFailed: vi.fn(() => () => {}),
   setAlwaysOnTop: vi.fn().mockResolvedValue(undefined),
-  setOsdAccent: vi.fn().mockResolvedValue(undefined),
   setShortcut: vi.fn().mockResolvedValue(undefined),
   setTaskbarAlignment: vi.fn().mockResolvedValue(undefined),
   setTaskbarScrollVolume: vi.fn().mockResolvedValue(undefined),

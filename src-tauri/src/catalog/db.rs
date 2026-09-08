@@ -1389,16 +1389,7 @@ impl Database {
             let old_prefix = format!("{old_normalized}\\");
             let old_prefix_like = escape_like_pattern(&old_prefix);
             let new_prefix = format!("{}\\", new_item.normalized_path);
-            let old_display: Option<String> = tx
-                .query_row(
-                    "SELECT display_path FROM files WHERE volume_id = ?1 AND normalized_path = ?2;",
-                    params![volume_id, old_normalized],
-                    |row| row.get(0),
-                )
-                .optional()
-                .map_err(|e| e.to_string())?;
-            let old_display_prefix =
-                format!("{}\\", old_display.as_deref().unwrap_or(old_normalized));
+            let old_display_prefix = format!("{}\\", old_normalized);
             let new_display_prefix = format!("{}\\", new_item.display_path);
 
             // Update children paths
@@ -1410,9 +1401,9 @@ impl Database {
                  WHERE volume_id = ?5 AND normalized_path LIKE ?6 || '%' ESCAPE '!';",
                 params![
                     new_prefix,
-                    (old_prefix.chars().count() + 1) as i64,
+                    (old_prefix.len() + 1) as i64,
                     new_display_prefix,
-                    (old_display_prefix.chars().count() + 1) as i64,
+                    (old_display_prefix.len() + 1) as i64,
                     volume_id,
                     old_prefix_like,
                 ],
@@ -1603,50 +1594,20 @@ impl Database {
         let fts_limit = (limit.max(10) * 3) as i64;
         let per_vol_limit = (exact_limit / 3).max(30);
 
-        // The legacy `files` corpus holds rows from non-NTFS backends. Its
-        // queries filter out every row whose volume is now NTFS-managed; the
-        // correlated NOT EXISTS re-evaluates per candidate row and costs tens
-        // of milliseconds even over a bounded index scan (measured ~71 ms on a
-        // 2.2M-row corpus). Resolve the exclusion once as a literal list, and
-        // skip the corpus entirely when every volume is NTFS-managed (its rows
-        // are filtered to zero anyway, which the previous code proved by
-        // scanning every keystroke).
-        let excluded_ntfs_volumes = Self::excluded_ntfs_volume_ids(&conn)?;
-        let all_volumes_ntfs = Self::total_volumes(&conn)
-            .is_ok_and(|total| Self::files_corpus_should_skip(total, excluded_ntfs_volumes.len()));
-        let ntfs_ids = &excluded_ntfs_volumes;
-        // The exclusion placeholders must be numbered contiguously with the
-        // query's own ?NNN tokens: SQLite rejects a bare `?` mixed with
-        // numbered ones (the bare token collides with the next ?NNN).
-        let exclusion_clause = |start_index: usize| -> String {
-            if ntfs_ids.is_empty() {
-                return String::new();
-            }
-            let placeholders: Vec<String> =
-                (start_index..start_index + ntfs_ids.len()).map(|i| format!("?{i}")).collect();
-            format!(" AND f.volume_id NOT IN ({})", placeholders.join(", "))
-        };
-        let files_queries_skipped = all_volumes_ntfs;
-
         // 1. Exact match query
-        if !files_queries_skipped {
-            let exclusion = exclusion_clause(2);
-            let limit_index = 2 + ntfs_ids.len();
-            let sql = format!(
-                "SELECT id, display_path, lower_name, is_directory, extension \
-                 FROM files f WHERE lower_name = ?1{exclusion} \
-                 ORDER BY f.display_path COLLATE NOCASE \
-                 LIMIT ?{limit_index};"
-            );
+        {
             let mut stmt = conn
-                .prepare_cached(&sql)
+                .prepare_cached(
+                    "SELECT id, display_path, lower_name, is_directory, extension
+                     FROM files f WHERE lower_name = ?1
+                       AND NOT EXISTS(SELECT 1 FROM volumes v
+                                      WHERE v.volume_id = f.volume_id AND v.backend = 'ntfs')
+                     ORDER BY f.display_path COLLATE NOCASE
+                     LIMIT ?2;",
+                )
                 .map_err(|e| e.to_string())?;
-            let mut params_vec: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(2 + ntfs_ids.len());
-            params_vec.push(&lower as &dyn rusqlite::ToSql);
-            params_vec.extend(ntfs_ids.iter().map(|id| id as &dyn rusqlite::ToSql));
-            params_vec.push(&exact_limit as &dyn rusqlite::ToSql);
             let rows = stmt
-                .query_map(params_from_iter(params_vec.iter().copied()), |row| {
+                .query_map(params![lower, exact_limit], |row| {
                     Ok(CandidateEntry {
                         id: row.get(0)?,
                         display_path: row.get(1)?,
@@ -1671,27 +1632,23 @@ impl Database {
             // Reserve exact candidates per volume in addition to the
             // bounded global pool. A common filename with many C: rows can no
             // longer make the same valid filename on D:/E: unreachable.
-            let exclusion = exclusion_clause(3);
             let mut fair_stmt = conn
-                .prepare_cached(&format!(
-                    "SELECT f.id, f.display_path, f.lower_name, f.is_directory, f.extension \
-                     FROM ( \
-                         SELECT id, display_path, lower_name, is_directory, extension, volume_id, \
-                                ROW_NUMBER() OVER (PARTITION BY volume_id ORDER BY id) AS rn \
-                         FROM files \
-                         WHERE lower_name = ?1 \
-                     ) f \
-                     WHERE f.rn <= ?2{exclusion} \
-                     ORDER BY f.volume_id COLLATE NOCASE;"
-                ))
+                .prepare_cached(
+                    "SELECT f.id, f.display_path, f.lower_name, f.is_directory, f.extension
+                     FROM (
+                         SELECT id, display_path, lower_name, is_directory, extension, volume_id,
+                                ROW_NUMBER() OVER (PARTITION BY volume_id ORDER BY id) AS rn
+                         FROM files
+                         WHERE lower_name = ?1
+                     ) f
+                     WHERE f.rn <= ?2
+                       AND NOT EXISTS(SELECT 1 FROM volumes v
+                                      WHERE v.volume_id = f.volume_id AND v.backend = 'ntfs')
+                     ORDER BY f.volume_id COLLATE NOCASE;",
+                )
                 .map_err(|e| e.to_string())?;
-            let mut fair_params_vec: Vec<&dyn rusqlite::ToSql> =
-                Vec::with_capacity(2 + ntfs_ids.len());
-            fair_params_vec.push(&lower as &dyn rusqlite::ToSql);
-            fair_params_vec.push(&per_vol_limit as &dyn rusqlite::ToSql);
-            fair_params_vec.extend(ntfs_ids.iter().map(|id| id as &dyn rusqlite::ToSql));
             let fair_rows = fair_stmt
-                .query_map(params_from_iter(fair_params_vec.iter().copied()), |row| {
+                .query_map(params![lower, per_vol_limit], |row| {
                     Ok(CandidateEntry {
                         id: row.get(0)?,
                         display_path: row.get(1)?,
@@ -1714,25 +1671,19 @@ impl Database {
         }
 
         // 2. Prefix match query
-        if !files_queries_skipped {
+        {
             let prefix_end = format!("{lower}\u{FFFF}");
-            let exclusion = exclusion_clause(3);
-            let limit_index = 3 + ntfs_ids.len();
-            let sql = format!(
-                "SELECT id, display_path, lower_name, is_directory, extension \
-                 FROM files f WHERE lower_name >= ?1 AND lower_name <= ?2{exclusion} \
-                 LIMIT ?{limit_index};"
-            );
             let mut stmt = conn
-                .prepare_cached(&sql)
+                .prepare_cached(
+                    "SELECT id, display_path, lower_name, is_directory, extension
+                     FROM files f WHERE lower_name >= ?1 AND lower_name <= ?2
+                       AND NOT EXISTS(SELECT 1 FROM volumes v
+                                      WHERE v.volume_id = f.volume_id AND v.backend = 'ntfs')
+                     LIMIT ?3;",
+                )
                 .map_err(|e| e.to_string())?;
-            let mut params_vec: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(3 + ntfs_ids.len());
-            params_vec.push(&lower as &dyn rusqlite::ToSql);
-            params_vec.push(&prefix_end as &dyn rusqlite::ToSql);
-            params_vec.extend(ntfs_ids.iter().map(|id| id as &dyn rusqlite::ToSql));
-            params_vec.push(&prefix_limit as &dyn rusqlite::ToSql);
             let rows = stmt
-                .query_map(params_from_iter(params_vec.iter().copied()), |row| {
+                .query_map(params![lower, prefix_end, prefix_limit], |row| {
                     Ok(CandidateEntry {
                         id: row.get(0)?,
                         display_path: row.get(1)?,
@@ -1756,7 +1707,7 @@ impl Database {
         }
 
         // 3. 3+ characters: FTS5 Trigram MATCH query
-        if !files_queries_skipped && query_len >= 3 {
+        if query_len >= 3 {
             let fts_query = sanitize_fts5_trigram_query(&lower);
             if !fts_query.is_empty() {
                 let mut stmt = conn
@@ -1802,46 +1753,46 @@ impl Database {
         // B-tree range for names beginning with the selected token's first
         // character, then let the existing scorer validate every token.
         let probes = subsequence_probes(&lower);
-        if !files_queries_skipped && !probes.is_empty() {
+        if !probes.is_empty() {
             let scan_limit = ((limit.max(10) * 20).min(5_000) / probes.len()).max(1) as i64;
             let match_limit = ((limit.max(10) * 3) / probes.len()).max(10) as i64;
-            let exclusion = exclusion_clause(3);
-            let scan_index = 3 + ntfs_ids.len();
-            let like_index = scan_index + 1;
-            let match_index = scan_index + 2;
             let mut stmt = conn
-                .prepare_cached(&format!(
-                    "SELECT id, display_path, lower_name, is_directory, extension \
-                     FROM ( \
-                         SELECT f.id, f.display_path, f.lower_name, f.is_directory, f.extension \
-                         FROM files f \
-                         WHERE f.lower_name >= ?1 AND f.lower_name <= ?2{exclusion} \
-                         ORDER BY f.lower_name \
-                         LIMIT ?{scan_index} \
-                     ) bounded \
-                     WHERE lower_name LIKE ?{like_index} ESCAPE '!' \
-                     LIMIT ?{match_index};"
-                ))
+                .prepare_cached(
+                    "SELECT id, display_path, lower_name, is_directory, extension
+                     FROM (
+                         SELECT f.id, f.display_path, f.lower_name, f.is_directory, f.extension
+                         FROM files f
+                         WHERE f.lower_name >= ?1 AND f.lower_name <= ?2
+                           AND NOT EXISTS(SELECT 1 FROM volumes v
+                                          WHERE v.volume_id = f.volume_id AND v.backend = 'ntfs')
+                         ORDER BY f.lower_name
+                         LIMIT ?3
+                     ) bounded
+                     WHERE lower_name LIKE ?4 ESCAPE '!'
+                     LIMIT ?5;",
+                )
                 .map_err(|e| e.to_string())?;
 
             for probe in probes {
-                let mut params_vec: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(5 + ntfs_ids.len());
-                params_vec.push(&probe.lower_bound as &dyn rusqlite::ToSql);
-                params_vec.push(&probe.upper_bound as &dyn rusqlite::ToSql);
-                params_vec.extend(ntfs_ids.iter().map(|id| id as &dyn rusqlite::ToSql));
-                params_vec.push(&scan_limit as &dyn rusqlite::ToSql);
-                params_vec.push(&probe.like_pattern as &dyn rusqlite::ToSql);
-                params_vec.push(&match_limit as &dyn rusqlite::ToSql);
                 let rows = stmt
-                    .query_map(params_from_iter(params_vec.iter().copied()), |row| {
-                        Ok(CandidateEntry {
-                            id: row.get(0)?,
-                            display_path: row.get(1)?,
-                            lower_name: row.get(2)?,
-                            is_directory: row.get::<_, i32>(3)? != 0,
-                            extension: row.get(4)?,
-                        })
-                    })
+                    .query_map(
+                        params![
+                            probe.lower_bound,
+                            probe.upper_bound,
+                            scan_limit,
+                            probe.like_pattern,
+                            match_limit
+                        ],
+                        |row| {
+                            Ok(CandidateEntry {
+                                id: row.get(0)?,
+                                display_path: row.get(1)?,
+                                lower_name: row.get(2)?,
+                                is_directory: row.get::<_, i32>(3)? != 0,
+                                extension: row.get(4)?,
+                            })
+                        },
+                    )
                     .map_err(|e| e.to_string())?;
 
                 for row in rows {
@@ -1855,6 +1806,7 @@ impl Database {
                 }
             }
         }
+
         if is_cancelled() {
             return Ok(Vec::new());
         }
@@ -1875,38 +1827,7 @@ impl Database {
         Ok(candidates)
     }
 
-    /// NTFS-managed volume ids. The legacy `files` corpus must exclude every row
-/// that belongs to one of these volumes.
-fn excluded_ntfs_volume_ids(conn: &Connection) -> Result<Vec<String>, String> {
-    let mut stmt = conn
-        .prepare("SELECT volume_id FROM volumes WHERE backend = 'ntfs'")
-        .map_err(|e| e.to_string())?;
-    let rows = stmt
-        .query_map([], |row| row.get::<_, String>(0))
-        .map_err(|e| e.to_string())?;
-    let mut ids = Vec::new();
-    for row in rows {
-        ids.push(row.map_err(|e| e.to_string())?);
-    }
-    Ok(ids)
-}
-
-/// Total number of known volumes.
-fn total_volumes(conn: &Connection) -> Result<u64, String> {
-    conn.query_row("SELECT COUNT(*) FROM volumes", [], |row| {
-        row.get::<_, u64>(0)
-    })
-    .map_err(|e| e.to_string())
-}
-
-/// Pure decision helper for the legacy-corpus fast path. When every known
-/// volume is NTFS-managed, the `files` rows are all excluded by the volume
-/// backend filter, so their queries can be skipped entirely.
-fn files_corpus_should_skip(total_volumes: u64, ntfs_volumes: usize) -> bool {
-    total_volumes > 0 && ntfs_volumes as u64 == total_volumes
-}
-
-fn debug_search_probe(conn: &Connection, lower: &str, candidates: &[CandidateEntry]) {
+    fn debug_search_probe(conn: &Connection, lower: &str, candidates: &[CandidateEntry]) {
         let file_count = conn
             .query_row(
                 "SELECT COUNT(*) FROM files WHERE lower_name = ?1;",
@@ -2292,21 +2213,6 @@ fn sanitize_fts5_trigram_query(query: &str) -> String {
 #[cfg(test)]
 mod ntfs_tests {
     use super::*;
-
-    #[test]
-    fn files_corpus_skip_requires_a_mixed_backend_set() {
-        // Every volume NTFS-managed: the legacy files corpus is fully filtered
-        // out, so its queries can be skipped.
-        assert!(Database::files_corpus_should_skip(1, 1));
-        assert!(Database::files_corpus_should_skip(2, 2));
-        // Mixed backends: legacy rows may belong to real volumes - keep them.
-        assert!(!Database::files_corpus_should_skip(2, 1));
-        assert!(!Database::files_corpus_should_skip(3, 1));
-        // No known volumes (fresh database): nothing to exclude, keep queries.
-        assert!(!Database::files_corpus_should_skip(0, 0));
-        // Known volumes but none NTFS-managed: nothing is filtered out.
-        assert!(!Database::files_corpus_should_skip(3, 0));
-    }
 
     fn temp_db_path(name: &str) -> PathBuf {
         let unique = SystemTime::now()

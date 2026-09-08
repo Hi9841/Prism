@@ -8,7 +8,6 @@ import {
   quitApp,
   saveState,
   setAlwaysOnTop,
-  setOsdAccent,
   setShortcut,
   setTaskbarAlignment,
   setTaskbarScrollVolume,
@@ -445,7 +444,6 @@ export function AppProvider({ children }: { children: ReactNode }) {
     if (!ready) return;
     document.documentElement.dataset.accent = settings.accent;
     document.documentElement.dataset.theme = effectiveTheme;
-    setOsdAccent(settings.accent).catch(() => {});
   }, [ready, settings.accent, effectiveTheme]);
 
   useEffect(() => {
@@ -613,7 +611,6 @@ export function sanitizeSettings(raw: unknown): Settings {
     pinnedApps: sanitizePinnedApps(src.pinnedApps),
     appGroups: sanitizeAppGroups(src.appGroups),
     sectionOrder: sanitizeSectionOrder(src.sectionOrder),
-    startView: pick(src.startView, ["palette", "menu"], DEFAULT_SETTINGS.startView),
   };
 }
 

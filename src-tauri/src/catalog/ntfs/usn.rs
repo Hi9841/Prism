@@ -241,7 +241,7 @@ pub(super) fn parse_record(bytes: &[u8]) -> Result<(ParsedUsnRecord, usize), Str
         return Err("USN filename extends beyond its record".to_string());
     }
     let mut utf16 = Vec::with_capacity(name_length / 2);
-    for pair in bytes[name_offset..name_end].as_chunks::<2>().0 {
+    for pair in bytes[name_offset..name_end].chunks_exact(2) {
         utf16.push(u16::from_le_bytes([pair[0], pair[1]]));
     }
 

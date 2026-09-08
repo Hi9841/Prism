@@ -9,7 +9,7 @@ import type { AppEntry, FileSearchResponse, PersistedState, QuickAccessEntry } f
 export type PowerAction = "lock" | "sleep" | "shutdown" | "restart";
 export type TaskbarThickness = "compact" | "default" | "adaptive";
 export type TaskbarCombineMode = "always" | "whenFull" | "never";
-export type TaskbarStartIcon = "prism" | "system" | "gem" | "diamond" | "custom";
+export type TaskbarStartIcon = "system" | "gem" | "diamond" | "custom";
 
 interface CustomStartIcon {
   id: string;
@@ -76,11 +76,6 @@ export async function isWindowVisible(): Promise<boolean> {
 export function setAlwaysOnTop(on: boolean): Promise<void> {
   if (!inTauri) return Promise.resolve();
   return getCurrentWindow().setAlwaysOnTop(on);
-}
-
-export function setOsdAccent(accent: string): Promise<void> {
-  if (!inTauri) return Promise.resolve();
-  return invoke("set_osd_accent", { accent });
 }
 
 export function setViewZoom(percent: number): Promise<void> {
@@ -285,7 +280,7 @@ export async function getTaskbarSettings(): Promise<TaskbarSettings> {
       thickness: "default",
       autoHide: false,
       combineButtons: "always",
-      startIcon: "prism",
+      startIcon: "system",
       selectedCustomIcon: null,
       customStartIcons: [],
     };
