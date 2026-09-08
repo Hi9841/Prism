@@ -108,6 +108,9 @@ const EVENT_SEARCH_RECT_CONFIGURED: usize = 19;
 const CONTROL_TASKBAR_PIN: usize = 20;
 const CONTROL_TASKBAR_UNPIN: usize = 21;
 const EVENT_TASKBAR_PIN_COMPLETED: usize = 22;
+const CONTROL_FOREGROUND_WINDOW: usize = 23;
+const EVENT_FOREGROUND_RESULT: usize = 24;
+const EVENT_SHELL_START_COMMAND: usize = 25;
 const WS_POPUP: u32 = 0x8000_0000;
 const SS_BITMAP: u32 = 0x0000_000e;
 const WS_EX_TOOLWINDOW: u32 = 0x0000_0080;
@@ -196,6 +199,9 @@ extern "system" {
         flags: u32,
     ) -> i32;
     fn ShowWindow(window: Hwnd, command: i32) -> i32;
+    fn SetForegroundWindow(window: Hwnd) -> i32;
+    fn AllowSetForegroundWindow(process_id: u32) -> i32;
+    fn GetWindowThreadProcessId(window: Hwnd, process_id: *mut u32) -> u32;
 }
 
 #[link(name = "gdi32")]
@@ -436,6 +442,14 @@ fn handle_taskbar_pin(pinned: bool) -> isize {
 }
 
 unsafe fn observer_window() -> Hwnd {
+    // The observer is a hidden top-level tool window so it keeps receiving
+    // keyboard INPUTSINK reports while an elevated app has focus. Fall back to
+    // the legacy message-only child so an older Prism build sharing this bridge
+    // still resolves its observer.
+    let top_level = FindWindowW(OBSERVER_CLASS.as_ptr(), std::ptr::null());
+    if !top_level.is_null() {
+        return top_level;
+    }
     FindWindowExW(
         HWND_MESSAGE,
         std::ptr::null_mut(),
@@ -975,12 +989,31 @@ pub unsafe extern "system" fn PrismShellGetMessageHook(
                     let _ = notify_observer(message_id, EVENT_TASKBAR_PIN_COMPLETED, result);
                     message.message = WM_NULL;
                 }
+                CONTROL_FOREGROUND_WINDOW => {
+                    // Runs inside Explorer, the shell that just handled the Win
+                    // key, so Explorer may still hold foreground-activation
+                    // permission. This is the closest cheap analogue to
+                    // Open-Shell hosting its Start menu as an Explorer window.
+                    let target = message.lparam as Hwnd;
+                    let mut process_id = 0u32;
+                    GetWindowThreadProcessId(target, &mut process_id);
+                    let mut granted = false;
+                    if !target.is_null() && process_id != 0 {
+                        let _ = AllowSetForegroundWindow(process_id);
+                        granted = SetForegroundWindow(target) != 0;
+                    }
+                    let _ = notify_observer(message_id, EVENT_FOREGROUND_RESULT, granted as isize);
+                    message.message = WM_NULL;
+                }
                 _ => {}
             }
         } else if is_start_command(message) && !observer_window().is_null() {
-            // Consume the Start command only while Prism's observer is alive.
-            // The raw-input state machine decides whether the key sequence was
-            // a standalone Win press, so Win+key chords never open Prism.
+            // A bare Win press or Ctrl+Esc reaches the shell as SC_TASKLIST.
+            // Start-button clicks are consumed by the mouse hook and never get
+            // here. Forward the keyboard path so Prism can toggle even when
+            // raw input is blocked by an elevated foreground window (UIPI);
+            // the app de-duplicates it against the raw observer.
+            let _ = notify_observer(message_id, EVENT_SHELL_START_COMMAND, 0);
             message.message = WM_NULL;
         } else if message.message == WM_SETTINGCHANGE && has_active_icon() {
             // Wallpaper, theme, or layout changes behind the Start button

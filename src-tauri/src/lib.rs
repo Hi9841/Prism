@@ -27,9 +27,12 @@ use windows::Win32::Foundation::{HWND, POINT, RECT};
 use windows::Win32::Graphics::Gdi::{
     GetMonitorInfoW, MonitorFromPoint, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST,
 };
+use windows::Win32::System::Threading::GetCurrentProcessId;
+use windows::Win32::UI::Input::KeyboardAndMouse::{SetActiveWindow, SetFocus};
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetCursorPos, SetForegroundWindow, SetWindowPos, HWND_TOPMOST, SWP_NOMOVE, SWP_NOSIZE,
-    SWP_SHOWWINDOW,
+    AllowSetForegroundWindow, BringWindowToTop, GetClassNameW, GetCursorPos, GetForegroundWindow,
+    GetWindowLongPtrW, GetWindowThreadProcessId, LockSetForegroundWindow, SetForegroundWindow,
+    SetWindowPos, GWL_EXSTYLE, HWND_TOPMOST, LSFW_UNLOCK, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW,
 };
 
 /// The only accepted global shortcuts. Bare typing keys, reserved keys and
@@ -50,6 +53,9 @@ const LEGACY_STATE_VERSION: u32 = 2;
 const STATE_VERSION: u32 = 3;
 const PALETTE_HIDE_DELAY: Duration = Duration::from_millis(125);
 const PALETTE_RAISE_RETRY_DELAY: Duration = Duration::from_millis(40);
+/// Window during which a focus-lost event after opening is treated as part of
+/// the activation burst instead of a click-away dismissal.
+const ACTIVATION_FOCUS_GRACE: Duration = Duration::from_millis(600);
 const PALETTE_STARTUP_DELAY: Duration = Duration::from_millis(100);
 const STARTUP_SHELL_RETRY_DELAY: Duration = Duration::from_millis(250);
 const STARTUP_SHELL_RETRY_ATTEMPTS: usize = 120;
@@ -211,6 +217,12 @@ pub fn run() {
                 if drag::is_dragging() {
                     return;
                 }
+                // WebView2 hosts child windows of its own; a focus event whose
+                // foreground still belongs to Prism is an internal transition,
+                // not a click-away.
+                if is_prism_foreground() {
+                    return;
+                }
                 // Windows may report the palette as unfocused once before
                 // granting foreground activation to the existing process.
                 if ACTIVATION_FOCUS_PENDING.swap(false, Ordering::AcqRel) {
@@ -218,6 +230,7 @@ pub fn run() {
                 }
                 PALETTE_OPEN.store(false, Ordering::Release);
                 PALETTE_TRANSITION.fetch_add(1, Ordering::AcqRel);
+                crate::win_key::debug_trace("palette-hide-blur");
                 PRESENTATION_ANCHOR
                     .lock()
                     .map(|mut value| *value = None)
@@ -531,6 +544,67 @@ impl From<POINT> for PhysicalPoint {
     }
 }
 
+/// True when the foreground window belongs to this Prism process. WebView2
+/// hosts its own child windows, so compare the owning process rather than a
+/// single HWND.
+fn is_prism_foreground() -> bool {
+    unsafe {
+        let foreground = GetForegroundWindow();
+        if foreground.0.is_null() {
+            return false;
+        }
+        let mut pid = 0u32;
+        GetWindowThreadProcessId(foreground, Some(&mut pid));
+        pid != 0 && pid == GetCurrentProcessId()
+    }
+}
+
+/// Ask Windows for keyboard focus. Deliberately does not use
+/// `AttachThreadInput`: attaching to an elevated foreground thread is blocked
+/// by UIPI (and can deadlock the UI thread), so it silently failed whenever
+/// Task Manager or another elevated window held focus. Unlocking the
+/// foreground lock and raising the window works across integrity levels.
+fn force_foreground(hwnd: HWND) {
+    unsafe {
+        if is_prism_foreground() {
+            return;
+        }
+        let _ = LockSetForegroundWindow(LSFW_UNLOCK);
+        let _ = AllowSetForegroundWindow(GetCurrentProcessId());
+        let _ = BringWindowToTop(hwnd);
+        let _ = SetForegroundWindow(hwnd);
+        let _ = SetActiveWindow(hwnd);
+        let _ = SetFocus(Some(hwnd));
+    }
+}
+
+/// Debug-only: record what currently owns the foreground and whether it is
+/// topmost, so a failing toggle can be attributed to the right window.
+#[cfg(debug_assertions)]
+fn log_foreground(tag: &str) {
+    unsafe {
+        let foreground = GetForegroundWindow();
+        if foreground.0.is_null() {
+            crate::win_key::debug_trace(&format!("{tag} fg=null"));
+            return;
+        }
+        let mut pid = 0u32;
+        GetWindowThreadProcessId(foreground, Some(&mut pid));
+        let mut class = [0u16; 64];
+        let length = GetClassNameW(foreground, &mut class);
+        let class = String::from_utf16_lossy(&class[..length.max(0) as usize]);
+        let ex_style = GetWindowLongPtrW(foreground, GWL_EXSTYLE) as u32;
+        crate::win_key::debug_trace(&format!(
+            "{tag} fg_pid={pid} self={} topmost={} class={class}",
+            pid == GetCurrentProcessId(),
+            ex_style & 0x8 != 0
+        ));
+    }
+}
+
+#[cfg(not(debug_assertions))]
+fn log_foreground(_tag: &str) {}
+
 /// Reasserts Prism at the front of the topmost band. `alwaysOnTop` keeps the
 /// window in that band, but an already-active topmost window can still sit
 /// above it until Prism is explicitly repositioned.
@@ -547,10 +621,13 @@ fn raise_palette(window: &tauri::WebviewWindow) -> Result<(), String> {
             SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW,
         )
         .map_err(|error| error.to_string())?;
-        // The Win press is the user's current input, so Windows normally grants
-        // this foreground request. SetWindowPos still fixes visibility if focus
-        // is restricted by another process.
-        let _ = SetForegroundWindow(HWND(hwnd.0));
+        force_foreground(HWND(hwnd.0));
+        let foreground = GetForegroundWindow();
+        crate::win_key::debug_trace(&format!(
+            "raise fg_self={} fg={:p}",
+            foreground == HWND(hwnd.0),
+            foreground.0
+        ));
     }
     window.set_focus().map_err(|error| error.to_string())
 }
@@ -650,11 +727,30 @@ fn toggle_palette_with_presentation(
     };
     let opening = toggle_open_state(&PALETTE_OPEN);
     let transition = PALETTE_TRANSITION.fetch_add(1, Ordering::AcqRel) + 1;
+    log_foreground(if opening {
+        "toggle-open-before"
+    } else {
+        "toggle-close-before"
+    });
+    crate::win_key::debug_trace(&format!("palette-toggle open={opening}"));
     if !opening {
         ACTIVATION_FOCUS_PENDING.store(false, Ordering::Release);
     }
     if opening {
         set_webview_memory_target(&window, false);
+        // Windows can report the palette as unfocused once while it is still
+        // acquiring foreground from an elevated window; do not let that
+        // spurious blur dismiss the palette before it appears.
+        ACTIVATION_FOCUS_PENDING.store(true, Ordering::Release);
+        let grace_app = app.clone();
+        let grace_transition = transition;
+        tauri::async_runtime::spawn(async move {
+            tokio::time::sleep(ACTIVATION_FOCUS_GRACE).await;
+            if PALETTE_TRANSITION.load(Ordering::Acquire) == grace_transition {
+                ACTIVATION_FOCUS_PENDING.store(false, Ordering::Release);
+            }
+            drop(grace_app);
+        });
         PRESENTATION_ANCHOR
             .lock()
             .map(|mut value| *value = anchor)
@@ -725,13 +821,27 @@ fn present_palette(app: tauri::AppHandle) -> Result<bool, String> {
     }
     window.show().map_err(|error| error.to_string())?;
     raise_palette(&window)?;
+    // If Prism could not take foreground itself (for example an elevated Task
+    // Manager holds it), ask the injected Explorer bridge to hand it over.
+    // Explorer handled the Win key, so it may still hold activation rights.
+    if !is_prism_foreground() {
+        if let Ok(hwnd) = window.hwnd() {
+            let granted = crate::win_key::request_foreground(hwnd.0 as isize);
+            crate::win_key::debug_trace(&format!(
+                "explorer-fg granted={granted} self={}",
+                is_prism_foreground()
+            ));
+        }
+    }
     schedule_palette_raise_retry(&app, PALETTE_TRANSITION.load(Ordering::Acquire));
+    log_foreground("present-after");
     perf::finish(timer, "palette_present", || "window=main".to_string());
     Ok(true)
 }
 
 #[tauri::command]
 fn hide_palette(app: tauri::AppHandle) -> Result<(), String> {
+    crate::win_key::debug_trace("palette-hide-command");
     PALETTE_OPEN.store(false, Ordering::Release);
     ACTIVATION_FOCUS_PENDING.store(false, Ordering::Release);
     PALETTE_TRANSITION.fetch_add(1, Ordering::AcqRel);
