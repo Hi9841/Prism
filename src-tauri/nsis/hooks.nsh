@@ -4,10 +4,6 @@
   ; and replaces its executable.
   IfFileExists "$INSTDIR\prism.exe" 0 +2
   ExecWait '"$INSTDIR\prism.exe" --prism-restore-start-menu "$APPDATA\app.prism.launcher\start-menu-restore.json"'
-  ; Also restore any stranded taskbar z-band left by a crashed instance so
-  ; updates never inherit a broken taskbar.
-  IfFileExists "$INSTDIR\prism.exe" 0 +2
-  ExecWait '"$INSTDIR\prism.exe" --repair-taskbar'
 !macroend
 
 !macro NSIS_HOOK_POSTINSTALL
@@ -27,10 +23,6 @@
   ; watchdog are removed. The helper exits before Tauri initializes.
   IfFileExists "$INSTDIR\prism.exe" 0 +2
   ExecWait '"$INSTDIR\prism.exe" --prism-restore-start-menu "$APPDATA\app.prism.launcher\start-menu-restore.json"'
-  ; Restore a stranded taskbar z-band too: uninstalling must never leave the
-  ; taskbar broken with Prism gone.
-  IfFileExists "$INSTDIR\prism.exe" 0 +2
-  ExecWait '"$INSTDIR\prism.exe" --repair-taskbar'
 !macroend
 
 !macro NSIS_HOOK_POSTUNINSTALL

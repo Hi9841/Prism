@@ -1,16 +1,5 @@
 // biome-ignore-all lint/a11y/useSemanticElements: the ARIA grid uses div layout so result rows can contain secondary actions.
-import {
-  ChevronDown,
-  FolderSync,
-  GripVertical,
-  LayoutGrid,
-  List,
-  Pin,
-  PinOff,
-  RefreshCw,
-  Search,
-  X,
-} from "lucide-react";
+import { ChevronDown, FolderSync, GripVertical, Pin, PinOff, RefreshCw, Search, X } from "lucide-react";
 import { memo, useCallback, useEffect, useRef, useState } from "react";
 import { PowerMenu } from "../../components/PowerMenu";
 import { displayShortcut } from "../../components/SettingsSheet";
@@ -28,7 +17,6 @@ import { usePalette } from "../../state/palette";
 import { UpdateControl } from "../updater/UpdateControl";
 import { PaletteSearchInput } from "./PaletteSearchInput";
 import { type ContextMenuPosition, clampContextMenuPosition, ResultContextMenu } from "./ResultContextMenu";
-import { StartMenu, type StartMenuHandle } from "./StartMenu";
 import { isClipboardKind } from "./sections";
 
 interface ReorderDragState {
@@ -595,64 +583,6 @@ export function Palette() {
     el?.scrollIntoView({ block: "nearest" });
   }, [palette.selected]);
 
-  // Rough page size for PageUp/PageDown: the default palette shows roughly
-  // this many dense rows. Selection clamping handles the edges.
-  const PAGE_SIZE = 8;
-
-  const jumpToEdge = useCallback(
-    (edge: "first" | "last") => {
-      palette.select(edge === "first" ? 0 : Math.max(0, palette.flatItems.length - 1));
-    },
-    [palette],
-  );
-
-  const pageMove = useCallback(
-    (delta: -1 | 1) => {
-      palette.move(delta * PAGE_SIZE);
-    },
-    [palette],
-  );
-
-  // Start-menu view: the empty-query presentation. While it is active the
-  // search box's keyboard callbacks drive the menu's own selection instead
-  // of the results list; typing any query swaps back to the results view.
-  const menuActive = settings.startView === "menu" && palette.query.trim() === "";
-  const menuRef = useRef<StartMenuHandle | null>(null);
-
-  const handleMove = useCallback(
-    (delta: number) => {
-      if (menuActive) menuRef.current?.move(delta);
-      else palette.move(delta);
-    },
-    [menuActive, palette],
-  );
-  const handleJump = useCallback(
-    (edge: "first" | "last") => {
-      if (menuActive) menuRef.current?.jump(edge);
-      else jumpToEdge(edge);
-    },
-    [menuActive, jumpToEdge],
-  );
-  const handlePageMove = useCallback(
-    (delta: -1 | 1) => {
-      if (menuActive) menuRef.current?.pageMove(delta);
-      else pageMove(delta);
-    },
-    [menuActive, pageMove],
-  );
-  const handleRunSelected = useCallback(() => {
-    if (menuActive) menuRef.current?.runSelected();
-    else palette.runSelected();
-  }, [menuActive, palette]);
-  const handleOpenSelectedMenu = useCallback(() => {
-    if (menuActive) menuRef.current?.openSelectedMenu();
-    else openSelectedMenu();
-  }, [menuActive, openSelectedMenu]);
-  const toggleStartView = useCallback(() => {
-    updateSettings({ startView: settings.startView === "menu" ? "palette" : "menu" });
-    requestAnimationFrame(() => inputRef.current?.focus());
-  }, [settings.startView, updateSettings]);
-
   return (
     <div className="shell focus-ring" style={{ height: "100%" }}>
       <PaletteSearchInput
@@ -664,252 +594,244 @@ export function Palette() {
         busy={!palette.appsLoaded || palette.filesBusy}
         settingsOpen={app.openSettings}
         onQueryChange={palette.setQuery}
-        onMove={handleMove}
-        onJump={handleJump}
-        onPageMove={handlePageMove}
-        onRunSelected={handleRunSelected}
-        onOpenSelectedMenu={handleOpenSelectedMenu}
+        onMove={palette.move}
+        onRunSelected={palette.runSelected}
+        onOpenSelectedMenu={openSelectedMenu}
         onDismiss={dismiss}
         onToggleSettings={() => setOpenSettings(!app.openSettings)}
       />
 
       {/* ------- results ------- */}
-      {menuActive ? (
-        <StartMenu ref={menuRef} narrow={settings.width === 560} />
-      ) : (
-        <div
-          ref={listRef}
-          id="prism-results"
-          role="grid"
-          aria-label="Search results"
-          aria-busy={!palette.appsLoaded || palette.filesBusy}
-          className="scroll-thin min-h-0 flex-1 overflow-y-auto px-2.5 pb-2"
-        >
-          {palette.fileError && palette.sections.length > 0 ? (
-            <FileSearchErrorNotice
-              error={palette.fileError}
-              onRetry={palette.retryFileSearch}
-              onRebuild={palette.rebuildIndex}
-            />
-          ) : null}
-          {palette.sections.length === 0 ? (
-            <EmptyState
-              query={palette.query}
-              loading={palette.query ? palette.filesBusy : !palette.appsLoaded}
-              appError={palette.appsError}
-              fileError={palette.fileError}
-              pathBrowsing={palette.pathBrowsing}
-              onRetryApps={palette.refreshApps}
-              onRetryFileSearch={palette.retryFileSearch}
-              onRebuildIndex={palette.rebuildIndex}
-            />
-          ) : (
-            (() => {
-              let flat = 0;
-              return palette.sections.map((section) => {
-                const sectionReorderable = palette.query.trim() === "";
-                const sectionDropTarget =
-                  categoryDrag?.kind === "section" && categoryDrag.targetId === section.id;
-                const sectionDragTargetProps = sectionReorderable
-                  ? { "data-palette-section-id": section.id }
-                  : {};
-                return (
-                  <div
-                    key={section.id}
-                    role="presentation"
-                    {...sectionDragTargetProps}
-                    data-category-drop-target={sectionDropTarget || undefined}
-                    data-category-dragging={
-                      categoryDrag?.kind === "section" && categoryDrag.id === section.id ? true : undefined
-                    }
-                    className={sectionDropTarget ? "section-category-drop" : undefined}
-                  >
-                    {section.collapsible ? (
-                      <div role="row" tabIndex={-1} className="flex items-center gap-1 px-3.5 pb-1.5 pt-4">
+      <div
+        ref={listRef}
+        id="prism-results"
+        role="grid"
+        aria-label="Search results"
+        aria-busy={!palette.appsLoaded || palette.filesBusy}
+        className="scroll-thin min-h-0 flex-1 overflow-y-auto px-2.5 pb-2"
+      >
+        {palette.fileError && palette.sections.length > 0 ? (
+          <FileSearchErrorNotice
+            error={palette.fileError}
+            onRetry={palette.retryFileSearch}
+            onRebuild={palette.rebuildIndex}
+          />
+        ) : null}
+        {palette.sections.length === 0 ? (
+          <EmptyState
+            query={palette.query}
+            loading={palette.query ? palette.filesBusy : !palette.appsLoaded}
+            appError={palette.appsError}
+            fileError={palette.fileError}
+            pathBrowsing={palette.pathBrowsing}
+            onRetryApps={palette.refreshApps}
+            onRetryFileSearch={palette.retryFileSearch}
+            onRebuildIndex={palette.rebuildIndex}
+          />
+        ) : (
+          (() => {
+            let flat = 0;
+            return palette.sections.map((section) => {
+              const sectionReorderable = palette.query.trim() === "";
+              const sectionDropTarget =
+                categoryDrag?.kind === "section" && categoryDrag.targetId === section.id;
+              const sectionDragTargetProps = sectionReorderable
+                ? { "data-palette-section-id": section.id }
+                : {};
+              return (
+                <div
+                  key={section.id}
+                  role="presentation"
+                  {...sectionDragTargetProps}
+                  data-category-drop-target={sectionDropTarget || undefined}
+                  data-category-dragging={
+                    categoryDrag?.kind === "section" && categoryDrag.id === section.id ? true : undefined
+                  }
+                  className={sectionDropTarget ? "section-category-drop" : undefined}
+                >
+                  {section.collapsible ? (
+                    <div role="row" tabIndex={-1} className="flex items-center gap-1 px-3.5 pb-1.5 pt-4">
+                      <div role="gridcell" tabIndex={-1} className="min-w-0 flex-1">
+                        <button
+                          type="button"
+                          aria-expanded={!section.collapsed}
+                          aria-controls={`prism-section-${section.id}`}
+                          onClick={() =>
+                            app.updateSettings({ quickAccessCollapsed: !settings.quickAccessCollapsed })
+                          }
+                          className="focus-ring group/section flex w-full min-w-0 cursor-pointer items-center gap-1 rounded-[6px] text-left text-[11px] font-semibold text-fg-quiet uppercase hover:text-fg-secondary"
+                        >
+                          <ChevronDown
+                            className={`h-3.5 w-3.5 transition-transform duration-150 ${
+                              section.collapsed ? "-rotate-90" : "rotate-0"
+                            }`}
+                          />
+                          <span className="truncate">{section.label}</span>
+                        </button>
+                      </div>
+                      {sectionReorderable ? (
+                        <div role="gridcell" tabIndex={-1}>
+                          <button
+                            type="button"
+                            aria-label={`Reorder ${section.label} section`}
+                            title={`Reorder ${section.label}`}
+                            className="focus-ring grid h-7 w-7 shrink-0 touch-none cursor-grab place-items-center rounded-[7px] text-fg-quiet hover:bg-surface-hover hover:text-fg active:cursor-grabbing"
+                            {...categoryDragHandlers("section", section.id, section.label)}
+                          >
+                            <GripVertical className="h-3.5 w-3.5" />
+                          </button>
+                        </div>
+                      ) : null}
+                    </div>
+                  ) : (
+                    <div role="row" tabIndex={-1} className="flex items-center gap-1">
+                      <div role="gridcell" tabIndex={-1} className="min-w-0 flex-1">
+                        <SectionLabel>{section.label}</SectionLabel>
+                      </div>
+                      {sectionReorderable ? (
+                        <div role="gridcell" tabIndex={-1}>
+                          <button
+                            type="button"
+                            aria-label={`Reorder ${section.label} section`}
+                            title={`Reorder ${section.label}`}
+                            className="focus-ring mr-3.5 grid h-7 w-7 shrink-0 touch-none cursor-grab place-items-center rounded-[7px] text-fg-quiet hover:bg-surface-hover hover:text-fg active:cursor-grabbing"
+                            {...categoryDragHandlers("section", section.id, section.label)}
+                          >
+                            <GripVertical className="h-3.5 w-3.5" />
+                          </button>
+                        </div>
+                      ) : null}
+                    </div>
+                  )}
+                  {section.groups?.map((group, groupIndex) => (
+                    <div
+                      key={group.id}
+                      role="presentation"
+                      data-palette-group-id={palette.query.trim() === "" ? group.groupId : undefined}
+                      data-category-drop-target={
+                        categoryDrag?.kind === "group" && categoryDrag.targetId === group.groupId
+                          ? true
+                          : undefined
+                      }
+                      data-category-dragging={
+                        categoryDrag?.kind === "group" && categoryDrag.id === group.groupId ? true : undefined
+                      }
+                      className={`${groupIndex > 0 ? "mt-1 border-t border-line pt-1" : ""} ${
+                        categoryDrag?.kind === "group" && categoryDrag.targetId === group.groupId
+                          ? "section-category-drop"
+                          : ""
+                      }`}
+                    >
+                      <div role="row" tabIndex={-1} className="flex items-center gap-1 px-3.5 pb-1.5 pt-2">
                         <div role="gridcell" tabIndex={-1} className="min-w-0 flex-1">
                           <button
                             type="button"
-                            aria-expanded={!section.collapsed}
-                            aria-controls={`prism-section-${section.id}`}
-                            onClick={() =>
-                              app.updateSettings({ quickAccessCollapsed: !settings.quickAccessCollapsed })
-                            }
-                            className="focus-ring group/section flex w-full min-w-0 cursor-pointer items-center gap-1 rounded-[6px] text-left text-[11px] font-semibold text-fg-quiet uppercase hover:text-fg-secondary"
+                            aria-expanded={!group.collapsed}
+                            aria-controls={`prism-section-${group.id}`}
+                            onClick={() => toggleAppGroup(group.groupId)}
+                            className="focus-ring group/section flex w-full min-w-0 cursor-pointer items-center gap-1 rounded-[6px] text-left text-[11px] font-semibold text-fg-secondary hover:text-fg"
                           >
                             <ChevronDown
                               className={`h-3.5 w-3.5 transition-transform duration-150 ${
-                                section.collapsed ? "-rotate-90" : "rotate-0"
+                                group.collapsed ? "-rotate-90" : "rotate-0"
                               }`}
                             />
-                            <span className="truncate">{section.label}</span>
+                            <span className="truncate">{group.label}</span>
                           </button>
                         </div>
-                        {sectionReorderable ? (
+                        {palette.query.trim() === "" ? (
                           <div role="gridcell" tabIndex={-1}>
                             <button
                               type="button"
-                              aria-label={`Reorder ${section.label} section`}
-                              title={`Reorder ${section.label}`}
+                              aria-label={`Reorder ${group.label} group`}
+                              title={`Reorder ${group.label}`}
                               className="focus-ring grid h-7 w-7 shrink-0 touch-none cursor-grab place-items-center rounded-[7px] text-fg-quiet hover:bg-surface-hover hover:text-fg active:cursor-grabbing"
-                              {...categoryDragHandlers("section", section.id, section.label)}
+                              {...categoryDragHandlers("group", group.groupId, group.label)}
                             >
                               <GripVertical className="h-3.5 w-3.5" />
                             </button>
                           </div>
                         ) : null}
                       </div>
-                    ) : (
-                      <div role="row" tabIndex={-1} className="flex items-center gap-1">
-                        <div role="gridcell" tabIndex={-1} className="min-w-0 flex-1">
-                          <SectionLabel>{section.label}</SectionLabel>
-                        </div>
-                        {sectionReorderable ? (
-                          <div role="gridcell" tabIndex={-1}>
-                            <button
-                              type="button"
-                              aria-label={`Reorder ${section.label} section`}
-                              title={`Reorder ${section.label}`}
-                              className="focus-ring mr-3.5 grid h-7 w-7 shrink-0 touch-none cursor-grab place-items-center rounded-[7px] text-fg-quiet hover:bg-surface-hover hover:text-fg active:cursor-grabbing"
-                              {...categoryDragHandlers("section", section.id, section.label)}
-                            >
-                              <GripVertical className="h-3.5 w-3.5" />
-                            </button>
-                          </div>
-                        ) : null}
-                      </div>
-                    )}
-                    {section.groups?.map((group, groupIndex) => (
                       <div
-                        key={group.id}
-                        role="presentation"
-                        data-palette-group-id={palette.query.trim() === "" ? group.groupId : undefined}
-                        data-category-drop-target={
-                          categoryDrag?.kind === "group" && categoryDrag.targetId === group.groupId
-                            ? true
-                            : undefined
-                        }
-                        data-category-dragging={
-                          categoryDrag?.kind === "group" && categoryDrag.id === group.groupId
-                            ? true
-                            : undefined
-                        }
-                        className={`${groupIndex > 0 ? "mt-1 border-t border-line pt-1" : ""} ${
-                          categoryDrag?.kind === "group" && categoryDrag.targetId === group.groupId
-                            ? "section-category-drop"
-                            : ""
-                        }`}
+                        id={`prism-section-${group.id}`}
+                        role="rowgroup"
+                        aria-label={group.label}
+                        className="m-0 flex list-none flex-col gap-[2px] p-0"
                       >
-                        <div role="row" tabIndex={-1} className="flex items-center gap-1 px-3.5 pb-1.5 pt-2">
-                          <div role="gridcell" tabIndex={-1} className="min-w-0 flex-1">
-                            <button
-                              type="button"
-                              aria-expanded={!group.collapsed}
-                              aria-controls={`prism-section-${group.id}`}
-                              onClick={() => toggleAppGroup(group.groupId)}
-                              className="focus-ring group/section flex w-full min-w-0 cursor-pointer items-center gap-1 rounded-[6px] text-left text-[11px] font-semibold text-fg-secondary hover:text-fg"
-                            >
-                              <ChevronDown
-                                className={`h-3.5 w-3.5 transition-transform duration-150 ${
-                                  group.collapsed ? "-rotate-90" : "rotate-0"
-                                }`}
-                              />
-                              <span className="truncate">{group.label}</span>
-                            </button>
-                          </div>
-                          {palette.query.trim() === "" ? (
-                            <div role="gridcell" tabIndex={-1}>
-                              <button
-                                type="button"
-                                aria-label={`Reorder ${group.label} group`}
-                                title={`Reorder ${group.label}`}
-                                className="focus-ring grid h-7 w-7 shrink-0 touch-none cursor-grab place-items-center rounded-[7px] text-fg-quiet hover:bg-surface-hover hover:text-fg active:cursor-grabbing"
-                                {...categoryDragHandlers("group", group.groupId, group.label)}
-                              >
-                                <GripVertical className="h-3.5 w-3.5" />
-                              </button>
-                            </div>
-                          ) : null}
-                        </div>
-                        <div
-                          id={`prism-section-${group.id}`}
-                          role="rowgroup"
-                          aria-label={group.label}
-                          className="m-0 flex list-none flex-col gap-[2px] p-0"
-                        >
-                          {group.items.map((item) => {
-                            const index = flat++;
-                            return renderResultRow(item, index, false, false);
-                          })}
-                        </div>
+                        {group.items.map((item) => {
+                          const index = flat++;
+                          return renderResultRow(item, index, false, false);
+                        })}
                       </div>
-                    ))}
-                    {section.groups && section.groups.length > 0 && section.items.length > 0 ? (
-                      <div className="mt-2 flex items-center gap-2 px-3.5 pb-1 pt-2 text-[10px] font-semibold text-fg-quiet uppercase">
-                        <span className="h-px flex-1 bg-line" aria-hidden="true" />
-                        <span>Other apps</span>
-                        <span className="h-px flex-1 bg-line" aria-hidden="true" />
-                      </div>
-                    ) : null}
-                    <div
-                      id={`prism-section-${section.id}`}
-                      role="rowgroup"
-                      aria-label={section.groups?.length ? "Other apps" : section.label}
-                      className="m-0 flex list-none flex-col gap-[2px] p-0"
-                    >
-                      {section.items.map((item) => {
-                        const index = flat++;
-                        const reorderable = section.id === "pinned" || section.id === "quick";
-                        return renderResultRow(item, index, reorderable, section.id === "recent");
-                      })}
                     </div>
+                  ))}
+                  {section.groups && section.groups.length > 0 && section.items.length > 0 ? (
+                    <div className="mt-2 flex items-center gap-2 px-3.5 pb-1 pt-2 text-[10px] font-semibold text-fg-quiet uppercase">
+                      <span className="h-px flex-1 bg-line" aria-hidden="true" />
+                      <span>Other apps</span>
+                      <span className="h-px flex-1 bg-line" aria-hidden="true" />
+                    </div>
+                  ) : null}
+                  <div
+                    id={`prism-section-${section.id}`}
+                    role="rowgroup"
+                    aria-label={section.groups?.length ? "Other apps" : section.label}
+                    className="m-0 flex list-none flex-col gap-[2px] p-0"
+                  >
+                    {section.items.map((item) => {
+                      const index = flat++;
+                      const reorderable = section.id === "pinned" || section.id === "quick";
+                      return renderResultRow(item, index, reorderable, section.id === "recent");
+                    })}
                   </div>
-                );
-              });
+                </div>
+              );
+            });
 
-              function renderResultRow(
-                item: PaletteItem,
-                index: number,
-                reorderable: boolean,
-                removable: boolean,
-              ) {
-                return (
-                  <ResultRow
-                    key={item.id}
-                    item={item}
-                    index={index}
-                    selected={palette.selected === index}
-                    pinned={item.appId ? settings.pinnedApps.includes(item.appId) : false}
-                    reorderable={reorderable}
-                    draggedItem={
-                      reorderDrag?.active
-                        ? reorderItemId(reorderDrag.item)
-                        : fileDrag?.active
-                          ? fileDrag.item.id
-                          : null
-                    }
-                    dropTargetItem={reorderDrag?.active ? reorderDrag.targetItemId : null}
-                    onSelect={palette.select}
-                    onRun={palette.runItem}
-                    onOpenContextMenu={openResultMenu}
-                    onTogglePin={togglePin}
-                    removable={removable}
-                    onRemoveHistory={app.removeHistory}
-                    onMoveItem={moveItem}
-                    onStartReorderDrag={startReorderDrag}
-                    onUpdateReorderDrag={updateReorderDrag}
-                    onFinishReorderDrag={finishReorderDrag}
-                    onCancelReorderDrag={cancelReorderDrag}
-                    onStartFileDrag={startFileDrag}
-                    onUpdateFileDrag={updateFileDrag}
-                    onFinishFileDrag={finishFileDrag}
-                    onCancelFileDrag={cancelFileDrag}
-                  />
-                );
-              }
-            })()
-          )}
-        </div>
-      )}
+            function renderResultRow(
+              item: PaletteItem,
+              index: number,
+              reorderable: boolean,
+              removable: boolean,
+            ) {
+              return (
+                <ResultRow
+                  key={item.id}
+                  item={item}
+                  index={index}
+                  selected={palette.selected === index}
+                  pinned={item.appId ? settings.pinnedApps.includes(item.appId) : false}
+                  reorderable={reorderable}
+                  draggedItem={
+                    reorderDrag?.active
+                      ? reorderItemId(reorderDrag.item)
+                      : fileDrag?.active
+                        ? fileDrag.item.id
+                        : null
+                  }
+                  dropTargetItem={reorderDrag?.active ? reorderDrag.targetItemId : null}
+                  onSelect={palette.select}
+                  onRun={palette.runItem}
+                  onOpenContextMenu={openResultMenu}
+                  onTogglePin={togglePin}
+                  removable={removable}
+                  onRemoveHistory={app.removeHistory}
+                  onMoveItem={moveItem}
+                  onStartReorderDrag={startReorderDrag}
+                  onUpdateReorderDrag={updateReorderDrag}
+                  onFinishReorderDrag={finishReorderDrag}
+                  onCancelReorderDrag={cancelReorderDrag}
+                  onStartFileDrag={startFileDrag}
+                  onUpdateFileDrag={updateFileDrag}
+                  onFinishFileDrag={finishFileDrag}
+                  onCancelFileDrag={cancelFileDrag}
+                />
+              );
+            }
+          })()
+        )}
+      </div>
 
       {resultMenu ? (
         <ResultContextMenu
@@ -978,16 +900,6 @@ export function Palette() {
           <span className="px-1">dismiss</span>
         </div>
         <div className="ms-auto flex max-w-full flex-wrap items-center justify-end gap-1.5">
-          <IconButton
-            label={settings.startView === "menu" ? "Switch to list view" : "Switch to menu view"}
-            onClick={toggleStartView}
-          >
-            {settings.startView === "menu" ? (
-              <List className="h-3.5 w-3.5" />
-            ) : (
-              <LayoutGrid className="h-3.5 w-3.5" />
-            )}
-          </IconButton>
           <UpdateControl />
           {!palette.appsLoaded && palette.query === "" && (
             <span className="flex items-center gap-1.5 text-[11px] text-fg-quiet">

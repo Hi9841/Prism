@@ -293,7 +293,7 @@ async function toggleTaskbarPin(path: string): Promise<void> {
   await setTaskbarPinned(path, !pinned);
 }
 
-export function appPaletteItem(app: AppEntry, icons: Readonly<Record<string, string>>): PaletteItem {
+function appPaletteItem(app: AppEntry, icons: Readonly<Record<string, string>>): PaletteItem {
   const localTarget =
     app.location ??
     (app.path && (app.path.includes(":") || app.path.startsWith("\\\\")) ? app.path : undefined);

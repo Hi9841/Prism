@@ -14,13 +14,12 @@ mod taskbar_customization;
 mod taskbar_icon_overlay;
 mod theme;
 mod win_key;
-mod launcher_watch;
 mod windows_settings;
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU64, Ordering};
-use std::sync::{Mutex, OnceLock};
-use std::time::{Duration, Instant};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Mutex;
+use std::time::Duration;
 
 use tauri::{Emitter, Manager, Theme, WindowEvent};
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
@@ -28,28 +27,10 @@ use windows::Win32::Foundation::{HWND, POINT, RECT};
 use windows::Win32::Graphics::Gdi::{
     GetMonitorInfoW, MonitorFromPoint, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST,
 };
-use windows::Win32::System::Threading::GetCurrentProcessId;
-use windows::Win32::UI::Input::KeyboardAndMouse::{SetActiveWindow, SetFocus};
 use windows::Win32::UI::WindowsAndMessaging::{
-    AllowSetForegroundWindow, BringWindowToTop, GetAncestor, GetCursorPos, GetForegroundWindow,
-    GetWindowRect, GetWindowThreadProcessId, LockSetForegroundWindow, SetForegroundWindow,
-    SetWindowPos, GA_ROOT, HWND_TOPMOST, LSFW_UNLOCK, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW,
+    GetCursorPos, SetForegroundWindow, SetWindowPos, HWND_TOPMOST, SWP_NOMOVE, SWP_NOSIZE,
+    SWP_SHOWWINDOW,
 };
-
-/// Debug-only trace to the same temp log used by win-key observation.
-#[cfg(debug_assertions)]
-fn win_key_debug_trace(message: &str) {
-    if let Ok(mut file) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(std::env::temp_dir().join("Prism").join("semantic-debug.log"))
-    {
-        let _ = std::io::Write::write_all(&mut file, format!("{message}\n").as_bytes());
-    }
-}
-
-#[cfg(not(debug_assertions))]
-fn win_key_debug_trace(_message: &str) {}
 
 /// The only accepted global shortcuts. Bare typing keys, reserved keys and
 /// known system/security combos are never accepted.
@@ -69,50 +50,15 @@ const LEGACY_STATE_VERSION: u32 = 2;
 const STATE_VERSION: u32 = 3;
 const PALETTE_HIDE_DELAY: Duration = Duration::from_millis(125);
 const PALETTE_RAISE_RETRY_DELAY: Duration = Duration::from_millis(40);
-/// Alignment-follow cadence while the palette is open; the alignment watcher
-/// itself accepts changes at 750ms, so polling faster than that only burns
-/// wakeups without reacting sooner.
-const PALETTE_FOLLOW_INTERVAL: Duration = Duration::from_millis(250);
-const PALETTE_RAISE_RETRY_COUNT: u32 = 1;
-/// Win-key open fires several focus events (show, SetForegroundWindow, webview
-/// input focus). Hide-on-blur must wait until that burst is over.
-const ACTIVATION_GRACE: Duration = Duration::from_millis(400);
 const PALETTE_STARTUP_DELAY: Duration = Duration::from_millis(100);
-const STARTUP_SHELL_RETRY_DELAY: Duration = Duration::from_millis(50);
+const STARTUP_SHELL_RETRY_DELAY: Duration = Duration::from_millis(250);
 const STARTUP_SHELL_RETRY_ATTEMPTS: usize = 120;
-const STARTUP_TRAY_WAIT: Duration = Duration::from_secs(2);
-const STARTUP_TRAY_POLL: Duration = Duration::from_millis(50);
-/// Gap between the palette and the live taskbar so they do not read as one
-/// extra-tall bar. Physical pixels; matches the Windows 11 Start gap.
-const PALETTE_TASKBAR_GAP: i32 = 12;
+const STARTUP_ALIGNMENT_DELAY: Duration = Duration::from_secs(1);
 
 static PALETTE_OPEN: AtomicBool = AtomicBool::new(false);
 static PALETTE_TRANSITION: AtomicU64 = AtomicU64::new(0);
-static PALETTE_WAS_FOCUSED: AtomicBool = AtomicBool::new(false);
-static ACTIVATION_GRACE_UNTIL_MS: AtomicU64 = AtomicU64::new(0);
-static ACTIVATION_CLOCK: OnceLock<Instant> = OnceLock::new();
+static ACTIVATION_FOCUS_PENDING: AtomicBool = AtomicBool::new(false);
 static PRESENTATION_ANCHOR: Mutex<Option<PresentationAnchor>> = Mutex::new(None);
-static MAIN_HWND: AtomicIsize = AtomicIsize::new(0);
-
-/// Retain one desktop handle for the process lifetime: attached threads need
-/// it to stay open. Reusing it avoids leaking a handle on every app launch.
-pub fn attach_to_default_desktop() {
-    use windows::core::w;
-    use windows::Win32::System::StationsAndDesktops::{
-        OpenDesktopW, SetThreadDesktop, DESKTOP_CONTROL_FLAGS, HDESK,
-    };
-    static DESKTOP: OnceLock<Option<usize>> = OnceLock::new();
-    let desktop = DESKTOP.get_or_init(|| unsafe {
-        OpenDesktopW(w!("Default"), DESKTOP_CONTROL_FLAGS(0), false, 0x01FF)
-            .ok()
-            .map(|handle| handle.0 as usize)
-    });
-    if let Some(handle) = desktop {
-        // This can fail on a thread that already owns windows or hooks; its
-        // existing desktop remains attached in that case.
-        let _ = unsafe { SetThreadDesktop(HDESK(*handle as *mut std::ffi::c_void)) };
-    }
-}
 
 #[derive(Clone, Copy, Debug, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -180,22 +126,6 @@ pub fn run_start_restore_watchdog_if_requested() -> bool {
     start_menu::run_watchdog_from_args()
 }
 
-/// One-shot taskbar repair (`prism.exe --repair-taskbar`): restores a
-/// stranded taskbar z-band and nudges the shell to re-lay out, then exits
-/// before the full app initializes. Used by the installer/uninstaller and as
-/// a manual escape hatch when Prism is not running.
-pub fn run_taskbar_repair_if_requested() -> bool {
-    if std::env::args_os()
-        .skip(1)
-        .any(|argument| argument == std::ffi::OsStr::new("--repair-taskbar"))
-    {
-        taskbar::repair();
-        true
-    } else {
-        false
-    }
-}
-
 pub fn run() {
     let startup_timer = perf::start();
     let show_on_start = !launched_for_autostart();
@@ -228,7 +158,6 @@ pub fn run() {
             let _ = taskbar_alignment::initialize(&alignment);
             schedule_startup_taskbar_alignment();
             win_key::init(app.handle().clone());
-            launcher_watch::init();
             let customization_app = app.handle().clone();
             tauri::async_runtime::spawn_blocking(move || {
                 taskbar_customization::init(customization_app);
@@ -266,10 +195,14 @@ pub fn run() {
             if window.label() != "main" {
                 return;
             }
+            // The activation guard exists because Windows may report the
+            // palette as unfocused once before granting foreground
+            // activation to an existing process. Once the palette actually
+            // receives focus the pending state is stale: clear it so a real
+            // later unfocus (alt-tab back into a game) is never swallowed,
+            // which would leave the palette open and the taskbar topmost.
             if matches!(event, WindowEvent::Focused(true)) {
-                if is_prism_foreground() {
-                    PALETTE_WAS_FOCUSED.store(true, Ordering::Release);
-                }
+                ACTIVATION_FOCUS_PENDING.store(false, Ordering::Release);
                 return;
             }
             // Clicking away dismisses the launcher, like Raycast.
@@ -278,19 +211,18 @@ pub fn run() {
                 if drag::is_dragging() {
                     return;
                 }
-                let is_foreground = is_prism_foreground();
-                if is_foreground {
-                    PALETTE_WAS_FOCUSED.store(true, Ordering::Release);
-                }
-                if !should_dismiss_palette_on_unfocus(
-                    PALETTE_WAS_FOCUSED.load(Ordering::Acquire),
-                    is_foreground,
-                    activation_now_ms(),
-                    ACTIVATION_GRACE_UNTIL_MS.load(Ordering::Acquire),
-                ) {
+                // Windows may report the palette as unfocused once before
+                // granting foreground activation to the existing process.
+                if ACTIVATION_FOCUS_PENDING.swap(false, Ordering::AcqRel) {
                     return;
                 }
-                mark_palette_dismissed();
+                PALETTE_OPEN.store(false, Ordering::Release);
+                PALETTE_TRANSITION.fetch_add(1, Ordering::AcqRel);
+                PRESENTATION_ANCHOR
+                    .lock()
+                    .map(|mut value| *value = None)
+                    .ok();
+                taskbar::release();
                 let _ = window.hide();
                 if let Some(webview) = window.app_handle().get_webview_window("main") {
                     set_webview_memory_target(&webview, true);
@@ -317,7 +249,6 @@ pub fn run() {
             show_path_properties,
             start_file_drag,
             present_palette,
-            take_open_typeahead,
             hide_palette,
             set_window_style,
             set_window_width,
@@ -351,13 +282,7 @@ fn launched_for_autostart() -> bool {
 
 fn schedule_startup_taskbar_alignment() {
     tauri::async_runtime::spawn(async move {
-        let _ = tauri::async_runtime::spawn_blocking(|| {
-            let deadline = std::time::Instant::now() + STARTUP_TRAY_WAIT;
-            while !taskbar::tray_present() && std::time::Instant::now() < deadline {
-                std::thread::sleep(STARTUP_TRAY_POLL);
-            }
-        })
-        .await;
+        tokio::time::sleep(STARTUP_ALIGNMENT_DELAY).await;
         let _ = tauri::async_runtime::spawn_blocking(move || {
             let _ = taskbar_alignment::reapply_current();
         })
@@ -401,7 +326,7 @@ fn schedule_initial_palette(app: tauri::AppHandle) {
 fn activate_palette(app: &tauri::AppHandle) {
     // A user-initiated launch should open the reusable palette without
     // creating another WebView window or relying on frontend timing.
-    arm_activation_grace();
+    ACTIVATION_FOCUS_PENDING.store(true, Ordering::Release);
     if !PALETTE_OPEN.load(Ordering::Acquire) {
         toggle_palette(app);
     }
@@ -449,12 +374,7 @@ fn palette_target(
     let info = anchor
         .and_then(|value| value.monitor.zip(value.work_area))
         .or_else(|| monitor_geometry_for_window(HWND(hwnd.0)));
-    let (monitor, reported_work) = info?;
-    let bars: Vec<PhysicalRect> = taskbar::bar_rects()
-        .into_iter()
-        .map(PhysicalRect::from)
-        .collect();
-    let work = usable_work_area(monitor, reported_work, &bars, PALETTE_TASKBAR_GAP);
+    let (monitor, work) = info?;
     let mut width = size.width as i32;
     let mut height = size.height as i32;
     // Clamp to the work area (small screens, huge taskbars, 200% DPI).
@@ -472,15 +392,7 @@ fn palette_target(
         .and_then(|value| value.taskbar_edge)
         .or_else(|| taskbar_edge(monitor, work))
         .unwrap_or(TaskbarEdge::Bottom);
-    let start_button = anchor.and_then(|value| value.start_button);
-    Some(palette_position(
-        work,
-        edge,
-        alignment,
-        width,
-        height,
-        start_button,
-    ))
+    Some(palette_position(work, edge, alignment, width, height))
 }
 
 fn presentation_anchor(
@@ -552,133 +464,17 @@ fn taskbar_edge(monitor: PhysicalRect, work: PhysicalRect) -> Option<TaskbarEdge
         .map(|(_, edge)| edge)
 }
 
-fn taskbar_occupies_edge(monitor: PhysicalRect, bar: PhysicalRect) -> Option<TaskbarEdge> {
-    if bar.width() <= 0 || bar.height() <= 0 {
-        return None;
-    }
-    if bar.right <= monitor.left
-        || bar.left >= monitor.right
-        || bar.bottom <= monitor.top
-        || bar.top >= monitor.bottom
-    {
-        return None;
-    }
-    let thickness = bar.width().min(bar.height());
-    let length = bar.width().max(bar.height());
-    // Shell_TrayWnd can report the full monitor. Ignore anything that is not
-    // a thin strip along an edge.
-    if thickness * 4 > length || thickness > monitor.height().min(monitor.width()) / 3 {
-        return None;
-    }
-    const FLUSH: i32 = 4;
-    if bar.width() >= bar.height() {
-        if bar.width() < monitor.width() / 2 {
-            return None;
-        }
-        if (monitor.bottom - bar.bottom).abs() <= FLUSH {
-            return Some(TaskbarEdge::Bottom);
-        }
-        if (bar.top - monitor.top).abs() <= FLUSH {
-            return Some(TaskbarEdge::Top);
-        }
-    } else {
-        if bar.height() < monitor.height() / 2 {
-            return None;
-        }
-        if (bar.left - monitor.left).abs() <= FLUSH {
-            return Some(TaskbarEdge::Left);
-        }
-        if (monitor.right - bar.right).abs() <= FLUSH {
-            return Some(TaskbarEdge::Right);
-        }
-    }
-    None
-}
-
-fn exclude_taskbar(work: PhysicalRect, bar: PhysicalRect, edge: TaskbarEdge) -> PhysicalRect {
-    match edge {
-        TaskbarEdge::Bottom => PhysicalRect {
-            bottom: work.bottom.min(bar.top),
-            ..work
-        },
-        TaskbarEdge::Top => PhysicalRect {
-            top: work.top.max(bar.bottom),
-            ..work
-        },
-        TaskbarEdge::Left => PhysicalRect {
-            left: work.left.max(bar.right),
-            ..work
-        },
-        TaskbarEdge::Right => PhysicalRect {
-            right: work.right.min(bar.left),
-            ..work
-        },
-    }
-}
-
-fn apply_taskbar_gap(monitor: PhysicalRect, work: PhysicalRect, gap: i32) -> PhysicalRect {
-    let mut work = work;
-    match taskbar_edge(monitor, work) {
-        Some(TaskbarEdge::Bottom) => work.bottom -= gap,
-        Some(TaskbarEdge::Top) => work.top += gap,
-        Some(TaskbarEdge::Left) => work.left += gap,
-        Some(TaskbarEdge::Right) => work.right -= gap,
-        None => work.bottom -= gap,
-    }
-    PhysicalRect {
-        left: work.left,
-        top: work.top,
-        right: work.right.max(work.left + 1),
-        bottom: work.bottom.max(work.top + 1),
-    }
-}
-
-/// Work area used to dock the palette. Windows 11 often reports `rcWork`
-/// equal to the full monitor, so live taskbar HWNDs are subtracted, then a
-/// small gap keeps the footer from sitting on the tray.
-///
-/// Auto-hide peek bars are a couple of pixels thick and are ignored. A
-/// visible 40px+ bar is always subtracted, even if Windows still reports
-/// the auto-hide bit.
-fn usable_work_area(
-    monitor: PhysicalRect,
-    reported_work: PhysicalRect,
-    taskbars: &[PhysicalRect],
-    gap: i32,
-) -> PhysicalRect {
-    let mut work = reported_work;
-    for bar in taskbars {
-        if bar.width().min(bar.height()) < 24 {
-            continue;
-        }
-        if let Some(edge) = taskbar_occupies_edge(monitor, *bar) {
-            work = exclude_taskbar(work, *bar, edge);
-        }
-    }
-    apply_taskbar_gap(monitor, work, gap)
-}
-
 fn palette_position(
     work: PhysicalRect,
     edge: TaskbarEdge,
     alignment: taskbar_alignment::Alignment,
     width: i32,
     height: i32,
-    start_button: Option<PhysicalRect>,
 ) -> (i32, i32) {
-    // Start-menu anchor: left/right-aligned taskbars dock the palette against
-    // the Start button (right mirrors: right edge = button right). A centered
-    // taskbar centers its whole Start cluster, and the button sits left of
-    // screen center, so the palette centers on the work area instead - the
-    // same placement as the native Windows 11 Start menu. Without a button
-    // (or while the locator is unavailable) each alignment falls back to its
-    // mirrored work-area position.
-    let aligned_x = match (alignment, start_button) {
-        (taskbar_alignment::Alignment::Left, Some(button)) => button.left,
-        (taskbar_alignment::Alignment::Right, Some(button)) => button.right - width,
-        (taskbar_alignment::Alignment::Left, None) => work.left,
-        (taskbar_alignment::Alignment::Right, None) => work.right - width,
-        (taskbar_alignment::Alignment::Center, _) => work.left + (work.width() - width) / 2,
+    let aligned_x = match alignment {
+        taskbar_alignment::Alignment::Left => work.left,
+        taskbar_alignment::Alignment::Center => work.left + (work.width() - width) / 2,
+        taskbar_alignment::Alignment::Right => work.right - width,
     };
     let aligned_y = match alignment {
         taskbar_alignment::Alignment::Left => work.top,
@@ -734,180 +530,14 @@ impl From<POINT> for PhysicalPoint {
     }
 }
 
-pub(crate) fn palette_is_open() -> bool {
-    PALETTE_OPEN.load(Ordering::Acquire)
-}
-
-fn palette_hwnd(window: &tauri::WebviewWindow) -> Result<HWND, String> {
-    let hwnd = window.hwnd().map_err(|error| error.to_string())?;
-    let native = HWND(hwnd.0);
-    MAIN_HWND.store(native.0 as isize, Ordering::Release);
-    Ok(native)
-}
-
-fn activation_now_ms() -> u64 {
-    ACTIVATION_CLOCK
-        .get_or_init(Instant::now)
-        .elapsed()
-        .as_millis() as u64
-        + 1
-}
-
-fn arm_activation_grace() {
-    let until = activation_now_ms() + ACTIVATION_GRACE.as_millis() as u64;
-    ACTIVATION_GRACE_UNTIL_MS.store(until, Ordering::Release);
-}
-
-fn clear_activation_grace() {
-    ACTIVATION_GRACE_UNTIL_MS.store(0, Ordering::Release);
-}
-
-fn should_dismiss_on_unfocus(now_ms: u64, grace_until_ms: u64) -> bool {
-    grace_until_ms == 0 || now_ms >= grace_until_ms
-}
-
-fn is_prism_foreground() -> bool {
-    #[cfg(windows)]
-    unsafe {
-        let foreground = GetForegroundWindow();
-        if foreground.0.is_null() {
-            return false;
-        }
-        let mut pid = 0u32;
-        GetWindowThreadProcessId(foreground, Some(&mut pid));
-        if pid != 0 && pid == GetCurrentProcessId() {
-            return true;
-        }
-        let main_raw = MAIN_HWND.load(Ordering::Acquire);
-        if main_raw != 0 {
-            let main = HWND(main_raw as *mut core::ffi::c_void);
-            if foreground == main || GetAncestor(foreground, GA_ROOT) == main {
-                return true;
-            }
-        }
-        false
-    }
-    #[cfg(not(windows))]
-    true
-}
-
-fn should_dismiss_palette_on_unfocus(
-    was_focused: bool,
-    is_foreground: bool,
-    now_ms: u64,
-    grace_until_ms: u64,
-) -> bool {
-    // If the foreground window still belongs to Prism (e.g. WebView2 child control),
-    // this is an internal focus transition, not a dismissal.
-    if is_foreground {
-        return false;
-    }
-    // If Prism was never focused since opening, it may still be acquiring
-    // foreground focus from a background application. Never auto-dismiss.
-    if !was_focused {
-        return false;
-    }
-    // Clicking away dismisses only after activation grace has elapsed.
-    should_dismiss_on_unfocus(now_ms, grace_until_ms)
-}
-
-fn pointer_is_outside(point: POINT, bounds: RECT) -> bool {
-    point.x < bounds.left
-        || point.x >= bounds.right
-        || point.y < bounds.top
-        || point.y >= bounds.bottom
-}
-
-/// Capture explicit outside-pointer intent before blur or activation retries
-/// can lose it. The existing mouse hook still passes the click to its target.
-pub(crate) fn dismiss_palette_for_outside_pointer(app: &tauri::AppHandle, point: POINT) {
-    if !PALETTE_OPEN.load(Ordering::Acquire) || drag::is_dragging() {
-        return;
-    }
-    let transition = PALETTE_TRANSITION.load(Ordering::Acquire);
-    let hwnd = HWND(MAIN_HWND.load(Ordering::Acquire) as *mut std::ffi::c_void);
-    let mut bounds = RECT::default();
-    if hwnd.0.is_null()
-        || unsafe { GetWindowRect(hwnd, &mut bounds) }.is_err()
-        || !pointer_is_outside(point, bounds)
-    {
-        return;
-    }
-    let close_app = app.clone();
-    let _ = app.run_on_main_thread(move || {
-        if PALETTE_TRANSITION.load(Ordering::Acquire) != transition
-            || !PALETTE_OPEN.load(Ordering::Acquire)
-            || drag::is_dragging()
-        {
-            return;
-        }
-        mark_palette_dismissed();
-        if let Some(window) = close_app.get_webview_window("main") {
-            let _ = window.hide();
-            set_webview_memory_target(&window, true);
-        }
-    });
-}
-
-#[cfg(test)]
-fn deferred_unfocus_should_dismiss(
-    _open: bool,
-    _transition_matches: bool,
-    _focused: bool,
-    _visible: bool,
-) -> bool {
-    // An open, visible palette must NEVER be auto-dismissed simply because
-    // it was not yet focused at the end of the grace period. Genuine blur
-    // dismissal is handled by on_window_event when Focus(false) arrives
-    // after activation grace has elapsed.
-    false
-}
-
-fn mark_palette_dismissed() {
-    PALETTE_OPEN.store(false, Ordering::Release);
-    PALETTE_WAS_FOCUSED.store(false, Ordering::Release);
-    win_key::end_typeahead(false);
-    win_key::on_palette_dismissed();
-    clear_activation_grace();
-    PALETTE_TRANSITION.fetch_add(1, Ordering::AcqRel);
-    PRESENTATION_ANCHOR
-        .lock()
-        .map(|mut value| *value = None)
-        .ok();
-    taskbar::release();
-}
-
-/// Ask Windows for keyboard focus. Do not attach to the previous foreground
-/// thread: that can deadlock the UI thread and freeze Prism with the hook
-/// still eating keys.
-fn force_foreground(hwnd: HWND) {
-    #[cfg(windows)]
-    unsafe {
-        if is_prism_foreground() {
-            return;
-        }
-
-        let _ = LockSetForegroundWindow(LSFW_UNLOCK);
-        let _ = AllowSetForegroundWindow(GetCurrentProcessId());
-        let _ = BringWindowToTop(hwnd);
-        let _ = SetForegroundWindow(hwnd);
-        let _ = SetActiveWindow(hwnd);
-        let _ = SetFocus(Some(hwnd));
-    }
-}
-
-fn should_reassert_foreground(is_prism_fg: bool) -> bool {
-    !is_prism_fg
-}
-
 /// Reasserts Prism at the front of the topmost band. `alwaysOnTop` keeps the
 /// window in that band, but an already-active topmost window can still sit
 /// above it until Prism is explicitly repositioned.
 fn raise_palette(window: &tauri::WebviewWindow) -> Result<(), String> {
-    let hwnd = palette_hwnd(window)?;
+    let hwnd = window.hwnd().map_err(|error| error.to_string())?;
     unsafe {
         SetWindowPos(
-            hwnd,
+            HWND(hwnd.0),
             Some(HWND_TOPMOST),
             0,
             0,
@@ -916,125 +546,34 @@ fn raise_palette(window: &tauri::WebviewWindow) -> Result<(), String> {
             SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW,
         )
         .map_err(|error| error.to_string())?;
+        // The Win press is the user's current input, so Windows normally grants
+        // this foreground request. SetWindowPos still fixes visibility if focus
+        // is restricted by another process.
+        let _ = SetForegroundWindow(HWND(hwnd.0));
     }
-    if is_prism_foreground() {
-        return Ok(());
-    }
-    force_foreground(hwnd);
-    let _ = window.set_focus();
-    Ok(())
+    window.set_focus().map_err(|error| error.to_string())
 }
 
-/// Follows taskbar alignment changes while the palette is open. The watcher
-/// may take up to its poll interval to accept a Windows-side change, and the
-/// palette's position is otherwise only computed at presentation time - so an
-/// open menu would sit still while the taskbar relayouts underneath it. This
-/// task polls the alignment generation and repositions the window (and the
-/// Start-button overlay) as soon as a change lands.
-fn schedule_palette_alignment_follower(app: &tauri::AppHandle, transition: u64) {
-    let follow_app = app.clone();
+fn schedule_palette_raise_retry(app: &tauri::AppHandle, transition: u64) {
+    let retry_app = app.clone();
     tauri::async_runtime::spawn(async move {
-        let mut seen = taskbar_alignment::alignment_generation();
-        loop {
-            tokio::time::sleep(PALETTE_FOLLOW_INTERVAL).await;
-            if PALETTE_TRANSITION.load(Ordering::Acquire) != transition
-                || !PALETTE_OPEN.load(Ordering::Acquire)
-            {
-                return;
-            }
-            let generation = taskbar_alignment::alignment_generation();
-            if generation == seen {
-                continue;
-            }
-            seen = generation;
-            let main_thread_app = follow_app.clone();
-            let _ = follow_app.run_on_main_thread(move || {
-                if PALETTE_TRANSITION.load(Ordering::Acquire) != transition
-                    || !PALETTE_OPEN.load(Ordering::Acquire)
-                {
-                    return;
-                }
-                let Some(window) = main_thread_app.get_webview_window("main") else {
-                    return;
-                };
-                // The anchor's Start-button rect predates the relayout and is
-                // stale by definition here; drop it so the placement derives
-                // from the monitor/work area and the fresh alignment.
-                let anchor = PRESENTATION_ANCHOR
-                    .lock()
-                    .ok()
-                    .and_then(|value| *value)
-                    .map(|value| PresentationAnchor {
-                        start_button: None,
-                        ..value
-                    });
-                position_palette(&window, anchor);
-                // The button moved with the taskbar; refresh its rect so the
-                // glyph overlay follows without waiting for the next poll.
-                win_key::request_start_rect_refresh();
-            });
-        }
-    });
-}
-
-fn schedule_activation_grace_check(app: &tauri::AppHandle, transition: u64) {
-    let check_app = app.clone();
-    tauri::async_runtime::spawn(async move {
-        tokio::time::sleep(ACTIVATION_GRACE).await;
+        tokio::time::sleep(PALETTE_RAISE_RETRY_DELAY).await;
         if PALETTE_TRANSITION.load(Ordering::Acquire) != transition
             || !PALETTE_OPEN.load(Ordering::Acquire)
         {
             return;
         }
-        let main_thread_app = check_app.clone();
-        let _ = check_app.run_on_main_thread(move || {
-            if PALETTE_TRANSITION.load(Ordering::Acquire) != transition
-                || !PALETTE_OPEN.load(Ordering::Acquire)
+        let main_thread_app = retry_app.clone();
+        let _ = retry_app.run_on_main_thread(move || {
+            if PALETTE_TRANSITION.load(Ordering::Acquire) == transition
+                && PALETTE_OPEN.load(Ordering::Acquire)
             {
-                return;
+                if let Some(window) = main_thread_app.get_webview_window("main") {
+                    let _ = raise_palette(&window);
+                }
             }
-            if !should_reassert_foreground(is_prism_foreground()) {
-                PALETTE_WAS_FOCUSED.store(true, Ordering::Release);
-                return;
-            }
-            let Some(window) = main_thread_app.get_webview_window("main") else {
-                return;
-            };
-            // Tauri `is_focused` can be true after `set_focus` even when
-            // Windows still gave foreground to the previous app. Retry on the
-            // Win32 foreground check only.
-            arm_activation_grace();
-            let _ = raise_palette(&window);
         });
     });
-}
-
-fn schedule_palette_raise_retry(app: &tauri::AppHandle, transition: u64) {
-    for attempt in 1..=PALETTE_RAISE_RETRY_COUNT {
-        let retry_app = app.clone();
-        tauri::async_runtime::spawn(async move {
-            tokio::time::sleep(PALETTE_RAISE_RETRY_DELAY * attempt).await;
-            if PALETTE_TRANSITION.load(Ordering::Acquire) != transition
-                || !PALETTE_OPEN.load(Ordering::Acquire)
-            {
-                return;
-            }
-            let main_thread_app = retry_app.clone();
-            let _ = retry_app.run_on_main_thread(move || {
-                if PALETTE_TRANSITION.load(Ordering::Acquire) == transition
-                    && PALETTE_OPEN.load(Ordering::Acquire)
-                {
-                    if is_prism_foreground() {
-                        PALETTE_WAS_FOCUSED.store(true, Ordering::Release);
-                        return;
-                    }
-                    if let Some(window) = main_thread_app.get_webview_window("main") {
-                        let _ = raise_palette(&window);
-                    }
-                }
-            });
-        });
-    }
 }
 
 #[cfg(windows)]
@@ -1106,29 +645,19 @@ fn toggle_palette_with_presentation(
 ) {
     let timer = perf::start();
     let Some(window) = app.get_webview_window("main") else {
-        win_key_debug_trace("palette-toggle-main-window-missing");
         return;
     };
     let opening = toggle_open_state(&PALETTE_OPEN);
-    win_key_debug_trace(&format!("palette-toggle open={opening}"));
-    launcher_watch::note_own_toggle();
     let transition = PALETTE_TRANSITION.fetch_add(1, Ordering::AcqRel) + 1;
     if !opening {
-        clear_activation_grace();
+        ACTIVATION_FOCUS_PENDING.store(false, Ordering::Release);
     }
     if opening {
-        PALETTE_WAS_FOCUSED.store(false, Ordering::Release);
-        arm_activation_grace();
-        win_key::begin_typeahead();
-        win_key::on_palette_opened();
         set_webview_memory_target(&window, false);
         PRESENTATION_ANCHOR
             .lock()
             .map(|mut value| *value = anchor)
             .ok();
-    } else {
-        win_key::end_typeahead(false);
-        win_key::on_palette_dismissed();
     }
     if !opening {
         PRESENTATION_ANCHOR
@@ -1178,14 +707,12 @@ fn toggle_open_state(open: &AtomicBool) -> bool {
 #[tauri::command]
 fn present_palette(app: tauri::AppHandle) -> Result<bool, String> {
     if !PALETTE_OPEN.load(Ordering::Acquire) {
-        win_key::end_typeahead(true);
         return Ok(false);
     }
     let timer = perf::start();
-    let Some(window) = app.get_webview_window("main") else {
-        win_key::end_typeahead(true);
-        return Err("main window is unavailable".to_string());
-    };
+    let window = app
+        .get_webview_window("main")
+        .ok_or_else(|| "main window is unavailable".to_string())?;
     set_webview_memory_target(&window, false);
     taskbar::present();
     let anchor = PRESENTATION_ANCHOR.lock().ok().and_then(|value| *value);
@@ -1195,38 +722,17 @@ fn present_palette(app: tauri::AppHandle) -> Result<bool, String> {
     if reconcile_palette_position(&window, anchor).is_err() {
         position_palette(&window, anchor);
     }
-    arm_activation_grace();
-    if let Err(error) = window
-        .show()
-        .map_err(|error| error.to_string())
-        .and_then(|_| raise_palette(&window))
-    {
-        win_key::end_typeahead(true);
-        return Err(error);
-    }
-    if is_prism_foreground() {
-        PALETTE_WAS_FOCUSED.store(true, Ordering::Release);
-    }
-    let transition = PALETTE_TRANSITION.load(Ordering::Acquire);
-    schedule_palette_raise_retry(&app, transition);
-    schedule_activation_grace_check(&app, transition);
-    schedule_palette_alignment_follower(&app, transition);
+    window.show().map_err(|error| error.to_string())?;
+    raise_palette(&window)?;
+    schedule_palette_raise_retry(&app, PALETTE_TRANSITION.load(Ordering::Acquire));
     perf::finish(timer, "palette_present", || "window=main".to_string());
     Ok(true)
 }
 
 #[tauri::command]
-fn take_open_typeahead() -> String {
-    win_key::take_typeahead()
-}
-
-#[tauri::command]
 fn hide_palette(app: tauri::AppHandle) -> Result<(), String> {
     PALETTE_OPEN.store(false, Ordering::Release);
-    PALETTE_WAS_FOCUSED.store(false, Ordering::Release);
-    win_key::end_typeahead(false);
-    win_key::on_palette_dismissed();
-    clear_activation_grace();
+    ACTIVATION_FOCUS_PENDING.store(false, Ordering::Release);
     PALETTE_TRANSITION.fetch_add(1, Ordering::AcqRel);
     PRESENTATION_ANCHOR
         .lock()
@@ -1886,7 +1392,6 @@ fn apply_shortcut_with_generation(
             let _ = start_menu::restore(app);
             return Err(error);
         }
-        launcher_watch::set_enabled(true);
         if let Ok(old) = prev.parse::<Shortcut>() {
             let _ = gs.unregister(old);
         }
@@ -1902,7 +1407,6 @@ fn apply_shortcut_with_generation(
             }
             return Err(error);
         }
-        launcher_watch::set_enabled(false);
         if let Err(error) = start_menu::restore(app) {
             let _ = win_key::set_enabled(true);
             if let Ok(shortcut) = combo.parse::<Shortcut>() {
@@ -2366,7 +1870,6 @@ mod tests {
                 taskbar_alignment::Alignment::Center,
                 720,
                 620,
-                None,
             ),
             (600, 420)
         );
@@ -2382,7 +1885,6 @@ mod tests {
                 taskbar_alignment::Alignment::Center,
                 720,
                 620,
-                None,
             ),
             (600, 40)
         );
@@ -2397,8 +1899,7 @@ mod tests {
                 TaskbarEdge::Left,
                 taskbar_alignment::Alignment::Center,
                 720,
-                620,
-                None,
+                620
             ),
             (48, 230)
         );
@@ -2412,8 +1913,7 @@ mod tests {
                 TaskbarEdge::Right,
                 taskbar_alignment::Alignment::Center,
                 720,
-                620,
-                None,
+                620
             ),
             (1_152, 230)
         );
@@ -2434,7 +1934,6 @@ mod tests {
                 taskbar_alignment::Alignment::Center,
                 720,
                 620,
-                None,
             ),
             (-1_320, -620)
         );
@@ -2452,88 +1951,8 @@ mod tests {
                 taskbar_alignment::Alignment::Center,
                 480,
                 400,
-                None,
             ),
             (10, 20)
-        );
-    }
-
-    #[test]
-    fn palette_anchors_to_the_start_button_not_the_work_center() {
-        let work = PhysicalRect {
-            left: 0,
-            top: 0,
-            right: 1_920,
-            bottom: 1_032,
-        };
-        // Left-aligned taskbar: palette starts at the button (0..45 wide).
-        assert_eq!(
-            palette_position(
-                work,
-                TaskbarEdge::Bottom,
-                taskbar_alignment::Alignment::Left,
-                560,
-                620,
-                Some(PhysicalRect {
-                    left: 0,
-                    top: 1_032,
-                    right: 45,
-                    bottom: 1_080,
-                }),
-            ),
-            (0, 412)
-        );
-        // Center-aligned taskbar: the menu centers on the work area, matching
-        // the native Start menu, instead of hugging the off-center button.
-        assert_eq!(
-            palette_position(
-                work,
-                TaskbarEdge::Bottom,
-                taskbar_alignment::Alignment::Center,
-                560,
-                620,
-                Some(PhysicalRect {
-                    left: 784,
-                    top: 1_032,
-                    right: 829,
-                    bottom: 1_080,
-                }),
-            ),
-            (680, 412)
-        );
-        // Right-aligned taskbar: palette ends at the button's right edge.
-        assert_eq!(
-            palette_position(
-                work,
-                TaskbarEdge::Bottom,
-                taskbar_alignment::Alignment::Right,
-                560,
-                620,
-                Some(PhysicalRect {
-                    left: 1_875,
-                    top: 1_032,
-                    right: 1_920,
-                    bottom: 1_080,
-                }),
-            ),
-            (1_360, 412)
-        );
-        // Clamped: a button near the right edge never pushes the palette out.
-        assert_eq!(
-            palette_position(
-                work,
-                TaskbarEdge::Bottom,
-                taskbar_alignment::Alignment::Left,
-                560,
-                620,
-                Some(PhysicalRect {
-                    left: 1_900,
-                    top: 1_032,
-                    right: 1_920,
-                    bottom: 1_080,
-                }),
-            ),
-            (1_360, 412)
         );
     }
 
@@ -2552,7 +1971,6 @@ mod tests {
                 taskbar_alignment::Alignment::Left,
                 560,
                 620,
-                None,
             ),
             (0, 412)
         );
@@ -2563,7 +1981,6 @@ mod tests {
                 taskbar_alignment::Alignment::Center,
                 560,
                 620,
-                None,
             ),
             (680, 412)
         );
@@ -2574,7 +1991,6 @@ mod tests {
                 taskbar_alignment::Alignment::Right,
                 560,
                 620,
-                None,
             ),
             (1_360, 412)
         );
@@ -2588,106 +2004,6 @@ mod tests {
         for width in [0, 559, 721, u32::MAX] {
             assert!(!is_animatable_window_width(width));
         }
-    }
-
-    fn sample_monitor() -> PhysicalRect {
-        PhysicalRect {
-            left: 0,
-            top: 0,
-            right: 1_920,
-            bottom: 1_080,
-        }
-    }
-
-    fn sample_bottom_bar() -> PhysicalRect {
-        PhysicalRect {
-            left: 0,
-            top: 1_032,
-            right: 1_920,
-            bottom: 1_080,
-        }
-    }
-
-    #[test]
-    fn usable_work_area_lifts_palette_off_a_taskbar_that_rc_work_ignored() {
-        let monitor = sample_monitor();
-        let work = usable_work_area(
-            monitor,
-            monitor,
-            &[sample_bottom_bar()],
-            PALETTE_TASKBAR_GAP,
-        );
-        assert_eq!(work.bottom, 1_032 - PALETTE_TASKBAR_GAP);
-        assert_eq!(
-            palette_position(
-                work,
-                TaskbarEdge::Bottom,
-                taskbar_alignment::Alignment::Center,
-                720,
-                620,
-                None,
-            ),
-            (600, 1_032 - PALETTE_TASKBAR_GAP - 620)
-        );
-    }
-
-    #[test]
-    fn usable_work_area_still_gaps_when_rc_work_already_excludes_the_tray() {
-        let monitor = sample_monitor();
-        let reported = PhysicalRect {
-            bottom: 1_032,
-            ..monitor
-        };
-        let work = usable_work_area(
-            monitor,
-            reported,
-            &[sample_bottom_bar()],
-            PALETTE_TASKBAR_GAP,
-        );
-        assert_eq!(work.bottom, 1_032 - PALETTE_TASKBAR_GAP);
-    }
-
-    #[test]
-    fn usable_work_area_ignores_auto_hide_peek_but_not_a_visible_bar() {
-        let monitor = sample_monitor();
-        let peek = PhysicalRect {
-            left: 0,
-            top: 1_078,
-            right: 1_920,
-            bottom: 1_080,
-        };
-        let peek_work = usable_work_area(monitor, monitor, &[peek], PALETTE_TASKBAR_GAP);
-        assert_eq!(peek_work.bottom, monitor.bottom - PALETTE_TASKBAR_GAP);
-
-        let visible_work = usable_work_area(
-            monitor,
-            monitor,
-            &[sample_bottom_bar()],
-            PALETTE_TASKBAR_GAP,
-        );
-        assert_eq!(visible_work.bottom, 1_032 - PALETTE_TASKBAR_GAP);
-    }
-
-    #[test]
-    fn taskbar_occupies_edge_detects_bottom_and_ignores_unrelated_windows() {
-        let monitor = sample_monitor();
-        assert_eq!(
-            taskbar_occupies_edge(monitor, sample_bottom_bar()),
-            Some(TaskbarEdge::Bottom)
-        );
-        assert_eq!(
-            taskbar_occupies_edge(
-                monitor,
-                PhysicalRect {
-                    left: 20,
-                    top: 20,
-                    right: 80,
-                    bottom: 80,
-                },
-            ),
-            None
-        );
-        assert_eq!(taskbar_occupies_edge(monitor, monitor), None);
     }
 
     #[test]
@@ -2761,71 +2077,5 @@ mod tests {
         );
         std::fs::remove_file(&path).expect("remove test file");
         assert!(filter_existing_paths(vec![path_text]).is_empty());
-    }
-
-    #[test]
-    fn unfocus_during_activation_grace_does_not_dismiss() {
-        assert!(!should_dismiss_on_unfocus(10, 410));
-        assert!(!should_dismiss_on_unfocus(409, 410));
-        assert!(should_dismiss_on_unfocus(410, 410));
-        assert!(should_dismiss_on_unfocus(500, 410));
-        assert!(should_dismiss_on_unfocus(10, 0));
-    }
-
-    #[test]
-    fn a_focus_gain_does_not_end_activation_grace() {
-        let grace_until = 400;
-        assert!(!should_dismiss_on_unfocus(40, grace_until));
-        assert!(!should_dismiss_on_unfocus(80, grace_until));
-        assert!(!should_dismiss_on_unfocus(120, grace_until));
-    }
-
-    #[test]
-    fn deferred_unfocus_never_auto_dismisses_the_palette() {
-        assert!(!deferred_unfocus_should_dismiss(true, true, false, true));
-        assert!(!deferred_unfocus_should_dismiss(true, true, true, true));
-        assert!(!deferred_unfocus_should_dismiss(false, true, false, true));
-        assert!(!deferred_unfocus_should_dismiss(true, false, false, true));
-        assert!(!deferred_unfocus_should_dismiss(true, true, false, false));
-    }
-
-    #[test]
-    fn should_dismiss_palette_on_unfocus_behavior() {
-        // If foreground still belongs to Prism (e.g. WebView2 child), never dismiss
-        assert!(!should_dismiss_palette_on_unfocus(true, true, 500, 400));
-        assert!(!should_dismiss_palette_on_unfocus(false, true, 500, 400));
-
-        // If Prism was never focused since opening, never dismiss
-        assert!(!should_dismiss_palette_on_unfocus(false, false, 500, 400));
-        assert!(!should_dismiss_palette_on_unfocus(false, false, 200, 400));
-
-        // If Prism was focused, but activation grace has not elapsed, do not dismiss
-        assert!(!should_dismiss_palette_on_unfocus(true, false, 200, 400));
-
-        // Only when Prism was focused, foreground moved to another app, and grace elapsed
-        assert!(should_dismiss_palette_on_unfocus(true, false, 400, 400));
-        assert!(should_dismiss_palette_on_unfocus(true, false, 500, 400));
-    }
-
-    #[test]
-    fn outside_pointer_intent_can_dismiss_during_activation_grace() {
-        let bounds = RECT {
-            left: 100,
-            top: 100,
-            right: 500,
-            bottom: 500,
-        };
-        assert!(pointer_is_outside(POINT { x: 99, y: 200 }, bounds));
-        assert!(pointer_is_outside(POINT { x: 500, y: 200 }, bounds));
-        assert!(pointer_is_outside(POINT { x: 200, y: 99 }, bounds));
-        assert!(pointer_is_outside(POINT { x: 200, y: 500 }, bounds));
-        assert!(!pointer_is_outside(POINT { x: 100, y: 100 }, bounds));
-        assert!(!pointer_is_outside(POINT { x: 499, y: 499 }, bounds));
-    }
-
-    #[test]
-    fn raise_retry_uses_win32_foreground_not_tauri_focus() {
-        assert!(should_reassert_foreground(false));
-        assert!(!should_reassert_foreground(true));
     }
 }

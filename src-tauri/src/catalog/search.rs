@@ -419,12 +419,6 @@ pub(crate) fn browse_path_with_errors(
                 requested.display()
             )));
         }
-        Err(_) if query.trim_end().ends_with(['\\', '/']) => {
-            return Some(Err(format!(
-                "Folder '{}' does not exist. Check the path and try again.",
-                requested.display()
-            )));
-        }
         Err(_) => {}
     }
 
@@ -620,18 +614,6 @@ mod tests {
 
         assert!(result.is_err());
         let _ = std::fs::remove_file(file);
-    }
-
-    #[test]
-    fn missing_directory_with_trailing_separator_reports_error() {
-        let missing = temp_path("missing-directory");
-        let query = format!("{}\\", missing.display());
-        let result = browse_path_with_errors(&query, 10).unwrap();
-        assert!(
-            result.is_err(),
-            "an explicitly requested missing directory is not empty"
-        );
-        assert!(result.unwrap_err().contains("Check the path"));
     }
 
     #[test]

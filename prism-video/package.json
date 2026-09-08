@@ -1,0 +1,26 @@
+{
+  "name": "prism-product-video",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test src/timeline.test.mjs",
+    "typecheck": "tsc --noEmit",
+    "studio": "remotion studio src/index.ts",
+    "render": "remotion render src/index.ts PrismShowcase out/prism-showcase.mp4 --codec=h264 --crf=18 --pixel-format=yuv420p",
+    "render:frames": "remotion still src/index.ts PrismShowcase"
+  },
+  "dependencies": {
+    "@remotion/cli": "4.0.512",
+    "@remotion/media": "4.0.512",
+    "@remotion/transitions": "4.0.512",
+    "@types/react": "19.2.14",
+    "@types/react-dom": "19.2.3",
+    "react": "19.2.3",
+    "react-dom": "19.2.3",
+    "remotion": "4.0.512"
+  },
+  "devDependencies": {
+    "typescript": "5.9.3"
+  }
+}

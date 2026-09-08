@@ -38,10 +38,6 @@ interface PaletteCtx {
   sections: Section[];
   flatItems: PaletteItem[];
   apps: AppEntry[];
-  /** Resolved quick-access palette items, in user order (start-menu view). */
-  quickItems: PaletteItem[];
-  /** Loaded app icon data URLs by appId (start-menu view tiles). */
-  appIcons: Readonly<Record<string, string>>;
   selected: number;
   move: (delta: number) => void;
   select: (index: number) => void;
@@ -464,15 +460,8 @@ export function PaletteProvider({ children }: { children: ReactNode }) {
       if (item.appId) ids.add(item.appId);
     }
     for (const appId of app.settings.pinnedApps) ids.add(appId);
-    // Warm the whole catalog once apps are loaded: Prism starts hidden at
-    // sign-in, so icons are cached before the first open. Without this, the
-    // start-menu's first render shows monograms that visibly swap to real
-    // icons, and the open itself pays the icon-fetch cost.
-    if (appsLoaded) {
-      for (const entry of visibleApps) ids.add(entry.appId);
-    }
     return [...ids];
-  }, [flatItems, app.settings.pinnedApps, visibleApps, appsLoaded]);
+  }, [flatItems, app.settings.pinnedApps]);
 
   useEffect(() => {
     void iconRetryTick;
@@ -594,8 +583,6 @@ export function PaletteProvider({ children }: { children: ReactNode }) {
       sections,
       flatItems,
       apps: visibleApps,
-      quickItems,
-      appIcons,
       selected,
       move,
       select: setSelected,
@@ -622,8 +609,6 @@ export function PaletteProvider({ children }: { children: ReactNode }) {
       sections,
       flatItems,
       visibleApps,
-      quickItems,
-      appIcons,
       selected,
       move,
       runSelected,

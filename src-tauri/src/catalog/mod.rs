@@ -351,7 +351,7 @@ impl FileIndex {
 
     fn cancel_all_scans(&self) {
         let cancels = self.scan_cancels.lock().unwrap_or_else(|e| e.into_inner());
-        for cancel in cancels.values() {
+        for (_, cancel) in cancels.iter() {
             cancel.store(true, Ordering::SeqCst);
         }
     }

@@ -16,8 +16,7 @@ use windows::Win32::Graphics::Gdi::{
     RedrawWindow, RDW_ALLCHILDREN, RDW_ERASE, RDW_FRAME, RDW_INVALIDATE, RDW_UPDATENOW,
 };
 use windows::Win32::System::Registry::{
-    RegCloseKey, RegOpenKeyExW, RegQueryValueExW, RegSetValueExW, HKEY, HKEY_CURRENT_USER,
-    KEY_QUERY_VALUE, KEY_SET_VALUE, REG_DWORD,
+    RegCloseKey, RegOpenKeyExW, RegSetValueExW, HKEY, HKEY_CURRENT_USER, KEY_SET_VALUE, REG_DWORD,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     EnumChildWindows, EnumWindows, GetClassNameW, GetWindowRect, IsWindowVisible,
@@ -32,7 +31,7 @@ const ALIGNMENT_UNSET: u8 = u8::MAX;
 const ALIGNMENT_WATCH_INTERVAL: Duration = Duration::from_millis(750);
 /// When Explorer keeps reverting a move (layout churn), re-apply at most once
 /// per this window instead of fighting it on every poll.
-const ALIGNMENT_REAPPLY_DEBOUNCE: Duration = Duration::from_millis(400);
+const ALIGNMENT_REAPPLY_DEBOUNCE: Duration = Duration::from_secs(3);
 /// On stock Windows 11 there are no classic taskbar HWNDs to move, so full
 /// desktop enumerations are wasted work. Re-check occasionally in case the
 /// shell is replaced (Explorer restart, StartAllBack install), but poll 20x
@@ -43,9 +42,6 @@ static ACTIVE_ALIGNMENT: AtomicU8 = AtomicU8::new(ALIGNMENT_UNSET);
 static INITIAL_REPAIR_DONE: AtomicBool = AtomicBool::new(false);
 static ALIGNMENT_WATCHER: OnceLock<()> = OnceLock::new();
 static ALIGNMENT_APPLY_LOCK: Mutex<()> = Mutex::new(());
-/// Bumped on every accepted alignment change so open surfaces (the palette)
-/// can follow taskbar relayouts without re-reading Explorer state.
-static ALIGNMENT_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 /// Signature of the last moves the watcher applied, with the time it applied
 /// them, so identical geometry is not reapplied in a tight loop.
 type AppliedMoves = (Vec<(usize, i32, i32)>, std::time::Instant);
@@ -164,7 +160,6 @@ pub(crate) fn initialize(value: &str) -> Result<(), String> {
     let alignment = Alignment::parse(value)?;
     let _ = write_shared_alignment(alignment);
     INITIAL_REPAIR_DONE.store(false, Ordering::Release);
-    note_alignment_change(Some(ACTIVE_ALIGNMENT.load(Ordering::Acquire)), alignment);
     ACTIVE_ALIGNMENT.store(alignment.code(), Ordering::Release);
     Ok(())
 }
@@ -255,7 +250,6 @@ fn set_alignment(alignment: Alignment, companion: Option<CompanionMove>) -> Resu
         crate::win_key::request_start_rect_refresh();
     }
     let _ = write_shared_alignment(alignment);
-    note_alignment_change(Some(ACTIVE_ALIGNMENT.load(Ordering::Acquire)), alignment);
     ACTIVE_ALIGNMENT.store(alignment.code(), Ordering::Release);
     // The user changed the alignment; let the watcher re-evaluate immediately.
     if let Ok(mut last) = LAST_ALIGNMENT_APPLY.lock() {
@@ -268,77 +262,6 @@ fn set_alignment(alignment: Alignment, companion: Option<CompanionMove>) -> Resu
 
 pub(crate) fn current() -> Alignment {
     Alignment::from_code(ACTIVE_ALIGNMENT.load(Ordering::Acquire)).unwrap_or(Alignment::Center)
-}
-
-/// Monotonic change counter for `current()`. Consumers poll this instead of
-/// re-deriving geometry just to detect "did the alignment change".
-pub(crate) fn alignment_generation() -> u64 {
-    ALIGNMENT_GENERATION.load(Ordering::Acquire)
-}
-
-fn note_alignment_change(previous: Option<u8>, next: Alignment) {
-    if previous != Some(next.code()) {
-        ALIGNMENT_GENERATION.fetch_add(1, Ordering::AcqRel);
-    }
-}
-
-/// Reads the Windows-side `TaskbarAl` value (0 = left, 1 = center). Windows
-/// cannot express Prism's Right mode, so `None` here simply means "no native
-/// opinion" and never overrides a Right marker.
-fn windows_alignment() -> Option<Alignment> {
-    let key_path = wide(EXPLORER_ADVANCED_KEY);
-    let mut key = HKEY::default();
-    let opened = unsafe {
-        RegOpenKeyExW(
-            HKEY_CURRENT_USER,
-            PCWSTR(key_path.as_ptr()),
-            None,
-            KEY_QUERY_VALUE,
-            &mut key,
-        )
-    };
-    if opened.is_err() {
-        return None;
-    }
-    let _close = RegistryKey(key);
-    let value_name = wide(TASKBAR_ALIGNMENT_VALUE);
-    let mut data: u32 = 0;
-    let mut size = std::mem::size_of::<u32>() as u32;
-    let mut kind = REG_DWORD;
-    let queried = unsafe {
-        RegQueryValueExW(
-            key,
-            PCWSTR(value_name.as_ptr()),
-            None,
-            Some(&mut kind),
-            Some(&mut data as *mut u32 as *mut u8),
-            Some(&mut size),
-        )
-    };
-    if queried.is_err() || kind != REG_DWORD {
-        return None;
-    }
-    match data {
-        0 => Some(Alignment::Left),
-        1 => Some(Alignment::Center),
-        _ => None,
-    }
-}
-
-/// Merges Prism's marker with the Windows registry. The registry is the
-/// ground truth for left/center (it sees changes made from Windows Settings),
-/// while the marker is the only source that can express Right - and Prism's
-/// Right mode deliberately parks the registry at "center", so a Right marker
-/// always wins over the registry.
-fn resolve_alignment(
-    marker: Option<Alignment>,
-    registry: Option<Alignment>,
-    active: Option<Alignment>,
-) -> Option<Alignment> {
-    if marker == Some(Alignment::Right) {
-        return marker;
-    }
-    registry.or(marker).or(active)
 }
 
 fn start_alignment_watcher() {
@@ -356,17 +279,10 @@ fn start_alignment_watcher() {
             let Ok(_apply_guard) = ALIGNMENT_APPLY_LOCK.lock() else {
                 continue;
             };
-            // Registry first: it sees alignment changes made from Windows
-            // Settings, which the marker file never reflects. The marker only
-            // wins for Prism's Right mode (Windows cannot express it).
-            let alignment = resolve_alignment(
-                shared_alignment(),
-                windows_alignment(),
-                Alignment::from_code(ACTIVE_ALIGNMENT.load(Ordering::Acquire)),
-            );
+            let alignment = shared_alignment()
+                .or_else(|| Alignment::from_code(ACTIVE_ALIGNMENT.load(Ordering::Acquire)));
             let Some(alignment) = alignment else { continue };
             if alignment.code() != ACTIVE_ALIGNMENT.load(Ordering::Acquire) {
-                note_alignment_change(Some(ACTIVE_ALIGNMENT.load(Ordering::Acquire)), alignment);
                 ACTIVE_ALIGNMENT.store(alignment.code(), Ordering::Release);
             }
             let moves = collect_classic_taskbar_moves(alignment);
@@ -784,41 +700,6 @@ fn wide(value: &str) -> Vec<u16> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn registry_changes_win_over_the_marker_except_for_right() {
-        // Windows Settings flipped to left while the marker still says center.
-        assert_eq!(
-            resolve_alignment(Some(Alignment::Center), Some(Alignment::Left), None),
-            Some(Alignment::Left)
-        );
-        // Prism's Right mode parks the registry at center; the marker wins.
-        assert_eq!(
-            resolve_alignment(Some(Alignment::Right), Some(Alignment::Center), None),
-            Some(Alignment::Right)
-        );
-        // No registry opinion: the marker decides.
-        assert_eq!(
-            resolve_alignment(Some(Alignment::Center), None, None),
-            Some(Alignment::Center)
-        );
-        // No marker either: keep the active state.
-        assert_eq!(
-            resolve_alignment(None, None, Some(Alignment::Left)),
-            Some(Alignment::Left)
-        );
-    }
-
-    #[test]
-    fn alignment_generation_only_advances_on_real_changes() {
-        let before = alignment_generation();
-        note_alignment_change(Some(0), Alignment::Left);
-        assert_eq!(alignment_generation(), before);
-        note_alignment_change(Some(0), Alignment::Center);
-        assert_eq!(alignment_generation(), before + 1);
-        note_alignment_change(None, Alignment::Center);
-        assert_eq!(alignment_generation(), before + 2);
-    }
 
     #[test]
     fn horizontal_alignment_uses_full_center_and_stays_before_notification_area() {

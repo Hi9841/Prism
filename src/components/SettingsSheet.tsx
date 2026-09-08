@@ -25,7 +25,6 @@ import type {
   AccentId,
   AppGroup,
   QuickAccessKind,
-  StartView,
   TaskbarAlignment,
   ThemeMode,
   WindowWidth,
@@ -42,11 +41,6 @@ import { SHORTCUT_OPTIONS, THEME_OPTIONS, useApp } from "../state/app";
 import { usePalette } from "../state/palette";
 import { TaskbarCustomization } from "./TaskbarCustomization";
 import { RowIcon, Segmented, SettingsRow, Toggle } from "./ui";
-
-const START_VIEW_OPTIONS: { value: StartView; label: string }[] = [
-  { value: "palette", label: "Palette" },
-  { value: "menu", label: "Menu" },
-];
 
 const ACCENTS: { id: AccentId; name: string }[] = [
   { id: "iris", name: "Iris" },
@@ -853,14 +847,6 @@ export function SettingsSheet() {
               value={settings.theme}
               onChange={(theme) => updateSettings({ theme })}
               options={THEME_OPTIONS}
-            />
-          </SettingsRow>
-          <SettingsRow title="Start view" detail="What the launcher shows before you type">
-            <Segmented<StartView>
-              label="Start view"
-              value={settings.startView}
-              onChange={(startView) => updateSettings({ startView })}
-              options={START_VIEW_OPTIONS}
             />
           </SettingsRow>
           <SettingsRow title="Accent color" detail="Used for highlights and focus">

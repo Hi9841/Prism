@@ -1,0 +1,81 @@
+name: Release
+run-name: Release Prism from ${{ github.ref_name }}
+
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
+      - "[0-9]+.[0-9]+.[0-9]+"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: prism-release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Build and publish Windows installer
+    runs-on: windows-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build data
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+          cache-on-failure: true
+
+      - name: Install frontend dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Check release version
+        run: .\scripts\check-version.ps1 -ExpectedTag "${{ github.ref_type == 'tag' && github.ref_name || '' }}"
+
+      - name: Build and publish installer
+        id: publish
+        uses: tauri-apps/tauri-action@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          tagName: ${{ github.ref_type == 'tag' && github.ref_name || 'v__VERSION__' }}
+          releaseName: Prism v__VERSION__
+          releaseBody: Download the Windows x64 setup executable below.
+          generateReleaseNotes: true
+          releaseDraft: false
+          prerelease: false
+          releaseAssetNamePattern: Prism_[version]_[arch][setup].[ext]
+          uploadUpdaterJson: true
+          updaterJsonPreferNsis: true
+          args: --target x86_64-pc-windows-msvc
+
+      - name: Verify updater release assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: pwsh
+        run: |
+          $tag = if ("${{ github.ref_type }}" -eq "tag") {
+            "${{ github.ref_name }}"
+          } else {
+            "v${{ steps.publish.outputs.appVersion }}"
+          }
+          $assets = gh release view $tag --repo "${{ github.repository }}" --json assets --jq ".assets[].name"
+          if ("latest.json" -notin $assets) {
+            throw "Release $tag is missing latest.json"
+          }
+          if (-not ($assets | Where-Object { $_ -like "*.sig" })) {
+            throw "Release $tag is missing an updater signature"
+          }

@@ -25,20 +25,15 @@ const fn rgb(r: u8, g: u8, b: u8) -> COLORREF {
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DispatchMessageW, GetMessageW, KillTimer, PostMessageW,
     RegisterClassW, SetTimer, SetWindowPos, ShowWindow, TranslateMessage, UpdateLayeredWindow,
-    CS_HREDRAW, CS_VREDRAW, HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SW_HIDE,
-    SW_SHOWNOACTIVATE, ULW_ALPHA, WM_APP, WM_DESTROY, WM_TIMER, WNDCLASSW, WS_EX_LAYERED,
-    WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+    CS_HREDRAW, CS_VREDRAW, HWND_TOPMOST, SWP_NOACTIVATE, SW_HIDE, SW_SHOWNOACTIVATE, ULW_ALPHA,
+    WM_APP, WM_DESTROY, WM_TIMER, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
+    WS_EX_TOPMOST, WS_POPUP,
 };
 
 const OSD_WIDTH: i32 = 244;
 const OSD_HEIGHT: i32 = 56;
 const TIMER_HIDE: usize = 1;
-const TIMER_TOPMOST: usize = 2;
 const HIDE_DELAY_MS: u32 = 1200;
-/// Re-assert topmost shortly after showing. Other topmost windows that were
-/// activated just before the OSD (Discord call popouts, game overlays) can
-/// otherwise render above it, hiding high-priority feedback behind them.
-const TOPMOST_REASSERT_MS: u32 = 250;
 const WM_UPDATE_OSD: u32 = WM_APP + 50;
 
 static OSD_HWND: AtomicIsize = AtomicIsize::new(0);
@@ -166,36 +161,16 @@ unsafe extern "system" fn osd_wnd_proc(
             if let Some(state) = state {
                 render_and_position(hwnd, &state);
                 let _ = SetTimer(Some(hwnd), TIMER_HIDE, HIDE_DELAY_MS, None);
-                let _ = SetTimer(Some(hwnd), TIMER_TOPMOST, TOPMOST_REASSERT_MS, None);
             }
-            LRESULT(0)
-        }
-        WM_TIMER if wparam.0 == TIMER_TOPMOST => {
-            // Re-assert while visible: an already-displayed pill can still be
-            // overtaken by a topmost window activated after the popup built
-            // its z-order (Discord popouts, terminal windows). Keep the pill
-            // above the whole band until it hides.
-            let _ = SetWindowPos(
-                hwnd,
-                Some(HWND_TOPMOST),
-                0,
-                0,
-                0,
-                0,
-                SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE,
-            );
-            let _ = SetTimer(Some(hwnd), TIMER_TOPMOST, TOPMOST_REASSERT_MS, None);
             LRESULT(0)
         }
         WM_TIMER if wparam.0 == TIMER_HIDE => {
             let _ = KillTimer(Some(hwnd), TIMER_HIDE);
-            let _ = KillTimer(Some(hwnd), TIMER_TOPMOST);
             let _ = ShowWindow(hwnd, SW_HIDE);
             LRESULT(0)
         }
         WM_DESTROY => {
             let _ = KillTimer(Some(hwnd), TIMER_HIDE);
-            let _ = KillTimer(Some(hwnd), TIMER_TOPMOST);
             LRESULT(0)
         }
         _ => DefWindowProcW(hwnd, msg, wparam, lparam),
@@ -284,24 +259,33 @@ fn scale_for_dpi(value: i32, dpi: u32) -> i32 {
     ((i64::from(value) * i64::from(dpi) + 48) / 96) as i32
 }
 
-/// Anchors the pill to the bottom-right of the work area, a fixed gap above
-/// the taskbar. Cursor position only picks the monitor; the pill itself is
-/// always right-side so it never sits over content the user is working on.
 fn position_in_work_area(
     work_area: Rect,
-    _point: POINT,
+    point: POINT,
     width: i32,
     height: i32,
     dpi: u32,
 ) -> OsdPosition {
+    let margin = scale_for_dpi(12, dpi);
     let offset = scale_for_dpi(16, dpi);
-    let min_x = work_area.left + scale_for_dpi(12, dpi);
-    let max_x = (work_area.right - width - offset).max(min_x);
-    let max_y = (work_area.bottom - height - offset).max(work_area.top + scale_for_dpi(12, dpi));
+    let min_x = work_area.left + margin;
+    let max_x = (work_area.right - width - margin).max(min_x);
+    let min_y = work_area.top + margin;
+    let max_y = (work_area.bottom - height - margin).max(min_y);
+
+    let (x, y) = if point.x < work_area.left {
+        (work_area.left + offset, point.y - height / 2)
+    } else if point.x >= work_area.right {
+        (work_area.right - width - offset, point.y - height / 2)
+    } else if point.y < work_area.top {
+        (point.x - width / 2, work_area.top + offset)
+    } else {
+        (point.x - width / 2, work_area.bottom - height - offset)
+    };
 
     OsdPosition {
-        x: max_x,
-        y: max_y,
+        x: x.clamp(min_x, max_x),
+        y: y.clamp(min_y, max_y),
     }
 }
 
@@ -721,31 +705,19 @@ unsafe fn render_typography(pixels: &mut [u32], width: i32, _height: i32, state:
     let _ = SetTextColor(text_dc, rgb(255, 255, 255));
 
     let is_no_audio = state.title.ends_with("(No Audio)");
-    let is_master_fallback = state.title.ends_with("(Master)");
     let clean_title = if is_no_audio {
         state.title.trim_end_matches(" (No Audio)").trim()
-    } else if is_master_fallback {
-        state.title.trim_end_matches(" (Master)").trim()
     } else {
         &state.title
     };
 
-    // 1. Draw Title text. Master-fallback titles swap the percentage for the
-    // word "Master" so a long app name never fights the suffix for space.
+    // 1. Draw Title text
     let display_title = truncate_string(clean_title, if is_no_audio { 15 } else { 19 });
     let mut wide_title: Vec<u16> = display_title.encode_utf16().collect();
     let mut title_rect = RECT {
         left: 38,
         top: 10,
-        right: if is_no_audio {
-            width - 82
-        } else if state.muted {
-            width - 88
-        } else if is_master_fallback {
-            width - 98
-        } else {
-            width - 58
-        },
+        right: if is_no_audio { width - 82 } else { width - 58 },
         bottom: 27,
     };
     windows::Win32::Graphics::Gdi::DrawTextW(
@@ -754,8 +726,7 @@ unsafe fn render_typography(pixels: &mut [u32], width: i32, _height: i32, state:
         &mut title_rect,
         windows::Win32::Graphics::Gdi::DT_LEFT
             | windows::Win32::Graphics::Gdi::DT_SINGLELINE
-            | windows::Win32::Graphics::Gdi::DT_VCENTER
-            | windows::Win32::Graphics::Gdi::DT_END_ELLIPSIS,
+            | windows::Win32::Graphics::Gdi::DT_VCENTER,
     );
 
     // Composite Title with pure crisp white (255, 255, 255)
@@ -778,24 +749,14 @@ unsafe fn render_typography(pixels: &mut [u32], width: i32, _height: i32, state:
     let (pct_text, text_color) = if is_no_audio {
         ("No Audio".to_string(), (148u8, 163u8, 184u8)) // Slate-400
     } else if state.muted {
-        (format!("Muted {}%", state.percentage), (248u8, 113u8, 113u8)) // Rose Coral
-    } else if is_master_fallback {
-        (format!("Master {}%", state.percentage), (148u8, 163u8, 184u8)) // Slate-400
+        ("Muted".to_string(), (248u8, 113u8, 113u8)) // Rose Coral
     } else {
         (format!("{}%", state.percentage), (203u8, 213u8, 225u8)) // Slate-300
     };
 
     let mut wide_pct: Vec<u16> = pct_text.encode_utf16().collect();
     let mut pct_rect = RECT {
-        left: if is_no_audio {
-            width - 80
-        } else if state.muted {
-            width - 88
-        } else if is_master_fallback {
-            width - 98
-        } else {
-            width - 62
-        },
+        left: if is_no_audio { width - 80 } else { width - 62 },
         top: 10,
         right: width - 16,
         bottom: 27,
@@ -843,9 +804,7 @@ mod tests {
     };
 
     #[test]
-    fn positions_osd_at_bottom_right_of_any_monitor() {
-        // Left monitor: pill hugs its own bottom-right, cursor merely picks
-        // the monitor.
+    fn positions_osd_inside_each_taskbar_edge() {
         assert_eq!(
             position_in_work_area(
                 Rect {
@@ -859,9 +818,8 @@ mod tests {
                 OSD_HEIGHT,
                 96,
             ),
-            OsdPosition { x: -260, y: 968 }
+            OsdPosition { x: -1864, y: 492 }
         );
-        // Right monitor, cursor anywhere inside.
         assert_eq!(
             position_in_work_area(
                 Rect {
@@ -875,18 +833,20 @@ mod tests {
                 OSD_HEIGHT,
                 96,
             ),
-            OsdPosition { x: 3540, y: 968 }
+            OsdPosition { x: 3540, y: 492 }
         );
-        // Primary monitor: fixed bottom-right, not cursor-centered.
         assert_eq!(
             position_in_work_area(
-                WORK_AREA,
+                Rect {
+                    top: 40,
+                    ..WORK_AREA
+                },
                 POINT { x: 960, y: 10 },
                 OSD_WIDTH,
                 OSD_HEIGHT,
                 96,
             ),
-            OsdPosition { x: 1660, y: 968 }
+            OsdPosition { x: 838, y: 56 }
         );
         assert_eq!(
             position_in_work_area(
@@ -896,7 +856,7 @@ mod tests {
                 OSD_HEIGHT,
                 96
             ),
-            OsdPosition { x: 1660, y: 968 }
+            OsdPosition { x: 838, y: 968 }
         );
     }
 
@@ -907,7 +867,7 @@ mod tests {
         assert_eq!((width, height), (366, 84));
         assert_eq!(
             position_in_work_area(WORK_AREA, POINT { x: 960, y: 1060 }, width, height, 144),
-            OsdPosition { x: 1530, y: 932 }
+            OsdPosition { x: 777, y: 932 }
         );
     }
 

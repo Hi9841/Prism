@@ -12,8 +12,6 @@ interface PaletteSearchInputProps {
   settingsOpen: boolean;
   onQueryChange: (query: string) => void;
   onMove: (delta: -1 | 1) => void;
-  onJump: (edge: "first" | "last") => void;
-  onPageMove: (delta: -1 | 1) => void;
   onRunSelected: () => void;
   onOpenSelectedMenu: () => void;
   onDismiss: () => void;
@@ -30,8 +28,6 @@ export function PaletteSearchInput({
   settingsOpen,
   onQueryChange,
   onMove,
-  onJump,
-  onPageMove,
   onRunSelected,
   onOpenSelectedMenu,
   onDismiss,
@@ -56,22 +52,6 @@ export function PaletteSearchInput({
           event.preventDefault();
           onMove(-1);
           break;
-        case "Home":
-          event.preventDefault();
-          onJump("first");
-          break;
-        case "End":
-          event.preventDefault();
-          onJump("last");
-          break;
-        case "PageDown":
-          event.preventDefault();
-          onPageMove(1);
-          break;
-        case "PageUp":
-          event.preventDefault();
-          onPageMove(-1);
-          break;
         case "Enter":
           event.preventDefault();
           onRunSelected();
@@ -94,7 +74,7 @@ export function PaletteSearchInput({
           break;
       }
     },
-    [onDismiss, onJump, onMove, onOpenSelectedMenu, onPageMove, onQueryChange, onRunSelected],
+    [onDismiss, onMove, onOpenSelectedMenu, onQueryChange, onRunSelected],
   );
 
   useEffect(() => {

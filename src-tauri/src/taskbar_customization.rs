@@ -41,13 +41,11 @@ const PREVIEW_EDGE: u32 = 96;
 
 const GEM_ICON: &[u8] = include_bytes!("../assets/taskbar-icons/gem.png");
 const DIAMOND_ICON: &[u8] = include_bytes!("../assets/taskbar-icons/diamond.png");
-const PRISM_ICON: &[u8] = include_bytes!("../icons/icon.png");
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 enum StartIcon {
     #[default]
-    Prism,
     System,
     Gem,
     Diamond,
@@ -57,7 +55,6 @@ enum StartIcon {
 impl StartIcon {
     fn parse(value: &str) -> Result<Self, String> {
         match value {
-            "prism" => Ok(Self::Prism),
             "system" => Ok(Self::System),
             "gem" => Ok(Self::Gem),
             "diamond" => Ok(Self::Diamond),
@@ -68,7 +65,6 @@ impl StartIcon {
 
     fn name(self) -> &'static str {
         match self {
-            Self::Prism => "prism",
             Self::System => "system",
             Self::Gem => "gem",
             Self::Diamond => "diamond",
@@ -257,7 +253,6 @@ fn overlay_icon(
     settings: &IconSettings,
 ) -> Result<Option<crate::taskbar_icon_overlay::OverlayIcon>, String> {
     let bytes = match settings.start_icon {
-        StartIcon::Prism => PRISM_ICON.to_vec(),
         StartIcon::System => return Ok(None),
         StartIcon::Gem => GEM_ICON.to_vec(),
         StartIcon::Diamond => DIAMOND_ICON.to_vec(),
