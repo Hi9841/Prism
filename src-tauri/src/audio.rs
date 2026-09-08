@@ -122,6 +122,7 @@ fn adjust_app_volume(
     if executable_stem.is_empty() {
         return Ok(None);
     }
+    let mut seen_processes: Vec<String> = Vec::new();
     unsafe {
         let enumerator: IMMDeviceEnumerator =
             CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)
@@ -177,6 +178,7 @@ fn adjust_app_volume(
                 }
 
                 let process_name = get_process_name(pid).unwrap_or_default();
+                seen_processes.push(process_name.clone());
                 if process_matches_executable(&process_name, &executable_stem) {
                     let current = simple
                         .GetMasterVolume()
@@ -206,6 +208,9 @@ fn adjust_app_volume(
             }
         }
 
+        crate::win_key::debug_trace(&format!(
+            "app-volume stem={executable_stem} matched={matched} sessions={seen_processes:?}"
+        ));
         if matched {
             Ok(Some((
                 matched_title.unwrap_or_else(|| "App".to_string()),
@@ -303,6 +308,7 @@ pub(crate) enum TaskbarTarget {
 /// Identifies the application or taskbar element under the cursor point.
 pub(crate) fn identify_taskbar_target_at(point: POINT) -> TaskbarTarget {
     let target = classify_taskbar_element(inspect_element_at(point));
+    crate::win_key::debug_trace(&format!("audio-target {target:?}"));
     if matches!(target, TaskbarTarget::Unknown) {
         // If element inspection failed or was inconclusive, but the cursor point
         // is physically over a taskbar window, default to Master volume. This is
@@ -467,7 +473,13 @@ fn classify_taskbar_element(element: Option<InspectedElement>) -> TaskbarTarget 
 }
 
 fn normalize_executable_stem(value: &str) -> String {
-    let lowercase = value.trim().to_ascii_lowercase();
+    let trimmed = value.trim();
+    // Some taskbar AppUserModelIDs are full executable paths
+    // (for example `C:\Users\...\Spotify\Spotify.exe`); only the file name
+    // identifies the process. Session process names are plain file names, so
+    // matching failed whenever the AppID carried a directory.
+    let file_name = trimmed.rsplit(['\\', '/']).next().unwrap_or(trimmed).trim();
+    let lowercase = file_name.to_ascii_lowercase();
     lowercase
         .strip_suffix(".exe")
         .unwrap_or(&lowercase)
@@ -830,6 +842,19 @@ mod tests {
         assert!(process_matches_executable("MUSIC.EXE", "music"));
         assert!(!process_matches_executable("MusicBee.exe", "music"));
         assert!(!process_matches_executable("Music.exe", "musicbee"));
+    }
+
+    #[test]
+    fn full_path_app_ids_resolve_to_the_file_stem() {
+        assert_eq!(
+            normalize_executable_stem(r"C:\Users\hi\AppData\Roaming\Spotify\Spotify.exe"),
+            "spotify"
+        );
+        assert_eq!(normalize_executable_stem("/opt/app/player"), "player");
+        assert!(process_matches_executable(
+            "Spotify.exe",
+            r"C:\Users\hi\AppData\Roaming\Spotify\Spotify.exe"
+        ));
     }
 
     #[test]
