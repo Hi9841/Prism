@@ -1337,7 +1337,7 @@ impl ShellBridge {
             return Err("Explorer taskbar process is unavailable".to_string());
         }
         let (start_button_locator, start_rect) =
-            match StartButtonLocator::new(taskbar, taskbar_process_id) {
+            match StartButtonLocator::new(taskbar) {
                 Ok(locator) => locator,
                 Err(error) => {
                     if let Some(hook) = taskbar_message_hook {
@@ -1347,7 +1347,7 @@ impl ShellBridge {
                     return Err(error);
                 }
             };
-        let (search_button_locator, search_rect) = SearchButtonLocator::new(taskbar, taskbar_process_id);
+        let (search_button_locator, search_rect) = SearchButtonLocator::new(taskbar);
         let taskbar_mouse_hook = match SetWindowsHookExW(
             WH_MOUSE,
             Some(mouse_hook_proc),
@@ -1513,7 +1513,7 @@ impl ShellBridge {
 }
 
 impl StartButtonLocator {
-    fn new(taskbar: HWND, process_id: u32) -> Result<(Self, RECT), String> {
+    fn new(taskbar: HWND) -> Result<(Self, RECT), String> {
         let automation = unsafe { create_automation_start_button(taskbar).ok() };
         let mut locator = Self {
             taskbar,
@@ -1741,8 +1741,8 @@ struct AutomationSearchButton {
 }
 
 impl SearchButtonLocator {
-    fn new(taskbar: HWND, process_id: u32) -> (Self, Option<RECT>) {
-        let automation = unsafe { create_automation_search_button(taskbar, process_id).ok() };
+    fn new(taskbar: HWND) -> (Self, Option<RECT>) {
+        let automation = unsafe { create_automation_search_button(taskbar).ok() };
         let mut locator = Self {
             taskbar,
             automation,
@@ -1786,7 +1786,6 @@ impl SearchButtonLocator {
 
 unsafe fn create_automation_search_button(
     taskbar_window: HWND,
-    taskbar_process_id: u32,
 ) -> Result<AutomationSearchButton, String> {
     let uia: IUIAutomation = CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER)
         .map_err(|error| format!("create UI Automation client: {error}"))?;
@@ -1834,13 +1833,7 @@ unsafe fn create_automation_search_button(
         .CreateOrCondition(&id_or4, &cond_taskbar_search)
         .map_err(|error| format!("combine Search conditions: {error}"))?;
 
-    let process_id: VARIANT = (taskbar_process_id as i32).into();
-    let process_condition = uia
-        .CreatePropertyCondition(UIA_ProcessIdPropertyId, &process_id)
-        .map_err(|error| format!("match Explorer process: {error}"))?;
-    let condition = uia
-        .CreateAndCondition(&id_condition, &process_condition)
-        .map_err(|error| format!("combine SearchButton identity conditions: {error}"))?;
+    let condition = id_condition;
     Ok(AutomationSearchButton {
         taskbar,
         condition,
