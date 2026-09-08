@@ -20,7 +20,6 @@ and the `/iterate` workflow relies on it, so keep the structure intact.
 - **Risk**: low (behavior-preserving)
 
 ### Validation
-- [x] `bun run lint`
 - [x] `bun run test`
 - [x] `bun run build`
 - [x] `cargo fmt --check`
