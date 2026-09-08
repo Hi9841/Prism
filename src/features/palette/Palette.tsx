@@ -855,7 +855,15 @@ export function Palette() {
                 await item.toggleTaskbarPin?.();
                 showToast(wasPinned ? "Unpinned from taskbar" : "Pinned to taskbar", item.title);
               } catch (error) {
-                showToast("Could not update taskbar pin", String(error));
+                const message = String(error);
+                if (!wasPinned && message.includes("prism-manual-pin-required")) {
+                  showToast(
+                    "Windows blocks automatic pinning",
+                    `Open ${item.title}, then right-click its taskbar icon and choose "Pin to taskbar".`,
+                  );
+                } else {
+                  showToast("Could not update taskbar pin", message);
+                }
               }
             })();
           }}

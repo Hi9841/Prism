@@ -1,6 +1,7 @@
 #![allow(non_snake_case)]
 
 use std::ffi::c_void;
+use std::io::Write;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::{Mutex, OnceLock};
@@ -329,6 +330,19 @@ fn to_wide(value: &str) -> Vec<u16> {
     value.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
+fn debug_log(message: &str) {
+    if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(
+        std::env::temp_dir()
+            .join("Prism")
+            .join("semantic-debug.log"),
+    ) {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default();
+        let _ = writeln!(file, "{} [dll] {message}", now.as_millis());
+    }
+}
+
 fn handle_taskbar_pin(pinned: bool) -> isize {
     let target_file = match std::env::var_os("LOCALAPPDATA").or_else(|| std::env::var_os("APPDATA")) {
         Some(appdata) => PathBuf::from(appdata)
@@ -346,6 +360,7 @@ fn handle_taskbar_pin(pinned: bool) -> isize {
         _ => return 0,
     };
     let _ = std::fs::remove_file(&target_file);
+    debug_log(&format!("pin start pinned={pinned} target={target}"));
 
     let target_wide = to_wide(&target);
     unsafe {
@@ -394,10 +409,12 @@ fn handle_taskbar_pin(pinned: bool) -> isize {
                 ((*(*pinned_list).vtbl).Release)(pinned_list_raw);
                 ILFree(pidl);
                 CoUninitialize();
+                debug_log(&format!("pin IPinnedList3 modify_hr=0x{modify_hr:08x}"));
                 if modify_hr >= 0 {
                     return 1;
                 }
             } else {
+                debug_log(&format!("pin IPinnedList3 cocreate hr=0x{hr:08x}"));
                 ILFree(pidl);
             }
         }
@@ -426,7 +443,9 @@ fn handle_taskbar_pin(pinned: bool) -> isize {
             icon_or_monitor: std::ptr::null_mut(),
             process: std::ptr::null_mut(),
         };
-        if ShellExecuteExW(&mut info) != 0 {
+        let shell_execute_ex = ShellExecuteExW(&mut info) != 0;
+        debug_log(&format!("pin ShellExecuteEx ok={shell_execute_ex}"));
+        if shell_execute_ex {
             return 1;
         }
         let result = ShellExecuteW(
@@ -437,7 +456,9 @@ fn handle_taskbar_pin(pinned: bool) -> isize {
             std::ptr::null(),
             SW_HIDE,
         );
-        isize::from(result > 32)
+        let ok = result > 32;
+        debug_log(&format!("pin ShellExecuteW ok={ok}"));
+        isize::from(ok)
     }
 }
 
