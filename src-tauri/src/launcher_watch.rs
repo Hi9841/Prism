@@ -23,8 +23,8 @@ use windows::core::BOOL;
 use windows::Win32::System::Threading::{OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION};
 use windows::Win32::Foundation::CloseHandle;
 use windows::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, GetWindowRect, GetClassNameW, IsWindowVisible, ShowWindow, SW_HIDE,
-    GetWindowTextLengthW,
+    EnumWindows, GetWindowRect, GetClassNameW, GetWindowThreadProcessId, IsWindowVisible,
+    ShowWindow, SW_HIDE,
 };
 
 const WATCH_INTERVAL: Duration = Duration::from_millis(500);
@@ -95,12 +95,6 @@ const LAUNCHER_CLASSES: &[&str] = &[
 
 fn launcher_classes() -> &'static [&'static str] {
     LAUNCHER_CLASSES
-}
-
-#[cfg(windows)]
-fn window_title_len(window: HWND) -> usize {
-    let len = unsafe { GetWindowTextLengthW(window) };
-    len.max(0) as usize
 }
 
 #[cfg(windows)]
