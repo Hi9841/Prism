@@ -87,6 +87,7 @@ const BRIDGE_RETRY_DELAY: Duration = Duration::from_millis(50);
 const SHELL_ACK_TIMEOUT: Duration = Duration::from_millis(200);
 const SHELL_BRIDGE_MESSAGE_NAME: &str = "Prism.ShellBridge.v1";
 const SHELL_CONTROL_START_RECT_LEFT: usize = 4;
+const SHELL_CONTROL_START_RECT_CHANGED: usize = 25;
 const SHELL_CONTROL_START_RECT_TOP: usize = 5;
 const SHELL_CONTROL_START_RECT_RIGHT: usize = 6;
 const SHELL_CONTROL_START_RECT_BOTTOM: usize = 7;
@@ -351,6 +352,11 @@ static SHELL_BRIDGE_ACTIVE: AtomicBool = AtomicBool::new(false);
 static BRIDGE_MESSAGE_ID: OnceLock<Result<u32, String>> = OnceLock::new();
 static SHELL_START_RECT_ACK: AtomicU32 = AtomicU32::new(0);
 static SHELL_SEARCH_RECT_ACK: AtomicU32 = AtomicU32::new(0);
+/// Mirror of the Start button rectangle that is actually posted to Explorer.
+/// The outside-pointer dismissal consults it so clicks on Prism's own
+/// taskbar buttons are never dismissed by the palette's outside-click path.
+static CURRENT_START_RECT: Mutex<Option<RECT>> = Mutex::new(None);
+static CURRENT_SEARCH_RECT: Mutex<Option<RECT>> = Mutex::new(None);
 static SHELL_START_CLICK_X: AtomicI32 = AtomicI32::new(0);
 static SHELL_TASKBAR_THREAD: AtomicU32 = AtomicU32::new(0);
 static SHELL_ICON_SHUTDOWN_ACK: AtomicU32 = AtomicU32::new(0);
@@ -1469,11 +1475,27 @@ impl ShellBridge {
             return;
         };
 
-        if let Some(rect) = self.start_button_locator.rect() {
+        if let Some(rect) = self
+            .start_button_locator
+            .rect()
+            .filter(|rect| valid_rect(*rect))
+        {
             if !same_rect(rect, self.start_rect)
                 && post_start_button_rect(self.taskbar_thread, message, rect).is_ok()
             {
                 self.start_rect = rect;
+            }
+        } else {
+            // UIA can flake while the XAML island restarts. Repost the last
+            // known-good rectangle so the overlay keeps its position instead
+            // of disappearing with a stale degenerate rect.
+            let cached = CURRENT_START_RECT.lock().ok().and_then(|rect| *rect);
+            if let Some(rect) = cached.filter(|rect| valid_rect(*rect)) {
+                if !same_rect(rect, self.start_rect)
+                    && post_start_button_rect(self.taskbar_thread, message, rect).is_ok()
+                {
+                    self.start_rect = rect;
+                }
             }
         }
 
@@ -1498,9 +1520,16 @@ impl StartButtonLocator {
             taskbar,
             automation,
         };
-        let rect = locator.rect().ok_or_else(|| {
-            "Start button was not found by AutomationId or taskbar child class".to_string()
-        })?;
+        // The XAML island can report a degenerate rectangle while it is still
+        // coming up after an Explorer restart. Accepting it poisons the whole
+        // bridge: the overlay stays hidden at the stale rect until the next
+        // Explorer event. Reject degenerate or aspect-breaking rectangles.
+        let rect = locator
+            .rect()
+            .filter(|rect| valid_rect(*rect))
+            .ok_or_else(|| {
+                "Start button was not found by AutomationId or taskbar child class".to_string()
+            })?;
         Ok((locator, rect))
     }
 
@@ -1614,27 +1643,71 @@ fn same_rect(left: RECT, right: RECT) -> bool {
         && left.bottom == right.bottom
 }
 
+pub fn point_on_taskbar_buttons(point: POINT) -> bool {
+    fn inside(rect: Option<RECT>, point: POINT) -> bool {
+        rect.is_some_and(|rect| {
+            point.x >= rect.left
+                && point.x < rect.right
+                && point.y >= rect.top
+                && point.y < rect.bottom
+        })
+    }
+    let start = CURRENT_START_RECT.lock().ok().and_then(|rect| *rect);
+    let search = CURRENT_SEARCH_RECT.lock().ok().and_then(|rect| *rect);
+    inside(start, point) || inside(search, point)
+}
+
+
 fn post_start_button_rect(thread: u32, message: u32, rect: RECT) -> Result<(), String> {
-    for (control, coordinate) in [
-        (SHELL_CONTROL_START_RECT_LEFT, rect.left),
-        (SHELL_CONTROL_START_RECT_TOP, rect.top),
-        (SHELL_CONTROL_START_RECT_RIGHT, rect.right),
-        (SHELL_CONTROL_START_RECT_BOTTOM, rect.bottom),
-    ] {
-        unsafe {
-            PostThreadMessageW(
-                thread,
-                message,
-                WPARAM(control),
-                LPARAM(coordinate as isize),
-            )
-            .map_err(|error| format!("configure Explorer Start-button rectangle: {error}"))?;
-        }
+    if let Ok(mut current) = CURRENT_START_RECT.lock() {
+        *current = Some(rect);
+    }
+    // The rectangle travels as a small file plus one signal message instead
+    // of four ordered messages. The four-message sequence was racy: parts
+    // could be observed half-applied, and a message round could be missed
+    // entirely if the shell hook was reinstalled between posts, leaving the
+    // overlay stranded at a degenerate rect. The shell hook re-reads the
+    // file on every tick, so a lost signal heals within one interval.
+    write_start_rect_file(rect)?;
+    unsafe {
+        PostThreadMessageW(
+            thread,
+            message,
+            WPARAM(SHELL_CONTROL_START_RECT_CHANGED),
+            LPARAM(0),
+        )
+        .map_err(|error| format!("signal Explorer Start-button rectangle: {error}"))?;
     }
     Ok(())
 }
 
+/// The start rectangle file lives next to the icon file, where the shell
+/// hook already looks for Prism-owned taskbar state.
+fn start_rect_file_path() -> Result<PathBuf, String> {
+    let mut dir = std::env::var_os("APPDATA")
+        .map(PathBuf::from)
+        .ok_or_else(|| "APPDATA is unavailable".to_string())?;
+    dir.push("app.prism.launcher");
+    Ok(dir.join("taskbar-start-rect.txt"))
+}
+
+fn write_start_rect_file(rect: RECT) -> Result<(), String> {
+    let path = start_rect_file_path()?;
+    let bytes: Vec<u8> = [rect.left, rect.top, rect.right, rect.bottom]
+        .iter()
+        .flat_map(|value| value.to_le_bytes())
+        .collect();
+    let temp = path.with_extension("tmp");
+    std::fs::create_dir_all(path.parent().ok_or("start rect path has no parent")?)
+        .map_err(|error| format!("create start rect directory: {error}"))?;
+    std::fs::write(&temp, &bytes).map_err(|error| format!("write start rect file: {error}"))?;
+    crate::files::replace_file(&temp, &path)
+}
+
 fn post_search_button_rect(thread: u32, message: u32, rect: Option<RECT>) -> Result<(), String> {
+    if let Ok(mut current) = CURRENT_SEARCH_RECT.lock() {
+        *current = rect;
+    }
     let rect = rect.unwrap_or_default();
     for (control, coordinate) in [
         (SHELL_CONTROL_SEARCH_RECT_LEFT, rect.left),
