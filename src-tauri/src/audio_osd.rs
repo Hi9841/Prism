@@ -284,33 +284,24 @@ fn scale_for_dpi(value: i32, dpi: u32) -> i32 {
     ((i64::from(value) * i64::from(dpi) + 48) / 96) as i32
 }
 
+/// Anchors the pill to the bottom-right of the work area, a fixed gap above
+/// the taskbar. Cursor position only picks the monitor; the pill itself is
+/// always right-side so it never sits over content the user is working on.
 fn position_in_work_area(
     work_area: Rect,
-    point: POINT,
+    _point: POINT,
     width: i32,
     height: i32,
     dpi: u32,
 ) -> OsdPosition {
-    let margin = scale_for_dpi(12, dpi);
     let offset = scale_for_dpi(16, dpi);
-    let min_x = work_area.left + margin;
-    let max_x = (work_area.right - width - margin).max(min_x);
-    let min_y = work_area.top + margin;
-    let max_y = (work_area.bottom - height - margin).max(min_y);
-
-    let (x, y) = if point.x < work_area.left {
-        (work_area.left + offset, point.y - height / 2)
-    } else if point.x >= work_area.right {
-        (work_area.right - width - offset, point.y - height / 2)
-    } else if point.y < work_area.top {
-        (point.x - width / 2, work_area.top + offset)
-    } else {
-        (point.x - width / 2, work_area.bottom - height - offset)
-    };
+    let min_x = work_area.left + scale_for_dpi(12, dpi);
+    let max_x = (work_area.right - width - offset).max(min_x);
+    let max_y = (work_area.bottom - height - offset).max(work_area.top + scale_for_dpi(12, dpi));
 
     OsdPosition {
-        x: x.clamp(min_x, max_x),
-        y: y.clamp(min_y, max_y),
+        x: max_x,
+        y: max_y,
     }
 }
 
@@ -852,7 +843,9 @@ mod tests {
     };
 
     #[test]
-    fn positions_osd_inside_each_taskbar_edge() {
+    fn positions_osd_at_bottom_right_of_any_monitor() {
+        // Left monitor: pill hugs its own bottom-right, cursor merely picks
+        // the monitor.
         assert_eq!(
             position_in_work_area(
                 Rect {
@@ -866,8 +859,9 @@ mod tests {
                 OSD_HEIGHT,
                 96,
             ),
-            OsdPosition { x: -1864, y: 492 }
+            OsdPosition { x: -260, y: 968 }
         );
+        // Right monitor, cursor anywhere inside.
         assert_eq!(
             position_in_work_area(
                 Rect {
@@ -881,20 +875,18 @@ mod tests {
                 OSD_HEIGHT,
                 96,
             ),
-            OsdPosition { x: 3540, y: 492 }
+            OsdPosition { x: 3540, y: 968 }
         );
+        // Primary monitor: fixed bottom-right, not cursor-centered.
         assert_eq!(
             position_in_work_area(
-                Rect {
-                    top: 40,
-                    ..WORK_AREA
-                },
+                WORK_AREA,
                 POINT { x: 960, y: 10 },
                 OSD_WIDTH,
                 OSD_HEIGHT,
                 96,
             ),
-            OsdPosition { x: 838, y: 56 }
+            OsdPosition { x: 1660, y: 968 }
         );
         assert_eq!(
             position_in_work_area(
@@ -904,7 +896,7 @@ mod tests {
                 OSD_HEIGHT,
                 96
             ),
-            OsdPosition { x: 838, y: 968 }
+            OsdPosition { x: 1660, y: 968 }
         );
     }
 
@@ -915,7 +907,7 @@ mod tests {
         assert_eq!((width, height), (366, 84));
         assert_eq!(
             position_in_work_area(WORK_AREA, POINT { x: 960, y: 1060 }, width, height, 144),
-            OsdPosition { x: 777, y: 932 }
+            OsdPosition { x: 1530, y: 932 }
         );
     }
 
