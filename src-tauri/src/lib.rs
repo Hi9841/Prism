@@ -30,9 +30,9 @@ use windows::Win32::Graphics::Gdi::{
 use windows::Win32::System::Threading::GetCurrentProcessId;
 use windows::Win32::UI::Input::KeyboardAndMouse::{SetActiveWindow, SetFocus};
 use windows::Win32::UI::WindowsAndMessaging::{
-    AllowSetForegroundWindow, BringWindowToTop, GetClassNameW, GetCursorPos, GetForegroundWindow,
-    GetWindowLongPtrW, GetWindowThreadProcessId, LockSetForegroundWindow, SetForegroundWindow,
-    SetWindowPos, GWL_EXSTYLE, HWND_TOPMOST, LSFW_UNLOCK, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW,
+    AllowSetForegroundWindow, BringWindowToTop, GetCursorPos, GetForegroundWindow,
+    GetWindowThreadProcessId, LockSetForegroundWindow, SetForegroundWindow, SetWindowPos,
+    HWND_TOPMOST, LSFW_UNLOCK, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW,
 };
 
 /// The only accepted global shortcuts. Bare typing keys, reserved keys and
@@ -591,9 +591,12 @@ fn log_foreground(tag: &str) {
         let mut pid = 0u32;
         GetWindowThreadProcessId(foreground, Some(&mut pid));
         let mut class = [0u16; 64];
-        let length = GetClassNameW(foreground, &mut class);
+        let length = windows::Win32::UI::WindowsAndMessaging::GetClassNameW(foreground, &mut class);
         let class = String::from_utf16_lossy(&class[..length.max(0) as usize]);
-        let ex_style = GetWindowLongPtrW(foreground, GWL_EXSTYLE) as u32;
+        let ex_style = windows::Win32::UI::WindowsAndMessaging::GetWindowLongPtrW(
+            foreground,
+            windows::Win32::UI::WindowsAndMessaging::GWL_EXSTYLE,
+        ) as u32;
         crate::win_key::debug_trace(&format!(
             "{tag} fg_pid={pid} self={} topmost={} class={class}",
             pid == GetCurrentProcessId(),
