@@ -1562,9 +1562,18 @@ impl StartButtonLocator {
                     .inspect(|start| automation.cached = Some(start.clone()))
                     .and_then(|start| start.CurrentBoundingRectangle().ok())
             });
-            if let Some(rect) = rect {
-                if valid_rect(rect) {
-                    return Some(rect);
+            match rect {
+                Some(rect) => {
+                    if valid_rect(rect) {
+                        return Some(rect);
+                    }
+                    debug_trace(&format!(
+                        "start-button-flake rect=({},{},{},{})",
+                        rect.left, rect.top, rect.right, rect.bottom
+                    ));
+                }
+                None => {
+                    debug_trace("start-button-lookup-empty");
                 }
             }
         }

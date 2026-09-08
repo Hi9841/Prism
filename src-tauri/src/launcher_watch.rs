@@ -18,10 +18,10 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
-use windows::core::PCWSTR;
-use windows::Win32::Foundation::HWND;
+use windows::Win32::Foundation::{HWND, LPARAM};
+use windows::core::BOOL;
 use windows::Win32::UI::WindowsAndMessaging::{
-    FindWindowW, GetWindowRect, IsWindowVisible, ShowWindow, SW_HIDE,
+    EnumWindows, GetWindowRect, GetClassNameW, IsWindowVisible, ShowWindow, SW_HIDE,
     GetWindowTextLengthW,
 };
 
@@ -101,6 +101,16 @@ fn window_title_len(window: HWND) -> usize {
     len.max(0) as usize
 }
 
+#[cfg(windows)]
+fn class_name_of(window: HWND) -> Option<String> {
+    let mut buffer = [0u16; 128];
+    let len = unsafe { GetClassNameW(window, &mut buffer) };
+    if len == 0 {
+        return None;
+    }
+    Some(String::from_utf16_lossy(&buffer[..len as usize]))
+}
+
 fn within_self_grace() -> bool {
     let clock = CLOCK.get_or_init(Instant::now);
     let elapsed = clock.elapsed().as_millis() as u64;
@@ -110,15 +120,28 @@ fn within_self_grace() -> bool {
 
 #[cfg(windows)]
 fn hide_if_visible(class: &str) {
-    let wide: Vec<u16> = class.encode_utf16().chain(Some(0)).collect();
-    let window = unsafe { FindWindowW(PCWSTR(wide.as_ptr()), PCWSTR::null()) };
-    let Ok(window) = window else {
-        return;
-    };
-    if window.0.is_null() {
-        return;
+    SCAN_CLASS.with(|cell| *cell.borrow_mut() = Some(class.to_string()));
+    let _ = unsafe { EnumWindows(Some(enum_scan_launcher), LPARAM(0)) };
+    SCAN_CLASS.with(|cell| *cell.borrow_mut() = None);
+}
+
+#[cfg(windows)]
+thread_local! {
+    static SCAN_CLASS: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(windows)]
+unsafe extern "system" fn enum_scan_launcher(window: HWND, _detail: LPARAM) -> BOOL {
+    let class = SCAN_CLASS.with(|cell| cell.borrow().clone());
+    if let Some(class) = class {
+        reveal_launcher_window(&class, window);
     }
-    if !unsafe { IsWindowVisible(window) }.as_bool() {
+    BOOL(1)
+}
+
+#[cfg(windows)]
+fn reveal_launcher_window(class: &str, window: HWND) {
+    if class_name_of(window).as_deref() != Some(class) {
         return;
     }
     // Win11's XAML island class is shared by other explorer surfaces (file
@@ -133,6 +156,9 @@ fn hide_if_visible(class: &str) {
     if class == WIN11_CORE_START_CLASS
         && (window_title_len(window) > 0 || !is_start_menu_silhouette(window))
     {
+        return;
+    }
+    if !unsafe { IsWindowVisible(window) }.as_bool() {
         return;
     }
     let _ = unsafe { ShowWindow(window, SW_HIDE) };
