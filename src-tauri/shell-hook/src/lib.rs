@@ -36,6 +36,32 @@ struct MouseHookStruct {
 
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
+struct PaintStruct {
+    hdc: *mut c_void,
+    f_erase: i32,
+    rc_paint: Rect,
+    f_restore: i32,
+    f_inc_update: i32,
+    rgb_reserved: [u8; 32],
+}
+
+#[repr(C)]
+#[derive(Default)]
+struct WNDCLASSW {
+    style: u32,
+    lpfn_wnd_proc: Option<unsafe extern "system" fn(Hwnd, u32, usize, isize) -> isize>,
+    cb_cls_extra: i32,
+    cb_wnd_extra: i32,
+    h_instance: *mut c_void,
+    h_icon: *mut c_void,
+    h_cursor: *mut c_void,
+    hbr_background: *mut c_void,
+    lpsz_menu_name: *const u16,
+    lpsz_class_name: *const u16,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
 struct Rect {
     left: i32,
     top: i32,
@@ -164,6 +190,20 @@ const OBSERVER_CLASS: &[u16] = &[
 ];
 
 const STATIC_CLASS: &[u16] = &[83, 116, 97, 116, 105, 99, 0];
+/// Prism's own overlay class. A window whose WndProc belongs to this module
+/// pins the module while the window exists, so a hard-killed Prism can never
+/// unload the DLL out from under a pending click callback.
+const OVERLAY_CLASS: &[u16] = &[
+    80, 114, 105, 115, 109, 46, 83, 116, 97, 114, 116, 66, 117, 116, 116, 111, 110, 46, 118, 49,
+    0,
+];
+const WM_CREATE: u32 = 0x0001;
+const WM_PAINT: u32 = 0x000F;
+const WM_ERASEBKGND: u32 = 0x0014;
+const WM_NCHITTEST: u32 = 0x0084;
+const HTCLIENT: isize = 1;
+const CS_HREDRAW: u32 = 0x0001;
+const CS_VREDRAW: u32 = 0x0002;
 const ICON_WINDOW_TITLE: &[u16] = &[
     80, 114, 105, 115, 109, 46, 83, 116, 97, 114, 116, 73, 99, 111, 110, 83, 104, 101, 108, 108,
     79, 118, 101, 114, 108, 97, 121, 46, 118, 49, 0,
@@ -204,6 +244,11 @@ extern "system" {
     fn DestroyWindow(window: Hwnd) -> i32;
     fn FindWindowW(class_name: *const u16, window_name: *const u16) -> Hwnd;
     fn IsWindowVisible(window: Hwnd) -> i32;
+    fn RegisterClassW(class: *const WNDCLASSW) -> u16;
+    fn DefWindowProcW(window: Hwnd, msg: u32, wparam: usize, lparam: isize) -> isize;
+    fn BeginPaint(window: Hwnd, paint: *mut PaintStruct) -> *mut c_void;
+    fn EndPaint(window: Hwnd, paint: *const PaintStruct) -> i32;
+    fn GetClientRect(window: Hwnd, rect: *mut Rect) -> i32;
     fn SetTimer(hwnd: Hwnd, id: usize, timeout: u32, proc_: *mut c_void) -> usize;
     fn ClientToScreen(hwnd: Hwnd, point: *mut Point) -> i32;
     fn GetDC(window: Hwnd) -> *mut c_void;
@@ -254,6 +299,7 @@ extern "system" {
 extern "system" {
     fn GetModuleHandleW(module_name: *const u16) -> *mut c_void;
     fn GetTickCount64() -> u64;
+    fn GetLastError() -> u32;
     fn Sleep(milliseconds: u32);
 }
 
@@ -563,21 +609,19 @@ fn load_icon_pixels() -> Result<(u32, u32, Vec<u8>), isize> {
 
 unsafe fn ensure_icon_window() -> Hwnd {
     let Ok(mut slot) = ICON_WINDOW.lock() else {
+        hook_trace("overlay-skip lock");
         return std::ptr::null_mut();
     };
     if *slot != 0 {
         return *slot as Hwnd;
     }
-    // Own the overlay from Prism's observer window when it is reachable:
-    // owned popups are destroyed by Windows when their owner dies, so a dead
-    // Prism removes the overlay (and its click callback) automatically and
-    // the native button returns without any heartbeat round-trip. The taskbar
-    // remains the fallback owner while the observer is not findable.
-    let mut owner = FindWindowW(OBSERVER_CLASS.as_ptr(), std::ptr::null());
+    // Owner stays the taskbar. Cross-process ownership (Prism's observer) is
+    // rejected by CreateWindowExW (ERROR_ACCESS_DENIED measured), and the
+    // module pin comes from the private window class: the WndProc lives in
+    // this DLL, so the module cannot unload while the overlay exists.
+    let owner = FindWindowW(TASKBAR_CLASS.as_ptr(), std::ptr::null());
     if owner.is_null() {
-        owner = FindWindowW(TASKBAR_CLASS.as_ptr(), std::ptr::null());
-    }
-    if owner.is_null() {
+        hook_trace("overlay-owner none");
         return std::ptr::null_mut();
     }
     // The overlay is created as an owned popup (WS_POPUP with a parent), so
@@ -602,11 +646,15 @@ unsafe fn ensure_icon_window() -> Hwnd {
         }
         let _ = DestroyWindow(stale);
     }
+    if !register_overlay_class() {
+        hook_trace("overlay-class-register failed");
+        return std::ptr::null_mut();
+    }
     let window = CreateWindowExW(
         WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE,
-        STATIC_CLASS.as_ptr(),
+        OVERLAY_CLASS.as_ptr(),
         ICON_WINDOW_TITLE.as_ptr(),
-        WS_POPUP | SS_BITMAP,
+        WS_POPUP,
         0,
         0,
         1,
@@ -616,6 +664,11 @@ unsafe fn ensure_icon_window() -> Hwnd {
         GetModuleHandleW(std::ptr::null()),
         std::ptr::null_mut(),
     );
+    hook_trace(&format!(
+        "overlay-created-window hwnd={} last-error={}",
+        window as usize,
+        GetLastError()
+    ));
     if !window.is_null() {
         // The overlay window IS the Prism Start button: subclass it so clicks
         // land here and nowhere near a rectangle lookup, exactly like
@@ -672,6 +725,78 @@ fn hook_trace(message: &str) {
 
 #[cfg(test)]
 fn hook_trace(_message: &str) {}
+
+fn register_overlay_class() -> bool {
+    unsafe {
+        let class = WNDCLASSW {
+            style: CS_HREDRAW | CS_VREDRAW,
+            lpfn_wnd_proc: Some(overlay_wnd_proc),
+            h_instance: GetModuleHandleW(std::ptr::null()),
+            lpsz_class_name: OVERLAY_CLASS.as_ptr(),
+            ..Default::default()
+        };
+        RegisterClassW(&class) != 0
+    }
+}
+
+/// Owns clicks on the Prism Start button and paints the composed glyph.
+/// Registered by this module so the DLL stays loaded while the window lives.
+unsafe extern "system" fn overlay_wnd_proc(
+    hwnd: Hwnd,
+    msg: u32,
+    wparam: usize,
+    lparam: isize,
+) -> isize {
+    match msg {
+        // The overlay is visual and pins this module while it exists. Clicks
+        // are captured by the low-level mouse hook: delivery of click
+        // messages to a topmost owned popup inside the taskbar's XAML island
+        // proved unreliable, while the hook sees every press.
+        msg if msg == STM_SETIMAGE as u32 => {
+            let previous = ICON_BITMAP.lock().map(|b| *b).unwrap_or(0);
+            *ICON_BITMAP.lock().unwrap_or_else(|e| e.into_inner()) = wparam;
+            let _ = InvalidateRect(hwnd, std::ptr::null(), 0);
+            previous as isize
+        }
+        msg if msg == STM_GETIMAGE as u32 => {
+            ICON_BITMAP.lock().map(|b| *b as isize).unwrap_or(0)
+        }
+        msg if msg == WM_PAINT as u32 => {
+            let mut paint = std::mem::MaybeUninit::<PaintStruct>::uninit();
+            let _ = BeginPaint(hwnd, paint.as_mut_ptr());
+            let paint = paint.assume_init();
+            let bitmap = ICON_BITMAP.lock().map(|b| *b).unwrap_or(0);
+            if bitmap != 0 {
+                let mut client = Rect::default();
+                let _ = GetClientRect(hwnd, &mut client);
+                let width = client.right - client.left;
+                let height = client.bottom - client.top;
+                let mem = CreateCompatibleDC(paint.hdc);
+                if !mem.is_null() {
+                    let old = SelectObject(mem, bitmap as *mut c_void);
+                    let _ = BitBlt(
+                        paint.hdc,
+                        0,
+                        0,
+                        width,
+                        height,
+                        mem,
+                        0,
+                        0,
+                        SRCCOPY,
+                    );
+                    let _ = SelectObject(mem, old);
+                    let _ = DeleteDC(mem);
+                }
+            }
+            let _ = EndPaint(hwnd, &paint);
+            0
+        }
+        msg if msg == WM_ERASEBKGND as u32 => 1,
+        msg if msg == WM_NCHITTEST as u32 => HTCLIENT,
+        _ => DefWindowProcW(hwnd, msg, wparam, lparam),
+    }
+}
 
 unsafe fn capture_background(rect: Rect) -> Option<Vec<u8>> {
     let width = rect.right - rect.left;
@@ -971,6 +1096,20 @@ fn point_is_in_search_button(point: &Point) -> bool {
         && point.y < SEARCH_RECT_BOTTOM.load(Ordering::Relaxed)
 }
 
+/// True when the message targets Prism's own Start button overlay (either the
+/// legacy Static-created overlay or the private Prism.StartButton.v1 window).
+/// The overlay is the injected button: a click on it is a Start click
+/// regardless of the configured rectangle.
+fn is_our_start_button(hwnd: Hwnd) -> bool {
+    if hwnd.is_null() {
+        return false;
+    }
+    unsafe {
+        FindWindowW(STATIC_CLASS.as_ptr(), ICON_WINDOW_TITLE.as_ptr()) == hwnd
+            || FindWindowW(OVERLAY_CLASS.as_ptr(), ICON_WINDOW_TITLE.as_ptr()) == hwnd
+    }
+}
+
 /// True while the Prism Start button overlay is actually rendering. While it
 /// is, the overlay's subclassed WndProc owns Start-button clicks and this
 /// hook must leave the rectangle path alone (consuming the click here would
@@ -1132,7 +1271,10 @@ pub unsafe extern "system" fn PrismShellGetMessageHook(
                         START_RECT_READY.store(valid, Ordering::Release);
                         let _ =
                             notify_observer(message_id, EVENT_START_RECT_CONFIGURED, valid as isize);
-                        if valid && has_active_icon() {
+                        // Refresh unconditionally: the first render is what
+                        // sets the bitmap, so gating on has_active_icon here
+                        // would skip the very first paint forever.
+                        if valid {
                             let _ = refresh_icon_window();
                         }
                         hook_trace(&format!(
@@ -1293,8 +1435,13 @@ pub unsafe extern "system" fn PrismShellMouseHook(
         // consume clicks for the overlay (that would stop the click from
         // reaching the overlay at all), it covers the rectangle path and the
         // search button.
+        // The point checks always run: clicks over the taskbar never deliver
+        // to topmost windows above it (the XAML taskbar owns that input), so
+        // the hook's window field cannot be trusted for them. The overlay
+        // covers the button rect, so a press there is Prism's either way.
         let in_target = point_is_in_search_button(&mouse.point)
-            || (!is_overlay_active() && point_is_in_start_button(&mouse.point));
+            || is_our_start_button(mouse.window)
+            || point_is_in_start_button(&mouse.point);
         if wparam == WM_LBUTTONDOWN {
             let capture = in_target && !observer_window().is_null();
             START_PRESS_CAPTURED.store(capture, Ordering::Release);
