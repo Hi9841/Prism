@@ -722,7 +722,7 @@ fn heartbeat_stale(last_ms: u64, now_ms: u64) -> bool {
 /// Prism keeps Explorer's threads pumping messages, so the overlay hides and
 /// the native button returns.
 fn hide_overlay_if_heartbeat_stale() {
-    let now_ms = GetTickCount64();
+    let now_ms = unsafe { GetTickCount64() };
     if now_ms.wrapping_sub(LAST_STALENESS_CHECK_MS.load(Ordering::Relaxed)) < 1_000 {
         return;
     }
