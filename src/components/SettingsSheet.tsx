@@ -849,7 +849,7 @@ export function SettingsSheet() {
               options={THEME_OPTIONS}
             />
           </SettingsRow>
-          <SettingsRow title="Accent color" detail="Used for highlights and focus">
+          <SettingsRow title="Accent color" detail="Colors highlights, focus, and the volume pill">
             <div className="flex gap-2">
               {ACCENTS.map((a) => {
                 const active = settings.accent === a.id;
@@ -894,7 +894,10 @@ export function SettingsSheet() {
           <SettingsRow title="Alignment">
             <TaskbarAlignmentPicker />
           </SettingsRow>
-          <SettingsRow title="Scroll volume" detail="Scroll mouse wheel over taskbar apps to adjust volume">
+          <SettingsRow
+            title="Scroll volume"
+            detail="Scroll over an app to change its volume, over the empty taskbar or tray for master"
+          >
             <Toggle
               checked={settings.taskbarScrollVolume ?? true}
               onChange={(v) => updateSettings({ taskbarScrollVolume: v })}

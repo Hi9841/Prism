@@ -1386,14 +1386,14 @@ unsafe fn bitmap_to_png(bitmap: HBITMAP) -> Option<Vec<u8>> {
         return None;
     }
     // GetDIBits yields BGRA; shell bitmaps arrive with premultiplied alpha.
-    let has_alpha = pixels.chunks_exact(4).any(|p| p[3] != 0);
+    let has_alpha = pixels.as_chunks::<4>().0.iter().any(|p| p[3] != 0);
     if !has_alpha {
         // No alpha channel: the 32-bit conversion filled 0s - force opaque.
-        for px in pixels.chunks_exact_mut(4) {
+        for px in pixels.as_chunks_mut::<4>().0 {
             px[3] = 255;
         }
     } else {
-        for px in pixels.chunks_exact_mut(4) {
+        for px in pixels.as_chunks_mut::<4>().0 {
             let (b, g, r, a) = (px[0] as u32, px[1] as u32, px[2] as u32, px[3] as u32);
             let scale = |c: u32| ((c * 255) / a.max(1)).min(255) as u8;
             px[0] = scale(r);
@@ -1455,7 +1455,9 @@ unsafe fn reg_string(hk: HKEY, name: &str) -> Option<String> {
     }
     if value_type.0 == REG_SZ.0 || value_type.0 == REG_EXPAND_SZ.0 {
         let units: Vec<u16> = buf
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|c| u16::from_le_bytes([c[0], c[1]]))
             .collect();
         let end = units.iter().position(|&u| u == 0).unwrap_or(units.len());
@@ -1923,7 +1925,17 @@ struct IPinnedList3Vtbl {
     ) -> windows::core::HRESULT,
     pub AddRef: unsafe extern "system" fn(this: *mut c_void) -> u32,
     pub Release: unsafe extern "system" fn(this: *mut c_void) -> u32,
-    pub Other: [usize; 13],
+    /// Slots 3-8: EnumObjects, GetPinnableInfo, IsPinnable, Resolve,
+    /// LegacyModify, GetChangeCount.
+    pub BeforeIsPinned: [usize; 6],
+    /// Slot 9: `S_OK` = pinned, `S_FALSE` = not pinned (matches Chromium's
+    /// `taskbar_util.cc` IPinnedList3 layout).
+    pub IsPinned: unsafe extern "system" fn(
+        this: *mut c_void,
+        pidl: *const ITEMIDLIST,
+    ) -> windows::core::HRESULT,
+    /// Slots 10-15: GetPinnedItem ... GetPinnedItemForAppID.
+    pub BeforeModify: [usize; 6],
     pub Modify: unsafe extern "system" fn(
         this: *mut c_void,
         unpin: *const ITEMIDLIST,
@@ -2029,73 +2041,65 @@ fn wait_for_taskbar_state(path: &Path, pinned: bool) -> bool {
 
 /// Pins or unpins a launch target and returns success only after the taskbar
 /// pin store reflects the requested state.
+/// Sentinel returned when Windows refuses to pin programmatically. The
+/// frontend turns this into the manual taskbar instruction.
+pub const MANUAL_PIN_REQUIRED: &str = "prism-manual-pin-required";
+
 pub fn set_taskbar_pinned(path: &Path, pinned: bool) -> Result<(), String> {
     if !path.exists() {
         return Err(format!("{} does not exist", path.display()));
     }
-    if is_pinned_to_taskbar(path) == pinned {
+    // Unknown state must not be treated as "already in the desired state":
+    // that reported a successful unpin without attempting one.
+    let current = taskbar_pin_state(path);
+    if current == Some(pinned) {
         return Ok(());
     }
+    if current.is_none() {
+        return Err("Could not read the current taskbar pin state.".to_string());
+    }
+    crate::win_key::debug_trace(&format!(
+        "set-pin begin path={} pinned={pinned}",
+        path.display()
+    ));
 
     let _com = ComGuard::init();
-    let pin_target = if pinned
-        && !path
-            .extension()
-            .is_some_and(|extension| extension.eq_ignore_ascii_case("lnk"))
-    {
-        let staging_dir = std::env::temp_dir().join("Prism").join("pin-shortcuts");
-        std::fs::create_dir_all(&staging_dir)
-            .ok()
-            .and_then(|_| pin_destination(path, &staging_dir).ok())
-            .and_then(|destination| {
-                create_pin_shortcut(path, &destination)
-                    .ok()
-                    .map(|_| destination)
-            })
-            .unwrap_or_else(|| path.to_path_buf())
-    } else {
+    // Unpin needs the shortcut that is actually in the taskbar store; pin uses
+    // the original shortcut.
+    let target = if pinned {
         path.to_path_buf()
-    };
-    let pinned_link = (!pinned).then(|| find_taskbar_pin(path)).flatten();
-    let taskband_target = if pinned {
-        pin_target.as_path()
     } else {
-        pinned_link.as_deref().unwrap_or(path)
+        find_taskbar_pin(path).unwrap_or_else(|| path.to_path_buf())
     };
 
-    if crate::win_key::shell_bridge_taskbar_pin(taskband_target, pinned).is_ok()
-        && wait_for_taskbar_state(path, pinned)
-    {
+    let mut result = crate::win_key::shell_bridge_taskbar_pin(&target, pinned);
+    if result.is_ok() && wait_for_taskbar_state(path, pinned) {
+        crate::win_key::debug_trace("set-pin bridge ok");
         return Ok(());
     }
 
-    if let Some(pidl) = resolve_shell_pidl(taskband_target) {
-        let result = if pinned {
+    if let Some(pidl) = resolve_shell_pidl(&target) {
+        result = if pinned {
             modify_taskband_pin(None, Some(pidl))
         } else {
             modify_taskband_pin(Some(pidl), None)
         };
         unsafe { ILFree(Some(pidl)) };
         if result.is_ok() && wait_for_taskbar_state(path, pinned) {
+            crate::win_key::debug_trace("set-pin app-com ok");
             return Ok(());
         }
     }
 
-    let verb = if pinned { "taskbarpin" } else { "taskbarunpin" };
-    if unsafe { shell_execute_verb(verb, taskband_target) }.is_ok()
-        && wait_for_taskbar_state(path, pinned)
-    {
-        return Ok(());
-    }
-
-    let (action, menu_action) = if pinned {
-        ("pin this item", "Pin to taskbar")
+    if pinned {
+        // Windows 11 (24H2/25H2+) blocks programmatic pinning: Modify returns
+        // S_OK but does nothing and no shell verb is exposed. Ask the user to
+        // confirm from the taskbar instead of reporting a false success.
+        crate::win_key::debug_trace("set-pin manual required");
+        Err(MANUAL_PIN_REQUIRED.to_string())
     } else {
-        ("unpin this item", "Unpin from taskbar")
-    };
-    Err(format!(
-        "Windows did not {action}. Right-click it in Windows and choose \"{menu_action}\"."
-    ))
+        Err("Windows did not unpin this item.".to_string())
+    }
 }
 
 /// Finds the taskbar pin-store shortcut that represents a launch target, so
@@ -2157,8 +2161,44 @@ pub fn find_taskbar_pin(path: &Path) -> Option<PathBuf> {
 }
 
 /// Reports whether a launch target already sits on the taskbar's pin list.
+/// Uses `IPinnedList3::IsPinned`, which is authoritative. The on-disk pin
+/// folder is NOT: it keeps stale shortcuts for items that are no longer pinned.
 pub fn is_pinned_to_taskbar(path: &Path) -> bool {
-    find_taskbar_pin(path).is_some()
+    taskbar_pin_state(path).unwrap_or(false)
+}
+
+/// `Some(true)` = pinned, `Some(false)` = not pinned, `None` = unknown (the
+/// shell rejected the query, e.g. no PIDL for the path).
+fn taskbar_pin_state(path: &Path) -> Option<bool> {
+    let _com = ComGuard::init();
+    let unknown: windows::core::IUnknown =
+        unsafe { CoCreateInstance(&CLSID_TASKBAND_PIN, None, CLSCTX_INPROC_SERVER) }.ok()?;
+    let mut pinned_list_raw: *mut c_void = std::ptr::null_mut();
+    let hr = unsafe {
+        (windows::core::Interface::vtable(&unknown).QueryInterface)(
+            windows::core::Interface::as_raw(&unknown),
+            &IID_IPINNED_LIST3,
+            &mut pinned_list_raw,
+        )
+    };
+    if hr.is_err() || pinned_list_raw.is_null() {
+        return None;
+    }
+    let pinned_list = pinned_list_raw as *mut IPinnedList3;
+    let Some(pidl) = resolve_shell_pidl(path) else {
+        unsafe { ((*(*pinned_list).vtbl).Release)(pinned_list_raw) };
+        return None;
+    };
+    let state = unsafe { ((*(*pinned_list).vtbl).IsPinned)(pinned_list_raw, pidl) };
+    unsafe {
+        ILFree(Some(pidl));
+        ((*(*pinned_list).vtbl).Release)(pinned_list_raw);
+    }
+    match state.0 {
+        0 => Some(true),
+        1 => Some(false),
+        _ => None,
+    }
 }
 
 fn taskbar_pins_dir() -> Option<PathBuf> {
@@ -2181,36 +2221,9 @@ fn path_key(path: &str) -> String {
         .to_ascii_lowercase()
 }
 
-/// Chooses a unique shortcut path in the temporary staging directory.
-fn pin_destination(path: &Path, taskbar: &Path) -> Result<PathBuf, String> {
-    let is_shortcut = path
-        .extension()
-        .is_some_and(|extension| extension.eq_ignore_ascii_case("lnk"));
-    let mut file_name = if is_shortcut {
-        path.file_name()
-            .and_then(|name| name.to_str())
-            .map(str::to_string)
-    } else {
-        path.file_stem()
-            .and_then(|name| name.to_str())
-            .map(|stem| format!("{stem}.lnk"))
-    }
-    .ok_or_else(|| format!("{} has no usable file name", path.display()))?;
-    let mut candidate = taskbar.join(&file_name);
-    let mut suffix = 2u32;
-    while candidate.exists() {
-        let stem = file_name
-            .get(..file_name.len() - 4)
-            .unwrap_or(&file_name)
-            .to_string();
-        file_name = format!("{stem} ({suffix}).lnk");
-        candidate = taskbar.join(&file_name);
-        suffix += 1;
-    }
-    Ok(candidate)
-}
-
-/// Creates a temporary shortcut for taskbar APIs that expect a shell link.
+/// Creates a shortcut file. Only used by tests now that Windows blocks
+/// programmatic taskbar pinning.
+#[cfg(test)]
 fn create_pin_shortcut(target: &Path, destination: &Path) -> Result<(), String> {
     unsafe {
         let link: IShellLinkW = CoCreateInstance(&CLSID_SHELL_LINK, None, CLSCTX_INPROC_SERVER)

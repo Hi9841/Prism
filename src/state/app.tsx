@@ -8,6 +8,7 @@ import {
   quitApp,
   saveState,
   setAlwaysOnTop,
+  setOsdAccent,
   setShortcut,
   setTaskbarAlignment,
   setTaskbarScrollVolume,
@@ -444,6 +445,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
     if (!ready) return;
     document.documentElement.dataset.accent = settings.accent;
     document.documentElement.dataset.theme = effectiveTheme;
+    setOsdAccent(settings.accent).catch(() => {});
   }, [ready, settings.accent, effectiveTheme]);
 
   useEffect(() => {
