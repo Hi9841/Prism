@@ -140,13 +140,10 @@ const EVENT_TASKBAR_PIN_COMPLETED: usize = 22;
 const EVENT_SHELL_START: usize = 23;
 const CONTROL_HEARTBEAT: usize = 24;
 const CONTROL_START_RECT_CHANGED: usize = 25;
-const TIMER_HEARTBEAT: usize = 42;
-const WM_TIMER: u32 = 0x0113;
 /// The overlay hides itself when this much time passes without a Prism
-/// heartbeat, so a crashed Prism can never leave a dead button on the
-/// taskbar: the native glyph and Start menu return automatically.
+/// heartbeat, so a crashed or paused Prism can never leave a dead button on
+/// the taskbar: the native glyph and Start menu return automatically.
 const HEARTBEAT_DEAD_MS: u64 = 15_000;
-const HEARTBEAT_CHECK_MS: u32 = 5_000;
 const WS_POPUP: u32 = 0x8000_0000;
 const SS_BITMAP: u32 = 0x0000_000e;
 const WS_EX_TOOLWINDOW: u32 = 0x0000_0080;
@@ -179,6 +176,9 @@ static ICON_WINDOW: Mutex<usize> = Mutex::new(0);
 static ICON_BITMAP: Mutex<usize> = Mutex::new(0);
 static ICON_BACKGROUND: Mutex<Option<(i32, i32, Vec<u8>)>> = Mutex::new(None);
 static LAST_HEARTBEAT_MS: AtomicU64 = AtomicU64::new(0);
+/// Rate limit for the hook-side staleness check, which runs on every queued
+/// message instead of on a timer.
+static LAST_STALENESS_CHECK_MS: AtomicU64 = AtomicU64::new(0);
 static OVERLAY_HIDDEN: AtomicBool = AtomicBool::new(false);
 
 const BRIDGE_MESSAGE: &[u16] = &[
@@ -707,9 +707,39 @@ unsafe extern "system" fn overlay_subclass_proc(
 }
 
 /// The Prism observer is considered gone after HEARTBEAT_DEAD_MS without a
-/// ping, or before the first ping ever arrives (last == 0).
+/// ping. Before the first ping (last == 0) staleness does not apply: the
+/// overlay is owned by Prism's observer window, so a dead Prism destroys it
+/// anyway, and hiding on last == 0 would flicker the glyph during the brief
+/// window between overlay creation and the first heartbeat.
 fn heartbeat_stale(last_ms: u64, now_ms: u64) -> bool {
-    last_ms == 0 || now_ms.wrapping_sub(last_ms) > HEARTBEAT_DEAD_MS
+    last_ms != 0 && now_ms.wrapping_sub(last_ms) > HEARTBEAT_DEAD_MS
+}
+
+/// Enforced from the message hook instead of a timer: a recurring timer
+/// callback kept firing into this module after a hard-killed Prism let the
+/// DLL unload mid-callback (Explorer crashed with 0xc0000005 exactly that
+/// way). The hook only runs while the module is loaded, and a paused or hung
+/// Prism keeps Explorer's threads pumping messages, so the overlay hides and
+/// the native button returns.
+fn hide_overlay_if_heartbeat_stale() {
+    let now_ms = GetTickCount64();
+    if now_ms.wrapping_sub(LAST_STALENESS_CHECK_MS.load(Ordering::Relaxed)) < 1_000 {
+        return;
+    }
+    LAST_STALENESS_CHECK_MS.store(now_ms, Ordering::Relaxed);
+    if !heartbeat_stale(LAST_HEARTBEAT_MS.load(Ordering::Acquire), now_ms) {
+        return;
+    }
+    if OVERLAY_HIDDEN.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    let overlay = ICON_WINDOW.lock().map(|slot| *slot).unwrap_or(0);
+    if overlay != 0 {
+        unsafe {
+            let _ = ShowWindow(overlay as Hwnd, SW_HIDE);
+        }
+    }
+    hook_trace("heartbeat-stale overlay hidden");
 }
 
 /// Debug trace to the same temp directory the observer uses.
@@ -1184,6 +1214,7 @@ pub unsafe extern "system" fn PrismShellGetMessageHook(
     lparam: isize,
 ) -> isize {
     if code >= HC_ACTION && wparam != 0 && lparam != 0 {
+        hide_overlay_if_heartbeat_stale();
         let message_id = bridge_message_id();
         let message = &mut *(lparam as *mut Msg);
 
@@ -1384,7 +1415,6 @@ mod tests {
     }
 
     #[test]
-    #[test]
     fn rect_file_parses_exactly_four_little_endian_ints() {
         let mut bytes = Vec::new();
         for value in [784i32, 1032, 829, 1080] {
@@ -1402,8 +1432,10 @@ mod tests {
 
     #[test]
     fn heartbeat_dead_only_after_a_missing_interval() {
-        // No ping ever received: dead immediately.
-        assert!(heartbeat_stale(0, 5_000));
+        // No ping ever received: not stale. The overlay is owned by Prism's
+        // observer window, so a dead Prism destroys it; hiding on last == 0
+        // would only flicker the glyph during startup.
+        assert!(!heartbeat_stale(0, 5_000));
         // Fresh ping: alive.
         assert!(!heartbeat_stale(5_000, 10_000));
         // Past the dead threshold: dead.
@@ -1412,6 +1444,7 @@ mod tests {
         assert!(!heartbeat_stale(u64::MAX - 1_000, 1_000));
     }
 
+    #[test]
     fn shell_start_event_is_distinct() {
         assert_eq!(EVENT_SHELL_START, 23);
         assert_ne!(EVENT_SHELL_START, EVENT_TASKBAR_PIN_COMPLETED);
