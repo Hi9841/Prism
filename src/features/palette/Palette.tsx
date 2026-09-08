@@ -895,8 +895,8 @@ export function Palette() {
       </div>
 
       {/* ------- footer ------- */}
-      <div className="footer-bar flex min-h-12 flex-wrap items-center justify-between gap-x-3 gap-y-1 px-5 py-2.5">
-        <div className="flex items-center gap-1.5 text-[11px] text-fg-quiet">
+      <div className="footer-bar flex h-12 shrink-0 flex-nowrap items-center justify-between gap-x-3 overflow-hidden px-5">
+        <div className="flex shrink-0 items-center gap-1.5 text-[11px] text-fg-quiet">
           <Kbd>↑</Kbd>
           <Kbd>↓</Kbd>
           <span className="px-1">navigate</span>
@@ -907,17 +907,17 @@ export function Palette() {
           <Kbd>esc</Kbd>
           <span className="px-1">dismiss</span>
         </div>
-        <div className="ms-auto flex max-w-full flex-wrap items-center justify-end gap-1.5">
+        <div className="ms-auto flex min-w-0 flex-nowrap items-center justify-end gap-1.5">
           <UpdateControl />
           {!palette.appsLoaded && palette.query === "" && (
-            <span className="flex items-center gap-1.5 text-[11px] text-fg-quiet">
-              <RefreshCw className="h-3 w-3 animate-spin" />
-              indexing apps
+            <span className="flex min-w-0 items-center gap-1.5 text-[11px] text-fg-quiet">
+              <RefreshCw className="h-3 w-3 shrink-0 animate-spin" />
+              <span className="truncate">indexing apps</span>
             </span>
           )}
           {palette.fileIndexing && palette.appsLoaded && (
             <span
-              className="flex items-center gap-1.5 text-[11px] text-fg-quiet"
+              className="flex min-w-0 items-center gap-1.5 text-[11px] text-fg-quiet"
               title={
                 palette.volumes.length > 0
                   ? palette.volumes
@@ -926,8 +926,8 @@ export function Palette() {
                   : "Indexing file catalog..."
               }
             >
-              <RefreshCw className="h-3 w-3 animate-spin" />
-              indexing files
+              <RefreshCw className="h-3 w-3 shrink-0 animate-spin" />
+              <span className="truncate">indexing files</span>
             </span>
           )}
           {palette.appsError && palette.query === "" && (
