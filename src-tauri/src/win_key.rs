@@ -348,6 +348,11 @@ static SHELL_BRIDGE_ACTIVE: AtomicBool = AtomicBool::new(false);
 static BRIDGE_MESSAGE_ID: OnceLock<Result<u32, String>> = OnceLock::new();
 static SHELL_START_RECT_ACK: AtomicU32 = AtomicU32::new(0);
 static SHELL_SEARCH_RECT_ACK: AtomicU32 = AtomicU32::new(0);
+/// Mirror of the Start button rectangle that is actually posted to Explorer.
+/// The outside-pointer dismissal consults it so clicks on Prism's own
+/// taskbar buttons are never dismissed by the palette's outside-click path.
+static CURRENT_START_RECT: Mutex<Option<RECT>> = Mutex::new(None);
+static CURRENT_SEARCH_RECT: Mutex<Option<RECT>> = Mutex::new(None);
 static SHELL_START_CLICK_X: AtomicI32 = AtomicI32::new(0);
 static SHELL_TASKBAR_THREAD: AtomicU32 = AtomicU32::new(0);
 static SHELL_ICON_SHUTDOWN_ACK: AtomicU32 = AtomicU32::new(0);
@@ -367,6 +372,7 @@ static LAST_OBSERVED_KEY: Mutex<Option<(KeyKind, bool, Instant)>> = Mutex::new(N
 /// refreshes the Start rect immediately instead of up to 5 seconds later.
 static START_RECT_REFRESH_REQUEST: AtomicBool = AtomicBool::new(false);
 
+#[derive(Clone, Copy, Debug)]
 enum Action {
     ToggleWin(WinSide),
     ToggleTaskbar(POINT),
@@ -1091,6 +1097,7 @@ unsafe fn run_pump(ready: HookReady) {
                         break 'pump;
                     }
                     let start_rect = shell_bridge.as_ref().and_then(ShellBridge::start_rect);
+                    debug_trace(&format!("execute-action {:?}", action));
                     match action {
                         Action::ToggleWin(_side) => {
                             if let Some(app) = APP.get() {
@@ -1457,11 +1464,17 @@ impl ShellBridge {
         };
 
         if let Some(rect) = self.start_button_locator.rect() {
+            debug_trace(&format!(
+                "start-rect-located ({} {} {} {})",
+                rect.left, rect.top, rect.right, rect.bottom
+            ));
             if !same_rect(rect, self.start_rect)
                 && post_start_button_rect(self.taskbar_thread, message, rect).is_ok()
             {
                 self.start_rect = rect;
             }
+        } else {
+            debug_trace("start-rect-locator-empty");
         }
 
         let search_rect = self.search_button_locator.rect();
@@ -1526,7 +1539,7 @@ impl StartButtonLocator {
 
 unsafe fn create_automation_start_button(
     taskbar_window: HWND,
-    taskbar_process_id: u32,
+    _taskbar_process_id: u32,
 ) -> Result<AutomationStartButton, String> {
     let uia: IUIAutomation = CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER)
         .map_err(|error| format!("create UI Automation client: {error}"))?;
@@ -1537,16 +1550,13 @@ unsafe fn create_automation_start_button(
     let automation_id_condition = uia
         .CreatePropertyCondition(UIA_AutomationIdPropertyId, &automation_id)
         .map_err(|error| format!("match StartButton AutomationId: {error}"))?;
-    let process_id: VARIANT = (taskbar_process_id as i32).into();
-    let process_condition = uia
-        .CreatePropertyCondition(UIA_ProcessIdPropertyId, &process_id)
-        .map_err(|error| format!("match Explorer process: {error}"))?;
-    let condition = uia
-        .CreateAndCondition(&automation_id_condition, &process_condition)
-        .map_err(|error| format!("combine StartButton identity conditions: {error}"))?;
+    // The Windows 11 Start button is hosted in a separate XAML island
+    // process (ShellExperienceHost, not Explorer.exe). Filtering by the
+    // taskbar's process id makes the query fail on 11, so the identity is
+    // scoped by the taskbar subtree plus this AutomationId only.
     Ok(AutomationStartButton {
         taskbar,
-        condition,
+        condition: automation_id_condition,
         cached: None,
     })
 }
@@ -1601,7 +1611,27 @@ fn same_rect(left: RECT, right: RECT) -> bool {
         && left.bottom == right.bottom
 }
 
+/// True when the point is inside Prism's own taskbar buttons (Start capture
+/// rect or Search button). The shell hook owns clicks there and toggles the
+/// palette; the outside-pointer dismissal must leave them alone.
+pub fn point_on_taskbar_buttons(point: POINT) -> bool {
+    fn inside(rect: Option<RECT>, point: POINT) -> bool {
+        rect.is_some_and(|rect| {
+            point.x >= rect.left
+                && point.x < rect.right
+                && point.y >= rect.top
+                && point.y < rect.bottom
+        })
+    }
+    let start = CURRENT_START_RECT.lock().ok().and_then(|rect| *rect);
+    let search = CURRENT_SEARCH_RECT.lock().ok().and_then(|rect| *rect);
+    inside(start, point) || inside(search, point)
+}
+
 fn post_start_button_rect(thread: u32, message: u32, rect: RECT) -> Result<(), String> {
+    if let Ok(mut current) = CURRENT_START_RECT.lock() {
+        *current = Some(rect);
+    }
     for (control, coordinate) in [
         (SHELL_CONTROL_START_RECT_LEFT, rect.left),
         (SHELL_CONTROL_START_RECT_TOP, rect.top),
@@ -1622,6 +1652,9 @@ fn post_start_button_rect(thread: u32, message: u32, rect: RECT) -> Result<(), S
 }
 
 fn post_search_button_rect(thread: u32, message: u32, rect: Option<RECT>) -> Result<(), String> {
+    if let Ok(mut current) = CURRENT_SEARCH_RECT.lock() {
+        *current = rect;
+    }
     let rect = rect.unwrap_or_default();
     for (control, coordinate) in [
         (SHELL_CONTROL_SEARCH_RECT_LEFT, rect.left),
@@ -1747,16 +1780,12 @@ unsafe fn create_automation_search_button(
         .CreateOrCondition(&id_or4, &cond_taskbar_search)
         .map_err(|error| format!("combine Search conditions: {error}"))?;
 
-    let process_id: VARIANT = (taskbar_process_id as i32).into();
-    let process_condition = uia
-        .CreatePropertyCondition(UIA_ProcessIdPropertyId, &process_id)
-        .map_err(|error| format!("match Explorer process: {error}"))?;
-    let condition = uia
-        .CreateAndCondition(&id_condition, &process_condition)
-        .map_err(|error| format!("combine SearchButton identity conditions: {error}"))?;
+    let _process_id: VARIANT = (taskbar_process_id as i32).into();
+    // The Win11 search button is also XAML-island hosted (not Explorer.exe);
+    // see the Start button locator for why the process filter is omitted.
     Ok(AutomationSearchButton {
         taskbar,
-        condition,
+        condition: id_condition,
         cached: None,
     })
 }
@@ -2400,6 +2429,7 @@ unsafe extern "system" fn raw_input_window_proc(
     if shell_bridge_message().is_ok_and(|bridge_message| message == bridge_message) {
         match wparam.0 {
             SHELL_EVENT_START_RECT_CONFIGURED => {
+                debug_trace(&format!("start-rect-ack {}", lparam.0));
                 SHELL_START_RECT_ACK.store(if lparam.0 != 0 { 2 } else { 1 }, Ordering::Release);
             }
             SHELL_EVENT_SEARCH_RECT_CONFIGURED => {
@@ -2421,6 +2451,7 @@ unsafe extern "system" fn raw_input_window_proc(
                 arm_shell_start_fallback();
             }
             SHELL_EVENT_TASKBAR_START_CLICK_X => {
+                debug_trace(&format!("start-click-x {}", lparam.0));
                 SHELL_START_CLICK_X.store(lparam.0 as i32, Ordering::Release);
             }
             SHELL_EVENT_TASKBAR_START_CLICK_Y
@@ -2428,10 +2459,11 @@ unsafe extern "system" fn raw_input_window_proc(
                     && RAW_OBSERVER_ACTIVE.load(Ordering::Acquire)
                     && SHELL_BRIDGE_ACTIVE.load(Ordering::Acquire) =>
             {
-                queue_action(Action::ToggleTaskbar(POINT {
+                let queued = queue_action(Action::ToggleTaskbar(POINT {
                     x: SHELL_START_CLICK_X.load(Ordering::Acquire),
                     y: lparam.0 as i32,
                 }));
+                debug_trace(&format!("start-click-queued {queued}"));
             }
             _ => {}
         }
