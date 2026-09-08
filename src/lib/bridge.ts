@@ -9,7 +9,7 @@ import type { AppEntry, FileSearchResponse, PersistedState, QuickAccessEntry } f
 export type PowerAction = "lock" | "sleep" | "shutdown" | "restart";
 export type TaskbarThickness = "compact" | "default" | "adaptive";
 export type TaskbarCombineMode = "always" | "whenFull" | "never";
-export type TaskbarStartIcon = "system" | "gem" | "diamond" | "custom";
+export type TaskbarStartIcon = "prism" | "system" | "gem" | "diamond" | "custom";
 
 interface CustomStartIcon {
   id: string;
@@ -290,7 +290,7 @@ export async function getTaskbarSettings(): Promise<TaskbarSettings> {
       thickness: "default",
       autoHide: false,
       combineButtons: "always",
-      startIcon: "system",
+      startIcon: "prism",
       selectedCustomIcon: null,
       customStartIcons: [],
     };

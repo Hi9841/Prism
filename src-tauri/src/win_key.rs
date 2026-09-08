@@ -106,6 +106,9 @@ const SHELL_CONTROL_TASKBAR_PIN: usize = 20;
 const SHELL_CONTROL_TASKBAR_UNPIN: usize = 21;
 const SHELL_EVENT_TASKBAR_PIN_COMPLETED: usize = 22;
 const SHELL_EVENT_SHELL_START: usize = 23;
+/// Regular ping so the shell hook can distinguish a live Prism from a dead
+/// one. If the pings stop, the overlay hides and the native Start returns.
+const SHELL_CONTROL_HEARTBEAT: usize = 24;
 
 /// Event the frontend receives when Win observation self-disables.
 pub const FAILED_EVENT: &str = "win-mode-failed";
@@ -1083,6 +1086,16 @@ unsafe fn run_pump(ready: HookReady) {
             // Explorer keeps all registered hotkeys intact.
             bridge.try_attach_app_manager();
             bridge.refresh_start_rect();
+            // Heartbeat: proves Prism is alive so the overlay button never
+            // survives a dead Prism (see shell-hook CONTROL_HEARTBEAT).
+            if let Ok(message) = shell_bridge_message() {
+                let _ = PostThreadMessageW(
+                    bridge.taskbar_thread,
+                    message,
+                    WPARAM(SHELL_CONTROL_HEARTBEAT),
+                    LPARAM(0),
+                );
+            }
         }
         if let Ok(mut rx_slot) = ACTION_RX.lock() {
             if let Some(rx) = rx_slot.as_mut() {
@@ -1895,25 +1908,17 @@ fn wait_for_ack(acknowledgement: &AtomicU32, timeout: Duration) -> u32 {
 }
 
 fn write_shell_hook_library() -> Result<PathBuf, String> {
+    // NOTE: stale DLLs are intentionally NOT removed here. A killed Prism
+    // leaves its hooks installed in Explorer, and the DLL stays mapped while
+    // those hooks fire. Deleting the file lets Windows lazily unload it the
+    // moment the last reference closes, and any hook callback still in flight
+    // then executes in an unmapped module: Explorer crashes (0xc0000005 in
+    // prism-shell-hook-*.dll, observed repeatedly). Unique nonce-named files
+    // in the temp shell-hooks directory are harmless; they self-clean on
+    // normal exits of the instance that owns them.
     let directory = std::env::temp_dir().join("Prism").join("shell-hooks");
     std::fs::create_dir_all(&directory)
         .map_err(|error| format!("create Explorer bridge directory: {error}"))?;
-    if let Ok(entries) = std::fs::read_dir(&directory) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            let is_stale_hook =
-                path.file_name()
-                    .and_then(|name| name.to_str())
-                    .is_some_and(|name| {
-                        name.starts_with("prism-shell-hook-") && name.ends_with(".dll")
-                    });
-            if is_stale_hook {
-                // Loaded DLLs remain locked on Windows, so this removes only
-                // debris from already-terminated Prism instances.
-                let _ = std::fs::remove_file(path);
-            }
-        }
-    }
     let nonce = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
