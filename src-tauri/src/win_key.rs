@@ -54,13 +54,13 @@ use windows::Win32::UI::WindowsAndMessaging::{
     EnumChildWindows, FindWindowW, GetClassNameW, GetShellWindow, GetWindowRect,
     GetWindowThreadProcessId, IsWindowVisible, MsgWaitForMultipleObjectsEx, PeekMessageW,
     PostThreadMessageW, RegisterClassW, RegisterWindowMessageW, SetWindowsHookExW,
-    TranslateMessage, UnhookWindowsHookEx, HHOOK, HWND_MESSAGE, MSG, MSGFLT_ALLOW, PM_REMOVE,
-    QS_ALLINPUT, RI_KEY_BREAK, WH_GETMESSAGE, WH_MOUSE, WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP,
-    WM_INPUT, WM_KEYDOWN, WM_KEYUP, WM_SYSKEYDOWN, WM_SYSKEYUP, WNDCLASSW,
+    TranslateMessage, UnhookWindowsHookEx, HHOOK, MSG, MSGFLT_ALLOW, PM_REMOVE, QS_ALLINPUT,
+    RI_KEY_BREAK, WH_GETMESSAGE, WH_MOUSE, WM_APP, WM_INPUT, WM_KEYDOWN, WM_KEYUP, WM_SYSKEYDOWN,
+    WM_SYSKEYUP, WNDCLASSW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_POPUP,
 };
 
 const ACTION_MESSAGE: u32 = WM_APP + 1;
-const TOGGLE_DEBOUNCE_MS: u64 = 50;
+const TOGGLE_DEBOUNCE_MS: u64 = 80;
 const WIN_TOGGLE_RELEASE_GRACE: Duration = Duration::from_millis(30);
 /// The Start button rect only needs refreshing occasionally; the UIA query is
 /// expensive and runs on Explorer's side.
@@ -87,6 +87,17 @@ const SHELL_EVENT_SEARCH_RECT_CONFIGURED: usize = 19;
 const SHELL_CONTROL_TASKBAR_PIN: usize = 20;
 const SHELL_CONTROL_TASKBAR_UNPIN: usize = 21;
 const SHELL_EVENT_TASKBAR_PIN_COMPLETED: usize = 22;
+const SHELL_CONTROL_FOREGROUND_WINDOW: usize = 23;
+const SHELL_EVENT_FOREGROUND_RESULT: usize = 24;
+const SHELL_EVENT_SHELL_START_COMMAND: usize = 25;
+/// A shell Start command toggles immediately. The normal case is already
+/// de-duplicated: a raw Win-down sets `LAST_RAW_TOGGLE_MS` ~100 ms before the
+/// Win-up shell command, and a late raw toggle is dropped by the debounce.
+const SHELL_START_FALLBACK_GRACE: Duration = Duration::ZERO;
+/// If the raw observer saw a Win/Ctrl+Esc this recently, a shell Start command
+/// belongs to the same press and is ignored. Kept just above the physical
+/// press duration so a later, separate press is never suppressed.
+const SHELL_START_DEDUPE_MS: u64 = 250;
 
 /// Event the frontend receives when Win observation self-disables.
 pub const FAILED_EVENT: &str = "win-mode-failed";
@@ -334,6 +345,9 @@ static SHELL_START_CLICK_X: AtomicI32 = AtomicI32::new(0);
 static SHELL_TASKBAR_THREAD: AtomicU32 = AtomicU32::new(0);
 static SHELL_ICON_SHUTDOWN_ACK: AtomicU32 = AtomicU32::new(0);
 static SHELL_TASKBAR_PIN_ACK: AtomicU32 = AtomicU32::new(0);
+static SHELL_FOREGROUND_ACK: AtomicU32 = AtomicU32::new(0);
+static LAST_RAW_TOGGLE_MS: AtomicU64 = AtomicU64::new(0);
+static SHELL_START_FALLBACK: Mutex<ShellStartFallback> = Mutex::new(ShellStartFallback::EMPTY);
 static SHELL_TASKBAR_PIN_REQUEST: Mutex<()> = Mutex::new(());
 static LAST_TOGGLE_MS: AtomicU64 = AtomicU64::new(0);
 static TOGGLE_CLOCK: OnceLock<Instant> = OnceLock::new();
@@ -525,6 +539,34 @@ pub(crate) fn shell_bridge_taskbar_pin(path: &Path, pinned: bool) -> Result<(), 
     outcome
 }
 
+/// Asks the injected Explorer bridge to hand Prism the foreground. Explorer is
+/// the shell that handled the Win key, so it may still hold activation
+/// permission that a medium-integrity Prism process cannot claim directly.
+/// This is the closest cheap analogue to Open-Shell hosting its Start menu as
+/// an Explorer-owned window.
+pub(crate) fn request_foreground(hwnd: isize) -> bool {
+    if !SHELL_BRIDGE_ACTIVE.load(Ordering::Acquire) || hwnd == 0 {
+        return false;
+    }
+    let Ok(message) = shell_bridge_message() else {
+        return false;
+    };
+    let taskbar_thread = SHELL_TASKBAR_THREAD.load(Ordering::Acquire);
+    if taskbar_thread == 0 {
+        return false;
+    }
+    SHELL_FOREGROUND_ACK.store(0, Ordering::Release);
+    unsafe {
+        PostThreadMessageW(
+            taskbar_thread,
+            message,
+            WPARAM(SHELL_CONTROL_FOREGROUND_WINDOW),
+            LPARAM(hwnd),
+        )
+        .is_ok()
+    }
+}
+
 /// Asks the observation pump to re-query the Start button rectangle now.
 /// Taskbar moves (alignment repair, density changes) should reposition the
 /// glyph overlay immediately rather than on the next interval tick.
@@ -666,6 +708,7 @@ unsafe fn run_pump(ready: HookReady) {
             let _ = DispatchMessageW(&msg);
         }
         flush_pending_win_toggle();
+        flush_shell_start_fallback();
         // Drain native actions outside the callback.
         if let Ok(mut rx_slot) = ACTION_RX.lock() {
             if let Some(rx) = rx_slot.as_mut() {
@@ -675,6 +718,7 @@ unsafe fn run_pump(ready: HookReady) {
                     }
                     match action {
                         Action::ToggleWin(_side) => {
+                            debug_trace("action-toggle-win");
                             if let Some(app) = APP.get() {
                                 let toggle_app = app.clone();
                                 let start_rect = shell_bridge.start_rect();
@@ -705,6 +749,9 @@ unsafe fn run_pump(ready: HookReady) {
         // interval; input already wakes the loop through the message queue.
         // A long timeout removes a permanent 1 Hz wakeup from the hot path.
         let wait = pending_win_toggle_wait()
+            .into_iter()
+            .chain(shell_start_fallback_wait())
+            .min()
             .unwrap_or(START_RECT_REFRESH_INTERVAL)
             .min(START_RECT_REFRESH_INTERVAL);
         let _ = MsgWaitForMultipleObjectsEx(
@@ -738,18 +785,21 @@ unsafe fn run_pump(ready: HookReady) {
 
 /// Safe recovery path: stop observing and tell the frontend so the user can react.
 #[cfg(debug_assertions)]
-fn debug_trace(message: &str) {
+pub(crate) fn debug_trace(message: &str) {
     if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(
         std::env::temp_dir()
             .join("Prism")
             .join("semantic-debug.log"),
     ) {
-        let _ = writeln!(file, "{message}");
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default();
+        let _ = writeln!(file, "{} {message}", now.as_millis());
     }
 }
 
 #[cfg(not(debug_assertions))]
-fn debug_trace(_message: &str) {}
+pub(crate) fn debug_trace(_message: &str) {}
 
 fn disable_observation(reason: &str) {
     debug_trace(&format!("observation-disabled {reason}"));
@@ -1625,16 +1675,20 @@ unsafe fn create_raw_input_window() -> Result<HWND, String> {
     let module = GetModuleHandleW(None).map_err(|error| format!("get Prism module: {error}"))?;
     let instance = HINSTANCE(module.0);
     let class_name = wide(RAW_INPUT_WINDOW_CLASS);
+    // Message-only windows stop receiving keyboard INPUTSINK reports while an
+    // elevated app (for example Task Manager) holds focus, so the Win key never
+    // reaches Prism until focus leaves that window. A hidden top-level tool
+    // window keeps receiving background keyboard reports.
     let window = CreateWindowExW(
-        WINDOW_EX_STYLE::default(),
+        WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
         PCWSTR(class_name.as_ptr()),
         PCWSTR::null(),
-        WINDOW_STYLE::default(),
+        WS_POPUP,
         0,
         0,
         0,
         0,
-        Some(HWND_MESSAGE),
+        None,
         None,
         Some(instance),
         None,
@@ -1712,12 +1766,114 @@ fn cancel_pending_win_toggle() {
     if let Ok(mut pending) = PENDING_WIN_TOGGLE.lock() {
         pending.cancel();
     }
+    cancel_shell_start_fallback();
 }
 
 fn schedule_win_toggle(side: WinSide, blocked_keys: [bool; 256]) {
     if let Ok(mut pending) = PENDING_WIN_TOGGLE.lock() {
         pending.arm(side, blocked_keys, Instant::now());
     }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct ShellStartFallback {
+    armed: bool,
+    deadline: Option<Instant>,
+}
+
+impl ShellStartFallback {
+    const EMPTY: Self = Self {
+        armed: false,
+        deadline: None,
+    };
+
+    fn arm(&mut self, now: Instant) {
+        self.armed = true;
+        self.deadline = Some(now + SHELL_START_FALLBACK_GRACE);
+    }
+
+    fn cancel(&mut self) {
+        self.armed = false;
+        self.deadline = None;
+    }
+
+    fn take_if_ready(&mut self, now: Instant) -> bool {
+        if !self.armed {
+            return false;
+        }
+        match self.deadline {
+            Some(deadline) if now >= deadline => {
+                self.armed = false;
+                self.deadline = None;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    fn wait_duration(&self, now: Instant) -> Option<Duration> {
+        if !self.armed {
+            return None;
+        }
+        self.deadline
+            .map(|deadline| deadline.saturating_duration_since(now))
+    }
+}
+
+/// Explorer saw a bare Win / Ctrl+Esc (`SC_TASKLIST`) but the raw observer may
+/// also report it. Arm a short fallback; a raw event cancels it. This is how
+/// Open-Shell/StartAllBack-style launchers work: the shell command is the
+/// signal, so an elevated foreground cannot block it.
+fn note_shell_start_command() {
+    if !ACTIVE.load(Ordering::Acquire)
+        || !RAW_OBSERVER_ACTIVE.load(Ordering::Acquire)
+        || !SHELL_BRIDGE_ACTIVE.load(Ordering::Acquire)
+    {
+        return;
+    }
+    let now = toggle_clock_ms();
+    // Consume the marker: one raw press may suppress exactly one shell command.
+    // Leaving it set let a later, separate Win press that only reached the shell
+    // be dropped as if it were the earlier raw press.
+    let last_raw = LAST_RAW_TOGGLE_MS.swap(0, Ordering::AcqRel);
+    if last_raw != 0 && now.saturating_sub(last_raw) < SHELL_START_DEDUPE_MS {
+        debug_trace("shell-start-skipped (raw recent)");
+        return;
+    }
+    debug_trace("shell-start-armed");
+    SHELL_START_FALLBACK
+        .lock()
+        .map(|mut pending| pending.arm(Instant::now()))
+        .ok();
+}
+
+fn cancel_shell_start_fallback() {
+    SHELL_START_FALLBACK
+        .lock()
+        .map(|mut pending| pending.cancel())
+        .ok();
+}
+
+fn flush_shell_start_fallback() {
+    let ready = SHELL_START_FALLBACK
+        .lock()
+        .ok()
+        .is_some_and(|mut pending| pending.take_if_ready(Instant::now()));
+    if ready
+        && ACTIVE.load(Ordering::Acquire)
+        && RAW_OBSERVER_ACTIVE.load(Ordering::Acquire)
+        && SHELL_BRIDGE_ACTIVE.load(Ordering::Acquire)
+    {
+        debug_trace("shell-start-fallback-toggle");
+        queue_action(Action::ToggleWin(WinSide::Left));
+    }
+}
+
+fn shell_start_fallback_wait() -> Option<Duration> {
+    SHELL_START_FALLBACK
+        .lock()
+        .ok()
+        .and_then(|pending| pending.wait_duration(Instant::now()))
 }
 
 fn flush_pending_win_toggle() {
@@ -1732,6 +1888,7 @@ fn flush_pending_win_toggle() {
                 && SHELL_BRIDGE_ACTIVE.load(Ordering::Acquire)
             {
                 queue_action(Action::ToggleWin(side));
+                debug_trace("pending-toggle-queued");
             }
         }
     }
@@ -1800,6 +1957,12 @@ unsafe extern "system" fn raw_input_window_proc(
             SHELL_EVENT_TASKBAR_PIN_COMPLETED => {
                 SHELL_TASKBAR_PIN_ACK.store(if lparam.0 != 0 { 2 } else { 1 }, Ordering::Release);
             }
+            SHELL_EVENT_FOREGROUND_RESULT => {
+                SHELL_FOREGROUND_ACK.store(if lparam.0 != 0 { 2 } else { 1 }, Ordering::Release);
+            }
+            SHELL_EVENT_SHELL_START_COMMAND => {
+                note_shell_start_command();
+            }
             SHELL_EVENT_TASKBAR_START_CLICK_X => {
                 SHELL_START_CLICK_X.store(lparam.0 as i32, Ordering::Release);
             }
@@ -1847,6 +2010,11 @@ unsafe extern "system" fn raw_input_window_proc(
                     .lock()
                     .map(|mut machine| machine.feed(kind, is_down))
                     .unwrap_or(Decision::Pass);
+                if matches!(kind, KeyKind::Win(_)) || matches!(decision, Decision::Toggle(_)) {
+                    debug_trace(&format!("raw-key {kind:?} down={is_down} -> {decision:?}"));
+                    LAST_RAW_TOGGLE_MS.store(toggle_clock_ms(), Ordering::Release);
+                    cancel_shell_start_fallback();
+                }
                 match decision {
                     Decision::Toggle(side) if should_defer_toggle(kind) => {
                         schedule_win_toggle(side, non_win_keys_down());
@@ -2541,5 +2709,25 @@ mod tests {
     fn m_feed_single(kind: KeyKind, is_down: bool) -> Decision {
         let mut m = WinKeyMachine::default();
         m.feed(kind, is_down)
+    }
+
+    #[test]
+    fn shell_start_fallback_fires_once() {
+        let now = Instant::now();
+        let mut pending = ShellStartFallback::EMPTY;
+        pending.arm(now);
+        assert!(pending.take_if_ready(now + SHELL_START_FALLBACK_GRACE));
+        // Fires once; a second flush is a no-op.
+        assert!(!pending.take_if_ready(now + SHELL_START_FALLBACK_GRACE));
+    }
+
+    #[test]
+    fn shell_start_fallback_is_cancelled_by_a_raw_event() {
+        let now = Instant::now();
+        let mut pending = ShellStartFallback::EMPTY;
+        pending.arm(now);
+        pending.cancel();
+        assert!(!pending.take_if_ready(now + SHELL_START_FALLBACK_GRACE));
+        assert!(pending.wait_duration(now).is_none());
     }
 }

@@ -78,6 +78,11 @@ export function setAlwaysOnTop(on: boolean): Promise<void> {
   return getCurrentWindow().setAlwaysOnTop(on);
 }
 
+export function setOsdAccent(accent: string): Promise<void> {
+  if (!inTauri) return Promise.resolve();
+  return invoke("set_osd_accent", { accent });
+}
+
 export function setViewZoom(percent: number): Promise<void> {
   const scaleFactor = percent / 100;
   if (!inTauri) {
