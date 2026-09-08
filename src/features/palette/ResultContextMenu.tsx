@@ -32,6 +32,8 @@ export function ResultContextMenu({
   onRunAsAdmin,
   onToggleTaskbarPin,
   onShowProperties,
+  onToggleAppPin,
+  appPinned,
   onClose,
 }: {
   item: PaletteItem;
@@ -40,6 +42,9 @@ export function ResultContextMenu({
   onRunAsAdmin?: () => void;
   onToggleTaskbarPin?: (wasPinned: boolean) => void;
   onShowProperties?: () => void;
+  /** Pins/unpins the app on Prism's own pinned list (start-menu view). */
+  onToggleAppPin?: () => void;
+  appPinned?: boolean;
   onClose: (restoreFocus: boolean) => void;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -185,6 +190,21 @@ export function ResultContextMenu({
           >
             <ShieldCheck className="h-4 w-4 text-accent" aria-hidden="true" />
             <span>Run as administrator</span>
+          </button>
+        )}
+        {onToggleAppPin && (
+          <button
+            type="button"
+            role="menuitem"
+            onClick={onToggleAppPin}
+            className="focus-ring press flex h-9 w-full cursor-pointer items-center gap-2 rounded-[4px] px-2.5 text-left text-[12.5px] font-medium text-fg-secondary hover:bg-surface-hover hover:text-fg"
+          >
+            {appPinned ? (
+              <PinOff className="h-4 w-4 text-accent" aria-hidden="true" />
+            ) : (
+              <Pin className="h-4 w-4 text-accent" aria-hidden="true" />
+            )}
+            <span>{appPinned ? "Unpin" : "Pin"}</span>
           </button>
         )}
         {hasTaskbarPin && pinnedToTaskbar !== null && (

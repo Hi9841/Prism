@@ -613,6 +613,7 @@ export function sanitizeSettings(raw: unknown): Settings {
     pinnedApps: sanitizePinnedApps(src.pinnedApps),
     appGroups: sanitizeAppGroups(src.appGroups),
     sectionOrder: sanitizeSectionOrder(src.sectionOrder),
+    startView: pick(src.startView, ["palette", "menu"], DEFAULT_SETTINGS.startView),
   };
 }
 

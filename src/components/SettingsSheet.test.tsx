@@ -30,6 +30,8 @@ function renderSettings(options?: { retryPersistence?: () => Promise<void>; quit
     sections: [],
     flatItems: [],
     apps: [],
+    quickItems: [],
+    appIcons: {},
     selected: 0,
     move: vi.fn(),
     select: vi.fn(),

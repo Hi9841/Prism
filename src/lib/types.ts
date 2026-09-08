@@ -235,6 +235,8 @@ export type AccentId = "iris" | "azure" | "mint" | "amber" | "rose";
 export type WindowWidth = 560 | 640 | 720;
 export type ThemeMode = "system" | "dark" | "light";
 export type TaskbarAlignment = "left" | "center" | "right";
+/** Idle (empty-query) presentation: classic results palette or start-menu view. */
+export type StartView = "palette" | "menu";
 export const VIEW_ZOOM_LEVELS = [70, 80, 90, 100, 110, 120, 130, 140, 150] as const;
 type ViewZoom = (typeof VIEW_ZOOM_LEVELS)[number];
 
@@ -258,6 +260,7 @@ export interface Settings {
   pinnedApps: string[];
   appGroups: AppGroup[];
   sectionOrder: string[];
+  startView: StartView;
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -274,6 +277,7 @@ export const DEFAULT_SETTINGS: Settings = {
   pinnedApps: [],
   appGroups: [],
   sectionOrder: [...DEFAULT_SECTION_ORDER],
+  startView: "palette",
 };
 
 export interface PersistedState {
