@@ -167,6 +167,15 @@ describe("Palette keyboard and accessibility behavior", () => {
     expect(index.rebuildIndex).toHaveBeenCalledOnce();
   });
 
+  it("does not clip the footer popup that opens above the bar", () => {
+    const { container } = renderPalette();
+    const footer = container.querySelector(".footer-bar");
+    expect(footer).toBeTruthy();
+    // The power menu is absolutely positioned above the footer; any overflow
+    // clipping on the bar makes it invisible (regression from the fixed-height fix).
+    expect(footer?.className).not.toContain("overflow-hidden");
+  });
+
   it("keeps file-search recovery visible when app matches remain", () => {
     const { rebuildIndex } = renderPalette({
       fileError: { kind: "indexQuery", message: "query failed" },

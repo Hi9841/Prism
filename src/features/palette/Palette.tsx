@@ -895,7 +895,10 @@ export function Palette() {
       </div>
 
       {/* ------- footer ------- */}
-      <div className="footer-bar flex h-12 shrink-0 flex-nowrap items-center justify-between gap-x-3 overflow-hidden px-5">
+      {/* No overflow clipping on the bar itself: the power menu opens upward
+          out of the footer and would be clipped away. Height is fixed by h-12
+          + shrink-0 + flex-nowrap, so nothing needs to be hidden. */}
+      <div className="footer-bar flex h-12 shrink-0 flex-nowrap items-center justify-between gap-x-3 px-5">
         <div className="flex shrink-0 items-center gap-1.5 text-[11px] text-fg-quiet">
           <Kbd>↑</Kbd>
           <Kbd>↓</Kbd>
