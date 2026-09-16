@@ -7,7 +7,7 @@
 //! user only sees Prism. Windows this module hid are shown again when Win
 //! observation is turned off.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -32,6 +32,7 @@ const HOST_PROCESSES: &[&str] = &[
 ];
 
 static ENABLED: AtomicBool = AtomicBool::new(false);
+static GENERATION: AtomicU64 = AtomicU64::new(0);
 static THREAD_STARTED: AtomicBool = AtomicBool::new(false);
 static HIDDEN: Mutex<Vec<isize>> = Mutex::new(Vec::new());
 
@@ -45,6 +46,7 @@ pub fn init() {
 pub fn set_enabled(on: bool) {
     ENABLED.store(on, Ordering::Release);
     if !on {
+        GENERATION.fetch_add(1, Ordering::AcqRel);
         restore_hidden();
     }
 }
@@ -106,12 +108,24 @@ fn remember_hidden(window: HWND) {
 unsafe extern "system" fn enum_hide_launcher(window: HWND, _detail: LPARAM) -> BOOL {
     if let Some((class, process)) = window_identity(window) {
         if is_native_launcher(&class, &process) && unsafe { IsWindowVisible(window) }.as_bool() {
-            let _ = unsafe { ShowWindow(window, SW_HIDE) };
-            remember_hidden(window);
-            crate::win_key::debug_trace(&format!("launcher-watch hid {class} ({process})"));
+            hide_or_rollback(window, &class, &process);
         }
     }
     BOOL(1)
+}
+
+fn hide_or_rollback(window: HWND, class: &str, process: &str) {
+    let generation = GENERATION.load(Ordering::Acquire);
+    if !ENABLED.load(Ordering::Acquire) {
+        return;
+    }
+    let _ = unsafe { ShowWindow(window, SW_HIDE) };
+    if ENABLED.load(Ordering::Acquire) && GENERATION.load(Ordering::Acquire) == generation {
+        remember_hidden(window);
+        crate::win_key::debug_trace(&format!("launcher-watch hid {class} ({process})"));
+        return;
+    }
+    let _ = unsafe { ShowWindow(window, SW_SHOWNOACTIVATE) };
 }
 
 fn window_identity(window: HWND) -> Option<(String, String)> {
