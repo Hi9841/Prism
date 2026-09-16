@@ -2096,6 +2096,34 @@ fn sync_async_win(machine: &mut WinKeyMachine) {
     }
 }
 
+fn sync_async_key(machine: &mut WinKeyMachine, vk: u16) {
+    let down = async_key_down(vk);
+    let held = machine
+        .non_win_down
+        .get(vk as usize)
+        .copied()
+        .unwrap_or(false);
+    if down != held {
+        let _ = machine.feed(KeyKind::Other(vk), down);
+    }
+}
+
+fn sync_async_modifiers(machine: &mut WinKeyMachine) {
+    for vk in [
+        VK_SHIFT.0,
+        VK_LSHIFT.0,
+        VK_RSHIFT.0,
+        VK_CONTROL.0,
+        VK_LCONTROL.0,
+        VK_RCONTROL.0,
+        VK_MENU.0,
+        VK_LMENU.0,
+        VK_RMENU.0,
+    ] {
+        sync_async_key(machine, vk);
+    }
+}
+
 unsafe extern "system" fn ll_keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     if code < 0 || !ACTIVE.load(Ordering::Acquire) || !RAW_OBSERVER_ACTIVE.load(Ordering::Acquire) {
         return CallNextHookEx(None, code, wparam, lparam);
@@ -2119,6 +2147,7 @@ unsafe extern "system" fn ll_keyboard_proc(code: i32, wparam: WPARAM, lparam: LP
         Ok(mut machine) => {
             if is_down {
                 sync_async_win(&mut machine);
+                sync_async_modifiers(&mut machine);
             }
             machine.route(KeyKind::Other(vk), is_down)
         }
@@ -2995,6 +3024,19 @@ mod tests {
             .filter(|decision| matches!(decision, Decision::Toggle(_)))
             .count();
         assert_eq!(toggles, 1);
+    }
+
+    #[test]
+    fn e2e_late_shift_before_s_does_not_claim_search() {
+        let mut machine = WinKeyMachine::default();
+        assert_eq!(machine.feed(win(WinSide::Left), true), Decision::Mask);
+        assert_eq!(
+            machine.feed(KeyKind::Other(VK_SHIFT_CODE), true),
+            Decision::Pass
+        );
+        let routed = machine.route(KeyKind::Other(VK_S_CODE), true);
+        assert_eq!(routed.decision, Decision::Pass);
+        assert!(!routed.eat);
     }
 
     #[test]
