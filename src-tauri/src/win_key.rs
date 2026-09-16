@@ -2087,13 +2087,30 @@ fn async_key_down(vk: u16) -> bool {
     unsafe { GetAsyncKeyState(i32::from(vk)) as u16 & 0x8000 != 0 }
 }
 
-fn sync_async_win(machine: &mut WinKeyMachine) {
-    if async_key_down(VK_LWIN.0) && !machine.left.down {
+fn reconcile_held_win(machine: &mut WinKeyMachine, left: bool, right: bool) -> Decision {
+    let mut decision = Decision::Pass;
+    if left && !machine.left.down {
         let _ = machine.feed(KeyKind::Win(WinSide::Left), true);
+    } else if !left && machine.left.down {
+        decision = machine.feed(KeyKind::Win(WinSide::Left), false);
     }
-    if async_key_down(VK_RWIN.0) && !machine.right.down {
+    if right && !machine.right.down {
         let _ = machine.feed(KeyKind::Win(WinSide::Right), true);
+    } else if !right && machine.right.down {
+        let up = machine.feed(KeyKind::Win(WinSide::Right), false);
+        if matches!(up, Decision::Toggle(_)) {
+            decision = up;
+        }
     }
+    decision
+}
+
+fn sync_async_win(machine: &mut WinKeyMachine) -> Decision {
+    reconcile_held_win(
+        machine,
+        async_key_down(VK_LWIN.0),
+        async_key_down(VK_RWIN.0),
+    )
 }
 
 fn sync_async_key(machine: &mut WinKeyMachine, vk: u16) {
@@ -2143,19 +2160,34 @@ unsafe extern "system" fn ll_keyboard_proc(code: i32, wparam: WPARAM, lparam: LP
         return CallNextHookEx(None, code, wparam, lparam);
     }
 
-    let routed = match RAW_MACHINE.lock() {
+    let (win_decision, routed) = match RAW_MACHINE.lock() {
         Ok(mut machine) => {
-            if is_down {
-                sync_async_win(&mut machine);
+            let win_decision = if is_down {
+                let win_decision = sync_async_win(&mut machine);
                 sync_async_modifiers(&mut machine);
-            }
-            machine.route(KeyKind::Other(vk), is_down)
+                win_decision
+            } else {
+                Decision::Pass
+            };
+            (win_decision, machine.route(KeyKind::Other(vk), is_down))
         }
-        Err(_) => RoutedEvent {
-            decision: Decision::Pass,
-            eat: false,
-        },
+        Err(_) => (
+            Decision::Pass,
+            RoutedEvent {
+                decision: Decision::Pass,
+                eat: false,
+            },
+        ),
     };
+    if let Decision::Toggle(side) = win_decision {
+        LAST_RAW_TOGGLE_MS.store(toggle_clock_ms(), Ordering::Release);
+        cancel_shell_start_fallback();
+        if should_defer_toggle(KeyKind::Win(side)) {
+            schedule_win_toggle(side, non_win_keys_down());
+        } else {
+            queue_action(Action::ToggleWin(side));
+        }
+    }
     if let Decision::Toggle(side) = routed.decision {
         LAST_RAW_TOGGLE_MS.store(toggle_clock_ms(), Ordering::Release);
         cancel_shell_start_fallback();
@@ -3024,6 +3056,17 @@ mod tests {
             .filter(|decision| matches!(decision, Decision::Toggle(_)))
             .count();
         assert_eq!(toggles, 1);
+    }
+
+    #[test]
+    fn e2e_stale_win_down_does_not_eat_typed_s() {
+        let mut machine = WinKeyMachine::default();
+        assert_eq!(machine.feed(win(WinSide::Left), true), Decision::Mask);
+        let win_up = reconcile_held_win(&mut machine, false, false);
+        assert_eq!(win_up, Decision::Toggle(WinSide::Left));
+        let routed = machine.route(KeyKind::Other(VK_S_CODE), true);
+        assert_eq!(routed.decision, Decision::Pass);
+        assert!(!routed.eat);
     }
 
     #[test]
