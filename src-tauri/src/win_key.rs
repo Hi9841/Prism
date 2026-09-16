@@ -47,9 +47,8 @@ use windows::Win32::UI::Accessibility::{
     TreeScope_Descendants, UIA_AutomationIdPropertyId, UIA_ProcessIdPropertyId,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetAsyncKeyState, RegisterHotKey, UnregisterHotKey, MOD_NOREPEAT, MOD_WIN, VK_CONTROL,
-    VK_ESCAPE, VK_LCONTROL, VK_LMENU, VK_LSHIFT, VK_LWIN, VK_MENU, VK_Q, VK_RCONTROL, VK_RMENU,
-    VK_RSHIFT, VK_RWIN, VK_S, VK_SHIFT,
+    GetAsyncKeyState, VK_CONTROL, VK_ESCAPE, VK_LCONTROL, VK_LMENU, VK_LSHIFT, VK_LWIN, VK_MENU,
+    VK_Q, VK_RCONTROL, VK_RMENU, VK_RSHIFT, VK_RWIN, VK_S, VK_SHIFT,
 };
 use windows::Win32::UI::Input::{
     GetRawInputData, RegisterRawInputDevices, HRAWINPUT, RAWINPUT, RAWINPUTDEVICE, RAWINPUTHEADER,
@@ -61,14 +60,12 @@ use windows::Win32::UI::WindowsAndMessaging::{
     GetWindowThreadProcessId, IsWindowVisible, MsgWaitForMultipleObjectsEx, PeekMessageW,
     PostThreadMessageW, RegisterClassW, RegisterWindowMessageW, SetWindowsHookExW,
     TranslateMessage, UnhookWindowsHookEx, HHOOK, KBDLLHOOKSTRUCT, MSG, MSGFLT_ALLOW, PM_REMOVE,
-    QS_ALLINPUT, RI_KEY_BREAK, WH_GETMESSAGE, WH_KEYBOARD_LL, WH_MOUSE, WM_APP, WM_HOTKEY,
-    WM_INPUT, WM_KEYDOWN, WM_KEYUP, WM_SYSKEYDOWN, WM_SYSKEYUP, WNDCLASSW, WS_EX_NOACTIVATE,
+    QS_ALLINPUT, RI_KEY_BREAK, WH_GETMESSAGE, WH_KEYBOARD_LL, WH_MOUSE, WM_APP, WM_INPUT,
+    WM_KEYDOWN, WM_KEYUP, WM_SYSKEYDOWN, WM_SYSKEYUP, WNDCLASSW, WS_EX_NOACTIVATE,
     WS_EX_TOOLWINDOW, WS_POPUP,
 };
 
 const ACTION_MESSAGE: u32 = WM_APP + 1;
-const SEARCH_HOTKEY_S: i32 = 0x5053;
-const SEARCH_HOTKEY_Q: i32 = 0x5051;
 const TOGGLE_DEBOUNCE_MS: u64 = 80;
 const WIN_TOGGLE_RELEASE_GRACE: Duration = Duration::from_millis(30);
 /// The Start button rect only needs refreshing occasionally; the UIA query is
@@ -402,13 +399,6 @@ impl WinKeyMachine {
         self.non_win_down.fill(false);
         self.search_claimed = false;
         self.eat_search_up = false;
-    }
-
-    fn note_os_search_hotkey(&mut self) {
-        self.left.combo |= self.left.down;
-        self.right.combo |= self.right.down;
-        self.search_claimed = true;
-        self.eat_search_up = true;
     }
 
     /// Feeds one event and reports whether the Search chord should be eaten.
@@ -1882,31 +1872,10 @@ unsafe fn create_raw_input_window() -> Result<HWND, String> {
         let _ = DestroyWindow(window);
         return Err(format!("register raw keyboard observer: {error}"));
     }
-    register_search_hotkeys(window);
     Ok(window)
 }
 
-fn register_search_hotkeys(window: HWND) {
-    let modifiers = MOD_WIN | MOD_NOREPEAT;
-    for (id, vk) in [
-        (SEARCH_HOTKEY_S, VK_S.0 as u32),
-        (SEARCH_HOTKEY_Q, VK_Q.0 as u32),
-    ] {
-        match unsafe { RegisterHotKey(Some(window), id, modifiers, vk) } {
-            Ok(()) => debug_trace(&format!("search-hotkey-registered {id:#x}")),
-            Err(error) => debug_trace(&format!("search-hotkey-failed {id:#x} {error}")),
-        }
-    }
-}
-
-fn unregister_search_hotkeys(window: HWND) {
-    for id in [SEARCH_HOTKEY_S, SEARCH_HOTKEY_Q] {
-        let _ = unsafe { UnregisterHotKey(Some(window), id) };
-    }
-}
-
 unsafe fn destroy_raw_input_window(window: HWND) {
-    unregister_search_hotkeys(window);
     let remove = RAWINPUTDEVICE {
         usUsagePage: HID_USAGE_PAGE_GENERIC,
         usUsage: HID_USAGE_GENERIC_KEYBOARD,
@@ -2247,23 +2216,6 @@ unsafe extern "system" fn raw_input_window_proc(
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> LRESULT {
-    if message == WM_HOTKEY {
-        let id = wparam.0 as i32;
-        if id == SEARCH_HOTKEY_S || id == SEARCH_HOTKEY_Q {
-            if let Ok(mut machine) = RAW_MACHINE.lock() {
-                ensure_machine_matches_ll_win(&mut machine);
-                if !machine.left.down && !machine.right.down {
-                    let _ = machine.feed(KeyKind::Win(WinSide::Left), true);
-                }
-                machine.note_os_search_hotkey();
-            }
-            LAST_RAW_TOGGLE_MS.store(toggle_clock_ms(), Ordering::Release);
-            cancel_shell_start_fallback();
-            debug_trace("search-hotkey-toggle");
-            queue_action(Action::ToggleWin(WinSide::Left));
-            return LRESULT(0);
-        }
-    }
     if shell_bridge_message().is_ok_and(|bridge_message| message == bridge_message) {
         match wparam.0 {
             SHELL_EVENT_HOTKEY_DISABLED => {
@@ -3099,14 +3051,23 @@ mod tests {
     }
 
     #[test]
-    fn e2e_os_hotkey_then_extra_q_does_not_toggle_again() {
+    fn e2e_bare_win_still_toggles_after_win_q() {
         let mut machine = WinKeyMachine::default();
         assert_eq!(machine.feed(win(WinSide::Left), true), Decision::Mask);
-        machine.note_os_search_hotkey();
-        let first_extra = machine.route(KeyKind::Other(VK_Q_CODE), true);
-        assert_eq!(first_extra.decision, Decision::Pass);
-        assert!(first_extra.eat);
+        assert_eq!(
+            machine.route(KeyKind::Other(VK_Q_CODE), true).decision,
+            Decision::Toggle(WinSide::Left)
+        );
+        assert_eq!(
+            machine.route(KeyKind::Other(VK_Q_CODE), false).decision,
+            Decision::Pass
+        );
         assert_eq!(machine.feed(win(WinSide::Left), false), Decision::Pass);
+        assert_eq!(machine.feed(win(WinSide::Left), true), Decision::Mask);
+        assert_eq!(
+            machine.feed(win(WinSide::Left), false),
+            Decision::Toggle(WinSide::Left)
+        );
     }
 
     #[test]
