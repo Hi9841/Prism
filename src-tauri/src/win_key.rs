@@ -47,8 +47,9 @@ use windows::Win32::UI::Accessibility::{
     TreeScope_Descendants, UIA_AutomationIdPropertyId, UIA_ProcessIdPropertyId,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetAsyncKeyState, VK_CONTROL, VK_ESCAPE, VK_LCONTROL, VK_LMENU, VK_LSHIFT, VK_LWIN, VK_MENU,
-    VK_Q, VK_RCONTROL, VK_RMENU, VK_RSHIFT, VK_RWIN, VK_S, VK_SHIFT,
+    GetAsyncKeyState, RegisterHotKey, UnregisterHotKey, MOD_NOREPEAT, MOD_WIN, VK_CONTROL,
+    VK_ESCAPE, VK_LCONTROL, VK_LMENU, VK_LSHIFT, VK_LWIN, VK_MENU, VK_Q, VK_RCONTROL, VK_RMENU,
+    VK_RSHIFT, VK_RWIN, VK_S, VK_SHIFT,
 };
 use windows::Win32::UI::Input::{
     GetRawInputData, RegisterRawInputDevices, HRAWINPUT, RAWINPUT, RAWINPUTDEVICE, RAWINPUTHEADER,
@@ -59,13 +60,15 @@ use windows::Win32::UI::WindowsAndMessaging::{
     DispatchMessageW, EnumChildWindows, FindWindowW, GetClassNameW, GetShellWindow, GetWindowRect,
     GetWindowThreadProcessId, IsWindowVisible, MsgWaitForMultipleObjectsEx, PeekMessageW,
     PostThreadMessageW, RegisterClassW, RegisterWindowMessageW, SetWindowsHookExW,
-    TranslateMessage, UnhookWindowsHookEx, HHOOK, KBDLLHOOKSTRUCT, LLKHF_INJECTED, MSG,
-    MSGFLT_ALLOW, PM_REMOVE, QS_ALLINPUT, RI_KEY_BREAK, WH_GETMESSAGE, WH_KEYBOARD_LL, WH_MOUSE,
-    WM_APP, WM_INPUT, WM_KEYDOWN, WM_KEYUP, WM_SYSKEYDOWN, WM_SYSKEYUP, WNDCLASSW,
-    WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_POPUP,
+    TranslateMessage, UnhookWindowsHookEx, HHOOK, KBDLLHOOKSTRUCT, MSG, MSGFLT_ALLOW, PM_REMOVE,
+    QS_ALLINPUT, RI_KEY_BREAK, WH_GETMESSAGE, WH_KEYBOARD_LL, WH_MOUSE, WM_APP, WM_HOTKEY,
+    WM_INPUT, WM_KEYDOWN, WM_KEYUP, WM_SYSKEYDOWN, WM_SYSKEYUP, WNDCLASSW, WS_EX_NOACTIVATE,
+    WS_EX_TOOLWINDOW, WS_POPUP,
 };
 
 const ACTION_MESSAGE: u32 = WM_APP + 1;
+const SEARCH_HOTKEY_S: i32 = 0x5053;
+const SEARCH_HOTKEY_Q: i32 = 0x5051;
 const TOGGLE_DEBOUNCE_MS: u64 = 80;
 const WIN_TOGGLE_RELEASE_GRACE: Duration = Duration::from_millis(30);
 /// The Start button rect only needs refreshing occasionally; the UIA query is
@@ -381,9 +384,7 @@ impl WinKeyMachine {
                             Decision::Toggle(side)
                         }
                         SearchChordAction::Eat => {
-                            if !is_down {
-                                self.eat_search_up = false;
-                            }
+                            self.eat_search_up = is_down;
                             Decision::Pass
                         }
                         SearchChordAction::Pass => Decision::Pass,
@@ -403,26 +404,26 @@ impl WinKeyMachine {
         self.eat_search_up = false;
     }
 
+    fn note_os_search_hotkey(&mut self) {
+        self.left.combo |= self.left.down;
+        self.right.combo |= self.right.down;
+        self.search_claimed = true;
+        self.eat_search_up = true;
+    }
+
     /// Feeds one event and reports whether the Search chord should be eaten.
     pub fn route(&mut self, kind: KeyKind, is_down: bool) -> RoutedEvent {
-        let eat_up = !is_down
-            && matches!(kind, KeyKind::Other(key) if is_search_claim_key(key))
-            && self.eat_search_up;
+        let search_key = matches!(kind, KeyKind::Other(key) if is_search_claim_key(key));
+        let eat_up_pending = self.eat_search_up;
+        let already_claimed = self.search_claimed;
         let decision = self.feed(kind, is_down);
-        let eat_down = is_down
-            && matches!(kind, KeyKind::Other(key) if is_search_claim_key(key))
-            && matches!(decision, Decision::Toggle(_));
-        let eat_repeat = is_down
-            && matches!(kind, KeyKind::Other(key) if is_search_claim_key(key))
-            && self.search_claimed
-            && (self.left.down || self.right.down)
-            && !self.is_shift_down()
-            && !self.is_ctrl_down()
-            && !self.is_alt_down();
-        RoutedEvent {
-            decision,
-            eat: eat_up || eat_down || eat_repeat,
-        }
+        let eat = search_key
+            && (matches!(decision, Decision::Toggle(_))
+                || already_claimed
+                || eat_up_pending
+                || self.search_claimed
+                || self.eat_search_up);
+        RoutedEvent { decision, eat }
     }
 
     fn press_mut(&mut self, side: WinSide) -> &mut Press {
@@ -493,6 +494,8 @@ static PENDING_WIN_TOGGLE: Mutex<PendingWinToggle> = Mutex::new(PendingWinToggle
 /// Set when taskbar geometry changes (alignment moves, resizes) so the pump
 /// refreshes the Start rect immediately instead of up to 5 seconds later.
 static START_RECT_REFRESH_REQUEST: AtomicBool = AtomicBool::new(false);
+static LL_LEFT_WIN: AtomicBool = AtomicBool::new(false);
+static LL_RIGHT_WIN: AtomicBool = AtomicBool::new(false);
 
 enum Action {
     ToggleWin(WinSide),
@@ -731,6 +734,8 @@ pub fn set_enabled(on: bool) -> Result<(), String> {
     ACTIVE.store(on, Ordering::SeqCst);
     if !on {
         crate::launcher_watch::set_enabled(false);
+        LL_LEFT_WIN.store(false, Ordering::Release);
+        LL_RIGHT_WIN.store(false, Ordering::Release);
         SHELL_BRIDGE_ACTIVE.store(false, Ordering::Release);
         RAW_MACHINE.lock().map(|mut m| m.reset()).ok();
         cancel_pending_win_toggle();
@@ -956,6 +961,8 @@ fn disable_observation(reason: &str) {
     debug_trace(&format!("observation-disabled {reason}"));
     ACTIVE.store(false, Ordering::SeqCst);
     crate::launcher_watch::set_enabled(false);
+    LL_LEFT_WIN.store(false, Ordering::Release);
+    LL_RIGHT_WIN.store(false, Ordering::Release);
     SHELL_BRIDGE_ACTIVE.store(false, Ordering::Release);
     RAW_MACHINE.lock().map(|mut m| m.reset()).ok();
     cancel_pending_win_toggle();
@@ -1875,10 +1882,31 @@ unsafe fn create_raw_input_window() -> Result<HWND, String> {
         let _ = DestroyWindow(window);
         return Err(format!("register raw keyboard observer: {error}"));
     }
+    register_search_hotkeys(window);
     Ok(window)
 }
 
+fn register_search_hotkeys(window: HWND) {
+    let modifiers = MOD_WIN | MOD_NOREPEAT;
+    for (id, vk) in [
+        (SEARCH_HOTKEY_S, VK_S.0 as u32),
+        (SEARCH_HOTKEY_Q, VK_Q.0 as u32),
+    ] {
+        match unsafe { RegisterHotKey(Some(window), id, modifiers, vk) } {
+            Ok(()) => debug_trace(&format!("search-hotkey-registered {id:#x}")),
+            Err(error) => debug_trace(&format!("search-hotkey-failed {id:#x} {error}")),
+        }
+    }
+}
+
+fn unregister_search_hotkeys(window: HWND) {
+    for id in [SEARCH_HOTKEY_S, SEARCH_HOTKEY_Q] {
+        let _ = unsafe { UnregisterHotKey(Some(window), id) };
+    }
+}
+
 unsafe fn destroy_raw_input_window(window: HWND) {
+    unregister_search_hotkeys(window);
     let remove = RAWINPUTDEVICE {
         usUsagePage: HID_USAGE_PAGE_GENERIC,
         usUsage: HID_USAGE_GENERIC_KEYBOARD,
@@ -2087,6 +2115,7 @@ fn async_key_down(vk: u16) -> bool {
     unsafe { GetAsyncKeyState(i32::from(vk)) as u16 & 0x8000 != 0 }
 }
 
+#[cfg(test)]
 fn reconcile_held_win(machine: &mut WinKeyMachine, left: bool, right: bool) -> Decision {
     let mut decision = Decision::Pass;
     if left && !machine.left.down {
@@ -2105,12 +2134,39 @@ fn reconcile_held_win(machine: &mut WinKeyMachine, left: bool, right: bool) -> D
     decision
 }
 
-fn sync_async_win(machine: &mut WinKeyMachine) -> Decision {
-    reconcile_held_win(
-        machine,
-        async_key_down(VK_LWIN.0),
-        async_key_down(VK_RWIN.0),
-    )
+fn ll_win_down() -> bool {
+    LL_LEFT_WIN.load(Ordering::Acquire) || LL_RIGHT_WIN.load(Ordering::Acquire)
+}
+
+fn observe_ll_win(vk: u16, is_down: bool, is_up: bool) -> bool {
+    if vk == VK_LWIN.0 {
+        if is_down {
+            LL_LEFT_WIN.store(true, Ordering::Release);
+        }
+        if is_up {
+            LL_LEFT_WIN.store(false, Ordering::Release);
+        }
+        return true;
+    }
+    if vk == VK_RWIN.0 {
+        if is_down {
+            LL_RIGHT_WIN.store(true, Ordering::Release);
+        }
+        if is_up {
+            LL_RIGHT_WIN.store(false, Ordering::Release);
+        }
+        return true;
+    }
+    false
+}
+
+fn ensure_machine_matches_ll_win(machine: &mut WinKeyMachine) {
+    if LL_LEFT_WIN.load(Ordering::Acquire) && !machine.left.down {
+        let _ = machine.feed(KeyKind::Win(WinSide::Left), true);
+    }
+    if LL_RIGHT_WIN.load(Ordering::Acquire) && !machine.right.down {
+        let _ = machine.feed(KeyKind::Win(WinSide::Right), true);
+    }
 }
 
 fn sync_async_key(machine: &mut WinKeyMachine, vk: u16) {
@@ -2146,9 +2202,6 @@ unsafe extern "system" fn ll_keyboard_proc(code: i32, wparam: WPARAM, lparam: LP
         return CallNextHookEx(None, code, wparam, lparam);
     }
     let keyboard = &*(lparam.0 as *const KBDLLHOOKSTRUCT);
-    if keyboard.flags.contains(LLKHF_INJECTED) {
-        return CallNextHookEx(None, code, wparam, lparam);
-    }
     let message = wparam.0 as u32;
     let is_down = message == WM_KEYDOWN || message == WM_SYSKEYDOWN;
     let is_up = message == WM_KEYUP || message == WM_SYSKEYUP;
@@ -2156,38 +2209,26 @@ unsafe extern "system" fn ll_keyboard_proc(code: i32, wparam: WPARAM, lparam: LP
         return CallNextHookEx(None, code, wparam, lparam);
     }
     let vk = keyboard.vkCode as u16;
-    if !is_search_claim_key(vk) {
+    if observe_ll_win(vk, is_down, is_up) {
+        return CallNextHookEx(None, code, wparam, lparam);
+    }
+    if !is_search_claim_key(vk) || !ll_win_down() {
         return CallNextHookEx(None, code, wparam, lparam);
     }
 
-    let (win_decision, routed) = match RAW_MACHINE.lock() {
+    let routed = match RAW_MACHINE.lock() {
         Ok(mut machine) => {
-            let win_decision = if is_down {
-                let win_decision = sync_async_win(&mut machine);
+            if is_down {
+                ensure_machine_matches_ll_win(&mut machine);
                 sync_async_modifiers(&mut machine);
-                win_decision
-            } else {
-                Decision::Pass
-            };
-            (win_decision, machine.route(KeyKind::Other(vk), is_down))
+            }
+            machine.route(KeyKind::Other(vk), is_down)
         }
-        Err(_) => (
-            Decision::Pass,
-            RoutedEvent {
-                decision: Decision::Pass,
-                eat: false,
-            },
-        ),
+        Err(_) => RoutedEvent {
+            decision: Decision::Pass,
+            eat: false,
+        },
     };
-    if let Decision::Toggle(side) = win_decision {
-        LAST_RAW_TOGGLE_MS.store(toggle_clock_ms(), Ordering::Release);
-        cancel_shell_start_fallback();
-        if should_defer_toggle(KeyKind::Win(side)) {
-            schedule_win_toggle(side, non_win_keys_down());
-        } else {
-            queue_action(Action::ToggleWin(side));
-        }
-    }
     if let Decision::Toggle(side) = routed.decision {
         LAST_RAW_TOGGLE_MS.store(toggle_clock_ms(), Ordering::Release);
         cancel_shell_start_fallback();
@@ -2206,6 +2247,23 @@ unsafe extern "system" fn raw_input_window_proc(
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> LRESULT {
+    if message == WM_HOTKEY {
+        let id = wparam.0 as i32;
+        if id == SEARCH_HOTKEY_S || id == SEARCH_HOTKEY_Q {
+            if let Ok(mut machine) = RAW_MACHINE.lock() {
+                ensure_machine_matches_ll_win(&mut machine);
+                if !machine.left.down && !machine.right.down {
+                    let _ = machine.feed(KeyKind::Win(WinSide::Left), true);
+                }
+                machine.note_os_search_hotkey();
+            }
+            LAST_RAW_TOGGLE_MS.store(toggle_clock_ms(), Ordering::Release);
+            cancel_shell_start_fallback();
+            debug_trace("search-hotkey-toggle");
+            queue_action(Action::ToggleWin(WinSide::Left));
+            return LRESULT(0);
+        }
+    }
     if shell_bridge_message().is_ok_and(|bridge_message| message == bridge_message) {
         match wparam.0 {
             SHELL_EVENT_HOTKEY_DISABLED => {
@@ -3038,6 +3096,61 @@ mod tests {
         assert!(events[1].eat);
         assert!(events[2].eat);
         assert_eq!(events[3].decision, Decision::Pass);
+    }
+
+    #[test]
+    fn e2e_os_hotkey_then_extra_q_does_not_toggle_again() {
+        let mut machine = WinKeyMachine::default();
+        assert_eq!(machine.feed(win(WinSide::Left), true), Decision::Mask);
+        machine.note_os_search_hotkey();
+        let first_extra = machine.route(KeyKind::Other(VK_Q_CODE), true);
+        assert_eq!(first_extra.decision, Decision::Pass);
+        assert!(first_extra.eat);
+        assert_eq!(machine.feed(win(WinSide::Left), false), Decision::Pass);
+    }
+
+    #[test]
+    fn e2e_repeat_q_while_win_held_toggles_once_and_eats_every_q() {
+        let events = route_seq(&[
+            (win(WinSide::Left), true),
+            (KeyKind::Other(VK_Q_CODE), true),
+            (KeyKind::Other(VK_Q_CODE), false),
+            (KeyKind::Other(VK_Q_CODE), true),
+            (KeyKind::Other(VK_Q_CODE), false),
+            (KeyKind::Other(VK_Q_CODE), true),
+            (KeyKind::Other(VK_Q_CODE), false),
+            (win(WinSide::Left), false),
+        ]);
+        let toggles = events
+            .iter()
+            .filter(|event| matches!(event.decision, Decision::Toggle(_)))
+            .count();
+        assert_eq!(toggles, 1);
+        assert_eq!(events[1].decision, Decision::Toggle(WinSide::Left));
+        for event in &events[1..7] {
+            assert!(event.eat);
+        }
+        assert!(!events[7].eat);
+        assert_eq!(events[7].decision, Decision::Pass);
+    }
+
+    #[test]
+    fn e2e_repeat_s_while_win_held_toggles_once() {
+        let events = route_seq(&[
+            (win(WinSide::Left), true),
+            (KeyKind::Other(VK_S_CODE), true),
+            (KeyKind::Other(VK_S_CODE), false),
+            (KeyKind::Other(VK_S_CODE), true),
+            (KeyKind::Other(VK_S_CODE), false),
+            (win(WinSide::Left), false),
+        ]);
+        let toggles = events
+            .iter()
+            .filter(|event| matches!(event.decision, Decision::Toggle(_)))
+            .count();
+        assert_eq!(toggles, 1);
+        assert!(events[1].eat && events[2].eat && events[3].eat && events[4].eat);
+        assert_eq!(events[5].decision, Decision::Pass);
     }
 
     #[test]
