@@ -5,6 +5,7 @@ pub mod audio_osd;
 mod catalog;
 pub mod drag;
 mod files;
+mod launcher_watch;
 mod perf;
 mod power;
 mod start_menu;
@@ -736,6 +737,7 @@ fn toggle_palette_with_presentation(
         "toggle-close-before"
     });
     crate::win_key::debug_trace(&format!("palette-toggle open={opening}"));
+    crate::launcher_watch::note_own_toggle();
     if !opening {
         ACTIVATION_FOCUS_PENDING.store(false, Ordering::Release);
     }
