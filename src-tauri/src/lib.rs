@@ -5,7 +5,6 @@ pub mod audio_osd;
 mod catalog;
 pub mod drag;
 mod files;
-mod launcher_watch;
 mod perf;
 mod power;
 mod start_menu;
