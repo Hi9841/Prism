@@ -8,6 +8,7 @@ import {
   type Section,
 } from "../features/palette/sections";
 import {
+  acceptIntent,
   existingPaths,
   refreshApps as forceRefresh,
   getAppIcons,
@@ -17,10 +18,12 @@ import {
   hidePaletteWindow,
   onFileIndexUpdated,
   onWindowFocused,
+  queryPhase1,
   rebuildFileIndex,
   searchFiles,
 } from "../lib/bridge";
 import { appIconRetryDelay, selectAppIconRequestIds } from "../lib/iconLoading";
+import type { Phase1Response } from "../lib/query";
 import { dedupeApps } from "../lib/search";
 import type {
   AppEntry,
@@ -117,10 +120,12 @@ export function PaletteProvider({ children }: { children: ReactNode }) {
   const [filePathBrowse, setFilePathBrowse] = useState(false);
   const [fileIndexTick, setFileIndexTick] = useState(0);
   const [fileThumbnailRevision, setFileThumbnailRevision] = useState(0);
+  const [phase1, setPhase1] = useState<Phase1Response | null>(null);
   const [existingHistoryPaths, setExistingHistoryPaths] = useState<ReadonlySet<string>>(() => new Set());
   const [appIcons, setAppIcons] = useState<Readonly<Record<string, string>>>({});
   const [selected, setSelected] = useState(0);
   const fileRequest = useRef(0);
+  const phase1Request = useRef(0);
   const fileThumbnailCache = useRef<Map<string, string | null>>(new Map());
   const fileThumbnailInFlight = useRef<Set<string>>(new Set());
   const fileThumbnailEpoch = useRef(0);
@@ -246,6 +251,25 @@ export function PaletteProvider({ children }: { children: ReactNode }) {
   );
 
   useEffect(() => onWindowFocused((focused) => focused && validateHistoryPaths()), [validateHistoryPaths]);
+
+  useEffect(() => {
+    const searchText = query.trim();
+    const request = ++phase1Request.current;
+    if (!searchText) {
+      setPhase1(null);
+      return;
+    }
+    const recent = app.history.slice(0, 20).map((entry) => ({ id: entry.id, title: entry.title }));
+    void queryPhase1(searchText, recent)
+      .then((response) => {
+        if (request !== phase1Request.current) return;
+        setPhase1(response.query ? response : null);
+      })
+      .catch(() => {
+        if (request !== phase1Request.current) return;
+        setPhase1(null);
+      });
+  }, [query, app.history]);
 
   useEffect(() => {
     void fileIndexTick;
@@ -428,6 +452,7 @@ export function PaletteProvider({ children }: { children: ReactNode }) {
       filesError,
       fileIndexing: fileIndexing || volumes.some((v) => v.state === "indexing"),
       fileIndexReady: fileIndexReady || volumes.some((v) => v.state === "ready"),
+      phase1,
     });
   }, [
     query,
@@ -447,6 +472,7 @@ export function PaletteProvider({ children }: { children: ReactNode }) {
     filePathBrowse,
     filesBusy,
     filesError,
+    phase1,
     fileIndexing,
     fileIndexReady,
     volumes,
@@ -529,10 +555,16 @@ export function PaletteProvider({ children }: { children: ReactNode }) {
       try {
         if (clipboardItem) {
           await item.run();
+        } else if (item.id.startsWith("window::")) {
+          await item.run();
+          await hidePaletteWindow();
         } else {
           await Promise.all([hidePaletteWindow(), item.run()]);
         }
         app.pushHistory(item.id, item.historyTitle);
+        if (item.id.startsWith("action::")) {
+          void acceptIntent(query, item.id.slice("action::".length));
+        }
         if (clipboardItem) {
           app.showToast("Copied to clipboard", item.toastDetail ?? item.title);
         }
@@ -540,7 +572,7 @@ export function PaletteProvider({ children }: { children: ReactNode }) {
         app.showToast("Couldn’t open item", item.title);
       }
     },
-    [app],
+    [app, query],
   );
 
   const runSelected = useCallback(() => {

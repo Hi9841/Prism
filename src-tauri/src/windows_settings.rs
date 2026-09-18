@@ -5,6 +5,8 @@ use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
 const ALLOWED_URIS: &[&str] = &[
     "ms-settings:",
     "ms-settings:display",
+    "ms-settings:nightlight",
+    "ms-settings:hdr",
     "ms-settings:display-advanced",
     "ms-settings:sound",
     "ms-settings:sound-devices",
@@ -116,6 +118,8 @@ mod tests {
     fn allowlist_accepts_catalog_targets_only() {
         for uri in [
             "ms-settings:display",
+            "ms-settings:nightlight",
+            "ms-settings:hdr",
             "ms-settings:bluetooth",
             "ms-settings:windowsupdate",
             "ms-settings:defaultapps",
