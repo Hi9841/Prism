@@ -758,7 +758,7 @@ export function SettingsSheet() {
       <button
         type="button"
         aria-label="Close settings"
-        className="absolute inset-0 cursor-default rounded-[24px_24px_8px_8px] bg-backdrop backdrop-blur-[2px]"
+        className="settings-backdrop-dismiss absolute inset-0 cursor-default rounded-[24px_24px_8px_8px] bg-backdrop backdrop-blur-[2px]"
         onClick={() => requestClose()}
       />
       <div

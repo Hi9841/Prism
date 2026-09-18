@@ -1,0 +1,135 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Prism Windows Display &amp; DPI Hardening · Round 1</title>
+  <style>
+    :root { color-scheme: light; --paper: oklch(98% .008 85); --ink: oklch(27% .018 65); --muted: oklch(46% .018 65); --line: oklch(85% .012 85); --accent: oklch(40% .075 175); --selected: oklch(94% .025 175); --error: oklch(44% .16 25); }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--paper); color: var(--ink); font: 1rem/1.6 ui-sans-serif, system-ui, sans-serif; }
+    main { max-inline-size: 48rem; margin-inline: auto; padding: 3.5rem 1.25rem; }
+    header { margin-block-end: 3rem; }
+    h1 { font: 500 clamp(2rem, 5vw, 2.75rem)/1.15 Georgia, serif; margin: 0 0 1rem; text-wrap: balance; }
+    p { margin: .6rem 0; overflow-wrap: anywhere; }
+    header p { max-inline-size: 60ch; color: var(--muted); }
+    .meta { font-size: .875rem; color: var(--muted); margin-block-start: 1.25rem; }
+    fieldset { border: 0; border-block-end: 1px solid var(--line); margin: 0 0 2.5rem; padding: 0 0 2rem; min-inline-size: 0; }
+    legend { padding: 0; font-size: 1.35rem; font-weight: 600; line-height: 1.35; }
+    .question { margin-block: 1rem .6rem; }
+    .recommendation { color: var(--muted); margin-block-end: 1.25rem; }
+    .recommendation strong { color: var(--accent); font-weight: 600; }
+    .option { display: flex; align-items: start; gap: .8rem; padding: .8rem .5rem; min-block-size: 44px; border-radius: .4rem; cursor: pointer; }
+    .option:has(input:checked) { background: var(--selected); }
+    input[type=radio] { flex-shrink: 0; inline-size: 1.15rem; block-size: 1.15rem; margin: .25rem 0 0; accent-color: var(--accent); }
+    .option span { min-inline-size: 0; overflow-wrap: anywhere; }
+    .option small { display: block; color: var(--muted); font-size: .875rem; }
+    textarea { display: block; inline-size: 100%; min-block-size: 7rem; resize: vertical; margin-block: .5rem 1rem; padding: .75rem; border: 1px solid var(--muted); border-radius: .4rem; font: inherit; color: var(--ink); background: var(--paper); }
+    [data-custom] { padding-block-start: .75rem; }
+    details { margin-block: .5rem; }
+    summary { cursor: pointer; padding-block: .6rem; min-block-size: 44px; color: var(--muted); }
+    button { font: inherit; min-block-size: 44px; cursor: pointer; border-radius: .4rem; }
+    [data-clear] { border: 0; padding: .5rem 0; text-decoration: underline; text-underline-offset: .2em; background: transparent; color: var(--muted); font-size: .875rem; }
+    [type=submit] { background: var(--accent); color: white; border: 0; padding: .8rem 1.5rem; font-weight: 600; }
+    button:disabled { cursor: default; opacity: .65; }
+    [data-error] { color: var(--error); font-size: .875rem; }
+    [data-error]:empty { margin: 0; }
+    footer { display: flex; flex-wrap: wrap; align-items: center; gap: 1rem 1.5rem; }
+    #answer-progress { color: var(--muted); font-size: .875rem; font-variant-numeric: tabular-nums; }
+    #session-status { margin-block-start: 1rem; color: var(--muted); font-size: .875rem; }
+    ::selection { background: var(--selected); color: var(--ink); }
+    :focus-visible { outline: 2px solid var(--accent); outline-offset: 4px; }
+    @media (forced-colors: active) { :focus-visible { outline-color: Highlight; } }
+    @media (max-width: 30rem) { main { padding-block: 2rem; } }
+  </style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Hardening Prism across Windows displays.</h1>
+    <p>Settle the native sizing contract, mixed-DPI transitions, and viewport degradation rules before changing native window code.</p>
+    <p class="meta">Round 1 · 5 architectural decisions</p>
+  </header>
+  <form id="grill-form" novalidate>
+    <fieldset data-question="support-baseline">
+      <legend>1. What is the minimum supported display baseline?</legend>
+      <p class="question">Prism cannot guarantee perfect display on arbitrary ultra-small screens or extreme scaling. What is the guaranteed floor, below which Prism degrades gracefully into a compact mode?</p>
+      <p class="recommendation"><strong>Recommended: 800×600 effective work area.</strong> Supports common laptops (1080p at 150% = 1280×720 work area, or 1366×768 at 125% = 1092×614) while accommodating docked taskbars and tablets.</p>
+      <label class="option"><input id="support-baseline-netbook" type="radio" name="support-baseline" value="netbook-tablet" aria-describedby="support-baseline-error"><span>800×600 effective logical work area<small>Guarantees full launcher search and at least 3 visible results; collapses metadata below it.</small></span></label>
+      <label class="option"><input id="support-baseline-standard" type="radio" name="support-baseline" value="standard-desktop" aria-describedby="support-baseline-error"><span>1024×768 effective logical work area<small>Requires standard modern desktop/laptop screens; compact launcher fallback below 1024×768.</small></span></label>
+      <label class="option"><input id="support-baseline-permissive" type="radio" name="support-baseline" value="permissive" aria-describedby="support-baseline-error"><span>640×480 permissive floor<small>Aggressively collapses secondary actions, metadata, and preview pane to fit tiny viewports.</small></span></label>
+      <label class="option"><input id="support-baseline-custom" type="radio" name="support-baseline" value="custom" aria-describedby="support-baseline-error"><span>Write my own answer</span></label>
+      <div data-custom hidden><label for="support-baseline-text">Your support baseline specification</label><textarea id="support-baseline-text" data-text aria-describedby="support-baseline-error"></textarea></div>
+      <label class="option"><input id="support-baseline-discuss" type="radio" name="support-baseline" value="discuss" aria-describedby="support-baseline-error"><span>Discuss first</span></label>
+      <details><summary>Add context</summary><label for="support-baseline-context">Additional details on display support</label><textarea id="support-baseline-context" data-context></textarea></details>
+      <button type="button" data-clear>Clear answer</button>
+      <p id="support-baseline-error" data-error></p>
+    </fieldset>
+
+    <fieldset data-question="unit-contract">
+      <legend>2. What unit contract governs native sizing and IPC?</legend>
+      <p class="question">In lib.rs:1241, set_window_width assigns incoming values to PhysicalSize while frontend treats them as logical CSS pixels. Which unit should be authoritative everywhere in settings and IPC?</p>
+      <p class="recommendation"><strong>Recommended: Logical DIP everywhere.</strong> Settings, IPC, and frontend use logical CSS pixels. Rust converts to physical pixels strictly at Win32/Tauri boundaries using monitor DPI.</p>
+      <label class="option"><input id="unit-contract-logical" type="radio" name="unit-contract" value="logical-everywhere" aria-describedby="unit-contract-error"><span>Logical DIP everywhere<small>Frontend sends logical pixels (e.g. 640/720/800); Rust scales by monitor DPI when calling Win32.</small></span></label>
+      <label class="option"><input id="unit-contract-physical" type="radio" name="unit-contract" value="physical-everywhere" aria-describedby="unit-contract-error"><span>Physical pixels everywhere<small>Frontend inspects window.devicePixelRatio and sends physical pixels over IPC.</small></span></label>
+      <label class="option"><input id="unit-contract-tagged" type="radio" name="unit-contract" value="explicit-tagged" aria-describedby="unit-contract-error"><span>Explicit tagged units in IPC<small>Commands accept { value: number, unit: "logical" | "physical" } to prevent confusion.</small></span></label>
+      <label class="option"><input id="unit-contract-custom" type="radio" name="unit-contract" value="custom" aria-describedby="unit-contract-error"><span>Write my own answer</span></label>
+      <div data-custom hidden><label for="unit-contract-text">Your unit contract specification</label><textarea id="unit-contract-text" data-text aria-describedby="unit-contract-error"></textarea></div>
+      <label class="option"><input id="unit-contract-discuss" type="radio" name="unit-contract" value="discuss" aria-describedby="unit-contract-error"><span>Discuss first</span></label>
+      <details><summary>Add context</summary><label for="unit-contract-context">Additional details on unit contracts</label><textarea id="unit-contract-context" data-context></textarea></details>
+      <button type="button" data-clear>Clear answer</button>
+      <p id="unit-contract-error" data-error></p>
+    </fieldset>
+
+    <fieldset data-question="mixed-dpi-behavior">
+      <legend>3. How should Prism behave when moving across mixed-DPI monitors?</legend>
+      <p class="question">When a user summons Prism or drags it between monitors with different scale factors (e.g. 150% laptop vs 100% external display), how should geometry adjust?</p>
+      <p class="recommendation"><strong>Recommended: Preserve logical DIP size.</strong> The launcher retains its identical logical layout and relative screen size, recalculating physical dimensions on the target monitor.</p>
+      <label class="option"><input id="mixed-dpi-preserve-logical" type="radio" name="mixed-dpi-behavior" value="preserve-logical" aria-describedby="mixed-dpi-behavior-error"><span>Preserve logical size<small>Recalculate physical size (logical * target_dpi) so physical appearance and proportions remain stable.</small></span></label>
+      <label class="option"><input id="mixed-dpi-preserve-physical" type="radio" name="mixed-dpi-behavior" value="preserve-physical" aria-describedby="mixed-dpi-behavior-error"><span>Preserve physical pixels<small>Window pixel count stays constant; launcher shrinks on high-DPI and enlarges on low-DPI.</small></span></label>
+      <label class="option"><input id="mixed-dpi-per-monitor" type="radio" name="mixed-dpi-behavior" value="per-monitor-memory" aria-describedby="mixed-dpi-behavior-error"><span>Remember settings per monitor<small>Store size and position offsets keyed by Windows monitor device ID.</small></span></label>
+      <label class="option"><input id="mixed-dpi-behavior-custom" type="radio" name="mixed-dpi-behavior" value="custom" aria-describedby="mixed-dpi-behavior-error"><span>Write my own answer</span></label>
+      <div data-custom hidden><label for="mixed-dpi-behavior-text">Your mixed-DPI handling rule</label><textarea id="mixed-dpi-behavior-text" data-text aria-describedby="mixed-dpi-behavior-error"></textarea></div>
+      <label class="option"><input id="mixed-dpi-behavior-discuss" type="radio" name="mixed-dpi-behavior" value="discuss" aria-describedby="mixed-dpi-behavior-error"><span>Discuss first</span></label>
+      <details><summary>Add context</summary><label for="mixed-dpi-behavior-context">Additional details on multi-monitor DPI</label><textarea id="mixed-dpi-behavior-context" data-context></textarea></details>
+      <button type="button" data-clear>Clear answer</button>
+      <p id="mixed-dpi-behavior-error" data-error></p>
+    </fieldset>
+
+    <fieldset data-question="height-clamping-strategy">
+      <legend>4. How should Prism adapt when work-area height is shorter than the launcher?</legend>
+      <p class="question">Under high display scaling (200%), vertical orientation, or thick taskbars, available vertical work area may be less than the standard 620px. How should the native window and UI adapt?</p>
+      <p class="recommendation"><strong>Recommended: Clamp window height and scroll results.</strong> Native window clamps to work area; search bar remains fixed, results list scrolls smoothly with stable gutter.</p>
+      <label class="option"><input id="height-clamping-scroll" type="radio" name="height-clamping-strategy" value="clamp-and-scroll" aria-describedby="height-clamping-strategy-error"><span>Clamp height &amp; scroll results<small>Window shrinks to fit work area; search input stays pinned, results list becomes scrollable.</small></span></label>
+      <label class="option"><input id="height-clamping-stepped" type="radio" name="height-clamping-strategy" value="stepped-compact" aria-describedby="height-clamping-strategy-error"><span>Step down to a dedicated compact layout<small>Switch to a low-height preset that hides footer badges and reduces item padding.</small></span></label>
+      <label class="option"><input id="height-clamping-clip" type="radio" name="height-clamping-strategy" value="clip-overflow" aria-describedby="height-clamping-strategy-error"><span>Retain fixed minimum height<small>Keep at least 480px height even if it extends beyond the taskbar edge.</small></span></label>
+      <label class="option"><input id="height-clamping-strategy-custom" type="radio" name="height-clamping-strategy" value="custom" aria-describedby="height-clamping-strategy-error"><span>Write my own answer</span></label>
+      <div data-custom hidden><label for="height-clamping-strategy-text">Your height clamping strategy</label><textarea id="height-clamping-strategy-text" data-text aria-describedby="height-clamping-strategy-error"></textarea></div>
+      <label class="option"><input id="height-clamping-strategy-discuss" type="radio" name="height-clamping-strategy" value="discuss" aria-describedby="height-clamping-strategy-error"><span>Discuss first</span></label>
+      <details><summary>Add context</summary><label for="height-clamping-strategy-context">Additional details on vertical clamping</label><textarea id="height-clamping-strategy-context" data-context></textarea></details>
+      <button type="button" data-clear>Clear answer</button>
+      <p id="height-clamping-strategy-error" data-error></p>
+    </fieldset>
+
+    <fieldset data-question="zoom-semantics">
+      <legend>5. What is the contract between view zoom and the native window frame?</legend>
+      <p class="question">In bridge.ts:86, setViewZoom alters webview zoom between 70% and 150%. Should zooming also resize the native OS window frame?</p>
+      <p class="recommendation"><strong>Recommended: Content zoom only; decouple window geometry.</strong> View zoom scales content inside the fixed launcher frame. Launcher width presets (640/720/800) control window geometry.</p>
+      <label class="option"><input id="zoom-semantics-content" type="radio" name="zoom-semantics" value="content-only" aria-describedby="zoom-semantics-error"><span>Content-only zoom<small>Native window frame size is unchanged; text and controls scale internally with scrollable fallback.</small></span></label>
+      <label class="option"><input id="zoom-semantics-frame" type="radio" name="zoom-semantics" value="frame-scales" aria-describedby="zoom-semantics-error"><span>Window frame scales with zoom<small>Enlarging zoom to 120% expands native window dimensions proportionally, bounded by work area.</small></span></label>
+      <label class="option"><input id="zoom-semantics-decouple" type="radio" name="zoom-semantics" value="decouple-zoom" aria-describedby="zoom-semantics-error"><span>Decouple text scaling from frame size<small>Treat zoom strictly as accessibility text scaling; window size remains determined by layout presets.</small></span></label>
+      <label class="option"><input id="zoom-semantics-custom" type="radio" name="zoom-semantics" value="custom" aria-describedby="zoom-semantics-error"><span>Write my own answer</span></label>
+      <div data-custom hidden><label for="zoom-semantics-text">Your zoom semantics rule</label><textarea id="zoom-semantics-text" data-text aria-describedby="zoom-semantics-error"></textarea></div>
+      <label class="option"><input id="zoom-semantics-discuss" type="radio" name="zoom-semantics" value="discuss" aria-describedby="zoom-semantics-error"><span>Discuss first</span></label>
+      <details><summary>Add context</summary><label for="zoom-semantics-context">Additional details on zoom and window geometry</label><textarea id="zoom-semantics-context" data-context></textarea></details>
+      <button type="button" data-clear>Clear answer</button>
+      <p id="zoom-semantics-error" data-error></p>
+    </fieldset>
+
+    <footer><button type="submit">Submit round</button><span id="answer-progress">0 of 5 answered</span></footer>
+  </form>
+  <p id="session-status" role="status">Connecting to this session…</p>
+  <noscript>Enable JavaScript to submit your answers.</noscript>
+</main>
+</body>
+</html>

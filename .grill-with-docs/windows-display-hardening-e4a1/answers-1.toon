@@ -1,0 +1,9 @@
+session: "windows-display-hardening-e4a1"
+round: 1
+status: submitted
+answers[5]{id,choice,text,deferred}:
+  "support-baseline","permissive","",false
+  "unit-contract","logical-everywhere","",false
+  "mixed-dpi-behavior","preserve-logical","",false
+  "height-clamping-strategy","clamp-and-scroll","",false
+  "zoom-semantics","content-only","",false

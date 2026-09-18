@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Prism Windows Display &amp; DPI Hardening · Round 2</title>
+  <style>
+    :root { color-scheme: light; --paper: oklch(98% .008 85); --ink: oklch(27% .018 65); --muted: oklch(46% .018 65); --line: oklch(85% .012 85); --accent: oklch(40% .075 175); --selected: oklch(94% .025 175); --error: oklch(44% .16 25); }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--paper); color: var(--ink); font: 1rem/1.6 ui-sans-serif, system-ui, sans-serif; }
+    main { max-inline-size: 48rem; margin-inline: auto; padding: 3.5rem 1.25rem; }
+    header { margin-block-end: 3rem; }
+    h1 { font: 500 clamp(2rem, 5vw, 2.75rem)/1.15 Georgia, serif; margin: 0 0 1rem; text-wrap: balance; }
+    p { margin: .6rem 0; overflow-wrap: anywhere; }
+    header p { max-inline-size: 60ch; color: var(--muted); }
+    .meta { font-size: .875rem; color: var(--muted); margin-block-start: 1.25rem; }
+    fieldset { border: 0; border-block-end: 1px solid var(--line); margin: 0 0 2.5rem; padding: 0 0 2rem; min-inline-size: 0; }
+    legend { padding: 0; font-size: 1.35rem; font-weight: 600; line-height: 1.35; }
+    .question { margin-block: 1rem .6rem; }
+    .recommendation { color: var(--muted); margin-block-end: 1.25rem; }
+    .recommendation strong { color: var(--accent); font-weight: 600; }
+    .option { display: flex; align-items: start; gap: .8rem; padding: .8rem .5rem; min-block-size: 44px; border-radius: .4rem; cursor: pointer; }
+    .option:has(input:checked) { background: var(--selected); }
+    input[type=radio] { flex-shrink: 0; inline-size: 1.15rem; block-size: 1.15rem; margin: .25rem 0 0; accent-color: var(--accent); }
+    .option span { min-inline-size: 0; overflow-wrap: anywhere; }
+    .option small { display: block; color: var(--muted); font-size: .875rem; }
+    textarea { display: block; inline-size: 100%; min-block-size: 7rem; resize: vertical; margin-block: .5rem 1rem; padding: .75rem; border: 1px solid var(--muted); border-radius: .4rem; font: inherit; color: var(--ink); background: var(--paper); }
+    [data-custom] { padding-block-start: .75rem; }
+    details { margin-block: .5rem; }
+    summary { cursor: pointer; padding-block: .6rem; min-block-size: 44px; color: var(--muted); }
+    button { font: inherit; min-block-size: 44px; cursor: pointer; border-radius: .4rem; }
+    [data-clear] { border: 0; padding: .5rem 0; text-decoration: underline; text-underline-offset: .2em; background: transparent; color: var(--muted); font-size: .875rem; }
+    [type=submit] { background: var(--accent); color: white; border: 0; padding: .8rem 1.5rem; font-weight: 600; }
+    button:disabled { cursor: default; opacity: .65; }
+    [data-error] { color: var(--error); font-size: .875rem; }
+    [data-error]:empty { margin: 0; }
+    footer { display: flex; flex-wrap: wrap; align-items: center; gap: 1rem 1.5rem; }
+    #answer-progress { color: var(--muted); font-size: .875rem; font-variant-numeric: tabular-nums; }
+    #session-status { margin-block-start: 1rem; color: var(--muted); font-size: .875rem; }
+    ::selection { background: var(--selected); color: var(--ink); }
+    :focus-visible { outline: 2px solid var(--accent); outline-offset: 4px; }
+    @media (forced-colors: active) { :focus-visible { outline-color: Highlight; } }
+    @media (max-width: 30rem) { main { padding-block: 2rem; } }
+  </style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Refining implementation &amp; container contracts.</h1>
+    <p>Round 1 agreed on Logical DIP, multi-DPI preservation, 640×480 permissive floor, height clamping, and content-only zoom. Now decide the component and event specifics.</p>
+    <p class="meta">Round 2 · 5 implementation decisions</p>
+  </header>
+  <form id="grill-form" novalidate>
+    <fieldset data-question="compact-breakpoint">
+      <legend>1. When should Prism trigger its compact responsive states?</legend>
+      <p class="question">With a 640×480 permissive floor, at what container dimensions should the launcher switch to compact presentation (collapsed badges, full-width settings)?</p>
+      <p class="recommendation"><strong>Recommended: Multi-stage container queries.</strong> Width &lt; 700px collapses secondary action hints; height &lt; 520px minimizes header padding and collapses footer badges.</p>
+      <label class="option"><input id="compact-breakpoint-multi" type="radio" name="compact-breakpoint" value="multi-stage" aria-describedby="compact-breakpoint-error"><span>Multi-stage container queries<small>Width &lt; 700px collapses secondary action hints; height &lt; 520px collapses badges and tightens padding.</small></span></label>
+      <label class="option"><input id="compact-breakpoint-standard" type="radio" name="compact-breakpoint" value="standard-compact" aria-describedby="compact-breakpoint-error"><span>Single-breakpoint compact mode<small>Switches entirely to compact mode whenever width &lt; 680px OR height &lt; 520px.</small></span></label>
+      <label class="option"><input id="compact-breakpoint-tight" type="radio" name="compact-breakpoint" value="tight-compact" aria-describedby="compact-breakpoint-error"><span>Tight compact threshold<small>Only triggers below 600px width OR below 460px height.</small></span></label>
+      <label class="option"><input id="compact-breakpoint-custom" type="radio" name="compact-breakpoint" value="custom" aria-describedby="compact-breakpoint-error"><span>Write my own answer</span></label>
+      <div data-custom hidden><label for="compact-breakpoint-text">Your compact breakpoint specification</label><textarea id="compact-breakpoint-text" data-text aria-describedby="compact-breakpoint-error"></textarea></div>
+      <label class="option"><input id="compact-breakpoint-discuss" type="radio" name="compact-breakpoint" value="discuss" aria-describedby="compact-breakpoint-error"><span>Discuss first</span></label>
+      <details><summary>Add context</summary><label for="compact-breakpoint-context">Additional details on container breakpoints</label><textarea id="compact-breakpoint-context" data-context></textarea></details>
+      <button type="button" data-clear>Clear answer</button>
+      <p id="compact-breakpoint-error" data-error></p>
+    </fieldset>
+
+    <fieldset data-question="native-min-bounds">
+      <legend>2. What minimum window bounds should be declared in tauri.conf.json?</legend>
+      <p class="question">Currently tauri.conf.json specifies 480×400 minimum. Should this be updated to match the agreed 640×480 permissive floor, or kept lower as an OS safety net?</p>
+      <p class="recommendation"><strong>Recommended: Keep 480×400 as OS safety floor.</strong> Prism UI targets 640×480, but allowing the native window to shrink down to 480×400 avoids OS creation errors on extreme edge displays.</p>
+      <label class="option"><input id="native-min-bounds-safety" type="radio" name="native-min-bounds" value="keep-safety-480x400" aria-describedby="native-min-bounds-error"><span>Keep 480×400 as OS safety floor<small>Prism UI targets 640×480, but the OS window allows shrinking down to 480×400 without crashing.</small></span></label>
+      <label class="option"><input id="native-min-bounds-align" type="radio" name="native-min-bounds" value="align-floor-640x480" aria-describedby="native-min-bounds-error"><span>Align tauri.conf.json to 640×480<small>Enforces the contract at the native window manager level.</small></span></label>
+      <label class="option"><input id="native-min-bounds-custom" type="radio" name="native-min-bounds" value="custom" aria-describedby="native-min-bounds-error"><span>Write my own answer</span></label>
+      <div data-custom hidden><label for="native-min-bounds-text">Your minimum bounds specification</label><textarea id="native-min-bounds-text" data-text aria-describedby="native-min-bounds-error"></textarea></div>
+      <label class="option"><input id="native-min-bounds-discuss" type="radio" name="native-min-bounds" value="discuss" aria-describedby="native-min-bounds-error"><span>Discuss first</span></label>
+      <details><summary>Add context</summary><label for="native-min-bounds-context">Additional details on minimum bounds</label><textarea id="native-min-bounds-context" data-context></textarea></details>
+      <button type="button" data-clear>Clear answer</button>
+      <p id="native-min-bounds-error" data-error></p>
+    </fieldset>
+
+    <fieldset data-question="dpi-sync-trigger">
+      <legend>3. When should Rust recalculate window size and position for DPI?</legend>
+      <p class="question">When moving across monitors or when monitor scale changes, when should Rust recalculate physical dimensions and clamp to work area?</p>
+      <p class="recommendation"><strong>Recommended: Summon time + ScaleFactorChanged / WM_DPICHANGED.</strong> Recalculates on every launch/show and listens for native Win32 DPI change events for immediate repositioning.</p>
+      <label class="option"><input id="dpi-sync-trigger-both" type="radio" name="dpi-sync-trigger" value="on-toggle-and-dpi-event" aria-describedby="dpi-sync-trigger-error"><span>Summon time + ScaleFactorChanged / WM_DPICHANGED<small>Recalculates on every launch/show and listens for native Win32 DPI change events.</small></span></label>
+      <label class="option"><input id="dpi-sync-trigger-toggle" type="radio" name="dpi-sync-trigger" value="on-toggle-only" aria-describedby="dpi-sync-trigger-error"><span>Summon time only<small>Recalculates only when Prism is shown; ignores DPI events while hidden.</small></span></label>
+      <label class="option"><input id="dpi-sync-trigger-custom" type="radio" name="dpi-sync-trigger" value="custom" aria-describedby="dpi-sync-trigger-error"><span>Write my own answer</span></label>
+      <div data-custom hidden><label for="dpi-sync-trigger-text">Your DPI sync trigger rule</label><textarea id="dpi-sync-trigger-text" data-text aria-describedby="dpi-sync-trigger-error"></textarea></div>
+      <label class="option"><input id="dpi-sync-trigger-discuss" type="radio" name="dpi-sync-trigger" value="discuss" aria-describedby="dpi-sync-trigger-error"><span>Discuss first</span></label>
+      <details><summary>Add context</summary><label for="dpi-sync-trigger-context">Additional details on DPI sync triggers</label><textarea id="dpi-sync-trigger-context" data-context></textarea></details>
+      <button type="button" data-clear>Clear answer</button>
+      <p id="dpi-sync-trigger-error" data-error></p>
+    </fieldset>
+
+    <fieldset data-question="width-animation-approach">
+      <legend>4. How should native window width transitions between presets be handled?</legend>
+      <p class="question">When switching width presets (640, 720, 800), set_window_width currently allows intermediate frames for frontend animation, which can cause Win32 repaint stutter.</p>
+      <p class="recommendation"><strong>Recommended: Instant native resize (0ms); smooth internal CSS layout.</strong> Window snaps instantly to target width, internal CSS components animate smoothly.</p>
+      <label class="option"><input id="width-animation-instant" type="radio" name="width-animation-approach" value="instant-switch" aria-describedby="width-animation-approach-error"><span>Instant native resize (0ms)<small>Eliminates Win32 repaint tearing and mixed-DPI stutter during width changes.</small></span></label>
+      <label class="option"><input id="width-animation-interpolated" type="radio" name="width-animation-approach" value="frontend-interpolated-logical" aria-describedby="width-animation-approach-error"><span>Keep 60fps frontend interpolation<small>Passes smooth logical DIP steps to set_window_width over 150ms.</small></span></label>
+      <label class="option"><input id="width-animation-approach-custom" type="radio" name="width-animation-approach" value="custom" aria-describedby="width-animation-approach-error"><span>Write my own answer</span></label>
+      <div data-custom hidden><label for="width-animation-approach-text">Your width transition specification</label><textarea id="width-animation-approach-text" data-text aria-describedby="width-animation-approach-error"></textarea></div>
+      <label class="option"><input id="width-animation-approach-discuss" type="radio" name="width-animation-approach" value="discuss" aria-describedby="width-animation-approach-error"><span>Discuss first</span></label>
+      <details><summary>Add context</summary><label for="width-animation-approach-context">Additional details on width animation</label><textarea id="width-animation-approach-context" data-context></textarea></details>
+      <button type="button" data-clear>Clear answer</button>
+      <p id="width-animation-approach-error" data-error></p>
+    </fieldset>
+
+    <fieldset data-question="scroll-container-structure">
+      <legend>5. How should scrolling and overflow be structured in React &amp; CSS?</legend>
+      <p class="question">Under short work areas (height clamped to 480px–550px), tokens.css:191 overflow:hidden causes content clipping. Where should scroll containment live?</p>
+      <p class="recommendation"><strong>Recommended: Pin search header &amp; footer; scroll results list.</strong> Search input stays pinned at top; results list has overflow-y: auto with stable scrollbar gutter.</p>
+      <label class="option"><input id="scroll-container-results" type="radio" name="scroll-container-structure" value="results-only-scroll" aria-describedby="scroll-container-structure-error"><span>Pin search header &amp; footer; scroll results list<small>Search input stays pinned at top; results list has overflow-y: auto with stable scrollbar gutter.</small></span></label>
+      <label class="option"><input id="scroll-container-shell" type="radio" name="scroll-container-structure" value="shell-fallback-scroll" aria-describedby="scroll-container-structure-error"><span>Dual scroll: results scroll, shell scrolls if ultra-short<small>Normally results scroll; if total height is under 440px, the entire launcher shell scrolls.</small></span></label>
+      <label class="option"><input id="scroll-container-structure-custom" type="radio" name="scroll-container-structure" value="custom" aria-describedby="scroll-container-structure-error"><span>Write my own answer</span></label>
+      <div data-custom hidden><label for="scroll-container-structure-text">Your scroll containment specification</label><textarea id="scroll-container-structure-text" data-text aria-describedby="scroll-container-structure-error"></textarea></div>
+      <label class="option"><input id="scroll-container-structure-discuss" type="radio" name="scroll-container-structure" value="discuss" aria-describedby="scroll-container-structure-error"><span>Discuss first</span></label>
+      <details><summary>Add context</summary><label for="scroll-container-structure-context">Additional details on scrolling structure</label><textarea id="scroll-container-structure-context" data-context></textarea></details>
+      <button type="button" data-clear>Clear answer</button>
+      <p id="scroll-container-structure-error" data-error></p>
+    </fieldset>
+
+    <footer><button type="submit">Submit round</button><span id="answer-progress">0 of 5 answered</span></footer>
+  </form>
+  <p id="session-status" role="status">Connecting to this session…</p>
+  <noscript>Enable JavaScript to submit your answers.</noscript>
+</main>
+</body>
+</html>

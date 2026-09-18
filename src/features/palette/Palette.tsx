@@ -899,16 +899,16 @@ export function Palette() {
           out of the footer and would be clipped away. Height is fixed by h-12
           + shrink-0 + flex-nowrap, so nothing needs to be hidden. */}
       <div className="footer-bar flex h-12 shrink-0 flex-nowrap items-center justify-between gap-x-3 px-5">
-        <div className="flex shrink-0 items-center gap-1.5 text-[11px] text-fg-quiet">
+        <div className="footer-hints flex shrink-0 items-center gap-1.5 text-[11px] text-fg-quiet">
           <Kbd>↑</Kbd>
           <Kbd>↓</Kbd>
-          <span className="px-1">navigate</span>
-          <span className="text-divider">·</span>
+          <span className="footer-hint-text px-1">navigate</span>
+          <span className="footer-hint-sep text-divider">·</span>
           <Kbd>↵</Kbd>
-          <span className="px-1">open</span>
-          <span className="text-divider">·</span>
+          <span className="footer-hint-text px-1">open</span>
+          <span className="footer-hint-sep text-divider">·</span>
           <Kbd>esc</Kbd>
-          <span className="px-1">dismiss</span>
+          <span className="footer-hint-text px-1">dismiss</span>
         </div>
         <div className="ms-auto flex min-w-0 flex-nowrap items-center justify-end gap-1.5">
           <UpdateControl />
