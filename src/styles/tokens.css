@@ -452,6 +452,7 @@ body {
 .scroll-thin {
   scrollbar-width: thin;
   scrollbar-color: var(--t-scroll) transparent;
+  scrollbar-gutter: stable;
 }
 .scroll-thin::-webkit-scrollbar {
   width: 8px;
@@ -480,6 +481,10 @@ body {
   &::-webkit-scrollbar {
     display: none;
   }
+}
+
+.launcher-container {
+  container: launcher / size;
 }
 
 .launcher-stage {
@@ -620,3 +625,67 @@ body {
     scroll-behavior: auto !important;
   }
 }
+
+/* ------------------------------------------------------------------ */
+/*  Container Responsiveness (DPI & Compact Viewports)                */
+/* ------------------------------------------------------------------ */
+
+@container launcher (max-width: 680px) {
+  .settings-backdrop-dismiss {
+    display: none;
+  }
+  .launcher-container .settings-panel {
+    width: 100%;
+    max-width: 100%;
+    border-left: none;
+    border-top-left-radius: 24px;
+    border-bottom-left-radius: 8px;
+  }
+  .footer-hint-text,
+  .footer-hint-sep {
+    display: none;
+  }
+}
+
+@container launcher (max-width: 580px) {
+  .footer-hints {
+    display: none;
+  }
+  .launcher-container .row {
+    grid-template-columns: 32px minmax(0, 1fr) auto;
+    gap: 8px;
+    padding: 5px 8px;
+  }
+  /* biome-ignore lint/complexity/noImportantStyles: Container query override must supersede React inline styles */
+  .launcher-container .row .tile,
+  .launcher-container .row [role="gridcell"]:first-child > div:last-child {
+    width: 32px !important;
+    height: 32px !important;
+  }
+  /* biome-ignore lint/complexity/noImportantStyles: Container query override must supersede React inline styles */
+  .launcher-container .row .tile svg {
+    width: 16px !important;
+    height: 16px !important;
+  }
+}
+
+@container launcher (max-height: 520px) {
+  .launcher-container .search-header {
+    padding-top: 0.75rem;
+    padding-bottom: 0.25rem;
+    padding-inline: 1rem;
+  }
+  .launcher-container .search-field {
+    padding-block: 0.5rem;
+    padding-inline: 0.75rem;
+  }
+  .launcher-container .row {
+    padding-block: 4px;
+    gap: 8px;
+  }
+  .launcher-container .footer-bar {
+    height: 2.25rem;
+    padding-inline: 1rem;
+  }
+}
+

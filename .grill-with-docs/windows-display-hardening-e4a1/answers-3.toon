@@ -1,0 +1,5 @@
+session: "windows-display-hardening-e4a1"
+round: 3
+status: submitted
+answers[1]{id,choice,text,deferred}:
+  "confirm-synthesis","confirm","",false

@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Prism Windows Display &amp; DPI Hardening · Round 3 (Synthesis)</title>
+  <style>
+    :root { color-scheme: light; --paper: oklch(98% .008 85); --ink: oklch(27% .018 65); --muted: oklch(46% .018 65); --line: oklch(85% .012 85); --accent: oklch(40% .075 175); --selected: oklch(94% .025 175); --error: oklch(44% .16 25); }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--paper); color: var(--ink); font: 1rem/1.6 ui-sans-serif, system-ui, sans-serif; }
+    main { max-inline-size: 48rem; margin-inline: auto; padding: 3.5rem 1.25rem; }
+    header { margin-block-end: 2.5rem; }
+    h1 { font: 500 clamp(2rem, 5vw, 2.75rem)/1.15 Georgia, serif; margin: 0 0 1rem; text-wrap: balance; }
+    p { margin: .6rem 0; overflow-wrap: anywhere; }
+    header p { max-inline-size: 60ch; color: var(--muted); }
+    .meta { font-size: .875rem; color: var(--muted); margin-block-start: 1.25rem; }
+    .synthesis-card { background: oklch(96% .008 85); border-radius: .6rem; padding: 1.5rem; margin-block-end: 2.5rem; border: 1px solid var(--line); }
+    .synthesis-card h2 { font-size: 1.15rem; margin-top: 0; margin-bottom: .8rem; }
+    .synthesis-card ul { margin: 0; padding-left: 1.25rem; }
+    .synthesis-card li { margin-bottom: .5rem; }
+    .docs-list { font-size: .875rem; color: var(--muted); margin-top: 1rem; }
+    .docs-list code { font-family: monospace; color: var(--ink); background: oklch(92% .01 85); padding: .15rem .35rem; border-radius: .25rem; }
+    fieldset { border: 0; border-block-end: 1px solid var(--line); margin: 0 0 2.5rem; padding: 0 0 2rem; min-inline-size: 0; }
+    legend { padding: 0; font-size: 1.35rem; font-weight: 600; line-height: 1.35; }
+    .question { margin-block: 1rem .6rem; }
+    .recommendation { color: var(--muted); margin-block-end: 1.25rem; }
+    .recommendation strong { color: var(--accent); font-weight: 600; }
+    .option { display: flex; align-items: start; gap: .8rem; padding: .8rem .5rem; min-block-size: 44px; border-radius: .4rem; cursor: pointer; }
+    .option:has(input:checked) { background: var(--selected); }
+    input[type=radio] { flex-shrink: 0; inline-size: 1.15rem; block-size: 1.15rem; margin: .25rem 0 0; accent-color: var(--accent); }
+    .option span { min-inline-size: 0; overflow-wrap: anywhere; }
+    .option small { display: block; color: var(--muted); font-size: .875rem; }
+    textarea { display: block; inline-size: 100%; min-block-size: 7rem; resize: vertical; margin-block: .5rem 1rem; padding: .75rem; border: 1px solid var(--muted); border-radius: .4rem; font: inherit; color: var(--ink); background: var(--paper); }
+    [data-custom] { padding-block-start: .75rem; }
+    details { margin-block: .5rem; }
+    summary { cursor: pointer; padding-block: .6rem; min-block-size: 44px; color: var(--muted); }
+    button { font: inherit; min-block-size: 44px; cursor: pointer; border-radius: .4rem; }
+    [data-clear] { border: 0; padding: .5rem 0; text-decoration: underline; text-underline-offset: .2em; background: transparent; color: var(--muted); font-size: .875rem; }
+    [type=submit] { background: var(--accent); color: white; border: 0; padding: .8rem 1.5rem; font-weight: 600; }
+    button:disabled { cursor: default; opacity: .65; }
+    [data-error] { color: var(--error); font-size: .875rem; }
+    [data-error]:empty { margin: 0; }
+    footer { display: flex; flex-wrap: wrap; align-items: center; gap: 1rem 1.5rem; }
+    #answer-progress { color: var(--muted); font-size: .875rem; font-variant-numeric: tabular-nums; }
+    #session-status { margin-block-start: 1rem; color: var(--muted); font-size: .875rem; }
+    ::selection { background: var(--selected); color: var(--ink); }
+    :focus-visible { outline: 2px solid var(--accent); outline-offset: 4px; }
+    @media (forced-colors: active) { :focus-visible { outline-color: Highlight; } }
+    @media (max-width: 30rem) { main { padding-block: 2rem; } }
+  </style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Synthesis &amp; Authorization.</h1>
+    <p>Every decision branch is resolved. Review the agreed architectural outcomes and confirm before starting implementation.</p>
+    <p class="meta">Round 3 · Final synthesis and authorization</p>
+  </header>
+
+  <section class="synthesis-card">
+    <h2>Agreed Architectural Decisions</h2>
+    <ul>
+      <li><strong>Baseline Support:</strong> 640×480 logical work area floor with graceful compact degradation.</li>
+      <li><strong>Unit Contract:</strong> Logical DIP everywhere across IPC, settings, and state; converted to physical pixels strictly at Win32/Tauri boundaries.</li>
+      <li><strong>Mixed-DPI Movement:</strong> Preserve logical dimensions across monitors by recalculating physical pixels (<code>logical * target_dpi</code>).</li>
+      <li><strong>Height Clamping:</strong> Native window height clamps to monitor work area; search bar stays pinned, results list scrolls smoothly.</li>
+      <li><strong>Zoom Semantics:</strong> Content-only webview zoom; native window frame size remains decoupled and governed by presets.</li>
+      <li><strong>Container Breakpoints:</strong> Multi-stage container queries (width &lt; 700px collapses secondary action hints; height &lt; 520px collapses badges/tightens padding).</li>
+      <li><strong>Native Safety Floor:</strong> Retain 480×400 in <code>tauri.conf.json</code> as OS safety net while UI targets 640×480.</li>
+      <li><strong>DPI Synchronization:</strong> Recalculate on summon/show and listen for <code>ScaleFactorChanged</code> / <code>WM_DPICHANGED</code> events.</li>
+      <li><strong>Width Transitions:</strong> Instant 0ms native resize via <code>set_window_width</code>; internal CSS transitions smoothly.</li>
+      <li><strong>Scroll Containment:</strong> Pinned search header/footer; results container has <code>overflow-y: auto</code> and <code>scrollbar-gutter: stable</code>.</li>
+    </ul>
+
+    <div class="docs-list">
+      <p><strong>Artifacts written:</strong></p>
+      <ul>
+        <li><code>CONTEXT.md</code> (Domain model &amp; terminology)</li>
+        <li><code>docs/adr/0001-logical-dpi-and-geometry-contract.md</code> (Core DPI decisions)</li>
+        <li><code>docs/adr/0002-multi-stage-container-and-dpi-sync.md</code> (Mechanics &amp; event handling)</li>
+        <li><code>.grill-with-docs/windows-display-hardening-e4a1/design-tree.md</code> (Decision tree)</li>
+      </ul>
+    </div>
+  </section>
+
+  <form id="grill-form" novalidate>
+    <fieldset data-question="confirm-synthesis">
+      <legend>Confirm decisions and authorize implementation</legend>
+      <p class="question">Do you confirm the synthesized decisions and authorize proceeding to implementation Slice 1 (native geometry and DPI conversion in Rust)?</p>
+      <p class="recommendation"><strong>Recommended: Confirm and proceed.</strong> All 10 foundational and mechanical decisions are aligned with your initial request and documented in ADRs.</p>
+      <label class="option"><input id="confirm-synthesis-yes" type="radio" name="confirm-synthesis" value="confirm" aria-describedby="confirm-synthesis-error"><span>Confirm and proceed<small>Authorize implementation starting with native geometry and DPI conversion in Rust.</small></span></label>
+      <label class="option"><input id="confirm-synthesis-revise" type="radio" name="confirm-synthesis" value="revise" aria-describedby="confirm-synthesis-error"><span>Request revisions<small>Reopen specific questions or adjust the synthesis before writing code.</small></span></label>
+      <label class="option"><input id="confirm-synthesis-custom" type="radio" name="confirm-synthesis" value="custom" aria-describedby="confirm-synthesis-error"><span>Write my own answer</span></label>
+      <div data-custom hidden><label for="confirm-synthesis-text">Your revision or direction</label><textarea id="confirm-synthesis-text" data-text aria-describedby="confirm-synthesis-error"></textarea></div>
+      <label class="option"><input id="confirm-synthesis-discuss" type="radio" name="confirm-synthesis" value="discuss" aria-describedby="confirm-synthesis-error"><span>Discuss first</span></label>
+      <details><summary>Add context</summary><label for="confirm-synthesis-context">Additional comments or requirements</label><textarea id="confirm-synthesis-context" data-context></textarea></details>
+      <button type="button" data-clear>Clear answer</button>
+      <p id="confirm-synthesis-error" data-error></p>
+    </fieldset>
+
+    <footer><button type="submit">Submit round</button><span id="answer-progress">0 of 1 answered</span></footer>
+  </form>
+  <p id="session-status" role="status">Connecting to this session…</p>
+  <noscript>Enable JavaScript to submit your answers.</noscript>
+</main>
+</body>
+</html>
