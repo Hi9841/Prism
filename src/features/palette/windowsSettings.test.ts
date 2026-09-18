@@ -6,9 +6,11 @@ import {
   Home,
   LayoutGrid,
   Monitor,
+  Moon,
   Paintbrush,
   RefreshCw,
   Shield,
+  Sun,
   UserRound,
   Wifi,
 } from "lucide-react";
@@ -27,6 +29,8 @@ describe("Windows Settings actions", () => {
 
   it.each([
     ["display settings", "ms-settings:display"],
+    ["night light", "ms-settings:nightlight"],
+    ["hdr", "ms-settings:hdr"],
     ["bluetooth", "ms-settings:bluetooth"],
     ["windows update", "ms-settings:windowsupdate"],
     ["default apps", "ms-settings:defaultapps"],
@@ -42,6 +46,8 @@ describe("Windows Settings actions", () => {
 
   it.each([
     ["settings", Home],
+    ["night light", Moon],
+    ["hdr", Sun],
     ["display", Monitor],
     ["bluetooth", Bluetooth],
     ["network & internet", Wifi],

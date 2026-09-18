@@ -35,6 +35,8 @@ import {
 } from "../../lib/bridge";
 import { sortApps } from "../../lib/emoji";
 import { formatNumber, isMathLike, tryEvaluate } from "../../lib/math";
+import type { Phase1Response } from "../../lib/query";
+import { phase1MatchesQuery } from "../../lib/query";
 import { fuzzy, fuzzyApps } from "../../lib/search";
 import type {
   AppEntry,
@@ -46,6 +48,7 @@ import type {
   TileTint,
 } from "../../lib/types";
 import { isElevatablePath, isPicturePath, isTaskbarPinablePath } from "../../lib/types";
+import { actionPaletteItem, appHitPaletteItem, isCommandAction, windowPaletteItem } from "./phase1";
 import { searchWindowsSettings } from "./windowsSettings";
 
 export interface Section {
@@ -91,6 +94,8 @@ export interface PaletteSources {
   filesError: boolean;
   fileIndexing?: boolean;
   fileIndexReady?: boolean;
+  /** Backend Phase 1 hits. Used only when `phase1.query` matches `query`. */
+  phase1?: Phase1Response | null;
 }
 
 /** Caps on the idle view; matching the displayed rows, not the data limits. */
@@ -125,6 +130,7 @@ export function buildSections(sources: PaletteSources): {
     filesError,
     fileIndexing,
     fileIndexReady,
+    phase1,
   } = sources;
   const normalized = query.trim();
   const searchQuery = normalized.toLowerCase();
@@ -180,15 +186,60 @@ export function buildSections(sources: PaletteSources): {
       out.push({ id: "calc", label: "Calculator", items: [calcItem(math.value)] });
     }
 
+    const usePhase1 = phase1MatchesQuery(phase1, normalized);
+    const appsById = new Map(apps.map((entry) => [entry.appId, entry]));
+    const phase1AppItems = usePhase1
+      ? (phase1?.apps
+          .map((hit) =>
+            appHitPaletteItem(hit, appsById, appIcons, (entry) => appPaletteItem(entry, appIcons)),
+          )
+          .filter((item): item is PaletteItem => item !== null) ?? [])
+      : [];
+    const appHits =
+      usePhase1 && phase1AppItems.length > 0
+        ? phase1AppItems.flatMap((item) => {
+            const entry = item.appId ? appsById.get(item.appId) : undefined;
+            return entry ? [entry] : [];
+          })
+        : fuzzyApps(apps, normalized, SEARCH_APPS_LIMIT, { preDeduped: true });
+    const appPaths = new Set<string>();
+    for (const entry of appHits) {
+      if (entry.path) appPaths.add(entry.path.toLowerCase());
+    }
+    if (usePhase1) {
+      for (const hit of phase1?.apps ?? []) {
+        if (hit.path) appPaths.add(hit.path.toLowerCase());
+      }
+    }
+
+    const recentItems =
+      usePhase1 && !filePathBrowse
+        ? (phase1?.recents
+            .map((hit) =>
+              rehydrate(
+                { id: hit.id, title: hit.title, ts: 0 },
+                appsById,
+                existingHistoryPaths,
+                appIcons,
+                fileThumbnails,
+              ),
+            )
+            .filter((item): item is PaletteItem => Boolean(item)) ?? [])
+        : [];
+    if (recentItems.length > 0) {
+      out.push({ id: "recent", label: "Recent", items: recentItems });
+    }
+
+    const windowItems =
+      usePhase1 && !filePathBrowse ? (phase1?.windows.map(windowPaletteItem) ?? []) : [];
+    if (windowItems.length > 0) {
+      out.push({ id: "windows", label: "Open windows", items: windowItems });
+    }
+
     const quickHits = fuzzy(quickItems, normalized, { limit: SEARCH_QUICK_LIMIT });
     if (quickHits.length > 0) {
       out.push({ id: "quick", label: "Quick Access", items: quickHits.map((hit) => hit.item) });
     }
-
-    const appHits = fuzzyApps(apps, normalized, SEARCH_APPS_LIMIT, { preDeduped: true });
-    const appPaths = new Set(
-      appHits.map((app) => app.path?.toLowerCase()).filter((p): p is string => Boolean(p)),
-    );
 
     const dedupedFiles = fileResults.filter((entry) => !appPaths.has(entry.path.toLowerCase()));
     const fileItems =
@@ -197,10 +248,23 @@ export function buildSections(sources: PaletteSources): {
     if (filePathBrowse && fileItems.length > 0) {
       out.push({ id: "files", label: "Folder Contents", items: fileItems });
     }
-    const settingsItems = filePathBrowse ? [] : searchWindowsSettings(normalized);
+    const settingsItems = filePathBrowse
+      ? []
+      : usePhase1
+        ? (phase1?.actions.filter((hit) => !isCommandAction(hit)).map(actionPaletteItem) ?? [])
+        : searchWindowsSettings(normalized);
+    const commandItems =
+      usePhase1 && !filePathBrowse
+        ? (phase1?.actions.filter(isCommandAction).map(actionPaletteItem) ?? [])
+        : [];
     const appsSection = buildAppsSection(appHits, appIcons, appGroups, SEARCH_APPS_LIMIT);
     if (appsSection) {
       out.push(appsSection);
+    } else if (usePhase1 && phase1AppItems.length > 0) {
+      out.push({ id: "apps", label: "Apps", items: phase1AppItems.slice(0, SEARCH_APPS_LIMIT) });
+    }
+    if (commandItems.length > 0) {
+      out.push({ id: "commands", label: "Commands", items: commandItems });
     }
     if (settingsItems.length > 0) {
       out.push({ id: "settings", label: "Settings", items: settingsItems });

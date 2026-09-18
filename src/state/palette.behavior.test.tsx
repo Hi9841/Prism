@@ -16,6 +16,14 @@ vi.mock("../lib/bridge", () => ({
   hidePaletteWindow: vi.fn().mockResolvedValue(undefined),
   onFileIndexUpdated: vi.fn(),
   onWindowFocused: vi.fn(() => () => {}),
+  queryPhase1: vi.fn().mockResolvedValue({
+    query: "",
+    recents: [],
+    windows: [],
+    apps: [],
+    actions: [],
+  }),
+  acceptIntent: vi.fn().mockResolvedValue(undefined),
   rebuildFileIndex: vi.fn().mockResolvedValue(undefined),
   searchFiles: vi.fn(),
 }));
@@ -134,5 +142,53 @@ describe("thumbnail cache invalidation", () => {
       kind: "image",
       src: "data:image/png;base64,fresh",
     });
+  });
+});
+
+describe("two-phase query paint", () => {
+  it("paints Phase 1 before file search runs", async () => {
+    vi.mocked(bridge.queryPhase1).mockResolvedValue({
+      query: "chrome",
+      recents: [],
+      windows: [
+        {
+          id: "window::9",
+          kind: "window",
+          title: "Chrome",
+          subtitle: "Open window · chrome",
+          score: 900,
+          hwnd: 9,
+          iconKey: "window",
+        },
+      ],
+      apps: [],
+      actions: [],
+    });
+    const files = deferred<FileSearchResponse>();
+    vi.mocked(bridge.searchFiles).mockImplementation((query) =>
+      query ? files.promise : Promise.resolve(statusResponse),
+    );
+
+    await act(async () => {
+      render(
+        <PaletteProvider>
+          <Probe />
+        </PaletteProvider>,
+      );
+    });
+    await act(async () => {
+      palette.setQuery("chrome");
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(palette.flatItems.some((item) => item.title === "Chrome")).toBe(true);
+    expect(vi.mocked(bridge.searchFiles).mock.calls.some(([query]) => query === "chrome")).toBe(false);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(35);
+    });
+    expect(vi.mocked(bridge.searchFiles).mock.calls.some(([query]) => query === "chrome")).toBe(true);
   });
 });

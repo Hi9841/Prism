@@ -1,6 +1,7 @@
 import { Home } from "lucide-react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { isPinnedToTaskbar, setTaskbarPinned } from "../../lib/bridge";
+import type { Phase1Hit, Phase1Response } from "../../lib/query";
 import type { AppEntry, FileEntry, PaletteItem, QuickAccessEntry } from "../../lib/types";
 import { buildSections, isClipboardKind, type PaletteSources, quickAccessPaletteItem } from "./sections";
 
@@ -15,6 +16,8 @@ vi.mock("../../lib/bridge", () => ({
   launchApp: vi.fn().mockResolvedValue(undefined),
   launchAppAsAdmin: vi.fn().mockResolvedValue(undefined),
   copyText: vi.fn().mockResolvedValue(undefined),
+  executeAction: vi.fn().mockResolvedValue(undefined),
+  focusWindow: vi.fn().mockResolvedValue(undefined),
 }));
 
 function app(name: string, overrides: Partial<AppEntry> = {}): AppEntry {
@@ -54,6 +57,25 @@ function quickItems(): PaletteItem[] {
       keywords: ["audio"],
     }),
   ];
+}
+
+function phase1Hit(overrides: Partial<Phase1Hit> & Pick<Phase1Hit, "id" | "kind" | "title">): Phase1Hit {
+  return {
+    subtitle: overrides.subtitle ?? "",
+    score: overrides.score ?? 100,
+    ...overrides,
+  };
+}
+
+function phase1(query: string, overrides: Partial<Phase1Response> = {}): Phase1Response {
+  return {
+    query,
+    recents: [],
+    windows: [],
+    apps: [],
+    actions: [],
+    ...overrides,
+  };
 }
 
 function sources(overrides: Partial<PaletteSources> = {}): PaletteSources {
@@ -326,6 +348,77 @@ describe("buildSections - search layout", () => {
 
     expect(ids(result.sections)).toEqual(["settings"]);
     expect(result.flatItems.some((entry) => entry.id.startsWith("copy::"))).toBe(false);
+  });
+
+  it("paints Phase 1 windows and actions without file results", () => {
+    const query = "my eyes hurt";
+    const result = buildSections(
+      sources({
+        query,
+        fileIndexReady: true,
+        filesBusy: true,
+        phase1: phase1(query, {
+          windows: [
+            phase1Hit({
+              id: "window::1",
+              kind: "window",
+              title: "Notes",
+              subtitle: "Open window · notepad",
+              hwnd: 1,
+              iconKey: "window",
+            }),
+          ],
+          actions: [
+            phase1Hit({
+              id: "action::settings.nightlight",
+              kind: "action",
+              title: "Night Light",
+              subtitle: "Windows Settings · from your wording",
+              actionId: "settings.nightlight",
+              uri: "ms-settings:nightlight",
+              iconKey: "nightlight",
+              score: 10_000,
+            }),
+          ],
+        }),
+      }),
+    );
+    expect(ids(result.sections)).toEqual(["windows", "settings"]);
+    expect(result.sections[0].items[0].title).toBe("Notes");
+    expect(result.sections[1].items[0].title).toBe("Night Light");
+  });
+
+  it("keeps local app search when Phase 1 apps are empty", () => {
+    const result = buildSections(
+      sources({
+        query: "disc",
+        apps: [app("Discord")],
+        fileIndexReady: true,
+        phase1: phase1("disc"),
+      }),
+    );
+    expect(result.sections[0].items[0].title).toBe("Discord");
+  });
+
+  it("does not wait on a mismatched Phase 1 payload", () => {
+    const result = buildSections(
+      sources({
+        query: "display",
+        fileIndexReady: true,
+        phase1: phase1("old", {
+          actions: [
+            phase1Hit({
+              id: "action::settings.nightlight",
+              kind: "action",
+              title: "Night Light",
+              actionId: "settings.nightlight",
+              uri: "ms-settings:nightlight",
+            }),
+          ],
+        }),
+      }),
+    );
+    expect(result.sections[0].items[0].title).toBe("Display");
   });
 
   it("matches quick access items through keywords only", () => {

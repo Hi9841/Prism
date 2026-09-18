@@ -4,6 +4,8 @@ import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
+import type { Phase1Response, RecentCommand } from "./query";
+import { EMPTY_PHASE1 } from "./query";
 import type { AppEntry, FileSearchResponse, PersistedState, QuickAccessEntry } from "./types";
 
 export type PowerAction = "lock" | "sleep" | "shutdown" | "restart";
@@ -182,6 +184,32 @@ export async function setTaskbarPinned(path: string, pinned: boolean): Promise<v
 export async function showPathProperties(path: string): Promise<void> {
   if (!inTauri) return;
   await invoke("show_path_properties", { path });
+}
+
+export async function queryPhase1(query: string, recent: RecentCommand[] = []): Promise<Phase1Response> {
+  if (!inTauri) {
+    return { ...EMPTY_PHASE1, query: "" };
+  }
+  return invoke<Phase1Response>("query_phase1", { query, recent });
+}
+
+export async function queryPhase2(query: string, limit = 20): Promise<FileSearchResponse> {
+  return searchFiles(query, limit);
+}
+
+export async function executeAction(id: string): Promise<void> {
+  if (!inTauri) return;
+  await invoke("execute_action", { id });
+}
+
+export async function acceptIntent(query: string, actionId: string): Promise<void> {
+  if (!inTauri) return;
+  await invoke("accept_intent", { query, actionId });
+}
+
+export async function focusWindow(hwnd: number): Promise<void> {
+  if (!inTauri) return;
+  await invoke("focus_window", { hwnd });
 }
 
 export async function searchFiles(query: string, limit = 20): Promise<FileSearchResponse> {
