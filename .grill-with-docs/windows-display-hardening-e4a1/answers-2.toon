@@ -1,9 +1,0 @@
-session: "windows-display-hardening-e4a1"
-round: 2
-status: submitted
-answers[5]{id,choice,text,deferred}:
-  "compact-breakpoint","multi-stage","",false
-  "native-min-bounds","keep-safety-480x400","",false
-  "dpi-sync-trigger","on-toggle-and-dpi-event","",false
-  "width-animation-approach","instant-switch","",false
-  "scroll-container-structure","results-only-scroll","",false
