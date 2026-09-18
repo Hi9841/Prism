@@ -77,6 +77,59 @@ pub fn get_process_name(pid: u32) -> Option<String> {
     None
 }
 
+fn default_endpoint_volume() -> Result<IAudioEndpointVolume, String> {
+    unsafe {
+        let enumerator: IMMDeviceEnumerator =
+            CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)
+                .map_err(|error| format!("create MMDeviceEnumerator: {error}"))?;
+        let device: IMMDevice = enumerator
+            .GetDefaultAudioEndpoint(eRender, eMultimedia)
+            .map_err(|error| format!("get default audio endpoint: {error}"))?;
+        device
+            .Activate(CLSCTX_ALL, None)
+            .map_err(|error| format!("activate IAudioEndpointVolume: {error}"))
+    }
+}
+
+/// Mutes or unmutes the default render endpoint.
+pub fn set_default_endpoint_mute(muted: bool) -> Result<bool, String> {
+    std::thread::spawn(move || {
+        let _com = ComApartment::initialize()?;
+        unsafe {
+            let endpoint = default_endpoint_volume()?;
+            endpoint
+                .SetMute(muted, std::ptr::null())
+                .map_err(|error| format!("set endpoint mute: {error}"))?;
+            endpoint
+                .GetMute()
+                .map(|value| value.as_bool())
+                .map_err(|error| format!("get endpoint mute: {error}"))
+        }
+    })
+    .join()
+    .map_err(|_| "endpoint mute thread panicked".to_string())?
+}
+
+/// Toggles mute on the default render endpoint.
+pub fn toggle_default_endpoint_mute() -> Result<bool, String> {
+    std::thread::spawn(|| {
+        let _com = ComApartment::initialize()?;
+        unsafe {
+            let endpoint = default_endpoint_volume()?;
+            let muted = endpoint
+                .GetMute()
+                .map(|value| value.as_bool())
+                .map_err(|error| format!("get endpoint mute: {error}"))?;
+            endpoint
+                .SetMute(!muted, std::ptr::null())
+                .map_err(|error| format!("toggle endpoint mute: {error}"))?;
+            Ok(!muted)
+        }
+    })
+    .join()
+    .map_err(|_| "endpoint mute thread panicked".to_string())?
+}
+
 /// Retrieves or adjusts the default render device's master volume.
 fn adjust_master_volume(delta: f32) -> Result<(f32, bool), String> {
     unsafe {
