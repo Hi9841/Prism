@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Prism Windows Display &amp; DPI Hardening · Interview Complete</title>
+  <style>
+    :root { color-scheme: light; --paper: oklch(98% .008 85); --ink: oklch(27% .018 65); --muted: oklch(46% .018 65); --line: oklch(85% .012 85); --accent: oklch(40% .075 175); --selected: oklch(94% .025 175); }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--paper); color: var(--ink); font: 1rem/1.6 ui-sans-serif, system-ui, sans-serif; }
+    main { max-inline-size: 48rem; margin-inline: auto; padding: 3.5rem 1.25rem; }
+    header { margin-block-end: 2.5rem; }
+    h1 { font: 500 clamp(2rem, 5vw, 2.75rem)/1.15 Georgia, serif; margin: 0 0 1rem; text-wrap: balance; color: var(--accent); }
+    p { margin: .6rem 0; overflow-wrap: anywhere; }
+    header p { max-inline-size: 60ch; color: var(--muted); }
+    .card { background: oklch(96% .008 85); border-radius: .6rem; padding: 1.5rem; margin-block-end: 2rem; border: 1px solid var(--line); }
+    h2 { font-size: 1.2rem; margin-top: 0; margin-bottom: .8rem; }
+    ul { margin: 0; padding-left: 1.25rem; }
+    li { margin-bottom: .5rem; }
+    code { font-family: monospace; color: var(--ink); background: oklch(92% .01 85); padding: .15rem .35rem; border-radius: .25rem; }
+    .status-badge { display: inline-block; background: var(--selected); color: var(--accent); font-weight: 600; padding: .3rem .8rem; border-radius: 9999px; font-size: .875rem; margin-bottom: 1rem; }
+  </style>
+</head>
+<body>
+<main>
+  <header>
+    <div class="status-badge">✓ Interview Complete &amp; Authorized</div>
+    <h1>Architecture Authorized.</h1>
+    <p>All design decisions have been settled, recorded in architectural decision records, and approved for implementation.</p>
+  </header>
+
+  <section class="card">
+    <h2>Agreed Architecture &amp; Contracts</h2>
+    <ul>
+      <li><strong>Support Floor:</strong> Permissive 640×480 logical DIP work area.</li>
+      <li><strong>Unit Contract:</strong> Logical DIP everywhere; physical conversion strictly at Win32 boundaries.</li>
+      <li><strong>Mixed-DPI Multi-Monitor:</strong> Preserve logical dimensions by scaling physical pixels per monitor.</li>
+      <li><strong>Height Clamping:</strong> Clamp window height to work area; search input pinned, results list scrollable.</li>
+      <li><strong>Zoom Semantics:</strong> Content-only webview zoom; native window geometry decoupled and preset-governed.</li>
+      <li><strong>Container Breakpoints:</strong> Width &lt; 700px collapses secondary hints; height &lt; 520px compacts padding/badges.</li>
+      <li><strong>Native Safety Floor:</strong> Retain 480×400 in <code>tauri.conf.json</code> as OS safety net.</li>
+      <li><strong>DPI Synchronization:</strong> Recalculate on summon/show and listen for <code>ScaleFactorChanged</code> / <code>WM_DPICHANGED</code>.</li>
+      <li><strong>Width Transitions:</strong> Instant 0ms native window resize via <code>set_window_width</code> (zero Win32 stutter).</li>
+      <li><strong>Scroll Containment:</strong> Pinned header/footer; results container has <code>overflow-y: auto</code> and <code>scrollbar-gutter: stable</code>.</li>
+    </ul>
+  </section>
+
+  <section class="card">
+    <h2>Recorded Documentation</h2>
+    <ul>
+      <li><code>CONTEXT.md</code> — Display &amp; Geometry Domain Vocabulary</li>
+      <li><code>docs/adr/0001-logical-dpi-and-geometry-contract.md</code> — Logical DIP &amp; Geometry Contract</li>
+      <li><code>docs/adr/0002-multi-stage-container-and-dpi-sync.md</code> — Container Responsiveness &amp; DPI Sync</li>
+      <li><code>.grill-with-docs/windows-display-hardening-e4a1/design-tree.md</code> — Full Decision Tree</li>
+    </ul>
+  </section>
+
+  <section class="card">
+    <h2>Next Step: Implementation Slice 1</h2>
+    <p>Implementation will begin on Slice 1: Native Rust geometry, DIP-to-physical conversion, mixed-DPI repositioning, and work area clamping in <code>src-tauri/src/lib.rs</code>.</p>
+  </section>
+</main>
+</body>
+</html>
