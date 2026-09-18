@@ -7,9 +7,11 @@ import {
   LayoutGrid,
   type LucideIcon,
   Monitor,
+  Moon,
   Paintbrush,
   RefreshCw,
   Shield,
+  Sun,
   UserRound,
   Wifi,
 } from "lucide-react";
@@ -36,6 +38,20 @@ function settingsPages(icon: LucideIcon, pages: WindowsSettingsPageSeed[]): Wind
 export const WINDOWS_SETTINGS_PAGES: WindowsSettingsPage[] = [
   ...settingsPages(Home, [
     { title: "Settings", uri: "ms-settings:", keywords: ["windows settings", "system settings"] },
+  ]),
+  ...settingsPages(Moon, [
+    {
+      title: "Night Light",
+      uri: "ms-settings:nightlight",
+      keywords: ["blue light", "eyes", "warm", "night mode", "nightlight"],
+    },
+  ]),
+  ...settingsPages(Sun, [
+    {
+      title: "HDR",
+      uri: "ms-settings:hdr",
+      keywords: ["high dynamic range", "auto hdr", "hdr display"],
+    },
   ]),
   ...settingsPages(Monitor, [
     {
