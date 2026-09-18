@@ -7,6 +7,7 @@ pub mod drag;
 mod files;
 mod perf;
 mod power;
+mod query;
 mod start_menu;
 mod taskbar;
 mod taskbar_alignment;
@@ -122,6 +123,7 @@ pub struct AppState {
     apps_cache: Mutex<Option<Vec<apps::AppEntry>>>,
     apps_scan_lock: tokio::sync::Mutex<()>,
     file_index: files::FileIndex,
+    intent: query::IntentStore,
     shortcut: Mutex<String>,
     shortcut_generation: AtomicU64,
 }
@@ -151,6 +153,7 @@ pub fn run() {
             apps_cache: Mutex::new(None),
             apps_scan_lock: tokio::sync::Mutex::new(()),
             file_index: files::FileIndex::default(),
+            intent: query::IntentStore::new(),
             shortcut: Mutex::new(String::new()),
             shortcut_generation: AtomicU64::new(0),
         })
@@ -174,6 +177,9 @@ pub fn run() {
                 .path()
                 .app_data_dir()
                 .unwrap_or_else(|_| PathBuf::from("."));
+            app.state::<AppState>()
+                .intent
+                .set_path(app_data_dir.join("intent-cache.db"));
             files::warm(
                 app.state::<AppState>().file_index.clone(),
                 app_data_dir,
@@ -246,6 +252,11 @@ pub fn run() {
             get_apps,
             get_app_icons,
             refresh_apps,
+            query_phase1,
+            query_phase2,
+            execute_action,
+            accept_intent,
+            focus_window,
             search_files,
             rebuild_file_index,
             get_file_thumbnails,
@@ -1160,6 +1171,65 @@ async fn start_file_drag(app: tauri::AppHandle, paths: Vec<String>) -> Result<bo
     Ok(dropped)
 }
 
+#[tauri::command]
+fn query_phase1(
+    query: String,
+    recent: Vec<query::RecentCommand>,
+    state: tauri::State<'_, AppState>,
+) -> query::Phase1Response {
+    let timer = perf::start();
+    let query_length = query.chars().count();
+    let windows = query::list_open_windows();
+    let apps_guard = state.apps_cache.lock().ok();
+    let apps = apps_guard
+        .as_ref()
+        .and_then(|guard| guard.as_ref())
+        .map(|list| list.as_slice())
+        .unwrap_or(&[]);
+    let response = query::phase1(&query, &recent, apps, &windows, &state.intent);
+    perf::finish(timer, "query_phase1", || {
+        format!(
+            "queryLength={query_length};actions={};apps={};windows={};recents={}",
+            response.actions.len(),
+            response.apps.len(),
+            response.windows.len(),
+            response.recents.len()
+        )
+    });
+    response
+}
+
+#[tauri::command]
+async fn query_phase2(
+    query: String,
+    limit: Option<usize>,
+    state: tauri::State<'_, AppState>,
+) -> Result<files::FileSearchResponse, String> {
+    search_files(query, limit, state).await
+}
+
+#[tauri::command]
+async fn execute_action(id: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || query::execute(&id))
+        .await
+        .map_err(|error| format!("action task failed: {error}"))?
+}
+
+#[tauri::command]
+fn accept_intent(
+    query: String,
+    action_id: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), String> {
+    query::accept_intent(&query, &action_id, &state.intent)
+}
+
+#[tauri::command]
+fn focus_window(hwnd: i64) -> Result<(), String> {
+    query::focus_window(hwnd)
+}
+
+/// Phase 2: SQLite FTS5 file search. The UI must not block Phase 1 on this.
 #[tauri::command]
 async fn search_files(
     query: String,
