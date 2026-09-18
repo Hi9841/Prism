@@ -85,7 +85,7 @@ export function PaletteSearchInput({
   }, [inputRef]);
 
   return (
-    <div className="search-header px-5 pb-1 pt-5">
+    <div className="px-5 pb-1 pt-5">
       <div className="search-field flex items-center gap-3 px-4 py-3">
         <Search className="h-[18px] w-[18px] shrink-0 text-fg-tertiary" strokeWidth={2} />
         <input

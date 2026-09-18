@@ -161,7 +161,7 @@ function Launcher() {
       className={`launcher-stage launcher-stage-${phase} absolute inset-0`}
     >
       <div
-        className="launcher-container relative h-full w-full max-w-full"
+        className="relative h-full w-full max-w-full"
         style={inTauri ? undefined : { width: app.settings.width / (app.settings.viewZoom / 100) }}
       >
         <Palette />
