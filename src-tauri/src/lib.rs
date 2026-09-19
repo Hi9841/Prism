@@ -348,7 +348,7 @@ fn schedule_initial_palette(app: tauri::AppHandle) {
     });
 }
 
-fn activate_palette(app: &tauri::AppHandle) {
+pub(crate) fn activate_palette(app: &tauri::AppHandle) {
     // A user-initiated launch should open the reusable palette without
     // creating another WebView window or relying on frontend timing.
     ACTIVATION_FOCUS_PENDING.store(true, Ordering::Release);

@@ -9,8 +9,10 @@
 //!   Prism never installs a low-level keyboard hook or modifies physical input.
 //! - StartAllBack integration disables the provider's Win action reversibly.
 //! - A small Explorer message hook takes ownership of `SC_TASKLIST` before
-//!   native Start is launched. Without provider integration, it also releases
-//!   Explorer's bare-Win hotkey. It fails open if Prism's observer disappears.
+//!   native Start is launched, and of Explorer `WM_HOTKEY` Win+S / Win+Q
+//!   before native Search (opened via `activate_palette`). Without provider
+//!   integration, it also releases Explorer's bare-Win hotkey. Search hotkeys
+//!   fail open if the observer cannot be notified.
 //! - The Start button is found by UI Automation ID (with a child-window class
 //!   fallback), and an Explorer-thread mouse hook consumes clicks in its rect.
 //! - Every Win32 result is checked. Registration failures disable observation.
@@ -90,6 +92,7 @@ const SHELL_EVENT_TASKBAR_PIN_COMPLETED: usize = 22;
 const SHELL_CONTROL_FOREGROUND_WINDOW: usize = 23;
 const SHELL_EVENT_FOREGROUND_RESULT: usize = 24;
 const SHELL_EVENT_SHELL_START_COMMAND: usize = 25;
+const SHELL_EVENT_SHELL_SEARCH_COMMAND: usize = 26;
 /// A shell Start command toggles immediately. The normal case is already
 /// de-duplicated: a raw Win-down sets `LAST_RAW_TOGGLE_MS` ~100 ms before the
 /// Win-up shell command, and a late raw toggle is dropped by the debounce.
@@ -98,6 +101,9 @@ const SHELL_START_FALLBACK_GRACE: Duration = Duration::ZERO;
 /// belongs to the same press and is ignored. Kept just above the physical
 /// press duration so a later, separate press is never suppressed.
 const SHELL_START_DEDUPE_MS: u64 = 250;
+/// If a Search hotkey races ahead of raw Win-down, treat the coming Win press
+/// as a combo only while Win is still physically held and only for this long.
+const SEARCH_COMBO_GRACE: Duration = Duration::from_millis(250);
 
 /// Event the frontend receives when Win observation self-disables.
 pub const FAILED_EVENT: &str = "win-mode-failed";
@@ -156,6 +162,7 @@ pub struct WinKeyMachine {
     right: Press,
     ctrl_esc: Press,
     non_win_down: [bool; 256],
+    search_combo_until: Option<Instant>,
 }
 
 impl Default for WinKeyMachine {
@@ -180,6 +187,7 @@ impl WinKeyMachine {
             combo: false,
         },
         non_win_down: [false; 256],
+        search_combo_until: None,
     };
     /// Feeds one key event into the machine and returns the decision.
     pub fn feed(&mut self, kind: KeyKind, is_down: bool) -> Decision {
@@ -200,6 +208,15 @@ impl WinKeyMachine {
                 if is_down && self.ctrl_esc.down {
                     self.ctrl_esc.combo = true;
                 }
+                let already_down = match side {
+                    WinSide::Left => self.left.down,
+                    WinSide::Right => self.right.down,
+                };
+                let search_combo = if is_down && !already_down {
+                    self.take_search_combo(Instant::now())
+                } else {
+                    false
+                };
                 let press = self.press_mut(side);
                 if is_down {
                     if press.down {
@@ -207,7 +224,7 @@ impl WinKeyMachine {
                         Decision::Pass
                     } else {
                         press.down = true;
-                        press.combo = preexisting_chord;
+                        press.combo = preexisting_chord || search_combo;
                         if preexisting_chord {
                             Decision::Pass
                         } else {
@@ -218,6 +235,9 @@ impl WinKeyMachine {
                     let standalone = !press.combo;
                     press.down = false;
                     press.combo = false;
+                    if !other_win_down {
+                        self.search_combo_until = None;
+                    }
                     if standalone {
                         Decision::Toggle(side)
                     } else {
@@ -297,6 +317,7 @@ impl WinKeyMachine {
         self.right = Press::default();
         self.ctrl_esc = Press::default();
         self.non_win_down.fill(false);
+        self.search_combo_until = None;
     }
 
     fn press_mut(&mut self, side: WinSide) -> &mut Press {
@@ -317,6 +338,33 @@ impl WinKeyMachine {
             .iter()
             .enumerate()
             .any(|(k, &down)| down && !excluded_keys.contains(&(k as u16)))
+    }
+
+    /// Explorer forwarded a Win+S / Win+Q hotkey. Marks a currently held Win
+    /// press as a combo so Win-up does not toggle, and arms a short grace only
+    /// when Win is still physically down but raw input has not seen it yet.
+    pub fn claim_search_hotkey(&mut self, now: Instant, win_physically_down: bool) -> WinSide {
+        self.left.combo |= self.left.down;
+        self.right.combo |= self.right.down;
+        if self.left.down || self.right.down {
+            self.search_combo_until = None;
+        } else if win_physically_down {
+            self.search_combo_until = Some(now + SEARCH_COMBO_GRACE);
+        } else {
+            self.search_combo_until = None;
+        }
+        if self.right.down && !self.left.down {
+            WinSide::Right
+        } else {
+            WinSide::Left
+        }
+    }
+
+    fn take_search_combo(&mut self, now: Instant) -> bool {
+        match self.search_combo_until.take() {
+            Some(until) if now < until => true,
+            _ => false,
+        }
     }
 }
 
@@ -359,6 +407,7 @@ static START_RECT_REFRESH_REQUEST: AtomicBool = AtomicBool::new(false);
 enum Action {
     ToggleWin(WinSide),
     ToggleTaskbar(POINT),
+    ActivateSearch,
 }
 
 struct PendingWinToggle {
@@ -737,6 +786,15 @@ unsafe fn run_pump(ready: HookReady) {
                                         click,
                                         start_rect,
                                     );
+                                });
+                            }
+                        }
+                        Action::ActivateSearch => {
+                            debug_trace("action-activate-search");
+                            if let Some(app) = APP.get() {
+                                let activate_app = app.clone();
+                                let _ = app.run_on_main_thread(move || {
+                                    crate::activate_palette(&activate_app);
                                 });
                             }
                         }
@@ -1820,6 +1878,32 @@ impl ShellStartFallback {
     }
 }
 
+/// Explorer saw Win+S / Win+Q (`WM_HOTKEY`) and consumed native Search.
+/// Open Prism (idempotent). Extra taps cannot close it or reopen Search.
+fn note_shell_search_command() {
+    if !ACTIVE.load(Ordering::Acquire)
+        || !RAW_OBSERVER_ACTIVE.load(Ordering::Acquire)
+        || !SHELL_BRIDGE_ACTIVE.load(Ordering::Acquire)
+    {
+        return;
+    }
+    let win_physically_down = win_keys_physically_down();
+    if let Ok(mut machine) = RAW_MACHINE.lock() {
+        let _ = machine.claim_search_hotkey(Instant::now(), win_physically_down);
+    }
+    cancel_pending_win_toggle();
+    LAST_RAW_TOGGLE_MS.store(toggle_clock_ms(), Ordering::Release);
+    debug_trace("shell-search-activate");
+    queue_action(Action::ActivateSearch);
+}
+
+fn win_keys_physically_down() -> bool {
+    unsafe {
+        GetAsyncKeyState(i32::from(VK_LWIN.0)) as u16 & 0x8000 != 0
+            || GetAsyncKeyState(i32::from(VK_RWIN.0)) as u16 & 0x8000 != 0
+    }
+}
+
 /// Explorer saw a bare Win / Ctrl+Esc (`SC_TASKLIST`) but the raw observer may
 /// also report it. Arm a short fallback; a raw event cancels it. This is how
 /// Open-Shell/StartAllBack-style launchers work: the shell command is the
@@ -1962,6 +2046,9 @@ unsafe extern "system" fn raw_input_window_proc(
             }
             SHELL_EVENT_SHELL_START_COMMAND => {
                 note_shell_start_command();
+            }
+            SHELL_EVENT_SHELL_SEARCH_COMMAND => {
+                note_shell_search_command();
             }
             SHELL_EVENT_TASKBAR_START_CLICK_X => {
                 SHELL_START_CLICK_X.store(lparam.0 as i32, Ordering::Release);
@@ -2729,5 +2816,123 @@ mod tests {
         pending.cancel();
         assert!(!pending.take_if_ready(now + SHELL_START_FALLBACK_GRACE));
         assert!(pending.wait_duration(now).is_none());
+    }
+
+    #[test]
+    fn search_hotkey_marks_combo_so_win_up_does_not_toggle() {
+        assert_eq!(SHELL_EVENT_SHELL_SEARCH_COMMAND, 26);
+        let mut machine = WinKeyMachine::default();
+        let now = Instant::now();
+        assert_eq!(machine.feed(win(WinSide::Left), true), Decision::Mask);
+        assert_eq!(machine.claim_search_hotkey(now, true), WinSide::Left);
+        assert_eq!(machine.feed(KeyKind::Other(0x53), true), Decision::Pass);
+        assert_eq!(machine.feed(KeyKind::Other(0x53), false), Decision::Pass);
+        assert_eq!(machine.feed(win(WinSide::Left), false), Decision::Pass);
+    }
+
+    #[test]
+    fn extra_search_hotkey_while_win_held_still_suppresses_win_up() {
+        let mut machine = WinKeyMachine::default();
+        let now = Instant::now();
+        assert_eq!(machine.feed(win(WinSide::Left), true), Decision::Mask);
+        assert_eq!(machine.claim_search_hotkey(now, true), WinSide::Left);
+        assert_eq!(machine.claim_search_hotkey(now, true), WinSide::Left);
+        assert_eq!(machine.claim_search_hotkey(now, true), WinSide::Left);
+        assert_eq!(machine.feed(win(WinSide::Left), false), Decision::Pass);
+    }
+
+    #[test]
+    fn delayed_raw_win_down_within_grace_does_not_toggle_on_win_up() {
+        let mut machine = WinKeyMachine::default();
+        let now = Instant::now();
+        assert_eq!(machine.claim_search_hotkey(now, true), WinSide::Left);
+        assert_eq!(machine.feed(win(WinSide::Left), true), Decision::Mask);
+        assert_eq!(machine.feed(win(WinSide::Left), false), Decision::Pass);
+    }
+
+    #[test]
+    fn absent_raw_win_events_do_not_latch_the_next_bare_win() {
+        let mut machine = WinKeyMachine::default();
+        let now = Instant::now();
+        assert_eq!(machine.claim_search_hotkey(now, true), WinSide::Left);
+        machine.search_combo_until = Some(now - Duration::from_millis(1));
+        assert_eq!(machine.feed(win(WinSide::Left), true), Decision::Mask);
+        assert_eq!(
+            machine.feed(win(WinSide::Left), false),
+            Decision::Toggle(WinSide::Left)
+        );
+    }
+
+    #[test]
+    fn search_hotkey_after_win_up_does_not_suppress_next_bare_win() {
+        let mut machine = WinKeyMachine::default();
+        let now = Instant::now();
+        assert_eq!(machine.feed(win(WinSide::Left), true), Decision::Mask);
+        assert_eq!(
+            machine.feed(win(WinSide::Left), false),
+            Decision::Toggle(WinSide::Left)
+        );
+        assert_eq!(machine.claim_search_hotkey(now, false), WinSide::Left);
+        assert_eq!(machine.feed(win(WinSide::Left), true), Decision::Mask);
+        assert_eq!(
+            machine.feed(win(WinSide::Left), false),
+            Decision::Toggle(WinSide::Left)
+        );
+    }
+
+    #[test]
+    fn right_win_search_hotkey_keeps_its_side() {
+        let mut machine = WinKeyMachine::default();
+        let now = Instant::now();
+        assert_eq!(machine.feed(win(WinSide::Right), true), Decision::Mask);
+        assert_eq!(machine.claim_search_hotkey(now, true), WinSide::Right);
+        assert_eq!(machine.feed(win(WinSide::Right), false), Decision::Pass);
+    }
+
+    #[test]
+    fn second_win_hold_can_claim_search_again() {
+        let mut machine = WinKeyMachine::default();
+        let now = Instant::now();
+        assert_eq!(machine.feed(win(WinSide::Left), true), Decision::Mask);
+        assert_eq!(machine.claim_search_hotkey(now, true), WinSide::Left);
+        assert_eq!(machine.feed(win(WinSide::Left), false), Decision::Pass);
+        assert_eq!(machine.feed(win(WinSide::Left), true), Decision::Mask);
+        assert_eq!(machine.claim_search_hotkey(now, true), WinSide::Left);
+        assert_eq!(machine.feed(win(WinSide::Left), false), Decision::Pass);
+    }
+
+    #[test]
+    fn reset_clears_search_combo_grace() {
+        let mut machine = WinKeyMachine::default();
+        let now = Instant::now();
+        assert_eq!(machine.claim_search_hotkey(now, true), WinSide::Left);
+        machine.reset();
+        assert_eq!(machine.feed(win(WinSide::Left), true), Decision::Mask);
+        assert_eq!(
+            machine.feed(win(WinSide::Left), false),
+            Decision::Toggle(WinSide::Left)
+        );
+    }
+
+    #[test]
+    fn win_shift_s_still_passes_without_a_search_claim() {
+        assert_eq!(
+            run(&[
+                (win(WinSide::Left), true),
+                (KeyKind::Other(0x10), true),
+                (KeyKind::Other(0x53), true),
+                (KeyKind::Other(0x53), false),
+                (KeyKind::Other(0x10), false),
+                (win(WinSide::Left), false),
+            ]),
+            vec![
+                Decision::Mask,
+                Decision::Pass,
+                Decision::Pass,
+                Decision::Pass,
+                Decision::Pass,
+                Decision::Pass,
+            ]
+        );
     }
 }
