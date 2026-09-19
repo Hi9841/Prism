@@ -52,6 +52,7 @@ const ALLOWED_SHORTCUTS: &[&str] = &[
 const DEFAULT_SHORTCUT: &str = "Win";
 const LEGACY_STATE_VERSION: u32 = 2;
 const STATE_VERSION: u32 = 3;
+/// Keep this >= frontend LAUNCHER_MOTION_MS (110ms) so the webview can fade out.
 const PALETTE_HIDE_DELAY: Duration = Duration::from_millis(125);
 const PALETTE_RAISE_RETRY_DELAY: Duration = Duration::from_millis(40);
 /// Window during which a focus-lost event after opening is treated as part of
@@ -73,6 +74,7 @@ enum PresentationSource {
     WinKey,
     TaskbarStartClick,
     ConfiguredShortcut,
+    FocusLoss,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
@@ -217,7 +219,10 @@ pub fn run() {
                 ACTIVATION_FOCUS_PENDING.store(false, Ordering::Release);
                 return;
             }
-            // Clicking away dismisses the launcher, like Raycast.
+            // Clicking away dismisses the launcher. Keep the window up for
+            // PALETTE_HIDE_DELAY so the webview can play the same exit as
+            // Win-key close. Do not raise or steal focus; the click already
+            // belongs to the other window.
             if matches!(event, WindowEvent::Focused(false)) && window.is_visible().unwrap_or(false)
             {
                 if drag::is_dragging() {
@@ -234,18 +239,23 @@ pub fn run() {
                 if ACTIVATION_FOCUS_PENDING.swap(false, Ordering::AcqRel) {
                     return;
                 }
-                PALETTE_OPEN.store(false, Ordering::Release);
-                PALETTE_TRANSITION.fetch_add(1, Ordering::AcqRel);
-                crate::win_key::debug_trace("palette-hide-blur");
-                PRESENTATION_ANCHOR
-                    .lock()
-                    .map(|mut value| *value = None)
-                    .ok();
-                taskbar::release();
-                let _ = window.hide();
-                if let Some(webview) = window.app_handle().get_webview_window("main") {
-                    set_webview_memory_target(&webview, true);
+                // A close already in flight owns the hide timer. Resetting it
+                // here would stretch Win-key / Escape exits when blur follows.
+                if !PALETTE_OPEN.load(Ordering::Acquire) {
+                    return;
                 }
+                let transition = begin_palette_close();
+                crate::win_key::debug_trace("palette-hide-blur");
+                let _ = window.emit(
+                    "prism-toggle",
+                    PresentationEvent {
+                        open: false,
+                        source: PresentationSource::FocusLoss,
+                        anchor: None,
+                        generation: transition,
+                    },
+                );
+                schedule_palette_hide(window.app_handle().clone(), transition);
             }
         })
         .invoke_handler(tauri::generate_handler![
@@ -775,27 +785,7 @@ fn toggle_palette_with_presentation(
             .lock()
             .map(|mut value| *value = None)
             .ok();
-        let close_app = app.clone();
-        tauri::async_runtime::spawn(async move {
-            tokio::time::sleep(PALETTE_HIDE_DELAY).await;
-            if PALETTE_TRANSITION.load(Ordering::Acquire) != transition
-                || PALETTE_OPEN.load(Ordering::Acquire)
-            {
-                return;
-            }
-            let hide_app = close_app.clone();
-            let _ = close_app.run_on_main_thread(move || {
-                if PALETTE_TRANSITION.load(Ordering::Acquire) == transition
-                    && !PALETTE_OPEN.load(Ordering::Acquire)
-                {
-                    if let Some(window) = hide_app.get_webview_window("main") {
-                        let _ = window.hide();
-                        set_webview_memory_target(&window, true);
-                        taskbar::release();
-                    }
-                }
-            });
-        });
+        schedule_palette_hide(app.clone(), transition);
     }
     // Send the desired state, not an ambiguous toggle, so native and webview
     // state cannot diverge if an event is delayed.
@@ -865,16 +855,48 @@ fn present_palette(app: tauri::AppHandle) -> Result<bool, String> {
     Ok(true)
 }
 
-#[tauri::command]
-fn hide_palette(app: tauri::AppHandle) -> Result<(), String> {
-    crate::win_key::debug_trace("palette-hide-command");
+fn begin_palette_close() -> u64 {
     PALETTE_OPEN.store(false, Ordering::Release);
     ACTIVATION_FOCUS_PENDING.store(false, Ordering::Release);
-    PALETTE_TRANSITION.fetch_add(1, Ordering::AcqRel);
+    let transition = PALETTE_TRANSITION.fetch_add(1, Ordering::AcqRel) + 1;
     PRESENTATION_ANCHOR
         .lock()
         .map(|mut value| *value = None)
         .ok();
+    transition
+}
+
+fn schedule_palette_hide(app: tauri::AppHandle, transition: u64) {
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(PALETTE_HIDE_DELAY).await;
+        if PALETTE_TRANSITION.load(Ordering::Acquire) != transition
+            || PALETTE_OPEN.load(Ordering::Acquire)
+        {
+            return;
+        }
+        let hide_app = app.clone();
+        let _ = app.run_on_main_thread(move || {
+            if PALETTE_TRANSITION.load(Ordering::Acquire) == transition
+                && !PALETTE_OPEN.load(Ordering::Acquire)
+            {
+                if let Some(window) = hide_app.get_webview_window("main") {
+                    let _ = window.hide();
+                    set_webview_memory_target(&window, true);
+                    taskbar::release();
+                }
+            }
+        });
+    });
+}
+
+#[tauri::command]
+fn hide_palette(app: tauri::AppHandle, defer: bool) -> Result<(), String> {
+    crate::win_key::debug_trace(&format!("palette-hide-command defer={defer}"));
+    let transition = begin_palette_close();
+    if defer {
+        schedule_palette_hide(app, transition);
+        return Ok(());
+    }
     let window = app
         .get_webview_window("main")
         .ok_or_else(|| "main window is unavailable".to_string())?;
@@ -1165,7 +1187,7 @@ async fn start_file_drag(app: tauri::AppHandle, paths: Vec<String>) -> Result<bo
     if dropped {
         let hide_app = app.clone();
         let _ = app.run_on_main_thread(move || {
-            let _ = hide_palette(hide_app);
+            let _ = hide_palette(hide_app, false);
         });
     }
     Ok(dropped)

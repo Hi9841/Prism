@@ -1,6 +1,7 @@
 import { FolderOpen, Info, Pin, PinOff, ShieldCheck } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { isPinnedToTaskbar } from "../../lib/bridge";
+import { POPOVER_MOTION_MS } from "../../lib/launcherMotion";
 import { onTransientUiDismiss } from "../../lib/transientUi";
 import type { PaletteItem } from "../../lib/types";
 
@@ -67,7 +68,7 @@ export function ResultContextMenu({
       closeTimerRef.current = window.setTimeout(() => {
         closeTimerRef.current = null;
         onClose(restoreFocus);
-      }, 110);
+      }, POPOVER_MOTION_MS);
     },
     [onClose],
   );

@@ -65,9 +65,9 @@ export function presentPaletteWindow(): Promise<boolean> {
   return invoke<boolean>("present_palette");
 }
 
-export function hidePaletteWindow(): Promise<void> {
+export function hidePaletteWindow(defer = false): Promise<void> {
   if (!inTauri) return Promise.resolve();
-  return invoke("hide_palette");
+  return invoke("hide_palette", { defer });
 }
 
 export async function isWindowVisible(): Promise<boolean> {
