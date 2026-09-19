@@ -80,6 +80,7 @@ const HC_ACTION: i32 = 0;
 const HWND_MESSAGE: Hwnd = -3isize as Hwnd;
 const WM_NULL: u32 = 0;
 const WM_SYSCOMMAND: u32 = 0x0112;
+const WM_HOTKEY: u32 = 0x0312;
 const WM_LBUTTONDOWN: usize = 0x0201;
 const WM_LBUTTONUP: usize = 0x0202;
 const WM_CLOSE: u32 = 0x0010;
@@ -112,6 +113,14 @@ const EVENT_TASKBAR_PIN_COMPLETED: usize = 22;
 const CONTROL_FOREGROUND_WINDOW: usize = 23;
 const EVENT_FOREGROUND_RESULT: usize = 24;
 const EVENT_SHELL_START_COMMAND: usize = 25;
+const EVENT_SHELL_SEARCH_COMMAND: usize = 26;
+const MOD_ALT: u32 = 0x0001;
+const MOD_CONTROL: u32 = 0x0002;
+const MOD_SHIFT: u32 = 0x0004;
+const MOD_WIN: u32 = 0x0008;
+const MOD_KEY_MASK: u32 = MOD_ALT | MOD_CONTROL | MOD_SHIFT | MOD_WIN;
+const VK_S: u16 = 0x53;
+const VK_Q: u16 = 0x51;
 const WS_POPUP: u32 = 0x8000_0000;
 const SS_BITMAP: u32 = 0x0000_000e;
 const WS_EX_TOOLWINDOW: u32 = 0x0000_0080;
@@ -486,6 +495,31 @@ unsafe fn notify_observer(message: u32, event: usize, detail: isize) -> bool {
 
 fn is_start_command(message: &Msg) -> bool {
     message.message == WM_SYSCOMMAND && message.wparam & 0xFFF0 == SC_TASKLIST
+}
+
+/// Explorer delivers Win+S / Win+Q as `WM_HOTKEY` with MOD_WIN and VK_S/VK_Q
+/// in `lParam` (low word = modifiers, high word = virtual key). Win+Shift+S
+/// and other modifier chords keep their native targets.
+fn is_search_hotkey(message: &Msg) -> bool {
+    if message.message != WM_HOTKEY {
+        return false;
+    }
+    let packed = message.lparam as u32;
+    let modifiers = packed & MOD_KEY_MASK;
+    let vk = ((packed >> 16) & 0xFFFF) as u16;
+    modifiers == MOD_WIN && (vk == VK_S || vk == VK_Q)
+}
+
+/// Null the Search hotkey only after Prism was notified. Otherwise Explorer
+/// keeps the message and native Search still opens.
+fn intercept_search_hotkey(message: &mut Msg, notified: bool) -> bool {
+    if !is_search_hotkey(message) {
+        return false;
+    }
+    if notified {
+        message.message = WM_NULL;
+    }
+    notified
 }
 
 fn bridge_message_id() -> u32 {
@@ -1036,6 +1070,12 @@ pub unsafe extern "system" fn PrismShellGetMessageHook(
             // the app de-duplicates it against the raw observer.
             let _ = notify_observer(message_id, EVENT_SHELL_START_COMMAND, 0);
             message.message = WM_NULL;
+        } else if is_search_hotkey(message) {
+            // Win+S / Win+Q consumed only after Prism was notified.
+            let _ = intercept_search_hotkey(
+                message,
+                notify_observer(message_id, EVENT_SHELL_SEARCH_COMMAND, 0),
+            );
         } else if message.message == WM_SETTINGCHANGE && has_active_icon() {
             // Wallpaper, theme, or layout changes behind the Start button
             // invalidate the cached capture. Re-render so the glyph never
@@ -1051,12 +1091,29 @@ pub unsafe extern "system" fn PrismShellGetMessageHook(
 mod tests {
     use super::*;
 
+    const MOD_NOREPEAT: u32 = 0x4000;
+    const VK_E: u16 = 0x45;
+    const VK_R: u16 = 0x52;
+    const VK_D: u16 = 0x44;
+
     fn message(message: u32, wparam: usize) -> Msg {
         Msg {
             hwnd: std::ptr::null_mut(),
             message,
             wparam,
             lparam: 0,
+            time: 0,
+            point: Point { x: 0, y: 0 },
+            private: 0,
+        }
+    }
+
+    fn hotkey(modifiers: u32, vk: u16) -> Msg {
+        Msg {
+            hwnd: std::ptr::null_mut(),
+            message: WM_HOTKEY,
+            wparam: 0,
+            lparam: (((vk as u32) << 16) | modifiers) as isize,
             time: 0,
             point: Point { x: 0, y: 0 },
             private: 0,
@@ -1072,6 +1129,50 @@ mod tests {
         )));
         assert!(!is_start_command(&message(WM_SYSCOMMAND, 0xF000)));
         assert!(!is_start_command(&message(WM_NULL, SC_TASKLIST)));
+        assert!(!is_start_command(&hotkey(MOD_WIN, VK_S)));
+    }
+
+    #[test]
+    fn identifies_win_s_and_win_q_hotkeys_only() {
+        assert_eq!(EVENT_SHELL_SEARCH_COMMAND, 26);
+        assert!(is_search_hotkey(&hotkey(MOD_WIN, VK_S)));
+        assert!(is_search_hotkey(&hotkey(MOD_WIN, VK_Q)));
+        assert!(is_search_hotkey(&hotkey(MOD_WIN | MOD_NOREPEAT, VK_S)));
+        assert!(is_search_hotkey(&hotkey(MOD_WIN | MOD_NOREPEAT, VK_Q)));
+        assert!(!is_search_hotkey(&hotkey(MOD_WIN | MOD_SHIFT, VK_S)));
+        assert!(!is_search_hotkey(&hotkey(MOD_WIN | MOD_CONTROL, VK_S)));
+        assert!(!is_search_hotkey(&hotkey(MOD_WIN | MOD_ALT, VK_Q)));
+        assert!(!is_search_hotkey(&hotkey(MOD_WIN, VK_E)));
+        assert!(!is_search_hotkey(&hotkey(MOD_WIN, VK_R)));
+        assert!(!is_search_hotkey(&hotkey(MOD_WIN, VK_D)));
+        assert!(!is_search_hotkey(&hotkey(0, VK_S)));
+        assert!(!is_search_hotkey(&message(WM_SYSCOMMAND, SC_TASKLIST)));
+        assert!(!is_search_hotkey(&message(WM_HOTKEY, 0)));
+    }
+
+    #[test]
+    fn search_hotkey_repeats_stay_search_commands() {
+        let first = hotkey(MOD_WIN, VK_Q);
+        let extra = hotkey(MOD_WIN, VK_Q);
+        assert!(is_search_hotkey(&first));
+        assert!(is_search_hotkey(&extra));
+    }
+
+    #[test]
+    fn search_hotkey_fails_open_when_observer_is_not_notified() {
+        let mut search = hotkey(MOD_WIN, VK_S);
+        assert!(!intercept_search_hotkey(&mut search, false));
+        assert_eq!(search.message, WM_HOTKEY);
+        let mut start = message(WM_SYSCOMMAND, SC_TASKLIST);
+        assert!(!intercept_search_hotkey(&mut start, true));
+        assert_eq!(start.message, WM_SYSCOMMAND);
+    }
+
+    #[test]
+    fn search_hotkey_is_nulled_only_after_successful_notify() {
+        let mut message = hotkey(MOD_WIN, VK_Q);
+        assert!(intercept_search_hotkey(&mut message, true));
+        assert_eq!(message.message, WM_NULL);
     }
 }
 
