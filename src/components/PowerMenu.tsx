@@ -1,6 +1,7 @@
 import { Lock, Moon, Power, RotateCcw } from "lucide-react";
 import { useCallback, useEffect, useId, useRef, useState } from "react";
 import { type PowerAction, performPowerAction } from "../lib/bridge";
+import { POPOVER_MOTION_MS } from "../lib/launcherMotion";
 import { onTransientUiDismiss } from "../lib/transientUi";
 import { useApp } from "../state/app";
 import { IconButton } from "./ui";
@@ -31,7 +32,12 @@ export function PowerMenu() {
 
   const openMenu = useCallback(
     (focusIndex = 0) => {
-      if (closingRef.current) return;
+      if (closeTimerRef.current !== null) {
+        window.clearTimeout(closeTimerRef.current);
+        closeTimerRef.current = null;
+      }
+      closingRef.current = false;
+      setClosing(false);
       setOpen(true);
       requestAnimationFrame(() => focusItem(focusIndex));
     },
@@ -41,8 +47,14 @@ export function PowerMenu() {
   // Deliberate closes animate out first; closes triggered by the palette
   // hiding (prism:close, transient dismiss) snap since the window is gone.
   const closeMenu = useCallback((animate: boolean) => {
-    if (closingRef.current) return;
+    if (!open && !closingRef.current) return;
+    if (closeTimerRef.current !== null) {
+      window.clearTimeout(closeTimerRef.current);
+      closeTimerRef.current = null;
+    }
     if (!animate) {
+      closingRef.current = false;
+      setClosing(false);
       setOpen(false);
       return;
     }
@@ -53,8 +65,8 @@ export function PowerMenu() {
       closingRef.current = false;
       setClosing(false);
       setOpen(false);
-    }, 110);
-  }, []);
+    }, POPOVER_MOTION_MS);
+  }, [open]);
 
   useEffect(
     () => () => {
@@ -150,9 +162,9 @@ export function PowerMenu() {
           label="Power options"
           active={open}
           aria-haspopup="menu"
-          aria-expanded={open}
+          aria-expanded={open && !closing}
           aria-controls={open ? menuId : undefined}
-          onClick={() => (open ? closeMenu(true) : openMenu())}
+          onClick={() => (open && !closing ? closeMenu(true) : openMenu())}
         >
           <Power className="h-3.5 w-3.5" />
         </IconButton>
