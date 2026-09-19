@@ -12,6 +12,12 @@ import {
   onWindowFocused,
   presentPaletteWindow,
 } from "./lib/bridge";
+import {
+  hidePaletteInvocation,
+  LAUNCHER_MOTION_MS,
+  type LauncherPhase,
+  reduceLauncherPhase,
+} from "./lib/launcherMotion";
 import { dismissTransientUi } from "./lib/transientUi";
 import { AppProvider, useApp } from "./state/app";
 import { PaletteProvider, usePalette } from "./state/palette";
@@ -48,10 +54,12 @@ function Launcher() {
   const palette = usePalette();
   const { reset } = palette;
   const { setOpenSettings } = app;
-  const [phase, setPhase] = useState<"hidden" | "preparing" | "visible">(inTauri ? "hidden" : "visible");
+  const [phase, setPhase] = useState<LauncherPhase>(inTauri ? "hidden" : "visible");
+  const phaseRef = useRef(phase);
   const visible = phase !== "hidden";
   const visibleRef = useRef(false);
   const blurCheck = useRef<number | null>(null);
+  const closeTimer = useRef<number | null>(null);
 
   useEffect(() => {
     if (!inTauri) return;
@@ -60,27 +68,70 @@ function Launcher() {
       .catch(() => {});
   }, []);
 
+  phaseRef.current = phase;
   visibleRef.current = visible;
 
-  const hide = useCallback(() => {
-    dismissTransientUi();
-    if (!visibleRef.current) return;
-    setPhase("hidden");
-    hidePaletteWindow().catch(() => {});
+  const clearCloseTimer = useCallback(() => {
+    if (closeTimer.current !== null) {
+      window.clearTimeout(closeTimer.current);
+      closeTimer.current = null;
+    }
+  }, []);
+
+  const hide = useCallback(
+    (origin: "native" | "web") => {
+      dismissTransientUi();
+      const event = origin === "native" ? "native-close" : "web-close";
+      const next = reduceLauncherPhase(phaseRef.current, event);
+      if (next === phaseRef.current) return;
+      clearCloseTimer();
+      setPhase(next);
+      const invocation = hidePaletteInvocation(origin, next);
+      if (invocation === "instant") hidePaletteWindow(false).catch(() => {});
+      if (invocation === "deferred") hidePaletteWindow(true).catch(() => {});
+      if (next === "closing") {
+        closeTimer.current = window.setTimeout(() => {
+          closeTimer.current = null;
+          setPhase((current) => reduceLauncherPhase(current, "exit-finished"));
+        }, LAUNCHER_MOTION_MS);
+      }
+    },
+    [clearCloseTimer],
+  );
+
+  const hideFromWeb = useCallback(() => hide("web"), [hide]);
+
+  const focusSearch = useCallback(() => {
+    document.querySelector<HTMLInputElement>("[data-prism-search]")?.focus();
   }, []);
 
   // Rust-side: global hotkey pressed, or user clicked away (blur).
   useEffect(() => {
     const offToggle = onToggleRequest((request) => {
       if (!request.open) {
-        hide();
-      } else {
-        dismissTransientUi();
-        // Fresh state on every open: no leftover query, selection or
-        // settings overlay - the palette starts from zero.
-        reset();
-        setOpenSettings(false);
-        setPhase("preparing");
+        hide("native");
+        return;
+      }
+      dismissTransientUi();
+      // Fresh state on every open: no leftover query, selection or
+      // settings overlay - the palette starts from zero.
+      reset();
+      setOpenSettings(false);
+      clearCloseTimer();
+      const next = reduceLauncherPhase(phaseRef.current, "open");
+      setPhase(next);
+      if (next === "visible") {
+        presentPaletteWindow()
+          .then((presented) => {
+            if (!presented) {
+              setPhase((current) => reduceLauncherPhase(current, "present-failed"));
+              return;
+            }
+            focusSearch();
+          })
+          .catch(() => {
+            setPhase((current) => reduceLauncherPhase(current, "present-failed"));
+          });
       }
     });
     const offBlur = onWindowFocused((focused) => {
@@ -95,14 +146,22 @@ function Launcher() {
         isWindowVisible()
           .then((nativeVisible) => {
             if (!nativeVisible) {
+              // Instant native hide (item launch) already took the window.
               dismissTransientUi();
+              clearCloseTimer();
               setPhase("hidden");
+              return;
+            }
+            // Click-away: the window is still up for the shared hide delay.
+            // prism-toggle usually starts the exit; this covers a missed event.
+            if (phaseRef.current === "visible" || phaseRef.current === "preparing") {
+              hide("native");
             }
           })
           .catch(() => {});
       }, 60);
     });
-    document.addEventListener("prism:close", hide);
+    document.addEventListener("prism:close", hideFromWeb);
     // Cold-start sync: if the webview loads after the window was already
     // shown (first toggle racing the page load), reflect the real state so
     // the palette isn't stuck invisible inside a visible window.
@@ -118,9 +177,11 @@ function Launcher() {
       offToggle();
       offBlur();
       if (blurCheck.current !== null) window.clearTimeout(blurCheck.current);
-      document.removeEventListener("prism:close", hide);
+      document.removeEventListener("prism:close", hideFromWeb);
     };
-  }, [hide, reset, setOpenSettings]);
+  }, [clearCloseTimer, focusSearch, hide, hideFromWeb, reset, setOpenSettings]);
+
+  useEffect(() => () => clearCloseTimer(), [clearCloseTimer]);
 
   // Commit the fully prepared DOM while the native window is still hidden.
   // Only then present the window and begin the entrance on the next frame.
@@ -131,22 +192,22 @@ function Launcher() {
       .then((presented) => {
         if (cancelled) return;
         if (!presented) {
-          setPhase("hidden");
+          setPhase((current) => reduceLauncherPhase(current, "present-failed"));
           return;
         }
         window.requestAnimationFrame(() => {
           if (cancelled) return;
-          setPhase("visible");
-          document.querySelector<HTMLInputElement>("[data-prism-search]")?.focus();
+          setPhase((current) => reduceLauncherPhase(current, "presented"));
+          focusSearch();
         });
       })
       .catch(() => {
-        if (!cancelled) setPhase("hidden");
+        if (!cancelled) setPhase((current) => reduceLauncherPhase(current, "present-failed"));
       });
     return () => {
       cancelled = true;
     };
-  }, [phase]);
+  }, [focusSearch, phase]);
 
   // Open settings action from the palette.
   useEffect(() => {
@@ -157,7 +218,7 @@ function Launcher() {
 
   return (
     <div
-      aria-hidden={phase === "hidden"}
+      aria-hidden={phase === "hidden" || phase === "closing"}
       className={`launcher-stage launcher-stage-${phase} absolute inset-0`}
     >
       <div
