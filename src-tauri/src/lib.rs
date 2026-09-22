@@ -396,7 +396,7 @@ pub(crate) fn activate_palette(app: &tauri::AppHandle) {
 /// clamps it to the physical-pixel work area. Keyboard and shortcut fallback
 /// placement remains bottom-centered on the active monitor.
 fn position_palette(window: &tauri::WebviewWindow, anchor: Option<PresentationAnchor>) {
-    let Some((x, y)) = palette_target(window, anchor, taskbar_alignment::current()) else {
+    let Ok((x, y)) = palette_target(window, anchor, taskbar_alignment::current()) else {
         return;
     };
     let _ = window.set_position(tauri::PhysicalPosition::new(x, y));
@@ -407,8 +407,7 @@ fn reconcile_palette_position(
     anchor: Option<PresentationAnchor>,
 ) -> Result<(), String> {
     let alignment = taskbar_alignment::current();
-    let (x, y) = palette_target(window, anchor, alignment)
-        .ok_or_else(|| "cannot resolve Prism alignment target".to_string())?;
+    let (x, y) = palette_target(window, anchor, alignment)?;
     let hwnd = window.hwnd().map_err(|error| error.to_string())?;
     taskbar_alignment::reapply_with_companion(taskbar_alignment::CompanionMove {
         window: HWND(hwnd.0),
@@ -421,10 +420,10 @@ fn palette_target(
     window: &tauri::WebviewWindow,
     anchor: Option<PresentationAnchor>,
     alignment: taskbar_alignment::Alignment,
-) -> Option<(i32, i32)> {
-    let Ok(hwnd) = window.hwnd() else {
-        return None;
-    };
+) -> Result<(i32, i32), String> {
+    let hwnd = window
+        .hwnd()
+        .map_err(|error| format!("cannot resolve window handle: {error}"))?;
     let info = anchor
         .and_then(|value| {
             let monitor = value.monitor?;
@@ -435,27 +434,31 @@ fn palette_target(
             Some((monitor, work, scale))
         })
         .or_else(|| monitor_geometry_for_window(HWND(hwnd.0)));
-    let (monitor, work, scale_factor) = info?;
+    let (monitor, work, scale_factor) =
+        info.ok_or_else(|| "cannot resolve monitor geometry".to_string())?;
     // Recalculate the physical size from the preferred logical dimensions
     // and the target monitor's DPI every time: presenting on a smaller or
     // denser display must not permanently shrink the palette, and moving
-    // back to a larger display restores the preferred size.
+    // back to a larger display restores the preferred size. A failed query
+    // or resize is reported instead of positioning for a size the window
+    // does not have.
     let (width, height) = calculate_clamped_window_size(
         LOGICAL_WIDTH.load(Ordering::Acquire),
         DEFAULT_LOGICAL_HEIGHT,
         work,
         scale_factor,
     );
-    if let Ok(size) = window.outer_size() {
-        if size.width as i32 != width || size.height as i32 != height {
-            let _ = window.set_size(tauri::PhysicalSize::new(width as u32, height as u32));
-        }
+    let size = window.outer_size().map_err(|error| error.to_string())?;
+    if size.width as i32 != width || size.height as i32 != height {
+        window
+            .set_size(tauri::PhysicalSize::new(width as u32, height as u32))
+            .map_err(|error| error.to_string())?;
     }
     let edge = anchor
         .and_then(|value| value.taskbar_edge)
         .or_else(|| taskbar_edge(monitor, work))
         .unwrap_or(TaskbarEdge::Bottom);
-    Some(palette_position(work, edge, alignment, width, height))
+    Ok(palette_position(work, edge, alignment, width, height))
 }
 
 fn presentation_anchor(
@@ -1439,8 +1442,7 @@ fn set_taskbar_alignment(app: tauri::AppHandle, alignment: String) -> Result<(),
         .get_webview_window("main")
         .ok_or_else(|| "main window not found".to_string())?;
     let anchor = PRESENTATION_ANCHOR.lock().ok().and_then(|value| *value);
-    let (x, y) = palette_target(&window, anchor, alignment)
-        .ok_or_else(|| "cannot resolve Prism alignment target".to_string())?;
+    let (x, y) = palette_target(&window, anchor, alignment)?;
     let hwnd = window.hwnd().map_err(|error| error.to_string())?;
     taskbar_alignment::set_with_companion(
         alignment,
