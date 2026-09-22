@@ -18,7 +18,7 @@ mod win_key;
 mod windows_settings;
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -29,6 +29,7 @@ use windows::Win32::Graphics::Gdi::{
     GetMonitorInfoW, MonitorFromPoint, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST,
 };
 use windows::Win32::System::Threading::GetCurrentProcessId;
+use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
 use windows::Win32::UI::Input::KeyboardAndMouse::{SetActiveWindow, SetFocus};
 use windows::Win32::UI::WindowsAndMessaging::{
     AllowSetForegroundWindow, BringWindowToTop, GetCursorPos, GetForegroundWindow,
@@ -63,10 +64,20 @@ const STARTUP_SHELL_RETRY_DELAY: Duration = Duration::from_millis(250);
 const STARTUP_SHELL_RETRY_ATTEMPTS: usize = 120;
 const STARTUP_ALIGNMENT_DELAY: Duration = Duration::from_secs(1);
 
+/// Preferred palette dimensions in logical (100% DPI) pixels. They stay
+/// fixed regardless of the monitor the palette lands on; the physical
+/// window size is derived per presentation from the target monitor's
+/// scale factor and work area.
+const DEFAULT_LOGICAL_WIDTH: u32 = 640;
+const DEFAULT_LOGICAL_HEIGHT: u32 = 620;
+const MIN_LOGICAL_WIDTH: u32 = 480;
+const MIN_LOGICAL_HEIGHT: u32 = 400;
+
 static PALETTE_OPEN: AtomicBool = AtomicBool::new(false);
 static PALETTE_TRANSITION: AtomicU64 = AtomicU64::new(0);
 static ACTIVATION_FOCUS_PENDING: AtomicBool = AtomicBool::new(false);
 static PRESENTATION_ANCHOR: Mutex<Option<PresentationAnchor>> = Mutex::new(None);
+static LOGICAL_WIDTH: AtomicU32 = AtomicU32::new(DEFAULT_LOGICAL_WIDTH);
 
 #[derive(Clone, Copy, Debug, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -110,6 +121,8 @@ struct PresentationAnchor {
     taskbar_edge: Option<TaskbarEdge>,
     monitor: Option<PhysicalRect>,
     work_area: Option<PhysicalRect>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    scale_factor: Option<f64>,
 }
 
 #[derive(Clone, Copy, Debug, serde::Serialize)]
@@ -165,6 +178,15 @@ pub fn run() {
             // the palette was open.
             tauri::async_runtime::spawn_blocking(taskbar::recover);
             let persisted = load_state_value(app.handle()).ok().flatten();
+            if let Some(persisted_width) = persisted
+                .as_ref()
+                .and_then(|value| value.pointer("/settings/width"))
+                .and_then(|value| value.as_u64())
+            {
+                if is_animatable_window_width(persisted_width as u32) {
+                    LOGICAL_WIDTH.store(persisted_width as u32, Ordering::Release);
+                }
+            }
             let alignment = startup_taskbar_alignment(persisted.as_ref());
             let _ = taskbar_alignment::initialize(&alignment);
             schedule_startup_taskbar_alignment();
@@ -403,25 +425,31 @@ fn palette_target(
     let Ok(hwnd) = window.hwnd() else {
         return None;
     };
-    let Ok(size) = window.outer_size() else {
-        return None;
-    };
     let info = anchor
-        .and_then(|value| value.monitor.zip(value.work_area))
+        .and_then(|value| {
+            let monitor = value.monitor?;
+            let work = value.work_area?;
+            let scale = value
+                .scale_factor
+                .unwrap_or_else(|| window_scale_factor(HWND(hwnd.0)));
+            Some((monitor, work, scale))
+        })
         .or_else(|| monitor_geometry_for_window(HWND(hwnd.0)));
-    let (monitor, work) = info?;
-    let mut width = size.width as i32;
-    let mut height = size.height as i32;
-    // Clamp to the work area (small screens, huge taskbars, 200% DPI).
-    let work_w = work.right - work.left;
-    let work_h = work.bottom - work.top;
-    if width > work_w {
-        width = work_w;
-        let _ = window.set_size(tauri::PhysicalSize::new(width as u32, height as u32));
-    }
-    if height > work_h {
-        height = work_h;
-        let _ = window.set_size(tauri::PhysicalSize::new(width as u32, height as u32));
+    let (monitor, work, scale_factor) = info?;
+    // Recalculate the physical size from the preferred logical dimensions
+    // and the target monitor's DPI every time: presenting on a smaller or
+    // denser display must not permanently shrink the palette, and moving
+    // back to a larger display restores the preferred size.
+    let (width, height) = calculate_clamped_window_size(
+        LOGICAL_WIDTH.load(Ordering::Acquire),
+        DEFAULT_LOGICAL_HEIGHT,
+        work,
+        scale_factor,
+    );
+    if let Ok(size) = window.outer_size() {
+        if size.width as i32 != width || size.height as i32 != height {
+            let _ = window.set_size(tauri::PhysicalSize::new(width as u32, height as u32));
+        }
     }
     let edge = anchor
         .and_then(|value| value.taskbar_edge)
@@ -441,13 +469,62 @@ fn presentation_anchor(
     PresentationAnchor {
         start_button,
         click_point,
-        taskbar_edge: geometry.and_then(|(monitor, work)| taskbar_edge(monitor, work)),
-        monitor: geometry.map(|(monitor, _)| monitor),
-        work_area: geometry.map(|(_, work)| work),
+        taskbar_edge: geometry.and_then(|(monitor, work, _)| taskbar_edge(monitor, work)),
+        monitor: geometry.map(|(monitor, _, _)| monitor),
+        work_area: geometry.map(|(_, work, _)| work),
+        scale_factor: geometry.map(|(_, _, scale)| scale),
     }
 }
 
-fn monitor_geometry_for_point(point: PhysicalPoint) -> Option<(PhysicalRect, PhysicalRect)> {
+/// Preferred logical size converted to physical pixels for the target
+/// monitor's scale factor, clamped to the work area and the configured
+/// minimum window bounds.
+fn calculate_clamped_window_size(
+    logical_width: u32,
+    logical_height: u32,
+    work_area: PhysicalRect,
+    scale_factor: f64,
+) -> (i32, i32) {
+    let scale = if scale_factor.is_finite() && scale_factor > 0.0 {
+        scale_factor
+    } else {
+        1.0
+    };
+    let desired_w = (logical_width as f64 * scale).round() as i32;
+    let desired_h = (logical_height as f64 * scale).round() as i32;
+    let work_w = work_area.width().max(1);
+    let work_h = work_area.height().max(1);
+    // The configured logical minimum applies only while it still fits.
+    let min_w = ((MIN_LOGICAL_WIDTH as f64 * scale).round() as i32).clamp(1, work_w);
+    let min_h = ((MIN_LOGICAL_HEIGHT as f64 * scale).round() as i32).clamp(1, work_h);
+    (
+        desired_w.clamp(min_w, work_w),
+        desired_h.clamp(min_h, work_h),
+    )
+}
+
+fn monitor_scale_factor(monitor: windows::Win32::Graphics::Gdi::HMONITOR) -> f64 {
+    let mut dpi_x = 0;
+    let mut dpi_y = 0;
+    if unsafe { GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &mut dpi_x, &mut dpi_y) }.is_ok()
+        && dpi_x > 0
+    {
+        dpi_x as f64 / 96.0
+    } else {
+        1.0
+    }
+}
+
+fn window_scale_factor(window: HWND) -> f64 {
+    let dpi = unsafe { windows::Win32::UI::HiDpi::GetDpiForWindow(window) };
+    if dpi > 0 {
+        dpi as f64 / 96.0
+    } else {
+        1.0
+    }
+}
+
+fn monitor_geometry_for_point(point: PhysicalPoint) -> Option<(PhysicalRect, PhysicalRect, f64)> {
     let monitor = unsafe {
         MonitorFromPoint(
             POINT {
@@ -460,7 +537,7 @@ fn monitor_geometry_for_point(point: PhysicalPoint) -> Option<(PhysicalRect, Phy
     monitor_geometry(monitor)
 }
 
-fn monitor_geometry_for_window(window: HWND) -> Option<(PhysicalRect, PhysicalRect)> {
+fn monitor_geometry_for_window(window: HWND) -> Option<(PhysicalRect, PhysicalRect, f64)> {
     let mut point = POINT::default();
     let monitor = unsafe {
         if GetCursorPos(&mut point).is_ok() {
@@ -474,15 +551,18 @@ fn monitor_geometry_for_window(window: HWND) -> Option<(PhysicalRect, PhysicalRe
 
 fn monitor_geometry(
     monitor: windows::Win32::Graphics::Gdi::HMONITOR,
-) -> Option<(PhysicalRect, PhysicalRect)> {
+) -> Option<(PhysicalRect, PhysicalRect, f64)> {
     let mut info: MONITORINFO = unsafe { std::mem::zeroed() };
     info.cbSize = std::mem::size_of::<MONITORINFO>() as u32;
-    unsafe { GetMonitorInfoW(monitor, &mut info).as_bool() }.then(|| {
-        (
+    if unsafe { GetMonitorInfoW(monitor, &mut info).as_bool() } {
+        Some((
             PhysicalRect::from(info.rcMonitor),
             PhysicalRect::from(info.rcWork),
-        )
-    })
+            monitor_scale_factor(monitor),
+        ))
+    } else {
+        None
+    }
 }
 
 fn taskbar_edge(monitor: PhysicalRect, work: PhysicalRect) -> Option<TaskbarEdge> {
@@ -522,10 +602,11 @@ fn palette_position(
         TaskbarEdge::Left => (work.left, aligned_y),
         TaskbarEdge::Right => (work.right - width, aligned_y),
     };
-    (
-        x.clamp(work.left, work.right - width),
-        y.clamp(work.top, work.bottom - height),
-    )
+    // A window larger than the work area still clamps inside it instead of
+    // panicking on inverted bounds.
+    let max_x = (work.right - width).max(work.left);
+    let max_y = (work.bottom - height).max(work.top);
+    (x.clamp(work.left, max_x), y.clamp(work.top, max_y))
 }
 
 impl PhysicalRect {
@@ -1337,15 +1418,17 @@ fn set_window_width(app: tauri::AppHandle, width: u32) -> Result<(), String> {
     if !is_animatable_window_width(width) {
         return Err(format!("unsupported width '{width}'"));
     }
+    LOGICAL_WIDTH.store(width, Ordering::Release);
     let window = app
         .get_webview_window("main")
         .ok_or_else(|| "main window not found".to_string())?;
-    let height = window.outer_size().map_err(|e| e.to_string())?.height;
-    window
-        .set_size(tauri::PhysicalSize::new(width, height))
-        .map_err(|e| e.to_string())?;
+    // Sizing flows through the same reconcile path as presentation so the
+    // new width is converted with the target monitor's scale factor and
+    // clamped against its work area.
     let anchor = PRESENTATION_ANCHOR.lock().ok().and_then(|value| *value);
-    position_palette(&window, anchor);
+    if reconcile_palette_position(&window, anchor).is_err() {
+        position_palette(&window, anchor);
+    }
     Ok(())
 }
 
@@ -2229,6 +2312,142 @@ mod tests {
         for width in [0, 559, 721, u32::MAX] {
             assert!(!is_animatable_window_width(width));
         }
+    }
+
+    #[test]
+    fn clamped_window_size_scales_both_axes_with_monitor_dpi() {
+        let work = PhysicalRect {
+            left: 0,
+            top: 0,
+            right: 1_920,
+            bottom: 1_040,
+        };
+        for (width, scale, expected_w, expected_h) in [
+            (560, 1.0, 560, 620),
+            (640, 1.0, 640, 620),
+            (720, 1.0, 720, 620),
+            (640, 1.25, 800, 775),
+            (720, 1.5, 1_080, 930),
+        ] {
+            assert_eq!(
+                calculate_clamped_window_size(width, DEFAULT_LOGICAL_HEIGHT, work, scale),
+                (expected_w, expected_h),
+                "width={width} scale={scale}"
+            );
+        }
+        // 200% DPI on a 4K panel: both axes scale past the 1080p work area.
+        let four_k = PhysicalRect {
+            left: 0,
+            top: 0,
+            right: 3_840,
+            bottom: 2_100,
+        };
+        assert_eq!(
+            calculate_clamped_window_size(560, DEFAULT_LOGICAL_HEIGHT, four_k, 2.0),
+            (1_120, 1_240)
+        );
+    }
+
+    #[test]
+    fn clamped_window_size_falls_back_for_invalid_scale() {
+        let work = PhysicalRect {
+            left: 0,
+            top: 0,
+            right: 1_920,
+            bottom: 1_040,
+        };
+        for scale in [0.0, -1.5, f64::NAN, f64::INFINITY] {
+            assert_eq!(
+                calculate_clamped_window_size(640, DEFAULT_LOGICAL_HEIGHT, work, scale),
+                (640, 620),
+                "scale={scale}"
+            );
+        }
+    }
+
+    #[test]
+    fn clamped_window_size_fits_small_and_portrait_work_areas() {
+        // 150% DPI on a 1366x768 laptop screen: the palette clamps to the
+        // work area instead of overflowing or shrinking forever.
+        let short = PhysicalRect {
+            left: 0,
+            top: 0,
+            right: 1_366,
+            bottom: 720,
+        };
+        assert_eq!(
+            calculate_clamped_window_size(640, DEFAULT_LOGICAL_HEIGHT, short, 1.5),
+            (960, 720)
+        );
+
+        let portrait = PhysicalRect {
+            left: 0,
+            top: 0,
+            right: 700,
+            bottom: 1_100,
+        };
+        assert_eq!(
+            calculate_clamped_window_size(720, DEFAULT_LOGICAL_HEIGHT, portrait, 1.0),
+            (700, 620)
+        );
+
+        let tiny = PhysicalRect {
+            left: 0,
+            top: 0,
+            right: 400,
+            bottom: 350,
+        };
+        assert_eq!(
+            calculate_clamped_window_size(640, DEFAULT_LOGICAL_HEIGHT, tiny, 1.0),
+            (400, 350)
+        );
+    }
+
+    #[test]
+    fn preferred_size_is_restored_after_a_temporary_clamp() {
+        // The function derives size only from the logical preference, so a
+        // monitor that was too small does not leave the window shrunk once
+        // it is presented on a larger work area again.
+        let cramped = PhysicalRect {
+            left: 0,
+            top: 0,
+            right: 500,
+            bottom: 420,
+        };
+        let roomy = PhysicalRect {
+            left: 0,
+            top: 0,
+            right: 2_560,
+            bottom: 1_400,
+        };
+        assert_eq!(
+            calculate_clamped_window_size(720, DEFAULT_LOGICAL_HEIGHT, cramped, 1.0),
+            (500, 420)
+        );
+        assert_eq!(
+            calculate_clamped_window_size(720, DEFAULT_LOGICAL_HEIGHT, roomy, 1.0),
+            (720, 620)
+        );
+    }
+
+    #[test]
+    fn palette_position_clamps_when_window_exceeds_work_area() {
+        let tiny_work = PhysicalRect {
+            left: 100,
+            top: 50,
+            right: 400,
+            bottom: 300,
+        };
+        assert_eq!(
+            palette_position(
+                tiny_work,
+                TaskbarEdge::Bottom,
+                taskbar_alignment::Alignment::Center,
+                720,
+                620,
+            ),
+            (100, 50)
+        );
     }
 
     #[test]
