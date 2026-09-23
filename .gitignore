@@ -1,0 +1,12 @@
+# JavaScript dependencies (including nested projects)
+node_modules/
+
+# Frontend build output
+/dist/
+
+# Tauri-generated code and Rust build output
+/src-tauri/gen/
+/src-tauri/target/
+
+# Local installers, update signatures, and release artifacts
+/artifacts/
