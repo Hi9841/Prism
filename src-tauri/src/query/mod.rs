@@ -19,7 +19,7 @@ pub use open_windows::OpenWindow;
 const RECENT_LIMIT: usize = 5;
 const WINDOW_LIMIT: usize = 8;
 const APP_LIMIT: usize = 6;
-const ACTION_LIMIT: usize = 8;
+const ACTION_LIMIT: usize = 16;
 
 #[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -117,9 +117,10 @@ pub fn phase1(
 }
 
 pub fn execute(action_id: &str) -> Result<(), String> {
-    let action =
-        catalog::get(action_id).ok_or_else(|| format!("unknown action id '{action_id}'"))?;
-    catalog::execute(action)
+    if let Some(action) = catalog::get(action_id) {
+        return catalog::execute(action);
+    }
+    crate::windows_tools::execute(action_id)
 }
 
 pub fn accept_intent(query: &str, action_id: &str, store: &IntentStore) -> Result<(), String> {
@@ -135,6 +136,27 @@ fn search_actions(query: &str, intent_id: Option<&str>) -> Vec<Phase1Hit> {
         .into_iter()
         .map(|(action, score)| action_hit(action, score, false))
         .collect();
+
+    if let Some(tools) = crate::windows_tools::cached() {
+        for tool in tools.iter() {
+            let keyword_refs = tool
+                .keywords
+                .iter()
+                .map(|keyword| keyword.as_str())
+                .collect::<Vec<_>>();
+            if let Some(score) = score::score_with_keywords(query, &tool.title, &keyword_refs) {
+                hits.push(tool_hit(tool, score));
+            }
+        }
+    }
+    hits.sort_by(|left, right| {
+        right
+            .score
+            .cmp(&left.score)
+            .then_with(|| left.title.cmp(&right.title))
+    });
+    hits.truncate(ACTION_LIMIT);
+
     if let Some(intent_id) = intent_id {
         if let Some(action) = catalog::get(intent_id) {
             hits.retain(|hit| hit.action_id.as_deref() != Some(intent_id));
@@ -199,6 +221,23 @@ fn action_hit(action: &catalog::TypedAction, score: i32, from_intent: bool) -> P
         uri: action.uri.map(str::to_string),
         icon_key: Some(action.icon_key.to_string()),
         source: None,
+    }
+}
+
+fn tool_hit(tool: &crate::windows_tools::WindowsTool, score: i32) -> Phase1Hit {
+    Phase1Hit {
+        id: format!("action::{}", tool.id),
+        kind: Phase1Kind::Action,
+        title: tool.title.clone(),
+        subtitle: tool.subtitle.clone(),
+        score,
+        app_id: None,
+        path: None,
+        hwnd: None,
+        action_id: Some(tool.id.clone()),
+        uri: None,
+        icon_key: Some(tool.icon_key.to_string()),
+        source: Some("windows-tool".to_string()),
     }
 }
 

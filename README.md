@@ -7,6 +7,7 @@ Prism is a fast, keyboard-first command palette and Windows taskbar companion. S
 ## Highlights
 
 - Search installed desktop and packaged Windows applications.
+- Search Windows tools, Control Panel applets, and installed power plans.
 - Find local files and folders with fuzzy matching and direct path browsing.
 - Pin applications, reorder them, and keep up to six Quick Access folders.
 - Open Prism from the configured global shortcut or the Windows Start button.
@@ -26,7 +27,7 @@ The installer is not currently Windows Authenticode-signed, so SmartScreen may d
 ## Using Prism
 
 1. Open Prism with the Windows key or your configured shortcut.
-2. Type an application name, file name, folder path, or calculation.
+2. Type an application name, file name, folder path, Windows tool, or calculation. Try `device manager`, `performance options`, or `power plan`.
 3. Use the arrow keys to select a result and press Enter to open it.
 
 The launcher starts hidden when you sign in to Windows so the global shortcut is ready immediately. Startup behavior can be managed from **Task Manager > Startup apps**.

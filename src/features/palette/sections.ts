@@ -251,17 +251,30 @@ export function buildSections(sources: PaletteSources): {
     const settingsItems = filePathBrowse
       ? []
       : usePhase1
-        ? (phase1?.actions.filter((hit) => !isCommandAction(hit)).map(actionPaletteItem) ?? [])
+        ? (phase1?.actions
+            .filter((hit) => hit.source !== "windows-tool" && !isCommandAction(hit))
+            .map(actionPaletteItem) ?? [])
         : searchWindowsSettings(normalized);
+    const toolItems =
+      usePhase1 && !filePathBrowse
+        ? (phase1?.actions
+            .filter((hit) => hit.source === "windows-tool")
+            .map(actionPaletteItem) ?? [])
+        : [];
     const commandItems =
       usePhase1 && !filePathBrowse
-        ? (phase1?.actions.filter(isCommandAction).map(actionPaletteItem) ?? [])
+        ? (phase1?.actions
+            .filter((hit) => hit.source !== "windows-tool" && isCommandAction(hit))
+            .map(actionPaletteItem) ?? [])
         : [];
     const appsSection = buildAppsSection(appHits, appIcons, appGroups, SEARCH_APPS_LIMIT);
     if (appsSection) {
       out.push(appsSection);
     } else if (usePhase1 && phase1AppItems.length > 0) {
       out.push({ id: "apps", label: "Apps", items: phase1AppItems.slice(0, SEARCH_APPS_LIMIT) });
+    }
+    if (toolItems.length > 0) {
+      out.push({ id: "tools", label: "Windows Tools", items: toolItems });
     }
     if (commandItems.length > 0) {
       out.push({ id: "commands", label: "Commands", items: commandItems });

@@ -944,7 +944,7 @@ export function Palette() {
             <FolderSync className="h-3.5 w-3.5" />
           </IconButton>
           <IconButton
-            label="Refresh applications"
+            label="Refresh applications and Windows tools"
             onClick={palette.refreshApps}
             disabled={!palette.appsLoaded}
           >
