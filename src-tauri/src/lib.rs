@@ -16,6 +16,7 @@ mod taskbar_icon_overlay;
 mod theme;
 mod win_key;
 mod windows_settings;
+mod windows_tools;
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
@@ -209,6 +210,7 @@ pub fn run() {
                 app_data_dir,
                 app.handle().clone(),
             );
+            tauri::async_runtime::spawn_blocking(windows_tools::warm);
             if let Some(window) = app.get_webview_window("main") {
                 let startup_theme = startup_window_theme(persisted.as_ref(), theme::apps_light());
                 let _ = apply_window_style(&window, startup_theme);
@@ -1117,9 +1119,12 @@ async fn refresh_apps(
 ) -> Result<Vec<apps::AppEntry>, String> {
     let _scan_guard = state.apps_scan_lock.lock().await;
     let cache_path = apps_cache_path(&app);
-    let list = tauri::async_runtime::spawn_blocking(move || apps::scan_force(&cache_path))
-        .await
-        .map_err(|e| format!("app scan task failed: {e}"))??;
+    let list = tauri::async_runtime::spawn_blocking(move || {
+        let _ = windows_tools::refresh();
+        apps::scan_force(&cache_path)
+    })
+    .await
+    .map_err(|e| format!("app scan task failed: {e}"))??;
     *state.apps_cache.lock().map_err(|e| e.to_string())? = Some(list.clone());
     Ok(strip_icons(list))
 }

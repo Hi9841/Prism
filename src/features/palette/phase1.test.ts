@@ -33,6 +33,22 @@ describe("phase1 mappers", () => {
     expect(vi.mocked(executeAction)).toHaveBeenCalledWith("audio.mute");
   });
 
+  it("runs dynamic Windows tools through executeAction", async () => {
+    const item = actionPaletteItem(
+      hit({
+        id: "action::windows.device-manager",
+        kind: "action",
+        title: "Device Manager",
+        subtitle: "Windows tool",
+        actionId: "windows.device-manager",
+        iconKey: "device",
+        source: "windows-tool",
+      }),
+    );
+    await item.run();
+    expect(vi.mocked(executeAction)).toHaveBeenCalledWith("windows.device-manager");
+  });
+
   it("focuses an open window by hwnd", async () => {
     const item = windowPaletteItem(
       hit({

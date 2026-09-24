@@ -350,6 +350,36 @@ describe("buildSections - search layout", () => {
     expect(result.flatItems.some((entry) => entry.id.startsWith("copy::"))).toBe(false);
   });
 
+  it("renders native Windows tools in their own section", () => {
+    const query = "device manager";
+    const result = buildSections(
+      sources({
+        query,
+        fileIndexReady: true,
+        phase1: phase1(query, {
+          actions: [
+            phase1Hit({
+              id: "action::windows.device-manager",
+              kind: "action",
+              title: "Device Manager",
+              subtitle: "Windows tool",
+              actionId: "windows.device-manager",
+              iconKey: "device",
+              source: "windows-tool",
+            }),
+          ],
+        }),
+      }),
+    );
+
+    expect(ids(result.sections)).toEqual(["tools"]);
+    expect(result.sections[0]).toMatchObject({ id: "tools", label: "Windows Tools" });
+    expect(result.sections[0].items[0]).toMatchObject({
+      title: "Device Manager",
+      id: "action::windows.device-manager",
+    });
+  });
+
   it("paints Phase 1 windows and actions without file results", () => {
     const query = "my eyes hurt";
     const result = buildSections(

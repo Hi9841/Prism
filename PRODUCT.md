@@ -27,12 +27,13 @@ Prism runs on Windows 10 and Windows 11 x64. People open it with the Windows key
 ## Capabilities and Constraints
 
 - Search installed desktop and packaged Windows applications.
+- Search Windows tools, Control Panel applets, and installed power plans.
 - Search local files and folders with fuzzy matching and direct path browsing.
 - Calculate expressions and copy results.
 - Pin and reorder applications and keep up to six Quick Access folders.
 - Run eligible local applications and scripts as administrator.
 - Control taskbar alignment, icon density, button grouping, auto-hide, and the Start button icon.
-- Follow the Windows theme or use light, dark, acrylic, mica, or solid appearances.
+- Follow the Windows theme or use light or dark appearance with accent colors.
 - Install signed in-app updates.
 - The current installer is not Windows Authenticode-signed, so Windows SmartScreen may show a warning.
 - The installer targets Windows x64, installs for the current user, and does not require administrator access.

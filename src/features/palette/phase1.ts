@@ -1,6 +1,8 @@
 import {
   AppWindow,
+  BatteryCharging,
   Bluetooth,
+  Cpu,
   HardDrive,
   Home,
   Lock,
@@ -10,10 +12,12 @@ import {
   Power,
   RefreshCw,
   RotateCcw,
+  Settings2,
   Sun,
   Volume2,
   VolumeX,
   Wifi,
+  Wrench,
 } from "lucide-react";
 import { executeAction, focusWindow, launchApp, launchAppAsAdmin } from "../../lib/bridge";
 import type { Phase1Hit } from "../../lib/query";
@@ -38,6 +42,11 @@ const ICONS: Record<string, { icon: LucideIcon; tint: TileTint }> = {
   restart: { icon: RotateCcw, tint: "amber" },
   window: { icon: AppWindow, tint: "azure" },
   settings: { icon: Home, tint: "azure" },
+  "control-panel": { icon: Settings2, tint: "azure" },
+  device: { icon: Cpu, tint: "azure" },
+  performance: { icon: Wrench, tint: "amber" },
+  "power-plan": { icon: BatteryCharging, tint: "mint" },
+  tool: { icon: Wrench, tint: "slate" },
 };
 
 export function actionPaletteItem(hit: Phase1Hit): PaletteItem {
