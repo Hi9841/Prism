@@ -1270,6 +1270,19 @@ unsafe fn extract_file_icon(path: &str) -> Option<Vec<u8>> {
     png
 }
 
+/// Returns a PNG data URL for a shell item's native icon.
+pub(crate) fn shell_item_icon_data_url(item: &IShellItem) -> Option<String> {
+    unsafe { extract_shell_item_icon(item).map(|png| png_data_url(&png)) }
+}
+
+unsafe fn extract_shell_item_icon(item: &IShellItem) -> Option<Vec<u8>> {
+    let factory = item.cast::<IShellItemImageFactory>().ok()?;
+    let bitmap = factory
+        .GetImage(SIZE { cx: 64, cy: 64 }, SIIGBF_ICONONLY)
+        .ok()?;
+    bitmap_to_png(bitmap)
+}
+
 /// Extracts an icon for a virtual AppsFolder item through the Shell image
 /// factory. Modern AppX/MSIX apps expose their package logo this way rather
 /// than as an icon resource filename. Older shell extensions fall back to
@@ -1279,15 +1292,7 @@ unsafe fn extract_apps_folder_icon(
     folder: &IShellFolder,
     pidl: *mut ITEMIDLIST,
 ) -> Option<Vec<u8>> {
-    if let Ok(factory) = item.cast::<IShellItemImageFactory>() {
-        if let Ok(bitmap) = factory.GetImage(SIZE { cx: 64, cy: 64 }, SIIGBF_ICONONLY) {
-            if let Some(png) = bitmap_to_png(bitmap) {
-                return Some(png);
-            }
-        }
-    }
-
-    extract_legacy_apps_folder_icon(folder, pidl)
+    extract_shell_item_icon(item).or_else(|| extract_legacy_apps_folder_icon(folder, pidl))
 }
 
 unsafe fn extract_legacy_apps_folder_icon(

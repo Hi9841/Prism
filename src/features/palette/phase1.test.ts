@@ -33,7 +33,8 @@ describe("phase1 mappers", () => {
     expect(vi.mocked(executeAction)).toHaveBeenCalledWith("audio.mute");
   });
 
-  it("runs dynamic Windows tools through executeAction", async () => {
+  it("runs dynamic Windows tools through executeAction and uses native icons", async () => {
+    const nativeIcon = "data:image/png;base64,icon";
     const item = actionPaletteItem(
       hit({
         id: "action::windows.device-manager",
@@ -42,11 +43,13 @@ describe("phase1 mappers", () => {
         subtitle: "Windows tool",
         actionId: "windows.device-manager",
         iconKey: "device",
+        icon: nativeIcon,
         source: "windows-tool",
       }),
     );
     await item.run();
     expect(vi.mocked(executeAction)).toHaveBeenCalledWith("windows.device-manager");
+    expect(item.icon).toEqual({ kind: "app", name: "Device Manager", icon: nativeIcon });
   });
 
   it("focuses an open window by hwnd", async () => {

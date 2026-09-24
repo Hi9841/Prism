@@ -50,13 +50,15 @@ const ICONS: Record<string, { icon: LucideIcon; tint: TileTint }> = {
 };
 
 export function actionPaletteItem(hit: Phase1Hit): PaletteItem {
-  const { icon, tint } = ICONS[hit.iconKey ?? "settings"] ?? ICONS.settings;
+  const mapped = ICONS[hit.iconKey ?? "settings"] ?? ICONS.settings;
   const actionId = hit.actionId ?? hit.id.replace(/^action::/, "");
   return {
     id: hit.id,
     title: hit.title,
     subtitle: hit.subtitle,
-    icon: { kind: "tile", icon, tint },
+    icon: hit.icon
+      ? { kind: "app", name: hit.title, icon: hit.icon }
+      : { kind: "tile", icon: mapped.icon, tint: mapped.tint },
     historyTitle: hit.title,
     run: () => executeAction(actionId),
   };

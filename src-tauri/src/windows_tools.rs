@@ -34,6 +34,7 @@ pub struct WindowsTool {
     pub subtitle: String,
     pub keywords: Vec<String>,
     pub icon_key: &'static str,
+    pub icon: Option<String>,
     target: ToolTarget,
 }
 
@@ -161,6 +162,7 @@ fn discover() -> Vec<WindowsTool> {
                         "energy".to_string(),
                     ],
                     icon_key: "power-plan",
+                    icon: None,
                     target: ToolTarget::PowerPlan(plan.guid),
                 },
             );
@@ -826,6 +828,7 @@ fn add_control_tool(
                 .map(|keyword| (*keyword).to_string())
                 .collect(),
             icon_key,
+            icon: None,
             target: ToolTarget::ControlPanel(applet.to_string()),
         },
     );
@@ -887,6 +890,7 @@ fn add_shell_tool_with_keywords(
                 .map(|keyword| (*keyword).to_string())
                 .collect(),
             icon_key,
+            icon: None,
             target: ToolTarget::Shell {
                 target: path.to_string_lossy().into_owned(),
                 parameters: parameters.map(str::to_string),
@@ -1002,6 +1006,7 @@ unsafe fn shell_control_panel_item(item: &IShellItem) -> Option<WindowsTool> {
     let pidl_pointer = SHGetIDListFromObject(item).ok()?;
     let pidl = copy_pidl(pidl_pointer);
     ILFree(Some(pidl_pointer));
+    let icon = crate::apps::shell_item_icon_data_url(item);
     Some(WindowsTool {
         id: format!("control-panel::shell-{}", slug(&title)),
         title: title.clone(),
@@ -1013,6 +1018,7 @@ unsafe fn shell_control_panel_item(item: &IShellItem) -> Option<WindowsTool> {
             "windows tool".to_string(),
         ],
         icon_key: "control-panel",
+        icon,
         target: ToolTarget::ShellItem {
             pidl: pidl?,
             parameter,
@@ -1120,6 +1126,7 @@ fn add_cpl_candidate(tools: &mut Vec<WindowsTool>, name: &str, value: Option<&st
             subtitle: "Control Panel".to_string(),
             keywords,
             icon_key: "control-panel",
+            icon: None,
             target: ToolTarget::ControlPanel(applet),
         },
     );
@@ -1331,6 +1338,9 @@ fn add_tool(tools: &mut Vec<WindowsTool>, tool: WindowsTool) {
             {
                 existing.keywords.push(keyword);
             }
+        }
+        if let Some(icon) = tool.icon.clone() {
+            existing.icon = Some(icon);
         }
         if new_target_rank > target_rank(&existing.target) {
             existing.target = tool.target;
