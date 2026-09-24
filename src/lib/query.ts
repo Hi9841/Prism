@@ -17,6 +17,7 @@ export interface Phase1Hit {
   actionId?: string;
   uri?: string;
   iconKey?: string;
+  icon?: string;
   source?: string;
 }
 

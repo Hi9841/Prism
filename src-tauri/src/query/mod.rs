@@ -51,6 +51,8 @@ pub struct Phase1Hit {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub icon_key: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub icon: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
 }
 
@@ -220,6 +222,7 @@ fn action_hit(action: &catalog::TypedAction, score: i32, from_intent: bool) -> P
         action_id: Some(action.id.to_string()),
         uri: action.uri.map(str::to_string),
         icon_key: Some(action.icon_key.to_string()),
+        icon: None,
         source: None,
     }
 }
@@ -237,6 +240,7 @@ fn tool_hit(tool: &crate::windows_tools::WindowsTool, score: i32) -> Phase1Hit {
         action_id: Some(tool.id.clone()),
         uri: None,
         icon_key: Some(tool.icon_key.to_string()),
+        icon: tool.icon.clone(),
         source: Some("windows-tool".to_string()),
     }
 }
@@ -254,6 +258,7 @@ fn app_hit(app: &AppEntry, score: i32) -> Phase1Hit {
         action_id: None,
         uri: None,
         icon_key: None,
+        icon: None,
         source: Some(app.source.clone()),
     }
 }
@@ -276,6 +281,7 @@ fn window_hit(window: &OpenWindow, score: i32) -> Phase1Hit {
         action_id: None,
         uri: None,
         icon_key: Some("window".to_string()),
+        icon: None,
         source: None,
     }
 }
@@ -293,6 +299,7 @@ fn recent_hit(entry: &RecentCommand, score: i32) -> Phase1Hit {
         action_id: None,
         uri: None,
         icon_key: None,
+        icon: None,
         source: None,
     }
 }
