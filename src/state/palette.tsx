@@ -16,14 +16,16 @@ import {
   getFileThumbnails,
   getQuickAccess,
   hidePaletteWindow,
+  onAppsUpdated,
   onFileIndexUpdated,
   onWindowFocused,
   queryPhase1,
+  queryPowerPlans,
   rebuildFileIndex,
   searchFiles,
 } from "../lib/bridge";
 import { appIconRetryDelay, selectAppIconRequestIds } from "../lib/iconLoading";
-import type { Phase1Response } from "../lib/query";
+import type { Phase1Response, PowerPlanHit } from "../lib/query";
 import { dedupeApps } from "../lib/search";
 import type {
   AppEntry,
@@ -45,7 +47,7 @@ interface PaletteCtx {
   move: (delta: number) => void;
   select: (index: number) => void;
   runSelected: () => void;
-  runItem: (item: PaletteItem) => void;
+  runItem: (item: PaletteItem) => Promise<void>;
   runItemAsAdmin: (item: PaletteItem) => void;
   appsLoaded: boolean;
   appsError: boolean;
@@ -66,6 +68,7 @@ const Ctx = createContext<PaletteCtx | null>(null);
 
 /** Bounds the retained thumbnail data URLs; the palette lives for weeks. */
 const THUMBNAIL_CACHE_LIMIT = 128;
+const POWER_PLAN_QUERY_DELAY_MS = 50;
 
 function rememberThumbnail(cache: Map<string, string | null>, path: string, thumbnail: string | null): void {
   // Refresh insertion order so recently shown images survive eviction; a
@@ -105,6 +108,7 @@ export function PaletteProvider({ children }: { children: ReactNode }) {
   const app = useApp();
   const [query, setQueryState] = useState("");
   const [apps, setApps] = useState<AppEntry[]>([]);
+  const [appsRevision, setAppsRevision] = useState(0);
   const [appsLoaded, setAppsLoaded] = useState(false);
   const [appsError, setAppsError] = useState(false);
   const [quickAccess, setQuickAccess] = useState<QuickAccessEntry[]>([]);
@@ -121,11 +125,15 @@ export function PaletteProvider({ children }: { children: ReactNode }) {
   const [fileIndexTick, setFileIndexTick] = useState(0);
   const [fileThumbnailRevision, setFileThumbnailRevision] = useState(0);
   const [phase1, setPhase1] = useState<Phase1Response | null>(null);
+  const [powerPlans, setPowerPlans] = useState<PowerPlanHit[]>([]);
   const [existingHistoryPaths, setExistingHistoryPaths] = useState<ReadonlySet<string>>(() => new Set());
   const [appIcons, setAppIcons] = useState<Readonly<Record<string, string>>>({});
   const [selected, setSelected] = useState(0);
   const fileRequest = useRef(0);
   const phase1Request = useRef(0);
+  const powerPlanRequest = useRef(0);
+  const queryRef = useRef("");
+  const selectionTargetRef = useRef<string | null>(null);
   const fileThumbnailCache = useRef<Map<string, string | null>>(new Map());
   const fileThumbnailInFlight = useRef<Set<string>>(new Set());
   const fileThumbnailEpoch = useRef(0);
@@ -140,7 +148,12 @@ export function PaletteProvider({ children }: { children: ReactNode }) {
   // state flips (adding the state to deps would double-fire searches).
   const indexStatusRef = useRef({ ready: false, indexing: true });
 
+  queryRef.current = query;
+
   const setQuery = useCallback((next: string) => {
+    selectionTargetRef.current = null;
+    powerPlanRequest.current += 1;
+    setPowerPlans([]);
     setQueryState(next);
     setSelected(0);
   }, []);
@@ -168,6 +181,25 @@ export function PaletteProvider({ children }: { children: ReactNode }) {
       active = false;
     };
   }, []);
+
+  // The native index refreshes when a shortcut or install folder shows up
+  // after the process started. Pull the new list and rerun the open query.
+  useEffect(
+    () =>
+      onAppsUpdated(() => {
+        getApps()
+          .then((list) => {
+            setApps(list);
+            setAppsError(false);
+            setAppsLoaded(true);
+            setAppsRevision((revision) => revision + 1);
+          })
+          .catch(() => {
+            setAppsError(true);
+          });
+      }),
+    [],
+  );
 
   const validateHistoryPaths = useCallback(() => {
     const request = ++historyPathRequest.current;
@@ -253,6 +285,8 @@ export function PaletteProvider({ children }: { children: ReactNode }) {
   useEffect(() => onWindowFocused((focused) => focused && validateHistoryPaths()), [validateHistoryPaths]);
 
   useEffect(() => {
+    // `appsRevision` is the signal that a shortcut rescan published a new list.
+    void appsRevision;
     const searchText = query.trim();
     const request = ++phase1Request.current;
     if (!searchText) {
@@ -269,7 +303,41 @@ export function PaletteProvider({ children }: { children: ReactNode }) {
         if (request !== phase1Request.current) return;
         setPhase1(null);
       });
-  }, [query, app.history]);
+  }, [query, app.history, appsRevision]);
+
+  const refreshPowerPlans = useCallback((searchText: string): Promise<PowerPlanHit[]> => {
+    const request = ++powerPlanRequest.current;
+    if (!searchText) {
+      setPowerPlans([]);
+      return Promise.resolve([]);
+    }
+    return queryPowerPlans(searchText)
+      .then((plans) => {
+        if (request === powerPlanRequest.current) setPowerPlans(plans);
+        return plans;
+      })
+      .catch((error) => {
+        if (request === powerPlanRequest.current) setPowerPlans([]);
+        throw error;
+      });
+  }, []);
+
+  useEffect(() => {
+    const searchText = query.trim();
+    const request = ++powerPlanRequest.current;
+    setPowerPlans([]);
+    if (!searchText) return;
+    const timer = window.setTimeout(() => {
+      void queryPowerPlans(searchText)
+        .then((plans) => {
+          if (request === powerPlanRequest.current) setPowerPlans(plans);
+        })
+        .catch(() => {
+          if (request === powerPlanRequest.current) setPowerPlans([]);
+        });
+    }, POWER_PLAN_QUERY_DELAY_MS);
+    return () => window.clearTimeout(timer);
+  }, [query]);
 
   useEffect(() => {
     void fileIndexTick;
@@ -453,6 +521,7 @@ export function PaletteProvider({ children }: { children: ReactNode }) {
       fileIndexing: fileIndexing || volumes.some((v) => v.state === "indexing"),
       fileIndexReady: fileIndexReady || volumes.some((v) => v.state === "ready"),
       phase1,
+      powerPlans,
     });
   }, [
     query,
@@ -473,6 +542,7 @@ export function PaletteProvider({ children }: { children: ReactNode }) {
     filesBusy,
     filesError,
     phase1,
+    powerPlans,
     fileIndexing,
     fileIndexReady,
     volumes,
@@ -537,6 +607,7 @@ export function PaletteProvider({ children }: { children: ReactNode }) {
 
   const move = useCallback(
     (delta: number) => {
+      selectionTargetRef.current = null;
       setSelected((previous) => {
         if (flatItems.length === 0) return 0;
         return Math.min(Math.max(previous + delta, 0), flatItems.length - 1);
@@ -545,14 +616,44 @@ export function PaletteProvider({ children }: { children: ReactNode }) {
     [flatItems.length],
   );
 
+  const select = useCallback((index: number) => {
+    selectionTargetRef.current = null;
+    setSelected(index);
+  }, []);
+
   useEffect(() => {
     setSelected((previous) => Math.min(previous, Math.max(0, flatItems.length - 1)));
   }, [flatItems.length]);
 
+  useEffect(() => {
+    const target = selectionTargetRef.current;
+    if (!target) return;
+    const index = flatItems.findIndex((item) => item.id === target);
+    if (index < 0) return;
+    selectionTargetRef.current = null;
+    setSelected(index);
+  }, [flatItems]);
+
   const runItem = useCallback(
     async (item: PaletteItem) => {
+      const submittedQuery = query.trim();
       const clipboardItem = isClipboardKind(item.id);
       try {
+        if (item.powerPlanGuid) {
+          await item.run();
+          if (queryRef.current.trim() !== submittedQuery) {
+            app.showToast("Power plan changed", item.title);
+            return;
+          }
+          try {
+            await refreshPowerPlans(submittedQuery);
+            if (queryRef.current.trim() === submittedQuery) selectionTargetRef.current = item.id;
+            app.showToast("Power plan changed", item.title);
+          } catch (error) {
+            app.showToast("Power plan changed", `Could not refresh the list: ${String(error)}`);
+          }
+          return;
+        }
         if (clipboardItem) {
           await item.run();
         } else if (item.id.startsWith("window::")) {
@@ -568,11 +669,14 @@ export function PaletteProvider({ children }: { children: ReactNode }) {
         if (clipboardItem) {
           app.showToast("Copied to clipboard", item.toastDetail ?? item.title);
         }
-      } catch {
-        app.showToast("Couldn’t open item", item.title);
+      } catch (error) {
+        app.showToast(
+          item.powerPlanGuid ? "Power plan not changed" : "Couldn’t open item",
+          item.powerPlanGuid ? String(error) : item.title,
+        );
       }
     },
-    [app, query],
+    [app, query, refreshPowerPlans],
   );
 
   const runSelected = useCallback(() => {
@@ -617,7 +721,7 @@ export function PaletteProvider({ children }: { children: ReactNode }) {
       apps: visibleApps,
       selected,
       move,
-      select: setSelected,
+      select,
       runSelected,
       runItem,
       runItemAsAdmin,
@@ -643,6 +747,7 @@ export function PaletteProvider({ children }: { children: ReactNode }) {
       visibleApps,
       selected,
       move,
+      select,
       runSelected,
       runItem,
       runItemAsAdmin,

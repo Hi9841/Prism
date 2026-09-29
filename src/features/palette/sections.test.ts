@@ -1,6 +1,6 @@
 import { Home } from "lucide-react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { isPinnedToTaskbar, setTaskbarPinned } from "../../lib/bridge";
+import { isPinnedToTaskbar, setPowerPlan, setTaskbarPinned } from "../../lib/bridge";
 import type { Phase1Hit, Phase1Response } from "../../lib/query";
 import type { AppEntry, FileEntry, PaletteItem, QuickAccessEntry } from "../../lib/types";
 import { buildSections, isClipboardKind, type PaletteSources, quickAccessPaletteItem } from "./sections";
@@ -18,6 +18,7 @@ vi.mock("../../lib/bridge", () => ({
   copyText: vi.fn().mockResolvedValue(undefined),
   executeAction: vi.fn().mockResolvedValue(undefined),
   focusWindow: vi.fn().mockResolvedValue(undefined),
+  setPowerPlan: vi.fn().mockResolvedValue(undefined),
 }));
 
 function app(name: string, overrides: Partial<AppEntry> = {}): AppEntry {
@@ -94,6 +95,7 @@ function sources(overrides: Partial<PaletteSources> = {}): PaletteSources {
     filePathBrowse: false,
     filesBusy: false,
     filesError: false,
+    powerPlans: [],
     ...overrides,
   };
 }
@@ -416,6 +418,71 @@ describe("buildSections - search layout", () => {
     expect(ids(result.sections)).toEqual(["windows", "settings"]);
     expect(result.sections[0].items[0].title).toBe("Notes");
     expect(result.sections[1].items[0].title).toBe("Night Light");
+  });
+
+  it("renders every discovered power plan with a clear active marker", async () => {
+    const query = "choose a power plan";
+    const result = buildSections(
+      sources({
+        query,
+        fileIndexReady: true,
+        powerPlans: [
+          {
+            guid: "11111111-1111-1111-1111-111111111111",
+            name: "Balanced",
+            active: true,
+            score: 800,
+            pickerIntent: true,
+          },
+          {
+            guid: "22222222-2222-2222-2222-222222222222",
+            name: "Économie d'énergie",
+            active: false,
+            score: 700,
+            pickerIntent: true,
+          },
+          {
+            guid: "33333333-3333-3333-3333-333333333333",
+            name: "Custom quiet plan",
+            active: false,
+            score: 700,
+            pickerIntent: true,
+          },
+        ],
+      }),
+    );
+    const section = result.sections.find((entry) => entry.id === "power-plans");
+
+    expect(section?.items.map((item) => item.title)).toEqual([
+      "Balanced",
+      "Économie d'énergie",
+      "Custom quiet plan",
+    ]);
+    expect(section?.items[0].subtitle).toBe("Power plan · active");
+    expect(section?.items[1].subtitle).toBe("Power plan");
+    await section?.items[2].run();
+    expect(vi.mocked(setPowerPlan)).toHaveBeenCalledWith("33333333-3333-3333-3333-333333333333");
+  });
+
+  it("keeps apps ahead of a plan-name match outside picker intent", () => {
+    const result = buildSections(
+      sources({
+        query: "Chrome",
+        apps: [app("Chrome")],
+        fileIndexReady: true,
+        powerPlans: [
+          {
+            guid: "44444444-4444-4444-4444-444444444444",
+            name: "Chrome",
+            active: false,
+            score: 1_000,
+            pickerIntent: false,
+          },
+        ],
+      }),
+    );
+
+    expect(ids(result.sections)).toEqual(["apps", "power-plans"]);
   });
 
   it("keeps local app search when Phase 1 apps are empty", () => {

@@ -21,7 +21,7 @@ mod windows_tools;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Mutex;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use tauri::{Emitter, Manager, Theme, WindowEvent};
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
@@ -137,6 +137,9 @@ struct PresentationEvent {
 
 pub struct AppState {
     apps_cache: Mutex<Option<Vec<apps::AppEntry>>>,
+    /// When the in-memory index was scanned. Compared with shortcut and
+    /// install-folder mtimes so a long-running session can pick up new apps.
+    apps_indexed_at: Mutex<Option<SystemTime>>,
     apps_scan_lock: tokio::sync::Mutex<()>,
     file_index: files::FileIndex,
     intent: query::IntentStore,
@@ -167,6 +170,7 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(AppState {
             apps_cache: Mutex::new(None),
+            apps_indexed_at: Mutex::new(None),
             apps_scan_lock: tokio::sync::Mutex::new(()),
             file_index: files::FileIndex::default(),
             intent: query::IntentStore::new(),
@@ -287,6 +291,7 @@ pub fn run() {
             get_app_icons,
             refresh_apps,
             query_phase1,
+            query_power_plans,
             query_phase2,
             execute_action,
             accept_intent,
@@ -324,6 +329,7 @@ pub fn run() {
             load_state,
             save_state,
             perform_power_action,
+            set_power_plan,
             set_taskbar_scroll_volume,
             is_taskbar_scroll_volume_enabled,
             set_osd_accent,
@@ -364,13 +370,64 @@ fn warm_apps(app: tauri::AppHandle) {
         }
         let cache_path = apps_cache_path(&app);
         let result = tauri::async_runtime::spawn_blocking(move || apps::scan(&cache_path)).await;
-        let Ok(Ok(list)) = result else {
+        let Ok(Ok(index)) = result else {
             return;
         };
-        let cache_result = state.apps_cache.lock();
-        if let Ok(mut cache) = cache_result {
-            *cache = Some(list);
-        }
+        publish_app_index(&state, index);
+    });
+}
+
+fn publish_app_index(state: &AppState, index: apps::AppIndex) -> Vec<apps::AppEntry> {
+    if let Ok(mut indexed_at) = state.apps_indexed_at.lock() {
+        *indexed_at = Some(index.scanned_at);
+    }
+    let apps = index.apps;
+    if let Ok(mut cache) = state.apps_cache.lock() {
+        *cache = Some(apps.clone());
+    }
+    apps
+}
+
+/// On palette open, rescan when a shortcut or install folder changed after
+/// the in-memory index was built. The check is off the Win-key path; the
+/// webview hears `apps-updated` once the new list is published.
+fn schedule_installed_apps_refresh(app: tauri::AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        let state = app.state::<AppState>();
+        let since = state
+            .apps_indexed_at
+            .lock()
+            .ok()
+            .and_then(|guard| *guard);
+        let Some(since) = since else {
+            return;
+        };
+        let changed = tauri::async_runtime::spawn_blocking(move || apps::installs_changed_since(since))
+            .await;
+        let Ok(true) = changed else {
+            return;
+        };
+        let _scan_guard = state.apps_scan_lock.lock().await;
+        let since = state
+            .apps_indexed_at
+            .lock()
+            .ok()
+            .and_then(|guard| *guard);
+        let Some(since) = since else {
+            return;
+        };
+        let changed = tauri::async_runtime::spawn_blocking(move || apps::installs_changed_since(since))
+            .await;
+        let Ok(true) = changed else {
+            return;
+        };
+        let cache_path = apps_cache_path(&app);
+        let scanned = tauri::async_runtime::spawn_blocking(move || apps::scan_force(&cache_path)).await;
+        let Ok(Ok(index)) = scanned else {
+            return;
+        };
+        publish_app_index(&state, index);
+        let _ = app.emit("apps-updated", ());
     });
 }
 
@@ -847,6 +904,7 @@ fn toggle_palette_with_presentation(
         ACTIVATION_FOCUS_PENDING.store(false, Ordering::Release);
     }
     if opening {
+        schedule_installed_apps_refresh(app.clone());
         set_webview_memory_target(&window, false);
         // Windows can report the palette as unfocused once while it is still
         // acquiring foreground from an elevated window; do not let that
@@ -1067,10 +1125,10 @@ async fn get_apps(
     }
     // Off the main thread: scanning walks the shell and extracts icons.
     let cache_path = apps_cache_path(&app);
-    let list = tauri::async_runtime::spawn_blocking(move || apps::scan(&cache_path))
+    let index = tauri::async_runtime::spawn_blocking(move || apps::scan(&cache_path))
         .await
         .map_err(|e| format!("app scan task failed: {e}"))??;
-    *state.apps_cache.lock().map_err(|e| e.to_string())? = Some(list.clone());
+    let list = publish_app_index(&state, index);
     perf::finish(timer, "get_apps_scan", || format!("count={}", list.len()));
     Ok(strip_icons(list))
 }
@@ -1119,13 +1177,13 @@ async fn refresh_apps(
 ) -> Result<Vec<apps::AppEntry>, String> {
     let _scan_guard = state.apps_scan_lock.lock().await;
     let cache_path = apps_cache_path(&app);
-    let list = tauri::async_runtime::spawn_blocking(move || {
+    let index = tauri::async_runtime::spawn_blocking(move || {
         let _ = windows_tools::refresh();
         apps::scan_force(&cache_path)
     })
     .await
     .map_err(|e| format!("app scan task failed: {e}"))??;
-    *state.apps_cache.lock().map_err(|e| e.to_string())? = Some(list.clone());
+    let list = publish_app_index(&state, index);
     Ok(strip_icons(list))
 }
 
@@ -1311,6 +1369,13 @@ fn query_phase1(
 }
 
 #[tauri::command]
+async fn query_power_plans(query: String) -> Result<Vec<crate::power::PowerPlanHit>, String> {
+    tauri::async_runtime::spawn_blocking(move || power::search(&query))
+        .await
+        .map_err(|error| format!("power plan query task failed: {error}"))?
+}
+
+#[tauri::command]
 async fn query_phase2(
     query: String,
     limit: Option<usize>,
@@ -1416,6 +1481,13 @@ async fn perform_power_action(action: String) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || power::perform(&action))
         .await
         .map_err(|error| format!("power action task failed: {error}"))?
+}
+
+#[tauri::command]
+async fn set_power_plan(guid: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || power::set_active(&guid))
+        .await
+        .map_err(|error| format!("power plan task failed: {error}"))?
 }
 
 #[tauri::command]

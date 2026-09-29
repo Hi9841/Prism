@@ -39,6 +39,7 @@ export interface PaletteItem {
   appId?: string;
   /** Stable Quick Access key when this row can be reordered. */
   quickAccessKind?: QuickAccessKind;
+  powerPlanGuid?: string;
 }
 
 export interface HistoryEntry {

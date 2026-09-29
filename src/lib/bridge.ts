@@ -4,7 +4,7 @@ import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
-import type { Phase1Response, RecentCommand } from "./query";
+import type { Phase1Response, PowerPlanHit, RecentCommand } from "./query";
 import { EMPTY_PHASE1 } from "./query";
 import type { AppEntry, FileSearchResponse, PersistedState, QuickAccessEntry } from "./types";
 
@@ -193,6 +193,11 @@ export async function queryPhase1(query: string, recent: RecentCommand[] = []): 
   return invoke<Phase1Response>("query_phase1", { query, recent });
 }
 
+export async function queryPowerPlans(query: string): Promise<PowerPlanHit[]> {
+  if (!inTauri) return [];
+  return invoke<PowerPlanHit[]>("query_power_plans", { query });
+}
+
 export async function queryPhase2(query: string, limit = 20): Promise<FileSearchResponse> {
   return searchFiles(query, limit);
 }
@@ -279,6 +284,11 @@ export async function performPowerAction(action: PowerAction): Promise<void> {
   await invoke("perform_power_action", { action });
 }
 
+export async function setPowerPlan(guid: string): Promise<void> {
+  if (!inTauri) return;
+  await invoke("set_power_plan", { guid });
+}
+
 export async function existingPaths(paths: string[]): Promise<string[]> {
   if (!inTauri) return paths;
   return invoke<string[]>("existing_paths", { paths });
@@ -287,6 +297,15 @@ export async function existingPaths(paths: string[]): Promise<string[]> {
 export function onFileIndexUpdated(cb: () => void): () => void {
   if (!inTauri) return () => {};
   const unlisten = listen("file-index-updated", cb);
+  return () => {
+    unlisten.then((stop) => stop());
+  };
+}
+
+/** Fired after a palette open notices a new shortcut or install folder. */
+export function onAppsUpdated(cb: () => void): () => void {
+  if (!inTauri) return () => {};
+  const unlisten = listen("apps-updated", cb);
   return () => {
     unlisten.then((stop) => stop());
   };

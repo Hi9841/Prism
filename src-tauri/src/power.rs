@@ -304,6 +304,80 @@ fn powercfg_executable() -> Result<PathBuf, String> {
     }
 }
 
+#[derive(Clone, Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PowerPlanHit {
+    pub guid: String,
+    pub name: String,
+    pub active: bool,
+    pub score: i32,
+    pub picker_intent: bool,
+}
+
+pub fn search(query: &str) -> Result<Vec<PowerPlanHit>, String> {
+    let plans = list_power_plans()?;
+    Ok(rank(query, &plans))
+}
+
+pub fn set_active(guid: &str) -> Result<(), String> {
+    set_active_power_plan(guid)
+}
+
+fn rank(query: &str, plans: &[PowerPlan]) -> Vec<PowerPlanHit> {
+    let catalog_query = is_power_plan_query(query);
+    let mut ranked: Vec<(i32, &PowerPlan)> = plans
+        .iter()
+        .filter_map(|plan| {
+            let name_score = crate::query::score::score_with_keywords(query, &plan.name, &[]);
+            if catalog_query {
+                Some((name_score.map_or(700, |score| score + 100), plan))
+            } else {
+                name_score.map(|score| (score, plan))
+            }
+        })
+        .collect();
+    ranked.sort_by(|left, right| {
+        right
+            .0
+            .cmp(&left.0)
+            .then_with(|| right.1.active.cmp(&left.1.active))
+            .then_with(|| left.1.name.cmp(&right.1.name))
+    });
+    ranked
+        .into_iter()
+        .map(|(score, plan)| PowerPlanHit {
+            guid: plan.guid.clone(),
+            name: plan.name.clone(),
+            active: plan.active,
+            score,
+            picker_intent: catalog_query,
+        })
+        .collect()
+}
+
+fn is_power_plan_query(query: &str) -> bool {
+    let mut compact = String::new();
+    for character in query.chars() {
+        if character.is_alphanumeric() {
+            compact.extend(character.to_lowercase());
+        }
+    }
+    matches!(
+        compact.as_str(),
+        "powerplan"
+            | "powerplans"
+            | "choosepowerplan"
+            | "choosepowerplans"
+            | "chooseapowerplan"
+            | "chooseapowerplans"
+            | "selectpowerplan"
+            | "selectpowerplans"
+            | "selectapowerplan"
+            | "selectapowerplans"
+            | "powerplanpicker"
+    )
+}
+
 fn shutdown_executable() -> Result<PathBuf, String> {
     let system_root = std::env::var_os("SystemRoot")
         .ok_or_else(|| "Windows SystemRoot is unavailable".to_string())?;
