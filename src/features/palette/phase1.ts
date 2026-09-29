@@ -19,8 +19,8 @@ import {
   Wifi,
   Wrench,
 } from "lucide-react";
-import { executeAction, focusWindow, launchApp, launchAppAsAdmin } from "../../lib/bridge";
-import type { Phase1Hit } from "../../lib/query";
+import { executeAction, focusWindow, launchApp, launchAppAsAdmin, setPowerPlan } from "../../lib/bridge";
+import type { Phase1Hit, PowerPlanHit } from "../../lib/query";
 import type { AppEntry, PaletteItem, TileTint } from "../../lib/types";
 import { isElevatablePath } from "../../lib/types";
 
@@ -61,6 +61,18 @@ export function actionPaletteItem(hit: Phase1Hit): PaletteItem {
       : { kind: "tile", icon: mapped.icon, tint: mapped.tint },
     historyTitle: hit.title,
     run: () => executeAction(actionId),
+  };
+}
+
+export function powerPlanPaletteItem(hit: PowerPlanHit): PaletteItem {
+  return {
+    id: `power-plan::${hit.guid}`,
+    title: hit.name,
+    subtitle: hit.active ? "Power plan · active" : "Power plan",
+    icon: { kind: "tile", icon: Power, tint: hit.active ? "mint" : "slate" },
+    historyTitle: hit.name,
+    powerPlanGuid: hit.guid,
+    run: () => setPowerPlan(hit.guid),
   };
 }
 

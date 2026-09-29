@@ -35,7 +35,7 @@ import {
 } from "../../lib/bridge";
 import { sortApps } from "../../lib/emoji";
 import { formatNumber, isMathLike, tryEvaluate } from "../../lib/math";
-import type { Phase1Response } from "../../lib/query";
+import type { Phase1Response, PowerPlanHit } from "../../lib/query";
 import { phase1MatchesQuery } from "../../lib/query";
 import { fuzzy, fuzzyApps } from "../../lib/search";
 import type {
@@ -48,7 +48,13 @@ import type {
   TileTint,
 } from "../../lib/types";
 import { isElevatablePath, isPicturePath, isTaskbarPinablePath } from "../../lib/types";
-import { actionPaletteItem, appHitPaletteItem, isCommandAction, windowPaletteItem } from "./phase1";
+import {
+  actionPaletteItem,
+  appHitPaletteItem,
+  isCommandAction,
+  powerPlanPaletteItem,
+  windowPaletteItem,
+} from "./phase1";
 import { searchWindowsSettings } from "./windowsSettings";
 
 export interface Section {
@@ -96,6 +102,7 @@ export interface PaletteSources {
   fileIndexReady?: boolean;
   /** Backend Phase 1 hits. Used only when `phase1.query` matches `query`. */
   phase1?: Phase1Response | null;
+  powerPlans: PowerPlanHit[];
 }
 
 /** Caps on the idle view; matching the displayed rows, not the data limits. */
@@ -131,6 +138,7 @@ export function buildSections(sources: PaletteSources): {
     fileIndexing,
     fileIndexReady,
     phase1,
+    powerPlans,
   } = sources;
   const normalized = query.trim();
   const searchQuery = normalized.toLowerCase();
@@ -236,6 +244,12 @@ export function buildSections(sources: PaletteSources): {
       out.push({ id: "windows", label: "Open windows", items: windowItems });
     }
 
+    const powerPlanItems = !filePathBrowse ? powerPlans.map(powerPlanPaletteItem) : [];
+    const powerPlanPicker = powerPlans.some((plan) => plan.pickerIntent === true);
+    if (powerPlanItems.length > 0 && powerPlanPicker) {
+      out.push({ id: "power-plans", label: "Power plans", items: powerPlanItems });
+    }
+
     const quickHits = fuzzy(quickItems, normalized, { limit: SEARCH_QUICK_LIMIT });
     if (quickHits.length > 0) {
       out.push({ id: "quick", label: "Quick Access", items: quickHits.map((hit) => hit.item) });
@@ -284,6 +298,9 @@ export function buildSections(sources: PaletteSources): {
     }
     if (!filePathBrowse && fileItems.length > 0) {
       out.push({ id: "files", label: "Files & Folders", items: fileItems });
+    }
+    if (powerPlanItems.length > 0 && !powerPlanPicker) {
+      out.push({ id: "power-plans", label: "Power plans", items: powerPlanItems });
     }
 
     const indexingOrBusy = filesBusy || Boolean(fileIndexing) || fileIndexReady === false;

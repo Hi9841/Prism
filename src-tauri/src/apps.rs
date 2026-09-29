@@ -136,11 +136,21 @@ pub struct AppEntry {
     pub keywords: Vec<String>,
 }
 
-/// Returns the cached scan when fresh, otherwise rescans and refreshes it.
-pub fn scan(cache_path: &Path) -> Result<Vec<AppEntry>, String> {
+pub struct AppIndex {
+    pub apps: Vec<AppEntry>,
+    pub scanned_at: SystemTime,
+}
+
+/// Returns the cached scan when it is younger than [`CACHE_TTL`] and no
+/// install location has changed since that scan.
+pub fn scan(cache_path: &Path) -> Result<AppIndex, String> {
     if cache_fresh(cache_path).unwrap_or(false) {
-        if let Some(list) = load_cache(cache_path) {
-            return Ok(list);
+        if let Some(index) = read_cached_index(cache_path) {
+            // A shortcut created after the cache file was written must not
+            // wait out the TTL. Desktop and Start Menu updates are the signal.
+            if !installs_changed_since(index.scanned_at) {
+                return Ok(index);
+            }
         }
     }
     scan_force(cache_path)
@@ -154,20 +164,31 @@ fn cache_fresh(path: &Path) -> Result<bool, String> {
     Ok(age < CACHE_TTL)
 }
 
-fn load_cache(path: &Path) -> Option<Vec<AppEntry>> {
+fn read_cached_index(path: &Path) -> Option<AppIndex> {
     let text = std::fs::read_to_string(path).ok()?;
     let mut value: serde_json::Value = serde_json::from_str(&text).ok()?;
     if value.get("version").and_then(|v| v.as_u64()) != Some(APPS_CACHE_VERSION as u64) {
         return None;
     }
-    // Take the apps value out instead of cloning the whole payload.
-    value
+    // Caches written before `scannedAt` existed still carry a usable clock:
+    // the file mtime is when that scan finished.
+    let scanned_at = value
+        .get("scannedAt")
+        .and_then(|v| v.as_u64())
+        .map(millis_to_system)
+        .or_else(|| file_mtime(path))?;
+    let apps = value
         .get_mut("apps")
-        .and_then(|apps| serde_json::from_value(std::mem::take(apps)).ok())
+        .and_then(|apps| serde_json::from_value(std::mem::take(apps)).ok())?;
+    Some(AppIndex { apps, scanned_at })
 }
 
-fn write_cache(path: &Path, apps: &[AppEntry]) {
-    let value = serde_json::json!({ "version": APPS_CACHE_VERSION, "apps": apps });
+fn write_cache(path: &Path, apps: &[AppEntry], scanned_at: SystemTime) {
+    let value = serde_json::json!({
+        "version": APPS_CACHE_VERSION,
+        "scannedAt": system_millis(scanned_at),
+        "apps": apps,
+    });
     let text = serde_json::to_string(&value).unwrap_or_default();
     let _ = std::fs::create_dir_all(path.parent().unwrap_or(Path::new("")));
     // Atomic commit (temp file + replace) so a crash mid-write can never
@@ -179,10 +200,146 @@ fn write_cache(path: &Path, apps: &[AppEntry]) {
 }
 
 /// Always rescans (used by the manual refresh button).
-pub fn scan_force(cache_path: &Path) -> Result<Vec<AppEntry>, String> {
-    let list = scan_raw()?;
-    write_cache(cache_path, &list);
-    Ok(list)
+pub fn scan_force(cache_path: &Path) -> Result<AppIndex, String> {
+    // Stamp the start, not the finish, so a shortcut created while the walk
+    // is in progress stays newer than this index and is picked up next open.
+    let scanned_at = SystemTime::now();
+    let apps = scan_raw()?;
+    write_cache(cache_path, &apps, scanned_at);
+    Ok(AppIndex { apps, scanned_at })
+}
+
+fn system_millis(time: SystemTime) -> u64 {
+    time.duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
+fn millis_to_system(millis: u64) -> SystemTime {
+    SystemTime::UNIX_EPOCH + Duration::from_millis(millis)
+}
+
+fn file_mtime(path: &Path) -> Option<SystemTime> {
+    std::fs::metadata(path).and_then(|meta| meta.modified()).ok()
+}
+
+/// True when a Desktop/Start Menu shortcut or an install folder was written
+/// after `since`. A running session uses this to notice apps installed after
+/// the in-memory index was built.
+pub fn installs_changed_since(since: SystemTime) -> bool {
+    for root in install_watch_roots() {
+        let changed = match root.kind {
+            WatchKind::Shortcuts { depth } => shortcuts_changed(&root.path, since, depth),
+            // Product folders are compared one level deep. A file written inside
+            // an already-indexed install (Zeron rewrites its own folder on
+            // launch) must not force a full rescan; adding or removing a
+            // product directory updates the parent.
+            WatchKind::Products => mtime_after(&root.path, since),
+        };
+        if changed {
+            return true;
+        }
+    }
+    false
+}
+
+struct InstallRoot {
+    path: PathBuf,
+    kind: WatchKind,
+}
+
+enum WatchKind {
+    /// `.lnk` / `.url` files. `depth` is how many child directories to enter
+    /// when that directory itself is newer than the last scan.
+    Shortcuts { depth: u32 },
+    /// Install roots. Only the root directory mtime counts: adding or
+    /// removing a product folder updates it, and writes inside a product do not.
+    Products,
+}
+
+fn install_watch_roots() -> Vec<InstallRoot> {
+    let mut roots = Vec::new();
+    for (fid, depth) in [
+        (FOLDERID_Programs, 4u32),
+        (FOLDERID_CommonPrograms, 4u32),
+        (FOLDERID_Desktop, 3u32),
+        (FOLDERID_PublicDesktop, 3u32),
+    ] {
+        if let Some(path) = unsafe { known_folder(&fid) } {
+            roots.push(InstallRoot {
+                path,
+                kind: WatchKind::Shortcuts { depth },
+            });
+        }
+    }
+    if let Some(profile) = unsafe { known_folder(&FOLDERID_Profile) } {
+        let taskbar = profile
+            .join("AppData")
+            .join("Roaming")
+            .join("Microsoft")
+            .join("Internet Explorer")
+            .join("Quick Launch")
+            .join("User Pinned")
+            .join("TaskBar");
+        roots.push(InstallRoot {
+            path: taskbar,
+            kind: WatchKind::Shortcuts { depth: 1 },
+        });
+    }
+    for fid in [FOLDERID_ProgramFiles, FOLDERID_ProgramFilesX86] {
+        if let Some(path) = unsafe { known_folder(&fid) } {
+            roots.push(InstallRoot {
+                path,
+                kind: WatchKind::Products,
+            });
+        }
+    }
+    if let Some(local) = unsafe { known_folder(&FOLDERID_LocalAppData) } {
+        roots.push(InstallRoot {
+            path: local.join("Programs"),
+            kind: WatchKind::Products,
+        });
+    }
+    roots
+}
+
+/// A shortcut change is a `.lnk` or `.url` newer than `since`. Other files
+/// (a document dropped on the Desktop) do not invalidate the app index.
+/// Child directories are entered only when their own mtime moved, which is
+/// what creating a shortcut inside them does.
+fn shortcuts_changed(dir: &Path, since: SystemTime, depth: u32) -> bool {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return false;
+    };
+    for entry in entries.flatten() {
+        let Ok(meta) = entry.metadata() else {
+            continue;
+        };
+        let Ok(modified) = meta.modified() else {
+            continue;
+        };
+        if meta.is_dir() {
+            if depth > 0 && modified > since && shortcuts_changed(&entry.path(), since, depth - 1) {
+                return true;
+            }
+            continue;
+        }
+        if modified <= since {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().to_lowercase();
+        if name.ends_with(".lnk") || name.ends_with(".url") {
+            return true;
+        }
+    }
+    false
+}
+
+fn mtime_after(path: &Path, since: SystemTime) -> bool {
+    std::fs::metadata(path)
+        .and_then(|meta| meta.modified())
+        .ok()
+        .is_some_and(|modified| modified > since)
 }
 
 fn scan_raw() -> Result<Vec<AppEntry>, String> {
@@ -2413,7 +2570,7 @@ mod tests {
         let tmp =
             std::env::temp_dir().join(format!("prism-test-apps-cache-{}.json", std::process::id()));
         let _ = std::fs::remove_file(&tmp);
-        let apps = scan(&tmp).expect("scan should succeed");
+        let apps = scan(&tmp).expect("scan should succeed").apps;
         assert!(!apps.is_empty(), "the Windows runner should expose apps");
         assert!(
             apps.iter().any(|app| app.icon.is_some()),
@@ -2447,9 +2604,103 @@ mod tests {
                 app.name
             );
         }
-        let cached = load_cache(&tmp).expect("scan cache should be readable");
-        assert_eq!(cached.len(), apps.len());
+        let cached = read_cached_index(&tmp).expect("scan cache should be readable");
+        assert_eq!(cached.apps.len(), apps.len());
         let _ = std::fs::remove_file(tmp);
+    }
+
+    #[test]
+    fn cached_index_reads_scanned_at_and_falls_back_to_mtime() {
+        let directory = std::env::temp_dir().join(format!(
+            "prism-apps-cache-stamp-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).expect("temp cache dir");
+        let path = directory.join("apps.json");
+        let scanned_at = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        write_cache(&path, &[], scanned_at);
+        let index = read_cached_index(&path).expect("stamped cache");
+        assert_eq!(system_millis(index.scanned_at), system_millis(scanned_at));
+        assert!(index.apps.is_empty());
+
+        std::fs::write(&path, r#"{"version":8,"apps":[]}"#).expect("legacy cache");
+        let legacy = read_cached_index(&path).expect("legacy cache");
+        let mtime = file_mtime(&path).expect("cache mtime");
+        assert_eq!(legacy.scanned_at, mtime);
+
+        std::fs::write(&path, r#"{"version":1,"apps":[]}"#).expect("old version");
+        assert!(read_cached_index(&path).is_none());
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn shortcut_mtime_marks_an_install_change_and_other_files_do_not() {
+        let root = std::env::temp_dir().join(format!("prism-shortcut-watch-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let vendor = root.join("Vendor");
+        std::fs::create_dir_all(&vendor).expect("vendor dir");
+        let shortcut = root.join("Zeron.lnk");
+        let nested = vendor.join("Nested.lnk");
+        let document = root.join("notes.txt");
+        std::fs::write(&shortcut, "shortcut").expect("shortcut");
+        std::fs::write(&nested, "nested").expect("nested shortcut");
+        std::fs::write(&document, "notes").expect("document");
+
+        let old = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
+        let recent = SystemTime::UNIX_EPOCH + Duration::from_secs(2_000_000);
+        let between = SystemTime::UNIX_EPOCH + Duration::from_secs(1_500_000);
+        set_mtime(&shortcut, old);
+        set_mtime(&nested, recent);
+        set_mtime(&document, recent);
+        set_mtime(&vendor, recent);
+        set_mtime(&root, old);
+
+        assert!(
+            shortcuts_changed(&root, between, 1),
+            "a shortcut inside a newer folder is a new install"
+        );
+        set_mtime(&nested, old);
+        set_mtime(&vendor, old);
+        assert!(
+            !shortcuts_changed(&root, between, 1),
+            "a newer document on the desktop is not an install"
+        );
+        set_mtime(&shortcut, recent);
+        assert!(shortcuts_changed(&root, between, 1));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn product_root_mtime_marks_an_install_change_but_a_child_write_does_not() {
+        let root = std::env::temp_dir().join(format!("prism-product-watch-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let product = root.join("Zeron");
+        std::fs::create_dir_all(&product).expect("product dir");
+        let old = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
+        let recent = SystemTime::UNIX_EPOCH + Duration::from_secs(2_000_000);
+        let between = SystemTime::UNIX_EPOCH + Duration::from_secs(1_500_000);
+        // Creating the product folder updates the parent. That is the install
+        // signal. A later write inside the product must not count once the
+        // parent stamp is back at the last scan.
+        set_mtime(&product, recent);
+        set_mtime(&root, old);
+        assert!(!mtime_after(&root, between));
+        set_mtime(&root, recent);
+        assert!(mtime_after(&root, between));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    fn set_mtime(path: &Path, when: SystemTime) {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+            .open(path)
+            .unwrap_or_else(|error| panic!("open {} to set mtime: {error}", path.display()));
+        file.set_modified(when)
+            .unwrap_or_else(|error| panic!("set mtime on {}: {error}", path.display()));
     }
 
     #[test]

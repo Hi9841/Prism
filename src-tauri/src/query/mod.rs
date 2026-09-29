@@ -7,7 +7,7 @@
 mod catalog;
 mod jev;
 mod open_windows;
-mod score;
+pub(crate) mod score;
 
 use crate::apps::AppEntry;
 use serde::{Deserialize, Serialize};

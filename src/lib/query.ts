@@ -21,6 +21,14 @@ export interface Phase1Hit {
   source?: string;
 }
 
+export interface PowerPlanHit {
+  guid: string;
+  name: string;
+  active: boolean;
+  score: number;
+  pickerIntent?: boolean;
+}
+
 export interface Phase1Response {
   query: string;
   recents: Phase1Hit[];
