@@ -657,10 +657,17 @@ export function PaletteProvider({ children }: { children: ReactNode }) {
         if (clipboardItem) {
           await item.run();
         } else if (item.id.startsWith("window::")) {
+          // Focus while Prism still holds the foreground so Windows grants
+          // the handoff, then get the always-on-top palette out of the way.
+          // Sequential: a concurrent hide would drop the permission first.
           await item.run();
           await hidePaletteWindow();
         } else {
-          await Promise.all([hidePaletteWindow(), item.run()]);
+          // Launch while Prism is foreground so the new process inherits
+          // activation rights, then hide. Never concurrent: if the hide won
+          // the race the app would start behind other windows.
+          await item.run();
+          await hidePaletteWindow();
         }
         app.pushHistory(item.id, item.historyTitle);
         if (item.id.startsWith("action::")) {
@@ -688,8 +695,9 @@ export function PaletteProvider({ children }: { children: ReactNode }) {
     async (item: PaletteItem) => {
       if (!item.runAsAdmin) return;
       try {
-        await hidePaletteWindow();
+        // Same ordering as runItem: elevate while foreground, then hide.
         await item.runAsAdmin();
+        await hidePaletteWindow();
         app.pushHistory(item.id, item.historyTitle);
       } catch (error) {
         app.showToast("Could not run as administrator", String(error));

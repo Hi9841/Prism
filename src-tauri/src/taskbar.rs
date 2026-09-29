@@ -9,11 +9,12 @@ use windows::Win32::Foundation::{LPARAM, RECT};
 use windows::Win32::Graphics::Gdi::{
     GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST,
 };
+use windows::Win32::System::Threading::GetCurrentProcessId;
 use windows::Win32::UI::Shell::{SHAppBarMessage, ABM_ACTIVATE, APPBARDATA};
 use windows::Win32::UI::WindowsAndMessaging::{
-    FindWindowW, GetForegroundWindow, GetWindowRect, SetWindowPos, ShowWindow, HWND_BOTTOM,
-    HWND_NOTOPMOST, HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW,
-    SW_SHOWNOACTIVATE,
+    FindWindowW, GetForegroundWindow, GetWindowRect, GetWindowThreadProcessId, SetWindowPos,
+    ShowWindow, HWND_BOTTOM, HWND_NOTOPMOST, HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+    SWP_SHOWWINDOW, SW_SHOWNOACTIVATE,
 };
 
 /// Persistent marker proving Prism presented the taskbar over a fullscreen
@@ -103,6 +104,13 @@ pub fn release() {
         write_marker(false);
         return;
     };
+    // Sampled immediately after hide(), the foreground is often still Prism
+    // itself (or null mid-transition) rather than the fullscreen game
+    // underneath. Treat that transient as fullscreen when we hold the lease:
+    // present() only ever takes the lease over a fullscreen app, so the game
+    // is still beneath us. Only a real switch to a normal window means
+    // NOTOPMOST.
+    let foreground_us_or_gone = foreground_is_self_or_gone();
     let fullscreen_foreground = foreground_is_fullscreen();
     unsafe {
         let mut appbar = APPBARDATA {
@@ -119,7 +127,7 @@ pub fn release() {
         // still above a borderless fullscreen game, so put it at the bottom
         // while that game is foreground.
         if PRESENTED.swap(false, Ordering::AcqRel) || marker_present() {
-            let insert_after = if fullscreen_foreground {
+            let insert_after = if fullscreen_foreground || foreground_us_or_gone {
                 HWND_BOTTOM
             } else {
                 HWND_NOTOPMOST
@@ -138,6 +146,21 @@ pub fn release() {
     }
 }
 
+/// True when the foreground still belongs to this process or there is no
+/// foreground yet (hide() just ran, focus is mid-flight). Callers use this
+/// to avoid misreading the release-time transient as "user is on desktop".
+fn foreground_is_self_or_gone() -> bool {
+    unsafe {
+        let foreground = GetForegroundWindow();
+        if foreground.0.is_null() {
+            return true;
+        }
+        let mut pid = 0u32;
+        GetWindowThreadProcessId(foreground, Some(&mut pid));
+        pid == 0 || pid == GetCurrentProcessId()
+    }
+}
+
 /// Startup repair: if a previous Prism instance crashed while the palette was
 /// open, its marker is still on disk - release the taskbar from the topmost
 /// band it left behind.
@@ -149,10 +172,17 @@ pub fn recover() {
         write_marker(false);
         return;
     };
+    // Mirror release(): a fullscreen game underneath needs BOTTOM, desktop
+    // needs NOTOPMOST. NOTOPMOST alone stays above borderless fullscreen.
+    let insert_after = if foreground_is_fullscreen() {
+        HWND_BOTTOM
+    } else {
+        HWND_NOTOPMOST
+    };
     unsafe {
         let _ = SetWindowPos(
             taskbar,
-            Some(HWND_NOTOPMOST),
+            Some(insert_after),
             0,
             0,
             0,

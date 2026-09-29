@@ -56,7 +56,11 @@ const LEGACY_STATE_VERSION: u32 = 2;
 const STATE_VERSION: u32 = 3;
 /// Keep this >= frontend LAUNCHER_MOTION_MS (110ms) so the webview can fade out.
 const PALETTE_HIDE_DELAY: Duration = Duration::from_millis(125);
-const PALETTE_RAISE_RETRY_DELAY: Duration = Duration::from_millis(40);
+/// Reassert over ~500ms, not once: the Explorer bridge grants foreground
+/// asynchronously and an elevated/fullscreen owner can deny the first
+/// SetForegroundWindow. Each shot is skipped once the palette is already
+/// foreground or a newer transition/close took over.
+const PALETTE_RAISE_RETRY_DELAYS: &[u64] = &[40, 120, 250, 500];
 /// Window during which a focus-lost event after opening is treated as part of
 /// the activation burst instead of a click-away dismissal.
 const ACTIVATION_FOCUS_GRACE: Duration = Duration::from_millis(600);
@@ -800,25 +804,32 @@ fn raise_palette(window: &tauri::WebviewWindow) -> Result<(), String> {
 }
 
 fn schedule_palette_raise_retry(app: &tauri::AppHandle, transition: u64) {
-    let retry_app = app.clone();
-    tauri::async_runtime::spawn(async move {
-        tokio::time::sleep(PALETTE_RAISE_RETRY_DELAY).await;
-        if PALETTE_TRANSITION.load(Ordering::Acquire) != transition
-            || !PALETTE_OPEN.load(Ordering::Acquire)
-        {
-            return;
-        }
-        let main_thread_app = retry_app.clone();
-        let _ = retry_app.run_on_main_thread(move || {
-            if PALETTE_TRANSITION.load(Ordering::Acquire) == transition
-                && PALETTE_OPEN.load(Ordering::Acquire)
+    for &delay_ms in PALETTE_RAISE_RETRY_DELAYS {
+        let retry_app = app.clone();
+        tauri::async_runtime::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+            if PALETTE_TRANSITION.load(Ordering::Acquire) != transition
+                || !PALETTE_OPEN.load(Ordering::Acquire)
             {
-                if let Some(window) = main_thread_app.get_webview_window("main") {
-                    let _ = raise_palette(&window);
-                }
+                return;
             }
+            let main_thread_app = retry_app.clone();
+            let _ = retry_app.run_on_main_thread(move || {
+                if PALETTE_TRANSITION.load(Ordering::Acquire) == transition
+                    && PALETTE_OPEN.load(Ordering::Acquire)
+                {
+                    if let Some(window) = main_thread_app.get_webview_window("main") {
+                        // Skip when already foreground: re-raising would yank
+                        // focus back after the user intentionally moved on.
+                        if is_prism_foreground() {
+                            return;
+                        }
+                        let _ = raise_palette(&window);
+                    }
+                }
+            });
         });
-    });
+    }
 }
 
 #[cfg(windows)]
@@ -968,7 +979,11 @@ fn present_palette(app: tauri::AppHandle) -> Result<bool, String> {
         position_palette(&window, anchor);
     }
     window.show().map_err(|error| error.to_string())?;
-    raise_palette(&window)?;
+    // A transient focus denial (elevated owner, Explorer still holding
+    // activation) must not fail the whole presentation after the window is
+    // already shown - that desyncs native-visible from the frontend phase.
+    // The Explorer bridge plus the scheduled retries finish the job.
+    let _ = raise_palette(&window);
     // If Prism could not take foreground itself (for example an elevated Task
     // Manager holds it), ask the injected Explorer bridge to hand it over.
     // Explorer handled the Win key, so it may still hold activation rights.
