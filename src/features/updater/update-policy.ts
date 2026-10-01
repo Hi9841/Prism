@@ -6,7 +6,13 @@ export const MIN_BACKGROUND_CHECK_INTERVAL_MS = 5 * 60 * 1000;
  */
 export const MIN_FORCED_CHECK_INTERVAL_MS = 60 * 1000;
 
-export function shouldCheckForUpdate(lastCheckAt: number, now: number, force: boolean): boolean {
-  const interval = force ? MIN_FORCED_CHECK_INTERVAL_MS : MIN_BACKGROUND_CHECK_INTERVAL_MS;
-  return now - lastCheckAt >= interval;
+export function shouldCheckForUpdate(
+	lastCheckAt: number,
+	now: number,
+	force: boolean,
+): boolean {
+	const interval = force
+		? MIN_FORCED_CHECK_INTERVAL_MS
+		: MIN_BACKGROUND_CHECK_INTERVAL_MS;
+	return now - lastCheckAt >= interval;
 }

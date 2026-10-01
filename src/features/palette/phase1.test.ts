@@ -1,111 +1,124 @@
 import { describe, expect, it, vi } from "vitest";
 import { executeAction, focusWindow, setPowerPlan } from "../../lib/bridge";
 import type { Phase1Hit, PowerPlanHit } from "../../lib/query";
-import { actionPaletteItem, isCommandAction, powerPlanPaletteItem, windowPaletteItem } from "./phase1";
+import {
+	actionPaletteItem,
+	isCommandAction,
+	powerPlanPaletteItem,
+	windowPaletteItem,
+} from "./phase1";
 
 vi.mock("../../lib/bridge", () => ({
-  executeAction: vi.fn().mockResolvedValue(undefined),
-  focusWindow: vi.fn().mockResolvedValue(undefined),
-  setPowerPlan: vi.fn().mockResolvedValue(undefined),
-  launchApp: vi.fn().mockResolvedValue(undefined),
-  launchAppAsAdmin: vi.fn().mockResolvedValue(undefined),
+	executeAction: vi.fn().mockResolvedValue(undefined),
+	focusWindow: vi.fn().mockResolvedValue(undefined),
+	setPowerPlan: vi.fn().mockResolvedValue(undefined),
+	launchApp: vi.fn().mockResolvedValue(undefined),
+	launchAppAsAdmin: vi.fn().mockResolvedValue(undefined),
 }));
 
-function hit(overrides: Partial<Phase1Hit> & Pick<Phase1Hit, "id" | "kind" | "title">): Phase1Hit {
-  return {
-    subtitle: "Windows Settings",
-    score: 100,
-    ...overrides,
-  };
+function hit(
+	overrides: Partial<Phase1Hit> & Pick<Phase1Hit, "id" | "kind" | "title">,
+): Phase1Hit {
+	return {
+		subtitle: "Windows Settings",
+		score: 100,
+		...overrides,
+	};
 }
 
 describe("phase1 mappers", () => {
-  it("runs catalog actions through executeAction", async () => {
-    const item = actionPaletteItem(
-      hit({
-        id: "action::audio.mute",
-        kind: "action",
-        title: "Mute",
-        actionId: "audio.mute",
-        iconKey: "mute",
-      }),
-    );
-    await item.run();
-    expect(vi.mocked(executeAction)).toHaveBeenCalledWith("audio.mute");
-  });
+	it("runs catalog actions through executeAction", async () => {
+		const item = actionPaletteItem(
+			hit({
+				id: "action::audio.mute",
+				kind: "action",
+				title: "Mute",
+				actionId: "audio.mute",
+				iconKey: "mute",
+			}),
+		);
+		await item.run();
+		expect(vi.mocked(executeAction)).toHaveBeenCalledWith("audio.mute");
+	});
 
-  it("runs dynamic Windows tools through executeAction and uses native icons", async () => {
-    const nativeIcon = "data:image/png;base64,icon";
-    const item = actionPaletteItem(
-      hit({
-        id: "action::windows.device-manager",
-        kind: "action",
-        title: "Device Manager",
-        subtitle: "Windows tool",
-        actionId: "windows.device-manager",
-        iconKey: "device",
-        icon: nativeIcon,
-        source: "windows-tool",
-      }),
-    );
-    await item.run();
-    expect(vi.mocked(executeAction)).toHaveBeenCalledWith("windows.device-manager");
-    expect(item.icon).toEqual({ kind: "app", name: "Device Manager", icon: nativeIcon });
-  });
+	it("runs dynamic Windows tools through executeAction and uses native icons", async () => {
+		const nativeIcon = "data:image/png;base64,icon";
+		const item = actionPaletteItem(
+			hit({
+				id: "action::windows.device-manager",
+				kind: "action",
+				title: "Device Manager",
+				subtitle: "Windows tool",
+				actionId: "windows.device-manager",
+				iconKey: "device",
+				icon: nativeIcon,
+				source: "windows-tool",
+			}),
+		);
+		await item.run();
+		expect(vi.mocked(executeAction)).toHaveBeenCalledWith(
+			"windows.device-manager",
+		);
+		expect(item.icon).toEqual({
+			kind: "app",
+			name: "Device Manager",
+			icon: nativeIcon,
+		});
+	});
 
-  it("applies a discovered power plan through the native bridge", async () => {
-    const plan: PowerPlanHit = {
-      guid: "11111111-1111-1111-1111-111111111111",
-      name: "Custom quiet plan",
-      active: false,
-      score: 900,
-    };
-    const item = powerPlanPaletteItem(plan);
-    await item.run();
+	it("applies a discovered power plan through the native bridge", async () => {
+		const plan: PowerPlanHit = {
+			guid: "11111111-1111-1111-1111-111111111111",
+			name: "Custom quiet plan",
+			active: false,
+			score: 900,
+		};
+		const item = powerPlanPaletteItem(plan);
+		await item.run();
 
-    expect(item).toMatchObject({
-      title: "Custom quiet plan",
-      subtitle: "Power plan",
-      powerPlanGuid: plan.guid,
-    });
-    expect(setPowerPlan).toHaveBeenCalledWith(plan.guid);
-  });
+		expect(item).toMatchObject({
+			title: "Custom quiet plan",
+			subtitle: "Power plan",
+			powerPlanGuid: plan.guid,
+		});
+		expect(setPowerPlan).toHaveBeenCalledWith(plan.guid);
+	});
 
-  it("focuses an open window by hwnd", async () => {
-    const item = windowPaletteItem(
-      hit({
-        id: "window::12",
-        kind: "window",
-        title: "Discord",
-        hwnd: 12,
-        iconKey: "window",
-      }),
-    );
-    await item.run();
-    expect(vi.mocked(focusWindow)).toHaveBeenCalledWith(12);
-  });
+	it("focuses an open window by hwnd", async () => {
+		const item = windowPaletteItem(
+			hit({
+				id: "window::12",
+				kind: "window",
+				title: "Discord",
+				hwnd: 12,
+				iconKey: "window",
+			}),
+		);
+		await item.run();
+		expect(vi.mocked(focusWindow)).toHaveBeenCalledWith(12);
+	});
 
-  it("treats volume and power rows as commands, not settings pages", () => {
-    expect(
-      isCommandAction(
-        hit({
-          id: "action::audio.mute",
-          kind: "action",
-          title: "Mute",
-          actionId: "audio.mute",
-        }),
-      ),
-    ).toBe(true);
-    expect(
-      isCommandAction(
-        hit({
-          id: "action::settings.nightlight",
-          kind: "action",
-          title: "Night Light",
-          actionId: "settings.nightlight",
-          uri: "ms-settings:nightlight",
-        }),
-      ),
-    ).toBe(false);
-  });
+	it("treats volume and power rows as commands, not settings pages", () => {
+		expect(
+			isCommandAction(
+				hit({
+					id: "action::audio.mute",
+					kind: "action",
+					title: "Mute",
+					actionId: "audio.mute",
+				}),
+			),
+		).toBe(true);
+		expect(
+			isCommandAction(
+				hit({
+					id: "action::settings.nightlight",
+					kind: "action",
+					title: "Night Light",
+					actionId: "settings.nightlight",
+					uri: "ms-settings:nightlight",
+				}),
+			),
+		).toBe(false);
+	});
 });

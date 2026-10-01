@@ -715,6 +715,22 @@ mod tests {
     }
 
     #[test]
+    fn display_matches_page_name_and_screen_alias() {
+        assert_eq!(search("display settings", 4)[0].0.id, "settings.display");
+        assert_eq!(search("screen", 4)[0].0.id, "settings.display");
+        assert_eq!(search("bluetooth", 4)[0].0.id, "settings.bluetooth");
+        assert_eq!(
+            search("windows update", 4)[0].0.id,
+            "settings.windowsupdate"
+        );
+        assert_eq!(search("default apps", 4)[0].0.id, "settings.defaultapps");
+        assert_eq!(
+            search("microphone", 4)[0].0.id,
+            "settings.privacy-microphone"
+        );
+    }
+
+    #[test]
     fn narrator_is_in_the_typed_catalog() {
         let hits = search("narrator", 4);
         assert_eq!(hits[0].0.id, "settings.easeofaccess-narrator");

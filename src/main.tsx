@@ -7,7 +7,7 @@ import App from "./App";
 document.documentElement.dataset.theme = "dark";
 
 ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
-  <React.StrictMode>
-    <App />
-  </React.StrictMode>,
+	<React.StrictMode>
+		<App />
+	</React.StrictMode>,
 );

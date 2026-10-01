@@ -6,13 +6,10 @@ use windows::Win32::System::Threading::{
     GetCurrentProcessId, OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32,
     PROCESS_QUERY_LIMITED_INFORMATION,
 };
-use windows::Win32::UI::Input::KeyboardAndMouse::{SetActiveWindow, SetFocus};
 use windows::Win32::UI::WindowsAndMessaging::{
-    AllowSetForegroundWindow, BringWindowToTop, EnumWindows, GetAncestor, GetClassNameW,
-    GetForegroundWindow, GetLastActivePopup, GetWindowLongW, GetWindowTextLengthW, GetWindowTextW,
-    GetWindowThreadProcessId, IsIconic, IsWindow, IsWindowVisible, LockSetForegroundWindow,
-    SetForegroundWindow, SetWindowPos, ShowWindow, GA_ROOTOWNER, GWL_EXSTYLE, HWND_NOTOPMOST,
-    HWND_TOPMOST, LSFW_UNLOCK, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SW_RESTORE,
+    EnumWindows, GetAncestor, GetClassNameW, GetLastActivePopup, GetWindowLongW,
+    GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindow,
+    IsWindowVisible, SetForegroundWindow, ShowWindow, GA_ROOTOWNER, GWL_EXSTYLE, SW_RESTORE,
     WS_EX_APPWINDOW, WS_EX_TOOLWINDOW,
 };
 
@@ -80,71 +77,21 @@ pub fn focus(hwnd_value: i64) -> Result<(), String> {
         if IsIconic(hwnd).as_bool() {
             let _ = ShowWindow(hwnd, SW_RESTORE);
         }
-        let mut target_pid = 0u32;
-        GetWindowThreadProcessId(hwnd, Some(&mut target_pid));
-        // A single SetForegroundWindow is denied whenever the caller is not
-        // the foreground owner yet (palette just opened behind an elevated
-        // window, hide/show racing, Explorer holding activation). Unlock,
-        // grant the target, and retry: success is the foreground actually
-        // moving, not the call returning nonzero once.
-        for _ in 0..5 {
-            let _ = LockSetForegroundWindow(LSFW_UNLOCK);
-            if target_pid != 0 {
-                let _ = AllowSetForegroundWindow(target_pid);
-            }
-            let _ = BringWindowToTop(hwnd);
-            let _ = SetForegroundWindow(hwnd);
-            let _ = SetActiveWindow(hwnd);
-            let _ = SetFocus(Some(hwnd));
-            if foreground_is_target(hwnd, target_pid) {
-                return Ok(());
-            }
-            std::thread::sleep(std::time::Duration::from_millis(40));
+        // The palette calls this while it still holds the foreground, then
+        // hides. SetForegroundWindow's return value is the result. A
+        // same-process PID match would accept a different window of that
+        // app, and SetActiveWindow/SetFocus on a foreign HWND clear this
+        // thread's active window. Flashing HWND_TOPMOST can leave the target
+        // stuck above every other window.
+        if SetForegroundWindow(hwnd).as_bool() {
+            return Ok(());
         }
-        // Last resort: force the z-order even without activation so the
-        // window is at least visible on top instead of silently staying
-        // behind, then try activation once more without forcing topmost.
-        let _ = SetWindowPos(
-            hwnd,
-            Some(HWND_TOPMOST),
-            0,
-            0,
-            0,
-            0,
-            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
-        );
-        let _ = SetWindowPos(
-            hwnd,
-            Some(HWND_NOTOPMOST),
-            0,
-            0,
-            0,
-            0,
-            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
-        );
-        let _ = SetForegroundWindow(hwnd);
-        if foreground_is_target(hwnd, target_pid) {
+        // A minimized window often denies the first call until restore finishes.
+        std::thread::sleep(std::time::Duration::from_millis(40));
+        if SetForegroundWindow(hwnd).as_bool() {
             return Ok(());
         }
         Err("Windows did not switch to that window".to_string())
-    }
-}
-
-/// True when the target took the foreground. Accept a same-process
-/// redirect: SetForegroundWindow may activate a different top-level HWND
-/// (popup/owner) in the target app instead of the exact handle we stored.
-fn foreground_is_target(hwnd: HWND, target_pid: u32) -> bool {
-    unsafe {
-        let foreground = GetForegroundWindow();
-        if foreground == hwnd {
-            return true;
-        }
-        if target_pid == 0 || foreground.0.is_null() {
-            return false;
-        }
-        let mut foreground_pid = 0u32;
-        GetWindowThreadProcessId(foreground, Some(&mut foreground_pid));
-        foreground_pid != 0 && foreground_pid == target_pid
     }
 }
 
