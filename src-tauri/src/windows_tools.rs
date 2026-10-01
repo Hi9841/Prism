@@ -2,7 +2,7 @@
 //!
 //! The Start menu is backed by several shell providers, not just Start Menu
 //! shortcuts. This module keeps the launch surface typed and native while
-//! discovering Control Panel applets and power plans from the current system.
+//! discovering Control Panel applets from the current system.
 
 use std::ffi::c_void;
 use std::path::{Path, PathBuf};
@@ -51,7 +51,6 @@ enum ToolTarget {
         pidl: Vec<u8>,
         parameter: String,
     },
-    PowerPlan(String),
 }
 
 struct CatalogState {
@@ -140,34 +139,6 @@ fn discover() -> Vec<WindowsTool> {
     add_fallback_tools(&mut tools);
     add_control_panel_applets(&mut tools);
     add_shell_control_panel_items(&mut tools);
-
-    if let Ok(plans) = crate::power::list_power_plans() {
-        for plan in plans {
-            add_tool(
-                &mut tools,
-                WindowsTool {
-                    id: format!("power-plan::{}", plan.guid),
-                    title: plan.name,
-                    subtitle: if plan.active {
-                        "Power plan · active".to_string()
-                    } else {
-                        "Power plan".to_string()
-                    },
-                    keywords: vec![
-                        "power plan".to_string(),
-                        "choose a power plan".to_string(),
-                        "select power plan".to_string(),
-                        "power mode".to_string(),
-                        "performance".to_string(),
-                        "energy".to_string(),
-                    ],
-                    icon_key: "power-plan",
-                    icon: None,
-                    target: ToolTarget::PowerPlan(plan.guid),
-                },
-            );
-        }
-    }
 
     tools
 }
@@ -1311,13 +1282,11 @@ fn target_key(target: &ToolTarget) -> String {
         ToolTarget::ShellItem { parameter, .. } => {
             format!("shell-item:{}", parameter.to_ascii_lowercase())
         }
-        ToolTarget::PowerPlan(guid) => format!("power-plan:{guid}"),
     }
 }
 
 fn target_rank(target: &ToolTarget) -> u8 {
     match target {
-        ToolTarget::PowerPlan(_) => 5,
         ToolTarget::ShellItem { .. } => 4,
         ToolTarget::Shell { .. } => 2,
         ToolTarget::ControlPanel(_) => 1,
@@ -1361,11 +1330,6 @@ fn execute_target(target: &ToolTarget) -> Result<(), String> {
             )
         }
         ToolTarget::ShellItem { pidl, .. } => shell_execute_pidl(pidl),
-        ToolTarget::PowerPlan(guid) => {
-            crate::power::set_active_power_plan(guid)?;
-            let _ = refresh();
-            Ok(())
-        }
     }
 }
 

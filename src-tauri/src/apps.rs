@@ -220,7 +220,9 @@ fn millis_to_system(millis: u64) -> SystemTime {
 }
 
 fn file_mtime(path: &Path) -> Option<SystemTime> {
-    std::fs::metadata(path).and_then(|meta| meta.modified()).ok()
+    std::fs::metadata(path)
+        .and_then(|meta| meta.modified())
+        .ok()
 }
 
 /// True when a Desktop/Start Menu shortcut or an install folder was written
@@ -2611,10 +2613,8 @@ mod tests {
 
     #[test]
     fn cached_index_reads_scanned_at_and_falls_back_to_mtime() {
-        let directory = std::env::temp_dir().join(format!(
-            "prism-apps-cache-stamp-{}",
-            std::process::id()
-        ));
+        let directory =
+            std::env::temp_dir().join(format!("prism-apps-cache-stamp-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&directory);
         std::fs::create_dir_all(&directory).expect("temp cache dir");
         let path = directory.join("apps.json");
@@ -2636,7 +2636,8 @@ mod tests {
 
     #[test]
     fn shortcut_mtime_marks_an_install_change_and_other_files_do_not() {
-        let root = std::env::temp_dir().join(format!("prism-shortcut-watch-{}", std::process::id()));
+        let root =
+            std::env::temp_dir().join(format!("prism-shortcut-watch-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let vendor = root.join("Vendor");
         std::fs::create_dir_all(&vendor).expect("vendor dir");

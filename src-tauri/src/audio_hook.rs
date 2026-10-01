@@ -51,10 +51,6 @@ pub fn set_enabled(enabled: bool) {
     }
 }
 
-pub fn is_enabled() -> bool {
-    HOOK_ENABLED.load(Ordering::Relaxed)
-}
-
 fn start_hook_thread() {
     if HOOK_THREAD_ID.load(Ordering::SeqCst) != 0 {
         return;

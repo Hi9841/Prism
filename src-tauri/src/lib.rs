@@ -81,6 +81,10 @@ const MIN_LOGICAL_HEIGHT: u32 = 400;
 static PALETTE_OPEN: AtomicBool = AtomicBool::new(false);
 static PALETTE_TRANSITION: AtomicU64 = AtomicU64::new(0);
 static ACTIVATION_FOCUS_PENDING: AtomicBool = AtomicBool::new(false);
+/// This open has already put Prism in the foreground. Raise retries exist to
+/// win the initial denial from an elevated owner. Once that succeeded, a later
+/// retry would steal Alt-Tab and launches back.
+static PALETTE_TOOK_FOREGROUND: AtomicBool = AtomicBool::new(false);
 static PRESENTATION_ANCHOR: Mutex<Option<PresentationAnchor>> = Mutex::new(None);
 static LOGICAL_WIDTH: AtomicU32 = AtomicU32::new(DEFAULT_LOGICAL_WIDTH);
 
@@ -248,6 +252,7 @@ pub fn run() {
             // later unfocus (alt-tab back into a game) is never swallowed,
             // which would leave the palette open and the taskbar topmost.
             if matches!(event, WindowEvent::Focused(true)) {
+                PALETTE_TOOK_FOREGROUND.store(true, Ordering::Release);
                 ACTIVATION_FOCUS_PENDING.store(false, Ordering::Release);
                 return;
             }
@@ -296,7 +301,6 @@ pub fn run() {
             refresh_apps,
             query_phase1,
             query_power_plans,
-            query_phase2,
             execute_action,
             accept_intent,
             focus_window,
@@ -307,7 +311,6 @@ pub fn run() {
             existing_paths,
             launch_app,
             launch_app_as_admin,
-            open_windows_settings,
             open_path,
             open_path_location,
             run_path_as_admin,
@@ -335,7 +338,6 @@ pub fn run() {
             perform_power_action,
             set_power_plan,
             set_taskbar_scroll_volume,
-            is_taskbar_scroll_volume_enabled,
             set_osd_accent,
             quit_app
         ])
@@ -398,35 +400,28 @@ fn publish_app_index(state: &AppState, index: apps::AppIndex) -> Vec<apps::AppEn
 fn schedule_installed_apps_refresh(app: tauri::AppHandle) {
     tauri::async_runtime::spawn(async move {
         let state = app.state::<AppState>();
-        let since = state
-            .apps_indexed_at
-            .lock()
-            .ok()
-            .and_then(|guard| *guard);
+        let since = state.apps_indexed_at.lock().ok().and_then(|guard| *guard);
         let Some(since) = since else {
             return;
         };
-        let changed = tauri::async_runtime::spawn_blocking(move || apps::installs_changed_since(since))
-            .await;
+        let changed =
+            tauri::async_runtime::spawn_blocking(move || apps::installs_changed_since(since)).await;
         let Ok(true) = changed else {
             return;
         };
         let _scan_guard = state.apps_scan_lock.lock().await;
-        let since = state
-            .apps_indexed_at
-            .lock()
-            .ok()
-            .and_then(|guard| *guard);
+        let since = state.apps_indexed_at.lock().ok().and_then(|guard| *guard);
         let Some(since) = since else {
             return;
         };
-        let changed = tauri::async_runtime::spawn_blocking(move || apps::installs_changed_since(since))
-            .await;
+        let changed =
+            tauri::async_runtime::spawn_blocking(move || apps::installs_changed_since(since)).await;
         let Ok(true) = changed else {
             return;
         };
         let cache_path = apps_cache_path(&app);
-        let scanned = tauri::async_runtime::spawn_blocking(move || apps::scan_force(&cache_path)).await;
+        let scanned =
+            tauri::async_runtime::spawn_blocking(move || apps::scan_force(&cache_path)).await;
         let Ok(Ok(index)) = scanned else {
             return;
         };
@@ -803,33 +798,44 @@ fn raise_palette(window: &tauri::WebviewWindow) -> Result<(), String> {
     window.set_focus().map_err(|error| error.to_string())
 }
 
+fn palette_raise_retry_wanted(open: bool, same_transition: bool, took_foreground: bool) -> bool {
+    open && same_transition && !took_foreground
+}
+
 fn schedule_palette_raise_retry(app: &tauri::AppHandle, transition: u64) {
     for &delay_ms in PALETTE_RAISE_RETRY_DELAYS {
         let retry_app = app.clone();
         tauri::async_runtime::spawn(async move {
             tokio::time::sleep(Duration::from_millis(delay_ms)).await;
-            if PALETTE_TRANSITION.load(Ordering::Acquire) != transition
-                || !PALETTE_OPEN.load(Ordering::Acquire)
-            {
+            if !palette_raise_still_wanted(transition) {
                 return;
             }
             let main_thread_app = retry_app.clone();
             let _ = retry_app.run_on_main_thread(move || {
-                if PALETTE_TRANSITION.load(Ordering::Acquire) == transition
-                    && PALETTE_OPEN.load(Ordering::Acquire)
-                {
-                    if let Some(window) = main_thread_app.get_webview_window("main") {
-                        // Skip when already foreground: re-raising would yank
-                        // focus back after the user intentionally moved on.
-                        if is_prism_foreground() {
-                            return;
-                        }
-                        let _ = raise_palette(&window);
+                if !palette_raise_still_wanted(transition) {
+                    return;
+                }
+                if is_prism_foreground() {
+                    PALETTE_TOOK_FOREGROUND.store(true, Ordering::Release);
+                    return;
+                }
+                if let Some(window) = main_thread_app.get_webview_window("main") {
+                    let _ = raise_palette(&window);
+                    if is_prism_foreground() {
+                        PALETTE_TOOK_FOREGROUND.store(true, Ordering::Release);
                     }
                 }
             });
         });
     }
+}
+
+fn palette_raise_still_wanted(transition: u64) -> bool {
+    palette_raise_retry_wanted(
+        PALETTE_OPEN.load(Ordering::Acquire),
+        PALETTE_TRANSITION.load(Ordering::Acquire) == transition,
+        PALETTE_TOOK_FOREGROUND.load(Ordering::Acquire),
+    )
 }
 
 #[cfg(windows)]
@@ -915,6 +921,7 @@ fn toggle_palette_with_presentation(
         ACTIVATION_FOCUS_PENDING.store(false, Ordering::Release);
     }
     if opening {
+        PALETTE_TOOK_FOREGROUND.store(false, Ordering::Release);
         schedule_installed_apps_refresh(app.clone());
         set_webview_memory_target(&window, false);
         // Windows can report the palette as unfocused once while it is still
@@ -995,6 +1002,9 @@ fn present_palette(app: tauri::AppHandle) -> Result<bool, String> {
                 is_prism_foreground()
             ));
         }
+    }
+    if is_prism_foreground() {
+        PALETTE_TOOK_FOREGROUND.store(true, Ordering::Release);
     }
     schedule_palette_raise_retry(&app, PALETTE_TRANSITION.load(Ordering::Acquire));
     log_foreground("present-after");
@@ -1244,13 +1254,6 @@ async fn launch_app_as_admin(id: String, state: tauri::State<'_, AppState>) -> R
 }
 
 #[tauri::command]
-async fn open_windows_settings(uri: String) -> Result<(), String> {
-    tauri::async_runtime::spawn_blocking(move || windows_settings::open(&uri))
-        .await
-        .map_err(|error| format!("open Windows Settings task failed: {error}"))?
-}
-
-#[tauri::command]
 async fn open_path(path: String) -> Result<(), String> {
     let timer = perf::start();
     let path = PathBuf::from(path);
@@ -1388,15 +1391,6 @@ async fn query_power_plans(query: String) -> Result<Vec<crate::power::PowerPlanH
     tauri::async_runtime::spawn_blocking(move || power::search(&query))
         .await
         .map_err(|error| format!("power plan query task failed: {error}"))?
-}
-
-#[tauri::command]
-async fn query_phase2(
-    query: String,
-    limit: Option<usize>,
-    state: tauri::State<'_, AppState>,
-) -> Result<files::FileSearchResponse, String> {
-    search_files(query, limit, state).await
 }
 
 #[tauri::command]
@@ -1573,11 +1567,6 @@ fn set_taskbar_combine_buttons(value: String) -> Result<(), String> {
 #[tauri::command]
 fn set_taskbar_scroll_volume(enabled: bool) {
     audio_hook::set_enabled(enabled);
-}
-
-#[tauri::command]
-fn is_taskbar_scroll_volume_enabled() -> bool {
-    audio_hook::is_enabled()
 }
 
 /// Pushes the accent preset to the native volume OSD so its level bar stays
@@ -1918,11 +1907,6 @@ fn validate_state(state: &serde_json::Value) -> Result<(), String> {
             return Err(format!("unknown accent '{accent}'"));
         }
     }
-    if let Some(effect) = settings.get("effect").and_then(|v| v.as_str()) {
-        if !matches!(effect, "acrylic" | "mica" | "solid") {
-            return Err(format!("unknown effect '{effect}'"));
-        }
-    }
     if let Some(theme) = settings.get("theme").and_then(|v| v.as_str()) {
         if !matches!(theme, "system" | "dark" | "light") {
             return Err(format!("unknown theme '{theme}'"));
@@ -2113,7 +2097,7 @@ async fn quit_app(app: tauri::AppHandle) -> Result<(), String> {
     // off the main thread so quitting never freezes the UI.
     let teardown_app = app.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        taskbar::release();
+        taskbar::release_on_exit();
         let _ = win_key::set_enabled(false);
         let _ = start_menu::restore(&teardown_app);
         win_key::set_provider_suppression(false);
@@ -2567,7 +2551,6 @@ mod tests {
 
         for patch in [
             serde_json::json!({"settings": {"accent": "neon"}}),
-            serde_json::json!({"settings": {"effect": "hologram"}}),
             serde_json::json!({"settings": {"theme": "sepia"}}),
             serde_json::json!({"settings": {"shortcut": "X"}}),
             serde_json::json!({"settings": {"alwaysOnTop": "yes"}}),
@@ -2615,5 +2598,13 @@ mod tests {
         );
         std::fs::remove_file(&path).expect("remove test file");
         assert!(filter_existing_paths(vec![path_text]).is_empty());
+    }
+
+    #[test]
+    fn raise_retries_stop_after_the_palette_took_foreground() {
+        assert!(palette_raise_retry_wanted(true, true, false));
+        assert!(!palette_raise_retry_wanted(true, true, true));
+        assert!(!palette_raise_retry_wanted(false, true, false));
+        assert!(!palette_raise_retry_wanted(true, false, false));
     }
 }
