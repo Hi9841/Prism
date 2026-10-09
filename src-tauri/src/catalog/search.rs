@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 
 use super::db::Database;
+use super::name_index::{NameIndex, NameQuery};
 use super::types::{
     CandidateEntry, FileEntry, FileSearchError, FileSearchErrorKind, FileSearchResponse,
     VolumeCoverage,
@@ -15,8 +16,8 @@ pub(crate) fn clamp_limit(limit: Option<usize>) -> usize {
     limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT)
 }
 
-fn path_depth(path: &str) -> usize {
-    path.chars().filter(|&c| c == '\\' || c == '/').count()
+pub(crate) fn path_depth(path: &str) -> usize {
+    path.bytes().filter(|&b| b == b'\\' || b == b'/').count()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -32,10 +33,14 @@ pub fn search(
     ready: bool,
 ) -> FileSearchResponse {
     let generation = search_generation.fetch_add(1, AtomicOrdering::AcqRel) + 1;
+    // End-to-end tests run the production path: the in-memory name index.
+    let names = NameIndex::default();
+    names.load(db).expect("load name index");
     search_with_generation(
         query,
         limit,
         db,
+        Some(&names),
         search_generation,
         generation,
         volumes,
@@ -50,6 +55,7 @@ pub fn search_with_generation(
     query: &str,
     limit: Option<usize>,
     db: &Database,
+    names: Option<&NameIndex>,
     search_generation: &AtomicU64,
     generation: u64,
     volumes: &[VolumeCoverage],
@@ -103,10 +109,21 @@ pub fn search_with_generation(
         );
     }
 
+    let query_lower = query_trimmed.to_lowercase();
+    let tokens: Vec<&str> = query_lower.split_whitespace().collect();
+    let cancelled = || is_cancelled(search_generation, generation);
+
     let candidate_limit = (limit * 15).max(150);
-    let candidates = match db.search_candidates_until(query_trimmed, candidate_limit, || {
-        is_cancelled(search_generation, generation)
-    }) {
+    let candidates = match candidates(
+        db,
+        names,
+        query_trimmed,
+        &tokens,
+        &query_lower,
+        limit,
+        candidate_limit,
+        &cancelled,
+    ) {
         Ok(c) => c,
         Err(message) => {
             return response(
@@ -124,7 +141,7 @@ pub fn search_with_generation(
         }
     };
 
-    if is_cancelled(search_generation, generation) {
+    if cancelled() {
         return response(
             Vec::new(),
             ready,
@@ -135,9 +152,6 @@ pub fn search_with_generation(
             None,
         );
     }
-
-    let query_lower = query_trimmed.to_lowercase();
-    let tokens: Vec<&str> = query_lower.split_whitespace().collect();
 
     let mut scored: Vec<(i32, CandidateEntry)> = Vec::with_capacity(candidates.len());
 
@@ -158,20 +172,7 @@ pub fn search_with_generation(
         }
     }
 
-    scored.sort_by(|(score_a, item_a), (score_b, item_b)| {
-        score_b
-            .cmp(score_a)
-            .then_with(|| item_a.lower_name.len().cmp(&item_b.lower_name.len()))
-            .then_with(|| item_a.lower_name.cmp(&item_b.lower_name))
-            .then_with(|| path_depth(&item_a.display_path).cmp(&path_depth(&item_b.display_path)))
-            .then_with(|| item_a.display_path.len().cmp(&item_b.display_path.len()))
-            .then_with(|| {
-                item_a
-                    .display_path
-                    .to_lowercase()
-                    .cmp(&item_b.display_path.to_lowercase())
-            })
-    });
+    scored.sort_by(result_order);
 
     // Verify disk existence only for the items we are about to return. A row
     // can briefly outlive its file (the watcher removes it within seconds),
@@ -236,6 +237,49 @@ pub fn search_with_generation(
     response(items, ready, indexing, false, volumes, total_indexed, None)
 }
 
+/// The ranking of scored candidates: score, then the shorter and
+/// alphabetically first name, then the shallower and shorter path.
+pub(crate) fn result_order(
+    (score_a, item_a): &(i32, CandidateEntry),
+    (score_b, item_b): &(i32, CandidateEntry),
+) -> Ordering {
+    score_b
+        .cmp(score_a)
+        .then_with(|| item_a.lower_name.len().cmp(&item_b.lower_name.len()))
+        .then_with(|| item_a.lower_name.cmp(&item_b.lower_name))
+        .then_with(|| path_depth(&item_a.display_path).cmp(&path_depth(&item_b.display_path)))
+        .then_with(|| item_a.display_path.len().cmp(&item_b.display_path.len()))
+        .then_with(|| {
+            item_a
+                .display_path
+                .to_lowercase()
+                .cmp(&item_b.display_path.to_lowercase())
+        })
+}
+
+/// Fallback-catalog candidates come from the in-memory name index when it can
+/// answer, else from the SQL stages. NTFS volumes always use SQL.
+#[allow(clippy::too_many_arguments)]
+fn candidates(
+    db: &Database,
+    names: Option<&NameIndex>,
+    query: &str,
+    tokens: &[&str],
+    query_lower: &str,
+    limit: usize,
+    candidate_limit: usize,
+    cancelled: &(dyn Fn() -> bool + Sync),
+) -> Result<Vec<CandidateEntry>, String> {
+    if let Some(names) = names {
+        let parsed = NameQuery::new(query_lower, tokens);
+        if let Some(mut found) = names.candidates(db, &parsed, limit, cancelled)? {
+            found.extend(db.ntfs_candidates_until(query, candidate_limit, cancelled)?);
+            return Ok(found);
+        }
+    }
+    db.search_candidates_until(query, candidate_limit, cancelled)
+}
+
 fn is_cancelled(search_generation: &AtomicU64, generation: u64) -> bool {
     search_generation.load(AtomicOrdering::Acquire) != generation
 }
@@ -261,28 +305,45 @@ fn response(
 }
 
 pub fn entry_score(entry: &CandidateEntry, tokens: &[&str], full_query: &str) -> Option<i32> {
-    let lower_name = &entry.lower_name;
-    let penalty = path_penalty(&entry.display_path, lower_name);
+    let penalty = path_penalty(&entry.display_path, &entry.lower_name);
+    name_score(&entry.lower_name, entry.is_directory, tokens, full_query)
+        .map(|score| score - penalty)
+}
+
+/// The name-only part of `entry_score`: everything except the location
+/// penalty. The in-memory name index scores every row with this and adds the
+/// penalty it stored at load time.
+pub(crate) fn name_score(
+    lower_name: &str,
+    is_directory: bool,
+    tokens: &[&str],
+    full_query: &str,
+) -> Option<i32> {
+    let directory_bonus = if is_directory { 20 } else { 0 };
 
     // Highest priority: Exact filename match (e.g. "gemini_revisions_unverified.md")
     if lower_name == full_query {
-        return Some(10_000 - penalty + if entry.is_directory { 20 } else { 0 });
+        return Some(10_000 + directory_bonus);
     }
 
-    // Exact filename without extension
-    if let Some(stem) = Path::new(lower_name).file_stem().and_then(|s| s.to_str()) {
-        if stem == full_query {
-            return Some(9_500 - penalty + if entry.is_directory { 20 } else { 0 });
-        }
+    // Exact filename without extension. The byte probe is a necessary
+    // condition for `file_stem == full_query` that skips the path parse on the
+    // hot path; `file_stem` still decides.
+    if lower_name.len() > full_query.len()
+        && lower_name.starts_with(full_query)
+        && lower_name.as_bytes()[full_query.len()] == b'.'
+        && Path::new(lower_name).file_stem().and_then(|s| s.to_str()) == Some(full_query)
+    {
+        return Some(9_500 + directory_bonus);
     }
 
-    let mut total = if entry.is_directory { 20 } else { 0 };
+    let mut total = directory_bonus;
 
     for token in tokens {
         total += target_score(token, lower_name)?;
     }
 
-    Some(total - lower_name.len().min(80) as i32 - penalty)
+    Some(total - lower_name.len().min(80) as i32)
 }
 
 /// High-noise locations and filenames. The catalog is full-coverage - system
@@ -321,29 +382,29 @@ const NOISE_FILE_NAMES: &[&str] = &[
     "swapfile.sys",
 ];
 
-fn path_penalty(display_path: &str, lower_name: &str) -> i32 {
+pub(crate) fn path_penalty(display_path: &str, lower_name: &str) -> i32 {
+    // Every location needle starts with a separator, so a match can only
+    // begin at a backslash. Testing the needles there, instead of sliding them
+    // over every byte, gives the same result for a fraction of the work - the
+    // name index computes this once per catalog row at load. ASCII
+    // case-insensitive, with no lowercase copy of the path.
+    let bytes = display_path.as_bytes();
     let mut penalty = 0i32;
-    for (needle, value) in LOCATION_PENALTIES {
-        if contains_ascii_ci(display_path, needle) {
-            penalty = penalty.max(*value);
+    for start in (0..bytes.len()).filter(|&index| bytes[index] == b'\\') {
+        let rest = &bytes[start..];
+        for (needle, value) in LOCATION_PENALTIES {
+            if *value > penalty
+                && rest.len() >= needle.len()
+                && rest[..needle.len()].eq_ignore_ascii_case(needle.as_bytes())
+            {
+                penalty = *value;
+            }
         }
     }
     if NOISE_FILE_NAMES.contains(&lower_name) || lower_name.starts_with("ntuser.dat") {
         penalty = penalty.max(800);
     }
     penalty
-}
-
-/// ASCII case-insensitive substring probe without allocating a lowercase copy
-/// of the path - this runs for every candidate on every keystroke.
-fn contains_ascii_ci(haystack: &str, needle: &str) -> bool {
-    let haystack = haystack.as_bytes();
-    let needle = needle.as_bytes();
-    !needle.is_empty()
-        && haystack.len() >= needle.len()
-        && haystack
-            .windows(needle.len())
-            .any(|window| window.eq_ignore_ascii_case(needle))
 }
 
 pub fn target_score(query: &str, target: &str) -> Option<i32> {
@@ -588,6 +649,7 @@ mod tests {
             "rpt",
             Some(10),
             &database,
+            None,
             &generation,
             1,
             &[],
@@ -603,6 +665,34 @@ mod tests {
         );
         drop(database);
         let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn location_penalty_matches_a_sliding_case_insensitive_scan() {
+        let sliding = |path: &str| {
+            let lower = path.to_ascii_lowercase();
+            LOCATION_PENALTIES
+                .iter()
+                .filter(|(needle, _)| lower.contains(needle))
+                .map(|(_, value)| *value)
+                .max()
+                .unwrap_or(0)
+        };
+        assert!(LOCATION_PENALTIES
+            .iter()
+            .all(|(needle, _)| needle.starts_with('\\')));
+        for path in [
+            r"C:\Windows\System32\drivers\etc\hosts",
+            r"C:\Program Files\WindowsApps\Pkg\app.exe",
+            r"D:\src\node_modules\.git\HEAD",
+            r"C:\Users\me\AppData\Local\Temp\x.tmp",
+            r"C:\Windows",
+            r"C:\Users\me\windows-notes.txt",
+            r"E:\PGDATA\base\1",
+            r"C:\Users\me\Documents\report.pdf",
+        ] {
+            assert_eq!(path_penalty(path, "x"), sliding(path), "{path}");
+        }
     }
 
     #[test]

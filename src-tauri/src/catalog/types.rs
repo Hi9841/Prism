@@ -134,3 +134,20 @@ pub struct CandidateEntry {
     #[allow(dead_code)]
     pub extension: Option<String>,
 }
+
+/// One fallback-catalog row as the in-memory name index loads it.
+#[derive(Clone, Debug)]
+pub struct NameRow {
+    pub id: i64,
+    pub lower_name: String,
+    pub display_path: String,
+    pub is_directory: bool,
+}
+
+/// Current state of a fallback row that the name index selected.
+#[derive(Clone, Debug)]
+pub enum RowLookup {
+    Found(CandidateEntry),
+    Missing,
+    Excluded,
+}
