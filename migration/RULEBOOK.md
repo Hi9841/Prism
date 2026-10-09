@@ -15,7 +15,8 @@ agents consistent. The kit's bakeoff does not apply (README, "If you're redesign
 - **Source of truth:** `C:/Users/hi/Desktop/Work/Prism` (`src/` for the UI, `src-tauri/` for the backend).
   It stays runnable and shippable until Step 6 is done.
 - **Unit of work:** a subsystem (§5), not a file. Files inside a subsystem are translated together.
-- **Referee:** `cargo check -p prism-ui` is the in-loop typecheck. Full builds run only in Step 4.
+- **Referee:** `cargo check` is the in-loop typecheck (Step 4 dissolved: 1.3 s incremental). The parity judge
+  (`PRISM_ADAPTER_CMD=prism-judge`) and running the real app verify behavior. **No unit tests** (owner, 2026-10-09).
 - **Markers:** `TODO(port):`, `PERF(port):`, `BUG(port):` only. Every translated file ends with
   `// PORT STATUS: confidence=<high|medium|low> todos=<N>`, and N equals the TODO(port) count.
 - **The BUG rule:** reproduce defective source behavior and mark it `BUG(port):`. Fixes wait for Step 6.
@@ -86,7 +87,7 @@ Do not invent a mapping (A1).
 
 - `crates/prism-ui/src/theme.rs` holds every token from `src/styles/tokens.css` (126 custom properties,
   dark and light themes, five accents). OKLCH values are converted once, at build time, to linear RGBA,
-  and a unit test pins each conversion.
+  and the visual check against screenshots of the original verifies them (no unit tests).
 - Fonts: `Segoe UI Variable Text`, fallback `Segoe UI`; mono `Cascadia Code`. Font features `cv11`, `ss01`.
 - Window at start (A8): 720×620 (min 480×400), transparent, no decorations, no shadow, not user-resizable,
   hidden, no taskbar entry (`WindowKind::PopUp` sets `WS_EX_TOOLWINDOW`). Width is a setting (560/640/720,
@@ -109,8 +110,8 @@ Do not invent a mapping (A1).
 - `src/<path>.ts(x)` → `crates/prism-ui/src/<path>.rs`, file names in snake_case
   (`PaletteSearchInput.tsx` → `palette_search_input.rs`). One source file, one target file.
 - `src/styles/tokens.css` → `crates/prism-ui/src/theme.rs`. `src/main.tsx` + `src/App.tsx` → `crates/prism-app/src/main.rs` and `crates/prism-ui/src/app.rs`.
-- `*.test.ts(x)` are not translated. The judge covers their behavior; pure-logic assertions are
-  re-expressed as Rust unit tests next to the module (same inputs and literal expected values).
+- `*.test.ts(x)` are not translated and not re-expressed as Rust tests. The judge covers their behavior
+  (owner, 2026-10-09: no unit tests).
 
 ## 5. Subsystems (units of work), dependency order
 
@@ -162,6 +163,12 @@ another app, Esc cancels, a click works after the drag, and a release over the p
 ## Deviation log
 
 - 2026-10-09: Step 0b reviewers and Step 1 map reviewers ran on Opus per the model plan. No deviation.
+- 2026-10-09: Step 3 runs inline on Opus, with no subagents and no unit tests (owner: "dont use subagents
+  we dont have enough usage", "dont do unit testings"). The kit's 4-agent pipeline per unit is replaced by
+  one inline translation plus an inline adversarial self-review per subsystem, `cargo check`, the judge,
+  and running the app. The build, judge, and commit denies in `.claude/settings.json` are lifted for this
+  session; the destructive git denies stay. The prism-core extraction runs in a git worktree of Prism
+  (`../Prism-core`, branch `gpui/prism-core`) so the owner's dirty Prism checkout stays untouched.
 - 2026-10-09: Step 2 gate acts (apply A1, A2, A4-A11; apply the inventory proposals; decide R11 and R12;
   install `.claude/settings.json`; commit) were done by the agent on the owner's explicit instruction
   ("do everything"). The kit assigns these acts to the owner. D3 stays open: it is a product decision.

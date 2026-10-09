@@ -13,6 +13,7 @@ The goal is the same design, layout, and behavior as the current Prism (1:1), wi
 | 1. Design document (`migration/RULEBOOK.md`) | Draft 3. D1, D2, D4, D5 decided; D3 open. |
 | 1. Gap inventory (`migration/inventory.tsv`) | Done. 1,428/1,428 sites covered by 118 rows. Spike rows settled at Step 2 (row 112 waits for Step 5). |
 | 2. Design review and spike (`migration/stress-test/step2-report.md`) | Done 2026-10-09. 7 of 8 spike rows settled (1:1 with headless Chromium baselines); OLE drag moved to Step 5. Rulebook draft 3 (A1, A2, A4-A11). Manifest: 44 units. |
+| 3. Translation | In progress. Subsystems 1-2 (pure logic, palette model, `prism-judge`) done 2026-10-10: the judge passes 277/277 against the port. Next: subsystem 0 (`prism-core`). |
 
 ## Layout
 
@@ -30,4 +31,11 @@ The judge needs Bun and a checkout of the original app at `../Prism` (or set `PR
 ```
 bun migration/judge/judge.mjs        # every scenario against the original
 bun migration/judge/mutate.mjs       # shows that the judge fails on broken copies
+```
+
+To run it against the port, build the adapter and point the judge at it:
+
+```
+cargo build -p prism-judge
+PRISM_ADAPTER_CMD=target/debug/prism-judge.exe bun migration/judge/judge.mjs
 ```
