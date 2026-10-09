@@ -872,6 +872,7 @@ async	src/lib/bridge.ts	144	export async function getApps(): Promise<AppEntry[]>
 async	src/lib/bridge.ts	149	appsRequest = invoke<AppEntry[]>("get_apps").finally(() => {
 tauri-command	src/lib/bridge.ts	149	appsRequest = invoke<AppEntry[]>("get_apps").finally(() => {
 async	src/lib/bridge.ts	159	export async function getAppIcons(
+tauri-command	src/lib/bridge.ts	163	return invoke<Record<string, string>>("get_app_icons", { ids });
 async	src/lib/bridge.ts	166	export async function refreshApps(): Promise<AppEntry[]> {
 tauri-command	src/lib/bridge.ts	168	return invoke<AppEntry[]>("refresh_apps");
 async	src/lib/bridge.ts	171	export async function launchApp(appId: string): Promise<void> {
@@ -898,6 +899,7 @@ async	src/lib/bridge.ts	209	export async function showPathProperties(path: strin
 async	src/lib/bridge.ts	211	await invoke("show_path_properties", { path });
 tauri-command	src/lib/bridge.ts	211	await invoke("show_path_properties", { path });
 async	src/lib/bridge.ts	214	export async function queryPhase1(
+tauri-command	src/lib/bridge.ts	221	return invoke<Phase1Response>("query_phase1", { query, recent });
 async	src/lib/bridge.ts	224	export async function queryPowerPlans(query: string): Promise<PowerPlanHit[]> {
 tauri-command	src/lib/bridge.ts	226	return invoke<PowerPlanHit[]>("query_power_plans", { query });
 async	src/lib/bridge.ts	229	export async function executeAction(id: string): Promise<void> {
@@ -916,7 +918,6 @@ async	src/lib/bridge.ts	285	await invoke("rebuild_file_index");
 tauri-command	src/lib/bridge.ts	285	await invoke("rebuild_file_index");
 async	src/lib/bridge.ts	293	export async function getFileThumbnails(
 async	src/lib/bridge.ts	297	const thumbnails = await invoke<(string | null)[]>("get_file_thumbnails", {
-tauri-command	src/lib/bridge.ts	297	const thumbnails = await invoke<(string | null)[]>("get_file_thumbnails", {
 async	src/lib/bridge.ts	303	export async function getQuickAccess(): Promise<QuickAccessEntry[]> {
 tauri-command	src/lib/bridge.ts	323	return invoke<QuickAccessEntry[]>("get_quick_access");
 async	src/lib/bridge.ts	326	export async function performPowerAction(action: PowerAction): Promise<void> {

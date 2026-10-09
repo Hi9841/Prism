@@ -31,7 +31,8 @@ const PATTERNS = [
   ["closure-field", /^\s*(?:run|runAsAdmin|openLocation|toggleTaskbarPin|showProperties|dragFile|on[A-Z]\w*)\??\s*:/, "ts"],
   ["event-handler", /\bon[A-Z][A-Za-z]*=\{/, "ts"],
   // Host boundary: the WebView and Tauri go away.
-  ["tauri-command", /\binvoke\s*(?:<[^>]*>)?\s*\(\s*["'][a-z_]+["']/, "ts"],
+  // `[^(]*` spans nested generics such as invoke<Record<string, string>>(.
+  ["tauri-command", /\binvoke\b[^(\n]*\(\s*["'][a-z_0-9]+["']/, "ts"],
   ["tauri-import", /from\s+["']@tauri-apps\//, "ts"],
   ["host-dom", /\b(?:document|navigator)\.|\bwindow\.(?!__TAURI)|\b(?:localStorage|sessionStorage)\b|getBoundingClientRect|elementFromPoint|scrollIntoView|\.focus\(|\.blur\(|ResizeObserver|matchMedia|addEventListener|removeEventListener|getComputedStyle/, "ts"],
   // Nullability: optional fields in shared data shapes.
