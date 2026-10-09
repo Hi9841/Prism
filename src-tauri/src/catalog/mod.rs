@@ -1,5 +1,6 @@
 pub mod backend;
 pub mod db;
+pub mod name_index;
 pub mod ntfs;
 pub mod scanner;
 pub mod search;
@@ -33,6 +34,7 @@ pub use types::{
 
 use self::backend::{select_backend, BackendKind};
 use self::db::Database;
+use self::name_index::NameIndex;
 use self::ntfs::NtfsBackend;
 use self::watcher::{watcher_root_changed, VolumeWatcher};
 
@@ -182,6 +184,7 @@ impl IndexCounts {
 #[derive(Clone)]
 pub struct FileIndex {
     db: Arc<RwLock<Option<Arc<Database>>>>,
+    names: Arc<NameIndex>,
     search_generation: Arc<AtomicU64>,
     volumes: Arc<RwLock<Vec<VolumeCoverage>>>,
     indexing: Arc<AtomicBool>,
@@ -201,6 +204,7 @@ impl Default for FileIndex {
     fn default() -> Self {
         Self {
             db: Arc::new(RwLock::new(None)),
+            names: Arc::new(NameIndex::default()),
             search_generation: Arc::new(AtomicU64::new(0)),
             volumes: Arc::new(RwLock::new(Vec::new())),
             indexing: Arc::new(AtomicBool::new(false)),
@@ -241,6 +245,7 @@ impl FileIndex {
             if self.counts.total() > 0 {
                 self.ready.store(true, Ordering::SeqCst);
             }
+            self.names.spawn_sync(Arc::clone(&db_arc));
             *self.db.write().unwrap_or_else(|e| e.into_inner()) = Some(db_arc);
         }
         *self.app_data_dir.write().unwrap_or_else(|e| e.into_inner()) = app_data_dir.to_path_buf();
@@ -320,17 +325,22 @@ impl FileIndex {
                 });
         };
 
-        search::search_with_generation(
+        let response = search::search_with_generation(
             query,
             limit,
             db,
+            Some(&self.names),
             &self.search_generation,
             generation,
             &volumes,
             total_indexed,
             indexing,
             ready,
-        )
+        );
+        if self.names.needs_sync() {
+            self.names.spawn_sync(Arc::clone(db));
+        }
+        response
     }
 
     /// Wipes the catalog and rebuilds it from scratch (used by the UI's
@@ -343,10 +353,29 @@ impl FileIndex {
             if let Some(ref db) = db {
                 let _ = db.clear_catalog();
             }
+            this.names.reset();
             this.counts.clear();
             this.ready.store(false, Ordering::SeqCst);
             this.scan_all_volumes(false).await;
         });
+    }
+
+    /// Returns unused catalog space to the file system on a blocking thread.
+    /// Searches keep running: they read through the WAL reader connection.
+    async fn reclaim_space(&self) {
+        let db = self.db.read().unwrap_or_else(|e| e.into_inner()).clone();
+        let Some(db) = db else { return };
+        let result = tauri::async_runtime::spawn_blocking(move || db.reclaim_space()).await;
+        match result {
+            Ok(Ok(report)) if report.after < report.before => eprintln!(
+                "[Prism Catalog] reclaimed {} MB (catalog {} MB -> {} MB)",
+                (report.before - report.after) / 1_048_576,
+                report.before / 1_048_576,
+                report.after / 1_048_576
+            ),
+            Ok(Err(error)) => eprintln!("[Prism Catalog] space reclaim failed: {error}"),
+            _ => {}
+        }
     }
 
     fn cancel_all_scans(&self) {
@@ -1015,6 +1044,7 @@ pub fn warm(index: FileIndex, app_data_dir: PathBuf, app: tauri::AppHandle) {
         // fresh are not re-walked (the watcher keeps them live), so a normal
         // launch has results immediately - no indexing phase.
         index.scan_all_volumes(true).await;
+        index.reclaim_space().await;
 
         let mut last_reconcile = tokio::time::Instant::now();
         let mut last_discovery = tokio::time::Instant::now();

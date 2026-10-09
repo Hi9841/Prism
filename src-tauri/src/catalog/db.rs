@@ -8,8 +8,8 @@ use rusqlite::{params, params_from_iter, Connection, OpenFlags, OptionalExtensio
 
 use super::ntfs::{resolve_path, PathNode, PathResolution};
 use super::types::{
-    CandidateEntry, JournalCheckpoint, NtfsChange, NtfsNode, ScannedItem, VolumeCoverage,
-    VolumeInfo, VolumeState,
+    CandidateEntry, JournalCheckpoint, NameRow, NtfsChange, NtfsNode, RowLookup, ScannedItem,
+    VolumeCoverage, VolumeInfo, VolumeState,
 };
 
 #[allow(dead_code)]
@@ -67,6 +67,16 @@ pub struct Database {
     /// sweep that changed nothing (the common overflow-reconcile case) does
     /// not re-tokenize millions of names for nothing.
     bulk_load_dirty: AtomicBool,
+}
+
+/// `PRAGMA auto_vacuum` value for INCREMENTAL.
+const AUTO_VACUUM_INCREMENTAL: i64 = 2;
+
+/// Catalog file size in bytes before and after `Database::reclaim_space`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SpaceReclaim {
+    pub before: i64,
+    pub after: i64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -211,9 +221,7 @@ impl Database {
                 UNIQUE(volume_id, normalized_path)
              );
 
-             CREATE INDEX IF NOT EXISTS idx_files_vol_gen ON files(volume_id, scan_generation);
              CREATE INDEX IF NOT EXISTS idx_files_lower_name ON files(lower_name, is_directory);
-             CREATE INDEX IF NOT EXISTS idx_files_parent ON files(parent);
              CREATE INDEX IF NOT EXISTS idx_files_vol_parent ON files(volume_id, parent);
 
              CREATE VIRTUAL TABLE IF NOT EXISTS file_fts USING fts5(
@@ -483,6 +491,68 @@ impl Database {
     /// of megabytes, and every process start pays recovery for whatever was
     /// left un-checkpointed - checkpointing after big writes keeps launches
     /// cheap and the app data directory small.
+    /// Drops the indexes that no query reads and returns free pages to the
+    /// file system. Earlier catalogs never did either: a long-lived 4.3M-row
+    /// catalog measured 8.5 GB, of which 3.6 GB were free pages and 0.7 GB
+    /// were `idx_files_parent` and `idx_files_vol_gen`.
+    ///
+    /// Background work only. The first run on a fragmented catalog rewrites
+    /// the file once (`VACUUM`, about 35 s for 4.6 GB) to switch on incremental
+    /// auto-vacuum; later runs only truncate the free pages. Row ids survive:
+    /// every rowid table has an explicit `INTEGER PRIMARY KEY`.
+    pub fn reclaim_space(&self) -> Result<SpaceReclaim, String> {
+        // Same lock order as begin/end_bulk_load (depth, then writer). Held for
+        // the whole pass so a bulk load cannot drop the FTS triggers mid-VACUUM.
+        let depth = self.bulk_load_depth.lock().map_err(|e| e.to_string())?;
+        if *depth > 0 {
+            return Ok(SpaceReclaim::default());
+        }
+        let conn = self.writer.lock().map_err(|e| e.to_string())?;
+        // Nothing filters on `parent` alone (the prune query also filters on
+        // `volume_id`, served by idx_files_vol_parent) or on
+        // `files.scan_generation`.
+        conn.execute_batch(
+            "DROP INDEX IF EXISTS idx_files_parent;
+             DROP INDEX IF EXISTS idx_files_vol_gen;",
+        )
+        .map_err(|e| e.to_string())?;
+
+        let pragma = |name: &str| -> Result<i64, String> {
+            conn.query_row(&format!("PRAGMA {name};"), [], |row| row.get(0))
+                .map_err(|e| e.to_string())
+        };
+        let page_size = pragma("page_size")?;
+        let before = pragma("page_count")? * page_size;
+        let free_pages = pragma("freelist_count")?;
+        if free_pages == 0 {
+            return Ok(SpaceReclaim {
+                before,
+                after: before,
+            });
+        }
+        if pragma("auto_vacuum")? == AUTO_VACUUM_INCREMENTAL {
+            conn.execute_batch("PRAGMA incremental_vacuum;")
+                .map_err(|e| e.to_string())?;
+        } else {
+            // The connection keeps temp tables in memory; VACUUM builds a
+            // full copy of the catalog as a temp database, so it must spill
+            // to disk instead of allocating gigabytes.
+            let result = conn.execute_batch(
+                "PRAGMA temp_store = FILE;
+                 PRAGMA auto_vacuum = INCREMENTAL;
+                 VACUUM;",
+            );
+            let _ = conn.execute_batch("PRAGMA temp_store = MEMORY;");
+            result.map_err(|e| e.to_string())?;
+        }
+        conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+            .map_err(|e| e.to_string())?;
+        Ok(SpaceReclaim {
+            before,
+            after: pragma("page_count")? * page_size,
+        })
+    }
+
     pub fn checkpoint(&self) -> Result<(), String> {
         let conn = self.writer.lock().map_err(|e| e.to_string())?;
         conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
@@ -1566,6 +1636,102 @@ impl Database {
         self.search_candidates_until(query, limit, || false)
     }
 
+    /// Fallback-catalog rows with an id above `after_id`, in id order. Feeds
+    /// the in-memory name index: ids only grow, so this is both the full load
+    /// (`after_id = 0`, in batches) and the incremental catch-up.
+    pub(crate) fn file_names_after(
+        &self,
+        after_id: i64,
+        limit: usize,
+    ) -> Result<Vec<NameRow>, String> {
+        let conn = self.reader.lock().map_err(|e| e.to_string())?;
+        let mut stmt = conn
+            .prepare_cached(
+                "SELECT id, lower_name, display_path, is_directory FROM files
+                 WHERE id > ?1 ORDER BY id LIMIT ?2;",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(params![after_id, limit as i64], |row| {
+                Ok(NameRow {
+                    id: row.get(0)?,
+                    lower_name: row.get(1)?,
+                    display_path: row.get(2)?,
+                    is_directory: row.get::<_, i32>(3)? != 0,
+                })
+            })
+            .map_err(|e| e.to_string())?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())
+    }
+
+    /// Current state of each requested fallback row. A row that a scan
+    /// deleted is `Missing`; a row whose volume is now served by the NTFS
+    /// catalog is `Excluded` (same filter as the SQL candidate stages).
+    pub(crate) fn file_rows_by_id(&self, ids: &[i64]) -> Result<Vec<RowLookup>, String> {
+        let conn = self.reader.lock().map_err(|e| e.to_string())?;
+        let mut stmt = conn
+            .prepare_cached(
+                "SELECT f.display_path, f.lower_name, f.is_directory, f.extension,
+                        COALESCE(v.backend, 'fallback')
+                 FROM files f LEFT JOIN volumes v ON v.volume_id = f.volume_id
+                 WHERE f.id = ?1;",
+            )
+            .map_err(|e| e.to_string())?;
+        ids.iter()
+            .map(|&id| {
+                let row = stmt
+                    .query_row(params![id], |row| {
+                        Ok((
+                            CandidateEntry {
+                                id,
+                                display_path: row.get(0)?,
+                                lower_name: row.get(1)?,
+                                is_directory: row.get::<_, i32>(2)? != 0,
+                                extension: row.get(3)?,
+                            },
+                            row.get::<_, String>(4)? == "ntfs",
+                        ))
+                    })
+                    .optional()
+                    .map_err(|e| e.to_string())?;
+                Ok(match row {
+                    None => RowLookup::Missing,
+                    Some((_, true)) => RowLookup::Excluded,
+                    Some((entry, false)) => RowLookup::Found(entry),
+                })
+            })
+            .collect()
+    }
+
+    /// The NTFS-catalog candidate stages alone. The in-memory name index
+    /// covers the fallback `files` table; NTFS volumes keep this SQL path.
+    pub(crate) fn ntfs_candidates_until<F>(
+        &self,
+        query: &str,
+        limit: usize,
+        is_cancelled: F,
+    ) -> Result<Vec<CandidateEntry>, String>
+    where
+        F: Fn() -> bool,
+    {
+        let conn = self.reader.lock().map_err(|e| e.to_string())?;
+        let mut candidates = Vec::new();
+        if is_cancelled() {
+            return Ok(candidates);
+        }
+        let lower = query.to_lowercase();
+        append_ntfs_candidates(
+            &conn,
+            &lower,
+            query.chars().count(),
+            limit,
+            &mut candidates,
+            &is_cancelled,
+        )?;
+        Ok(candidates)
+    }
+
     pub fn search_candidates_until<F>(
         &self,
         query: &str,
@@ -2639,6 +2805,69 @@ mod ntfs_tests {
         assert!(db
             .is_volume_fresh_at_mount(&data.volume_id, Path::new(r"d:\"), 86_400)
             .unwrap());
+
+        drop(db);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn reclaim_space_shrinks_the_file_and_keeps_rows_and_ids() {
+        let path = temp_db_path("reclaim-space");
+        let db = Database::open(&path).unwrap();
+        let data = volume();
+        db.upsert_volume(&data, VolumeState::Ready).unwrap();
+        let rows = (0..4_000)
+            .map(|n| {
+                scanned_file(
+                    &format!(r"C:\Bulk\{n}\file-{n}.txt"),
+                    &format!("file-{n}.txt"),
+                )
+            })
+            .collect::<Vec<_>>();
+        db.insert_batch(&data.volume_id, 1, &rows).unwrap();
+        db.insert_batch(
+            &data.volume_id,
+            1,
+            &[scanned_file(r"C:\Keep\keeper.txt", "keeper.txt")],
+        )
+        .unwrap();
+        db.remove_file(&data.volume_id, r"c:\bulk", true).unwrap();
+        let kept_id = || {
+            db.file_names_after(0, 10)
+                .unwrap()
+                .into_iter()
+                .map(|row| (row.id, row.lower_name))
+                .collect::<Vec<_>>()
+        };
+        let before_rows = kept_id();
+        assert_eq!(before_rows.len(), 1);
+
+        let first = db.reclaim_space().unwrap();
+        assert!(first.after < first.before, "{first:?}");
+        assert_eq!(kept_id(), before_rows, "VACUUM must keep row ids");
+
+        let conn = db.reader.lock().unwrap();
+        let auto_vacuum: i64 = conn
+            .query_row("PRAGMA auto_vacuum;", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(auto_vacuum, AUTO_VACUUM_INCREMENTAL);
+        let dropped: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master
+                 WHERE name IN ('idx_files_parent', 'idx_files_vol_gen');",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(dropped, 0);
+        drop(conn);
+
+        // Later deletes are returned by the cheap incremental pass.
+        db.insert_batch(&data.volume_id, 1, &rows).unwrap();
+        db.remove_file(&data.volume_id, r"c:\bulk", true).unwrap();
+        let second = db.reclaim_space().unwrap();
+        assert!(second.after < second.before, "{second:?}");
+        assert_eq!(kept_id(), before_rows);
 
         drop(db);
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
