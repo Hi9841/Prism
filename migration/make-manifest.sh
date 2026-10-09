@@ -8,7 +8,7 @@ bun migration/depmap_ts.mjs --root ../Prism --out migration/depmap
 grep -v '^#' migration/depmap/order.txt | tr '\t' '\n' | grep -vE '\.test\.(ts|tsx)$' > migration/depmap/order.port.txt
 # MSYS_NO_PATHCONV: Git Bash would rewrite the '/Name=...' arguments as Windows paths.
 MSYS_NO_PATHCONV=1 python "$KIT/scripts/make_manifest.py" \
-  --order migration/depmap/order.port.txt --out migration/manifest.tsv \
+  --order migration/depmap/order.port.txt --out migration/manifest.ui.tsv \
   --sub 'package.json=crates/prism-app/Cargo.toml' \
   --sub 'src/=crates/prism-ui/src/' \
   --sub 'crates/prism-ui/src/assets/=crates/prism-ui/assets/' \
@@ -21,3 +21,9 @@ MSYS_NO_PATHCONV=1 python "$KIT/scripts/make_manifest.py" \
   --sub 'UpdateControl=update_control' --sub 'update-policy=update_policy' --sub 'update-progress=update_progress' \
   --sub 'iconLoading=icon_loading' --sub 'launcherMotion=launcher_motion' --sub 'transientUi=transient_ui' \
   --sub '.tsx=.rs' --sub '.ts=.rs'
+# Subsystem 0 (RULEBOOK §5, A4): prism-core extraction and the lib.rs command bodies come
+# first. The TS dependency map cannot see them, so migration/backend-units.tsv lists them.
+# LF only: queue_runner.mjs rejects a CRLF header.
+{ head -n 1 migration/manifest.ui.tsv; tail -n +2 migration/backend-units.tsv; tail -n +2 migration/manifest.ui.tsv; } \
+  | tr -d '\r' > migration/manifest.tsv
+rm migration/manifest.ui.tsv

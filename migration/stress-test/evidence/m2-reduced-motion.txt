@@ -1,0 +1,2 @@
+[{"animation_effects":false,"chromium_prefers_reduced_motion":true},{"animation_effects":true,"chromium_prefers_reduced_motion":false}]
+restored animation_effects=True (original True)

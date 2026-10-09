@@ -1,0 +1,15 @@
+source	target
+src-tauri/Cargo.toml	../Prism/crates/prism-core/Cargo.toml
+src-tauri/src/catalog/mod.rs	../Prism/crates/prism-core/src/catalog/mod.rs
+src-tauri/src/apps.rs	../Prism/crates/prism-core/src/apps.rs
+src-tauri/src/theme.rs	../Prism/crates/prism-core/src/theme.rs
+src-tauri/src/audio.rs	../Prism/crates/prism-core/src/audio.rs
+src-tauri/src/audio_hook.rs	../Prism/crates/prism-core/src/audio_hook.rs
+src-tauri/src/win_key.rs	../Prism/crates/prism-core/src/win_key.rs
+src-tauri/src/start_menu.rs	../Prism/crates/prism-core/src/start_menu.rs
+src-tauri/src/windows_tools.rs	../Prism/crates/prism-core/src/windows_tools.rs
+src-tauri/src/taskbar_icon_overlay.rs	../Prism/crates/prism-core/src/taskbar_icon_overlay.rs
+src-tauri/src/taskbar_customization.rs	../Prism/crates/prism-core/src/taskbar_customization.rs
+src-tauri/src/lib.rs	../Prism/crates/prism-core/src/backend.rs
+src-tauri/src/lib.rs	../Prism/src-tauri/src/host_tauri.rs
+src-tauri/src/lib.rs	crates/prism-app/src/host.rs
