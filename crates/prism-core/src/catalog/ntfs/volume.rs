@@ -18,7 +18,7 @@ use super::usn::{self, JournalReadBatch};
 /// Narrow transport boundary for raw-volume operations. A future service
 /// implementation can satisfy this interface over a validated named-pipe
 /// protocol without changing catalog/database synchronization code.
-pub(crate) trait NtfsTransport {
+pub trait NtfsTransport {
     fn query_journal(&self) -> Result<JournalMetadata, String>;
     fn enumerate_mft(
         &mut self,

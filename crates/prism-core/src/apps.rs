@@ -1430,7 +1430,7 @@ unsafe fn extract_file_icon(path: &str) -> Option<Vec<u8>> {
 }
 
 /// Returns a PNG data URL for a shell item's native icon.
-pub(crate) fn shell_item_icon_data_url(item: &IShellItem) -> Option<String> {
+pub fn shell_item_icon_data_url(item: &IShellItem) -> Option<String> {
     unsafe { extract_shell_item_icon(item).map(|png| png_data_url(&png)) }
 }
 

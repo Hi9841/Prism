@@ -113,7 +113,7 @@ pub fn drive_letter_from_mount_path(path: &Path) -> Option<String> {
     }
 }
 
-pub(crate) fn canonical_mount_path_with(
+pub fn canonical_mount_path_with(
     paths: &[PathBuf],
     accessible: impl Fn(&Path) -> bool,
 ) -> Option<PathBuf> {
@@ -139,7 +139,7 @@ pub(crate) fn canonical_mount_path_with(
     paths.into_iter().next()
 }
 
-pub(crate) fn merge_volume_records(records: Vec<VolumeInfo>) -> Vec<VolumeInfo> {
+pub fn merge_volume_records(records: Vec<VolumeInfo>) -> Vec<VolumeInfo> {
     let mut merged: Vec<VolumeInfo> = Vec::new();
     for mut incoming in records {
         incoming.recompute_mount_metadata();

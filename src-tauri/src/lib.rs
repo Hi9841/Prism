@@ -1,59 +1,33 @@
-mod apps;
-pub mod audio;
-pub mod audio_hook;
-pub mod audio_osd;
-mod catalog;
-pub mod drag;
-mod files;
-mod perf;
-mod power;
-mod query;
-mod start_menu;
-mod taskbar;
-mod taskbar_alignment;
-mod taskbar_customization;
-mod taskbar_icon_overlay;
-mod theme;
-mod win_key;
-mod windows_settings;
-mod windows_tools;
+//! The Tauri host for the Prism palette. The backend lives in `prism-core`;
+//! this crate keeps the WebView window lifecycle and thin command wrappers.
 
-use std::path::{Path, PathBuf};
+pub use prism_core::{audio, audio_hook, audio_osd, drag};
+
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
-use std::sync::Mutex;
-use std::time::{Duration, SystemTime};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
+use prism_core::backend::{backend, startup_window_theme as startup_theme_name};
+#[cfg(test)]
+use prism_core::backend::{
+    filter_existing_paths, migrate_state_value, startup_shortcut, startup_taskbar_alignment,
+    validate_shortcut, validate_state, ALLOWED_SHORTCUTS, DEFAULT_SHORTCUT, LEGACY_STATE_VERSION,
+    STATE_VERSION,
+};
+#[cfg(test)]
+use prism_core::palette_window::{
+    calculate_clamped_window_size, palette_position, PhysicalRect, TaskbarEdge, DEFAULT_LOGICAL_HEIGHT,
+};
+use prism_core::palette_window::{
+    self, is_prism_foreground, log_foreground, presentation_anchor, PresentationAnchor,
+    PresentationEvent, PresentationSource, DEFAULT_LOGICAL_WIDTH,
+};
+use prism_core::{apps, files, perf, power, query, taskbar, taskbar_alignment, taskbar_customization, theme, win_key};
 use tauri::{Emitter, Manager, Theme, WindowEvent};
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
 use windows::Win32::Foundation::{HWND, POINT, RECT};
-use windows::Win32::Graphics::Gdi::{
-    GetMonitorInfoW, MonitorFromPoint, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST,
-};
-use windows::Win32::System::Threading::GetCurrentProcessId;
-use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
-use windows::Win32::UI::Input::KeyboardAndMouse::{SetActiveWindow, SetFocus};
-use windows::Win32::UI::WindowsAndMessaging::{
-    AllowSetForegroundWindow, BringWindowToTop, GetCursorPos, GetForegroundWindow,
-    GetWindowThreadProcessId, LockSetForegroundWindow, SetForegroundWindow, SetWindowPos,
-    HWND_TOPMOST, LSFW_UNLOCK, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW,
-};
 
-/// The only accepted global shortcuts. Bare typing keys, reserved keys and
-/// known system/security combos are never accepted.
-const ALLOWED_SHORTCUTS: &[&str] = &[
-    "Win", // standalone Win-key interception and first-run default
-    "Ctrl+Alt+Space",
-    "Ctrl+Alt+S",
-    "Ctrl+Alt+Shift+S",
-    "Ctrl+Alt+P",
-    "Ctrl+Alt+Shift+P",
-    "Ctrl+Alt+Enter",
-    "Ctrl+Alt+Shift+Enter",
-];
-
-const DEFAULT_SHORTCUT: &str = "Win";
-const LEGACY_STATE_VERSION: u32 = 2;
-const STATE_VERSION: u32 = 3;
 /// Keep this >= frontend LAUNCHER_MOTION_MS (110ms) so the webview can fade out.
 const PALETTE_HIDE_DELAY: Duration = Duration::from_millis(125);
 /// Reassert over ~500ms, not once: the Explorer bridge grants foreground
@@ -65,18 +39,6 @@ const PALETTE_RAISE_RETRY_DELAYS: &[u64] = &[40, 120, 250, 500];
 /// the activation burst instead of a click-away dismissal.
 const ACTIVATION_FOCUS_GRACE: Duration = Duration::from_millis(600);
 const PALETTE_STARTUP_DELAY: Duration = Duration::from_millis(100);
-const STARTUP_SHELL_RETRY_DELAY: Duration = Duration::from_millis(250);
-const STARTUP_SHELL_RETRY_ATTEMPTS: usize = 120;
-const STARTUP_ALIGNMENT_DELAY: Duration = Duration::from_secs(1);
-
-/// Preferred palette dimensions in logical (100% DPI) pixels. They stay
-/// fixed regardless of the monitor the palette lands on; the physical
-/// window size is derived per presentation from the target monitor's
-/// scale factor and work area.
-const DEFAULT_LOGICAL_WIDTH: u32 = 640;
-const DEFAULT_LOGICAL_HEIGHT: u32 = 620;
-const MIN_LOGICAL_WIDTH: u32 = 480;
-const MIN_LOGICAL_HEIGHT: u32 = 400;
 
 static PALETTE_OPEN: AtomicBool = AtomicBool::new(false);
 static PALETTE_TRANSITION: AtomicU64 = AtomicU64::new(0);
@@ -88,82 +50,66 @@ static PALETTE_TOOK_FOREGROUND: AtomicBool = AtomicBool::new(false);
 static PRESENTATION_ANCHOR: Mutex<Option<PresentationAnchor>> = Mutex::new(None);
 static LOGICAL_WIDTH: AtomicU32 = AtomicU32::new(DEFAULT_LOGICAL_WIDTH);
 
-#[derive(Clone, Copy, Debug, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-enum PresentationSource {
-    WinKey,
-    TaskbarStartClick,
-    ConfiguredShortcut,
-    FocusLoss,
+/// The `prism-core` host backed by the Tauri app handle.
+struct TauriHost {
+    app: tauri::AppHandle,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-struct PhysicalPoint {
-    x: i32,
-    y: i32,
-}
+impl prism_core::host::Host for TauriHost {
+    fn emit(&self, event: &str, payload: serde_json::Value) {
+        let _ = self.app.emit(event, payload);
+    }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-struct PhysicalRect {
-    left: i32,
-    top: i32,
-    right: i32,
-    bottom: i32,
-}
+    fn app_data_dir(&self) -> Result<PathBuf, String> {
+        self.app.path().app_data_dir().map_err(|error| error.to_string())
+    }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-enum TaskbarEdge {
-    Bottom,
-    Top,
-    Left,
-    Right,
-}
+    fn palette_visible(&self) -> bool {
+        self.app
+            .get_webview_window("main")
+            .map(|window| window.is_visible().unwrap_or(true))
+            .unwrap_or(true)
+    }
 
-#[derive(Clone, Copy, Debug, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-struct PresentationAnchor {
-    start_button: Option<PhysicalRect>,
-    click_point: Option<PhysicalPoint>,
-    taskbar_edge: Option<TaskbarEdge>,
-    monitor: Option<PhysicalRect>,
-    work_area: Option<PhysicalRect>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    scale_factor: Option<f64>,
-}
+    fn toggle_from_win(&self, start_button: Option<RECT>) {
+        let app = self.app.clone();
+        let _ = self
+            .app
+            .run_on_main_thread(move || toggle_palette_from_win(&app, start_button));
+    }
 
-#[derive(Clone, Copy, Debug, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-struct PresentationEvent {
-    open: bool,
-    source: PresentationSource,
-    anchor: Option<PresentationAnchor>,
-    generation: u64,
-}
+    fn toggle_from_taskbar(&self, click: POINT, start_button: Option<RECT>) {
+        let app = self.app.clone();
+        let _ = self
+            .app
+            .run_on_main_thread(move || toggle_palette_from_taskbar(&app, click, start_button));
+    }
 
-pub struct AppState {
-    apps_cache: Mutex<Option<Vec<apps::AppEntry>>>,
-    /// When the in-memory index was scanned. Compared with shortcut and
-    /// install-folder mtimes so a long-running session can pick up new apps.
-    apps_indexed_at: Mutex<Option<SystemTime>>,
-    apps_scan_lock: tokio::sync::Mutex<()>,
-    file_index: files::FileIndex,
-    intent: query::IntentStore,
-    shortcut: Mutex<String>,
-    shortcut_generation: AtomicU64,
+    fn activate(&self) {
+        let app = self.app.clone();
+        let _ = self.app.run_on_main_thread(move || activate_palette(&app));
+    }
+
+    fn register_shortcut(&self, combo: &str) -> Result<(), String> {
+        register_shortcut(&self.app, combo)
+    }
+
+    fn unregister_shortcut(&self, combo: &str) {
+        if let Ok(shortcut) = combo.parse::<Shortcut>() {
+            let _ = self.app.global_shortcut().unregister(shortcut);
+        }
+    }
 }
 
 /// Handles the internal crash-recovery mode before Tauri or the single-instance
 /// plugin starts. Returns true when this process was launched as the watchdog.
 pub fn run_start_restore_watchdog_if_requested() -> bool {
-    start_menu::run_watchdog_from_args()
+    prism_core::backend::run_start_restore_watchdog_if_requested()
 }
 
 pub fn run() {
     let startup_timer = perf::start();
-    let show_on_start = !launched_for_autostart();
+    let show_on_start = !prism_core::backend::launched_for_autostart();
     tauri::Builder::default()
         // Register this before every other plugin so a relaunch is redirected
         // before another plugin can initialize a second app instance.
@@ -176,21 +122,11 @@ pub fn run() {
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .plugin(tauri_plugin_updater::Builder::new().build())
-        .manage(AppState {
-            apps_cache: Mutex::new(None),
-            apps_indexed_at: Mutex::new(None),
-            apps_scan_lock: tokio::sync::Mutex::new(()),
-            file_index: files::FileIndex::default(),
-            intent: query::IntentStore::new(),
-            shortcut: Mutex::new(String::new()),
-            shortcut_generation: AtomicU64::new(0),
-        })
         .setup(move |app| {
-            let _ = start_menu::recover_stale(app.handle());
-            // Repair the taskbar band if a previous instance crashed while
-            // the palette was open.
-            tauri::async_runtime::spawn_blocking(taskbar::recover);
-            let persisted = load_state_value(app.handle()).ok().flatten();
+            prism_core::host::install(Arc::new(TauriHost {
+                app: app.handle().clone(),
+            }));
+            let persisted = prism_core::backend::load_state_value().ok().flatten();
             if let Some(persisted_width) = persisted
                 .as_ref()
                 .and_then(|value| value.pointer("/settings/width"))
@@ -200,41 +136,12 @@ pub fn run() {
                     LOGICAL_WIDTH.store(persisted_width as u32, Ordering::Release);
                 }
             }
-            let alignment = startup_taskbar_alignment(persisted.as_ref());
-            let _ = taskbar_alignment::initialize(&alignment);
-            schedule_startup_taskbar_alignment();
-            win_key::init(app.handle().clone());
-            let customization_app = app.handle().clone();
-            tauri::async_runtime::spawn_blocking(move || {
-                taskbar_customization::init(customization_app);
-            });
-            audio_hook::init(app.handle().clone());
-            theme::watch(app.handle().clone());
-            let app_data_dir = app
-                .path()
-                .app_data_dir()
-                .unwrap_or_else(|_| PathBuf::from("."));
-            app.state::<AppState>()
-                .intent
-                .set_path(app_data_dir.join("intent-cache.db"));
-            files::warm(
-                app.state::<AppState>().file_index.clone(),
-                app_data_dir,
-                app.handle().clone(),
-            );
-            tauri::async_runtime::spawn_blocking(windows_tools::warm);
             if let Some(window) = app.get_webview_window("main") {
                 let startup_theme = startup_window_theme(persisted.as_ref(), theme::apps_light());
                 let _ = apply_window_style(&window, startup_theme);
                 schedule_hidden_memory_trim(app.handle().clone());
             }
-            warm_apps(app.handle().clone());
-            // Start installing the persisted shortcut during native setup. A
-            // fresh, corrupt, or incomplete state defaults natively to Win,
-            // so first-run activation never waits on frontend startup. The
-            // Explorer bridge is initialized off the Tauri main thread.
-            let combo = startup_shortcut(persisted.as_ref());
-            apply_startup_shortcut(app.handle(), combo);
+            backend().start(persisted.as_ref());
             if show_on_start {
                 schedule_initial_palette(app.handle().clone());
             }
@@ -282,7 +189,7 @@ pub fn run() {
                     return;
                 }
                 let transition = begin_palette_close();
-                crate::win_key::debug_trace("palette-hide-blur");
+                win_key::debug_trace("palette-hide-blur");
                 let _ = window.emit(
                     "prism-toggle",
                     PresentationEvent {
@@ -345,91 +252,6 @@ pub fn run() {
         .expect("failed to run Prism");
 }
 
-fn launched_for_autostart() -> bool {
-    std::env::args_os()
-        .skip(1)
-        .any(|argument| argument == std::ffi::OsStr::new("--autostart"))
-}
-
-fn schedule_startup_taskbar_alignment() {
-    tauri::async_runtime::spawn(async move {
-        tokio::time::sleep(STARTUP_ALIGNMENT_DELAY).await;
-        let _ = tauri::async_runtime::spawn_blocking(move || {
-            let _ = taskbar_alignment::reapply_current();
-        })
-        .await;
-    });
-}
-
-fn warm_apps(app: tauri::AppHandle) {
-    tauri::async_runtime::spawn(async move {
-        let state = app.state::<AppState>();
-        let _scan_guard = state.apps_scan_lock.lock().await;
-        if state
-            .apps_cache
-            .lock()
-            .ok()
-            .and_then(|cache| cache.as_ref().map(|_| ()))
-            .is_some()
-        {
-            return;
-        }
-        let cache_path = apps_cache_path(&app);
-        let result = tauri::async_runtime::spawn_blocking(move || apps::scan(&cache_path)).await;
-        let Ok(Ok(index)) = result else {
-            return;
-        };
-        publish_app_index(&state, index);
-    });
-}
-
-fn publish_app_index(state: &AppState, index: apps::AppIndex) -> Vec<apps::AppEntry> {
-    if let Ok(mut indexed_at) = state.apps_indexed_at.lock() {
-        *indexed_at = Some(index.scanned_at);
-    }
-    let apps = index.apps;
-    if let Ok(mut cache) = state.apps_cache.lock() {
-        *cache = Some(apps.clone());
-    }
-    apps
-}
-
-/// On palette open, rescan when a shortcut or install folder changed after
-/// the in-memory index was built. The check is off the Win-key path; the
-/// webview hears `apps-updated` once the new list is published.
-fn schedule_installed_apps_refresh(app: tauri::AppHandle) {
-    tauri::async_runtime::spawn(async move {
-        let state = app.state::<AppState>();
-        let since = state.apps_indexed_at.lock().ok().and_then(|guard| *guard);
-        let Some(since) = since else {
-            return;
-        };
-        let changed =
-            tauri::async_runtime::spawn_blocking(move || apps::installs_changed_since(since)).await;
-        let Ok(true) = changed else {
-            return;
-        };
-        let _scan_guard = state.apps_scan_lock.lock().await;
-        let since = state.apps_indexed_at.lock().ok().and_then(|guard| *guard);
-        let Some(since) = since else {
-            return;
-        };
-        let changed =
-            tauri::async_runtime::spawn_blocking(move || apps::installs_changed_since(since)).await;
-        let Ok(true) = changed else {
-            return;
-        };
-        let cache_path = apps_cache_path(&app);
-        let scanned =
-            tauri::async_runtime::spawn_blocking(move || apps::scan_force(&cache_path)).await;
-        let Ok(Ok(index)) = scanned else {
-            return;
-        };
-        publish_app_index(&state, index);
-        let _ = app.emit("apps-updated", ());
-    });
-}
-
 fn schedule_initial_palette(app: tauri::AppHandle) {
     tauri::async_runtime::spawn(async move {
         tokio::time::sleep(PALETTE_STARTUP_DELAY).await;
@@ -482,319 +304,29 @@ fn palette_target(
     let hwnd = window
         .hwnd()
         .map_err(|error| format!("cannot resolve window handle: {error}"))?;
-    let info = anchor
-        .and_then(|value| {
-            let monitor = value.monitor?;
-            let work = value.work_area?;
-            let scale = value
-                .scale_factor
-                .unwrap_or_else(|| window_scale_factor(HWND(hwnd.0)));
-            Some((monitor, work, scale))
-        })
-        .or_else(|| monitor_geometry_for_window(HWND(hwnd.0)));
-    let (monitor, work, scale_factor) =
-        info.ok_or_else(|| "cannot resolve monitor geometry".to_string())?;
-    // Recalculate the physical size from the preferred logical dimensions
-    // and the target monitor's DPI every time: presenting on a smaller or
-    // denser display must not permanently shrink the palette, and moving
-    // back to a larger display restores the preferred size. A failed query
-    // or resize is reported instead of positioning for a size the window
-    // does not have.
-    let (width, height) = calculate_clamped_window_size(
+    let frame = palette_window::palette_frame(
+        HWND(hwnd.0),
+        anchor,
+        alignment,
         LOGICAL_WIDTH.load(Ordering::Acquire),
-        DEFAULT_LOGICAL_HEIGHT,
-        work,
-        scale_factor,
-    );
+    )?;
+    // A failed query or resize is reported instead of positioning for a size
+    // the window does not have.
     let size = window.outer_size().map_err(|error| error.to_string())?;
-    if size.width as i32 != width || size.height as i32 != height {
+    if size.width as i32 != frame.width || size.height as i32 != frame.height {
         window
-            .set_size(tauri::PhysicalSize::new(width as u32, height as u32))
+            .set_size(tauri::PhysicalSize::new(frame.width as u32, frame.height as u32))
             .map_err(|error| error.to_string())?;
     }
-    let edge = anchor
-        .and_then(|value| value.taskbar_edge)
-        .or_else(|| taskbar_edge(monitor, work))
-        .unwrap_or(TaskbarEdge::Bottom);
-    Ok(palette_position(work, edge, alignment, width, height))
+    Ok((frame.x, frame.y))
 }
-
-fn presentation_anchor(
-    start_button: Option<RECT>,
-    click_point: Option<POINT>,
-) -> PresentationAnchor {
-    let start_button = start_button.map(PhysicalRect::from);
-    let click_point = click_point.map(PhysicalPoint::from);
-    let monitor_point = click_point.or_else(|| start_button.map(PhysicalRect::center));
-    let geometry = monitor_point.and_then(monitor_geometry_for_point);
-    PresentationAnchor {
-        start_button,
-        click_point,
-        taskbar_edge: geometry.and_then(|(monitor, work, _)| taskbar_edge(monitor, work)),
-        monitor: geometry.map(|(monitor, _, _)| monitor),
-        work_area: geometry.map(|(_, work, _)| work),
-        scale_factor: geometry.map(|(_, _, scale)| scale),
-    }
-}
-
-/// Preferred logical size converted to physical pixels for the target
-/// monitor's scale factor, clamped to the work area and the configured
-/// minimum window bounds.
-fn calculate_clamped_window_size(
-    logical_width: u32,
-    logical_height: u32,
-    work_area: PhysicalRect,
-    scale_factor: f64,
-) -> (i32, i32) {
-    let scale = if scale_factor.is_finite() && scale_factor > 0.0 {
-        scale_factor
-    } else {
-        1.0
-    };
-    let desired_w = (logical_width as f64 * scale).round() as i32;
-    let desired_h = (logical_height as f64 * scale).round() as i32;
-    let work_w = work_area.width().max(1);
-    let work_h = work_area.height().max(1);
-    // The configured logical minimum applies only while it still fits.
-    let min_w = ((MIN_LOGICAL_WIDTH as f64 * scale).round() as i32).clamp(1, work_w);
-    let min_h = ((MIN_LOGICAL_HEIGHT as f64 * scale).round() as i32).clamp(1, work_h);
-    (
-        desired_w.clamp(min_w, work_w),
-        desired_h.clamp(min_h, work_h),
-    )
-}
-
-fn monitor_scale_factor(monitor: windows::Win32::Graphics::Gdi::HMONITOR) -> f64 {
-    let mut dpi_x = 0;
-    let mut dpi_y = 0;
-    if unsafe { GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &mut dpi_x, &mut dpi_y) }.is_ok()
-        && dpi_x > 0
-    {
-        dpi_x as f64 / 96.0
-    } else {
-        1.0
-    }
-}
-
-fn window_scale_factor(window: HWND) -> f64 {
-    let dpi = unsafe { windows::Win32::UI::HiDpi::GetDpiForWindow(window) };
-    if dpi > 0 {
-        dpi as f64 / 96.0
-    } else {
-        1.0
-    }
-}
-
-fn monitor_geometry_for_point(point: PhysicalPoint) -> Option<(PhysicalRect, PhysicalRect, f64)> {
-    let monitor = unsafe {
-        MonitorFromPoint(
-            POINT {
-                x: point.x,
-                y: point.y,
-            },
-            MONITOR_DEFAULTTONEAREST,
-        )
-    };
-    monitor_geometry(monitor)
-}
-
-fn monitor_geometry_for_window(window: HWND) -> Option<(PhysicalRect, PhysicalRect, f64)> {
-    let mut point = POINT::default();
-    let monitor = unsafe {
-        if GetCursorPos(&mut point).is_ok() {
-            MonitorFromPoint(point, MONITOR_DEFAULTTONEAREST)
-        } else {
-            MonitorFromWindow(window, MONITOR_DEFAULTTONEAREST)
-        }
-    };
-    monitor_geometry(monitor)
-}
-
-fn monitor_geometry(
-    monitor: windows::Win32::Graphics::Gdi::HMONITOR,
-) -> Option<(PhysicalRect, PhysicalRect, f64)> {
-    let mut info: MONITORINFO = unsafe { std::mem::zeroed() };
-    info.cbSize = std::mem::size_of::<MONITORINFO>() as u32;
-    if unsafe { GetMonitorInfoW(monitor, &mut info).as_bool() } {
-        Some((
-            PhysicalRect::from(info.rcMonitor),
-            PhysicalRect::from(info.rcWork),
-            monitor_scale_factor(monitor),
-        ))
-    } else {
-        None
-    }
-}
-
-fn taskbar_edge(monitor: PhysicalRect, work: PhysicalRect) -> Option<TaskbarEdge> {
-    let candidates = [
-        (work.top - monitor.top, TaskbarEdge::Top),
-        (monitor.bottom - work.bottom, TaskbarEdge::Bottom),
-        (work.left - monitor.left, TaskbarEdge::Left),
-        (monitor.right - work.right, TaskbarEdge::Right),
-    ];
-    candidates
-        .into_iter()
-        .filter(|(inset, _)| *inset > 0)
-        .max_by_key(|(inset, _)| *inset)
-        .map(|(_, edge)| edge)
-}
-
-fn palette_position(
-    work: PhysicalRect,
-    edge: TaskbarEdge,
-    alignment: taskbar_alignment::Alignment,
-    width: i32,
-    height: i32,
-) -> (i32, i32) {
-    let aligned_x = match alignment {
-        taskbar_alignment::Alignment::Left => work.left,
-        taskbar_alignment::Alignment::Center => work.left + (work.width() - width) / 2,
-        taskbar_alignment::Alignment::Right => work.right - width,
-    };
-    let aligned_y = match alignment {
-        taskbar_alignment::Alignment::Left => work.top,
-        taskbar_alignment::Alignment::Center => work.top + (work.height() - height) / 2,
-        taskbar_alignment::Alignment::Right => work.bottom - height,
-    };
-    let (x, y) = match edge {
-        TaskbarEdge::Bottom => (aligned_x, work.bottom - height),
-        TaskbarEdge::Top => (aligned_x, work.top),
-        TaskbarEdge::Left => (work.left, aligned_y),
-        TaskbarEdge::Right => (work.right - width, aligned_y),
-    };
-    // A window larger than the work area still clamps inside it instead of
-    // panicking on inverted bounds.
-    let max_x = (work.right - width).max(work.left);
-    let max_y = (work.bottom - height).max(work.top);
-    (x.clamp(work.left, max_x), y.clamp(work.top, max_y))
-}
-
-impl PhysicalRect {
-    fn width(self) -> i32 {
-        self.right - self.left
-    }
-
-    fn height(self) -> i32 {
-        self.bottom - self.top
-    }
-
-    fn center(self) -> PhysicalPoint {
-        PhysicalPoint {
-            x: self.left + self.width() / 2,
-            y: self.top + self.height() / 2,
-        }
-    }
-}
-
-impl From<RECT> for PhysicalRect {
-    fn from(rect: RECT) -> Self {
-        Self {
-            left: rect.left,
-            top: rect.top,
-            right: rect.right,
-            bottom: rect.bottom,
-        }
-    }
-}
-
-impl From<POINT> for PhysicalPoint {
-    fn from(point: POINT) -> Self {
-        Self {
-            x: point.x,
-            y: point.y,
-        }
-    }
-}
-
-/// True when the foreground window belongs to this Prism process. WebView2
-/// hosts its own child windows, so compare the owning process rather than a
-/// single HWND.
-fn is_prism_foreground() -> bool {
-    unsafe {
-        let foreground = GetForegroundWindow();
-        if foreground.0.is_null() {
-            return false;
-        }
-        let mut pid = 0u32;
-        GetWindowThreadProcessId(foreground, Some(&mut pid));
-        pid != 0 && pid == GetCurrentProcessId()
-    }
-}
-
-/// Ask Windows for keyboard focus. Deliberately does not use
-/// `AttachThreadInput`: attaching to an elevated foreground thread is blocked
-/// by UIPI (and can deadlock the UI thread), so it silently failed whenever
-/// Task Manager or another elevated window held focus. Unlocking the
-/// foreground lock and raising the window works across integrity levels.
-fn force_foreground(hwnd: HWND) {
-    unsafe {
-        if is_prism_foreground() {
-            return;
-        }
-        let _ = LockSetForegroundWindow(LSFW_UNLOCK);
-        let _ = AllowSetForegroundWindow(GetCurrentProcessId());
-        let _ = BringWindowToTop(hwnd);
-        let _ = SetForegroundWindow(hwnd);
-        let _ = SetActiveWindow(hwnd);
-        let _ = SetFocus(Some(hwnd));
-    }
-}
-
-/// Debug-only: record what currently owns the foreground and whether it is
-/// topmost, so a failing toggle can be attributed to the right window.
-#[cfg(debug_assertions)]
-fn log_foreground(tag: &str) {
-    unsafe {
-        let foreground = GetForegroundWindow();
-        if foreground.0.is_null() {
-            crate::win_key::debug_trace(&format!("{tag} fg=null"));
-            return;
-        }
-        let mut pid = 0u32;
-        GetWindowThreadProcessId(foreground, Some(&mut pid));
-        let mut class = [0u16; 64];
-        let length = windows::Win32::UI::WindowsAndMessaging::GetClassNameW(foreground, &mut class);
-        let class = String::from_utf16_lossy(&class[..length.max(0) as usize]);
-        let ex_style = windows::Win32::UI::WindowsAndMessaging::GetWindowLongPtrW(
-            foreground,
-            windows::Win32::UI::WindowsAndMessaging::GWL_EXSTYLE,
-        ) as u32;
-        crate::win_key::debug_trace(&format!(
-            "{tag} fg_pid={pid} self={} topmost={} class={class}",
-            pid == GetCurrentProcessId(),
-            ex_style & 0x8 != 0
-        ));
-    }
-}
-
-#[cfg(not(debug_assertions))]
-fn log_foreground(_tag: &str) {}
 
 /// Reasserts Prism at the front of the topmost band. `alwaysOnTop` keeps the
 /// window in that band, but an already-active topmost window can still sit
 /// above it until Prism is explicitly repositioned.
 fn raise_palette(window: &tauri::WebviewWindow) -> Result<(), String> {
     let hwnd = window.hwnd().map_err(|error| error.to_string())?;
-    unsafe {
-        SetWindowPos(
-            HWND(hwnd.0),
-            Some(HWND_TOPMOST),
-            0,
-            0,
-            0,
-            0,
-            SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW,
-        )
-        .map_err(|error| error.to_string())?;
-        force_foreground(HWND(hwnd.0));
-        let foreground = GetForegroundWindow();
-        crate::win_key::debug_trace(&format!(
-            "raise fg_self={} fg={:p}",
-            foreground == HWND(hwnd.0),
-            foreground.0
-        ));
-    }
+    palette_window::raise(HWND(hwnd.0))?;
     window.set_focus().map_err(|error| error.to_string())
 }
 
@@ -916,26 +448,24 @@ fn toggle_palette_with_presentation(
     } else {
         "toggle-close-before"
     });
-    crate::win_key::debug_trace(&format!("palette-toggle open={opening}"));
+    win_key::debug_trace(&format!("palette-toggle open={opening}"));
     if !opening {
         ACTIVATION_FOCUS_PENDING.store(false, Ordering::Release);
     }
     if opening {
         PALETTE_TOOK_FOREGROUND.store(false, Ordering::Release);
-        schedule_installed_apps_refresh(app.clone());
+        backend().schedule_installed_apps_refresh();
         set_webview_memory_target(&window, false);
         // Windows can report the palette as unfocused once while it is still
         // acquiring foreground from an elevated window; do not let that
         // spurious blur dismiss the palette before it appears.
         ACTIVATION_FOCUS_PENDING.store(true, Ordering::Release);
-        let grace_app = app.clone();
         let grace_transition = transition;
         tauri::async_runtime::spawn(async move {
             tokio::time::sleep(ACTIVATION_FOCUS_GRACE).await;
             if PALETTE_TRANSITION.load(Ordering::Acquire) == grace_transition {
                 ACTIVATION_FOCUS_PENDING.store(false, Ordering::Release);
             }
-            drop(grace_app);
         });
         PRESENTATION_ANCHOR
             .lock()
@@ -996,8 +526,8 @@ fn present_palette(app: tauri::AppHandle) -> Result<bool, String> {
     // Explorer handled the Win key, so it may still hold activation rights.
     if !is_prism_foreground() {
         if let Ok(hwnd) = window.hwnd() {
-            let granted = crate::win_key::request_foreground(hwnd.0 as isize);
-            crate::win_key::debug_trace(&format!(
+            let granted = win_key::request_foreground(hwnd.0 as isize);
+            win_key::debug_trace(&format!(
                 "explorer-fg granted={granted} self={}",
                 is_prism_foreground()
             ));
@@ -1010,7 +540,7 @@ fn present_palette(app: tauri::AppHandle) -> Result<bool, String> {
     log_foreground("present-after");
     #[cfg(debug_assertions)]
     if let (Ok(pos), Ok(size)) = (window.outer_position(), window.outer_size()) {
-        crate::win_key::debug_trace(&format!(
+        win_key::debug_trace(&format!(
             "present-geom pos={},{} size={}x{} visible={} focused={}",
             pos.x,
             pos.y,
@@ -1060,7 +590,7 @@ fn schedule_palette_hide(app: tauri::AppHandle, transition: u64) {
 
 #[tauri::command]
 fn hide_palette(app: tauri::AppHandle, defer: bool) -> Result<(), String> {
-    crate::win_key::debug_trace(&format!("palette-hide-command defer={defer}"));
+    win_key::debug_trace(&format!("palette-hide-command defer={defer}"));
     let transition = begin_palette_close();
     if defer {
         schedule_palette_hide(app, transition);
@@ -1113,6 +643,13 @@ impl WindowTheme {
     }
 }
 
+fn startup_window_theme(
+    state: Option<&serde_json::Value>,
+    system_light: Option<bool>,
+) -> WindowTheme {
+    WindowTheme::from_request(startup_theme_name(state, system_light)).unwrap_or(WindowTheme::Dark)
+}
+
 fn enforce_solid_window_surface(window: &tauri::WebviewWindow) -> Result<(), String> {
     // `EffectsBuilder::clear_effects()` only empties a new config. Tauri
     // interprets `None` as the instruction to remove the active native
@@ -1127,219 +664,66 @@ fn apply_window_style(window: &tauri::WebviewWindow, theme: WindowTheme) -> Resu
     enforce_solid_window_surface(window)
 }
 
-#[tauri::command]
-async fn get_apps(
-    app: tauri::AppHandle,
-    state: tauri::State<'_, AppState>,
-) -> Result<Vec<apps::AppEntry>, String> {
-    let timer = perf::start();
-    // Fast path: already scanned this session.
-    if let Some(list) = state.apps_cache.lock().map_err(|e| e.to_string())?.clone() {
-        perf::finish(timer, "get_apps_cache", || format!("count={}", list.len()));
-        return Ok(strip_icons(list));
-    }
-    // React StrictMode and fast repeated opens can overlap the initial IPC.
-    // Only one scan should touch the filesystem and icon cache; waiters recheck
-    // the populated in-memory cache after the first scan completes.
-    let _scan_guard = state.apps_scan_lock.lock().await;
-    if let Some(list) = state.apps_cache.lock().map_err(|e| e.to_string())?.clone() {
-        perf::finish(timer, "get_apps_cache_after_wait", || {
-            format!("count={}", list.len())
-        });
-        return Ok(strip_icons(list));
-    }
-    // Off the main thread: scanning walks the shell and extracts icons.
-    let cache_path = apps_cache_path(&app);
-    let index = tauri::async_runtime::spawn_blocking(move || apps::scan(&cache_path))
-        .await
-        .map_err(|e| format!("app scan task failed: {e}"))??;
-    let list = publish_app_index(&state, index);
-    perf::finish(timer, "get_apps_scan", || format!("count={}", list.len()));
-    Ok(strip_icons(list))
-}
+/* ---------------- commands (bodies in prism-core::backend) ---------------- */
 
-/// The full icon payload is several MB of base64. Results only need icons for
-/// the rows that are actually rendered, so the metadata list stays lean and
-/// `get_app_icons` delivers the pixels lazily in one batched IPC call.
-fn strip_icons(mut list: Vec<apps::AppEntry>) -> Vec<apps::AppEntry> {
-    for entry in &mut list {
-        entry.icon = None;
-    }
-    list
+#[tauri::command]
+async fn get_apps() -> Result<Vec<apps::AppEntry>, String> {
+    backend().get_apps().await
 }
 
 #[tauri::command]
-fn get_app_icons(
-    state: tauri::State<'_, AppState>,
-    ids: Vec<String>,
-) -> Result<std::collections::HashMap<String, String>, String> {
-    let mut icons = std::collections::HashMap::new();
-    let apps = state.apps_cache.lock().map_err(|error| error.to_string())?;
-    let apps = apps
-        .as_ref()
-        .ok_or_else(|| "application index is not ready".to_string())?;
-    // Index by app id once instead of scanning the whole list per requested
-    // id (O(n·m) worst case, with m up to 512).
-    let by_id: std::collections::HashMap<&str, &apps::AppEntry> = apps
-        .iter()
-        .map(|entry| (entry.app_id.as_str(), entry))
-        .collect();
-    for id in ids.into_iter().take(512) {
-        let Some(entry) = by_id.get(id.as_str()) else {
-            continue;
-        };
-        if let Some(icon) = entry.icon.as_deref() {
-            icons.insert(id, icon.to_string());
-        }
-    }
-    Ok(icons)
+fn get_app_icons(ids: Vec<String>) -> Result<std::collections::HashMap<String, String>, String> {
+    backend().get_app_icons(ids)
 }
 
 #[tauri::command]
-async fn refresh_apps(
-    app: tauri::AppHandle,
-    state: tauri::State<'_, AppState>,
-) -> Result<Vec<apps::AppEntry>, String> {
-    let _scan_guard = state.apps_scan_lock.lock().await;
-    let cache_path = apps_cache_path(&app);
-    let index = tauri::async_runtime::spawn_blocking(move || {
-        let _ = windows_tools::refresh();
-        apps::scan_force(&cache_path)
-    })
-    .await
-    .map_err(|e| format!("app scan task failed: {e}"))??;
-    let list = publish_app_index(&state, index);
-    Ok(strip_icons(list))
-}
-
-fn apps_cache_path(app: &tauri::AppHandle) -> std::path::PathBuf {
-    app.path()
-        .app_data_dir()
-        .unwrap_or_else(|_| PathBuf::from("."))
-        .join("apps.json")
+async fn refresh_apps() -> Result<Vec<apps::AppEntry>, String> {
+    backend().refresh_apps().await
 }
 
 #[tauri::command]
-async fn launch_app(id: String, state: tauri::State<'_, AppState>) -> Result<(), String> {
-    let timer = perf::start();
-    // Only launch apps that came from our own scan. The entry is cloned so
-    // the cache lock is released before ShellExecuteW, which can block.
-    let entry = {
-        let apps = state.apps_cache.lock().map_err(|e| e.to_string())?;
-        apps.as_ref()
-            .and_then(|list| list.iter().find(|a| a.app_id == id))
-            .cloned()
-            .ok_or_else(|| "unknown app id".to_string())?
-    };
-    let detail = format!("name={};source={}", entry.name, entry.source);
-    let result = tauri::async_runtime::spawn_blocking(move || apps::launch(&entry))
-        .await
-        .map_err(|e| format!("launch task failed: {e}"))?;
-    perf::finish(timer, "launch_app", move || detail.clone());
-    result
+async fn launch_app(id: String) -> Result<(), String> {
+    backend().launch_app(id).await
 }
 
 #[tauri::command]
-async fn launch_app_as_admin(id: String, state: tauri::State<'_, AppState>) -> Result<(), String> {
-    let entry = {
-        let apps = state.apps_cache.lock().map_err(|e| e.to_string())?;
-        apps.as_ref()
-            .and_then(|list| list.iter().find(|app| app.app_id == id))
-            .cloned()
-            .ok_or_else(|| "unknown app id".to_string())?
-    };
-    tauri::async_runtime::spawn_blocking(move || apps::launch_elevated(&entry))
-        .await
-        .map_err(|e| format!("elevated launch task failed: {e}"))?
+async fn launch_app_as_admin(id: String) -> Result<(), String> {
+    backend().launch_app_as_admin(id).await
 }
 
 #[tauri::command]
 async fn open_path(path: String) -> Result<(), String> {
-    let timer = perf::start();
-    let path = PathBuf::from(path);
-    if !path.is_absolute() || !path.exists() {
-        return Err("path must be an existing absolute file or folder".to_string());
-    }
-    let kind = if path.is_dir() { "directory" } else { "file" };
-    let result = tauri::async_runtime::spawn_blocking(move || apps::open_path(&path))
-        .await
-        .map_err(|e| format!("open path task failed: {e}"))?;
-    perf::finish(timer, "open_path", move || format!("kind={kind}"));
-    result
+    backend().open_path(path).await
 }
 
 #[tauri::command]
 async fn open_path_location(path: String) -> Result<(), String> {
-    let timer = perf::start();
-    let path = PathBuf::from(path);
-    if !path.is_absolute() || !path.exists() {
-        return Err("path must be an existing absolute file or folder".to_string());
-    }
-    let result = tauri::async_runtime::spawn_blocking(move || apps::open_path_location(&path))
-        .await
-        .map_err(|e| format!("open path location task failed: {e}"))?;
-    perf::finish(timer, "open_path_location", String::new);
-    result
+    backend().open_path_location(path).await
 }
 
 #[tauri::command]
 async fn run_path_as_admin(path: String) -> Result<(), String> {
-    let path = PathBuf::from(path);
-    if !path.is_absolute() || !path.is_file() {
-        return Err("path must be an existing absolute file".to_string());
-    }
-    tauri::async_runtime::spawn_blocking(move || apps::launch_path_elevated(&path, None, None))
-        .await
-        .map_err(|e| format!("run as administrator task failed: {e}"))?
+    backend().run_path_as_admin(path).await
 }
 
 #[tauri::command]
 async fn is_pinned_to_taskbar(path: String) -> bool {
-    let path = PathBuf::from(path);
-    if !path.is_absolute() {
-        return false;
-    }
-    tauri::async_runtime::spawn_blocking(move || apps::is_pinned_to_taskbar(&path))
-        .await
-        .unwrap_or(false)
+    backend().is_pinned_to_taskbar(path).await
 }
 
 #[tauri::command]
 async fn set_taskbar_pinned(path: String, pinned: bool) -> Result<(), String> {
-    let path = PathBuf::from(path);
-    if !path.is_absolute() || !path.exists() {
-        return Err("path must be an existing absolute file".to_string());
-    }
-    tauri::async_runtime::spawn_blocking(move || apps::set_taskbar_pinned(&path, pinned))
-        .await
-        .map_err(|e| format!("taskbar pin task failed: {e}"))?
+    backend().set_taskbar_pinned(path, pinned).await
 }
 
 #[tauri::command]
 async fn show_path_properties(path: String) -> Result<(), String> {
-    let path = PathBuf::from(path);
-    if !path.is_absolute() || !path.exists() {
-        return Err("path must be an existing absolute file or folder".to_string());
-    }
-    tauri::async_runtime::spawn_blocking(move || apps::show_properties(&path))
-        .await
-        .map_err(|e| format!("properties task failed: {e}"))?
+    backend().show_path_properties(path).await
 }
 
 #[tauri::command]
 async fn start_file_drag(app: tauri::AppHandle, paths: Vec<String>) -> Result<bool, String> {
-    if paths.is_empty() {
-        return Err("No file paths provided".to_string());
-    }
-    let path_bufs: Vec<PathBuf> = paths
-        .into_iter()
-        .map(PathBuf::from)
-        .filter(|p| p.is_absolute() && p.exists())
-        .collect();
-    if path_bufs.is_empty() {
-        return Err("No existing absolute file paths provided for drag".to_string());
-    }
-
+    let path_bufs = backend().drag_paths(paths)?;
     let (tx, rx) = tokio::sync::oneshot::channel();
     app.run_on_main_thread(move || {
         let result = drag::drag_files(&path_bufs);
@@ -1359,59 +743,28 @@ async fn start_file_drag(app: tauri::AppHandle, paths: Vec<String>) -> Result<bo
 }
 
 #[tauri::command]
-fn query_phase1(
-    query: String,
-    recent: Vec<query::RecentCommand>,
-    state: tauri::State<'_, AppState>,
-) -> query::Phase1Response {
-    let timer = perf::start();
-    let query_length = query.chars().count();
-    let windows = query::list_open_windows();
-    let apps_guard = state.apps_cache.lock().ok();
-    let apps = apps_guard
-        .as_ref()
-        .and_then(|guard| guard.as_ref())
-        .map(|list| list.as_slice())
-        .unwrap_or(&[]);
-    let response = query::phase1(&query, &recent, apps, &windows, &state.intent);
-    perf::finish(timer, "query_phase1", || {
-        format!(
-            "queryLength={query_length};actions={};apps={};windows={};recents={}",
-            response.actions.len(),
-            response.apps.len(),
-            response.windows.len(),
-            response.recents.len()
-        )
-    });
-    response
+fn query_phase1(query: String, recent: Vec<query::RecentCommand>) -> query::Phase1Response {
+    backend().query_phase1(query, recent)
 }
 
 #[tauri::command]
-async fn query_power_plans(query: String) -> Result<Vec<crate::power::PowerPlanHit>, String> {
-    tauri::async_runtime::spawn_blocking(move || power::search(&query))
-        .await
-        .map_err(|error| format!("power plan query task failed: {error}"))?
+async fn query_power_plans(query: String) -> Result<Vec<power::PowerPlanHit>, String> {
+    backend().query_power_plans(query).await
 }
 
 #[tauri::command]
 async fn execute_action(id: String) -> Result<(), String> {
-    tauri::async_runtime::spawn_blocking(move || query::execute(&id))
-        .await
-        .map_err(|error| format!("action task failed: {error}"))?
+    backend().execute_action(id).await
 }
 
 #[tauri::command]
-fn accept_intent(
-    query: String,
-    action_id: String,
-    state: tauri::State<'_, AppState>,
-) -> Result<(), String> {
-    query::accept_intent(&query, &action_id, &state.intent)
+fn accept_intent(query: String, action_id: String) -> Result<(), String> {
+    backend().accept_intent(query, action_id)
 }
 
 #[tauri::command]
 fn focus_window(hwnd: i64) -> Result<(), String> {
-    query::focus_window(hwnd)
+    backend().focus_window(hwnd)
 }
 
 /// Phase 2: SQLite FTS5 file search. The UI must not block Phase 1 on this.
@@ -1419,84 +772,39 @@ fn focus_window(hwnd: i64) -> Result<(), String> {
 async fn search_files(
     query: String,
     limit: Option<usize>,
-    state: tauri::State<'_, AppState>,
 ) -> Result<files::FileSearchResponse, String> {
-    let timer = perf::start();
-    let query_length = query.chars().count();
-    let index = state.file_index.clone();
-    // Allocate the generation before scheduling. Worker start order is not
-    // request order, so allocating inside spawn_blocking lets an older query
-    // supersede a newer one.
-    let generation = index.begin_search();
-    let result = tauri::async_runtime::spawn_blocking(move || {
-        index.search_with_generation(&query, limit, generation)
-    })
-    .await
-    .map_err(|error| format!("file search task failed: {error}"));
-    perf::finish(timer, "search_files", || match &result {
-        Ok(response) => format!(
-            "queryLength={query_length};results={};pathBrowse={}",
-            response.items.len(),
-            response.path_browse
-        ),
-        Err(_) => format!("queryLength={query_length};error=true"),
-    });
-    result
+    backend().search_files(query, limit).await
 }
 
 #[tauri::command]
-async fn rebuild_file_index(state: tauri::State<'_, AppState>) -> Result<(), String> {
-    state.file_index.rebuild();
+async fn rebuild_file_index() -> Result<(), String> {
+    backend().rebuild_file_index();
     Ok(())
 }
 
 #[tauri::command]
 async fn get_file_thumbnails(paths: Vec<String>) -> Vec<Option<String>> {
-    tauri::async_runtime::spawn_blocking(move || files::file_thumbnails(paths))
-        .await
-        .unwrap_or_default()
+    backend().get_file_thumbnails(paths).await
 }
 
 #[tauri::command]
 async fn get_quick_access() -> Vec<files::QuickAccessEntry> {
-    // Known-folder resolution and is_dir checks can block on redirected or
-    // network locations; keep the startup path off the main thread.
-    tauri::async_runtime::spawn_blocking(files::quick_access)
-        .await
-        .unwrap_or_default()
-}
-
-fn filter_existing_paths(paths: Vec<String>) -> Vec<String> {
-    paths
-        .into_iter()
-        .take(64)
-        .filter(|value| value.len() <= 4096)
-        .filter(|value| {
-            let path = Path::new(value);
-            path.is_absolute() && path.exists()
-        })
-        .collect()
+    backend().get_quick_access().await
 }
 
 #[tauri::command]
 async fn existing_paths(paths: Vec<String>) -> Vec<String> {
-    tauri::async_runtime::spawn_blocking(move || filter_existing_paths(paths))
-        .await
-        .unwrap_or_default()
+    backend().existing_paths(paths).await
 }
 
 #[tauri::command]
 async fn perform_power_action(action: String) -> Result<(), String> {
-    tauri::async_runtime::spawn_blocking(move || power::perform(&action))
-        .await
-        .map_err(|error| format!("power action task failed: {error}"))?
+    backend().perform_power_action(action).await
 }
 
 #[tauri::command]
 async fn set_power_plan(guid: String) -> Result<(), String> {
-    tauri::async_runtime::spawn_blocking(move || power::set_active(&guid))
-        .await
-        .map_err(|error| format!("power plan task failed: {error}"))?
+    backend().set_power_plan(guid).await
 }
 
 #[tauri::command]
@@ -1541,75 +849,53 @@ fn set_taskbar_alignment(app: tauri::AppHandle, alignment: String) -> Result<(),
 }
 
 #[tauri::command]
-async fn get_taskbar_settings(
-    app: tauri::AppHandle,
-) -> Result<taskbar_customization::TaskbarSettings, String> {
-    tauri::async_runtime::spawn_blocking(move || taskbar_customization::settings(&app))
-        .await
-        .map_err(|error| format!("taskbar settings task failed: {error}"))?
+async fn get_taskbar_settings() -> Result<taskbar_customization::TaskbarSettings, String> {
+    backend().get_taskbar_settings().await
 }
 
 #[tauri::command]
 fn set_taskbar_thickness(value: String) -> Result<(), String> {
-    taskbar_customization::set_thickness(&value)
+    backend().set_taskbar_thickness(value)
 }
 
 #[tauri::command]
 fn set_taskbar_auto_hide(enabled: bool) -> Result<(), String> {
-    taskbar_customization::set_auto_hide(enabled)
+    backend().set_taskbar_auto_hide(enabled)
 }
 
 #[tauri::command]
 fn set_taskbar_combine_buttons(value: String) -> Result<(), String> {
-    taskbar_customization::set_combine_buttons(&value)
+    backend().set_taskbar_combine_buttons(value)
 }
 
 #[tauri::command]
 fn set_taskbar_scroll_volume(enabled: bool) {
-    audio_hook::set_enabled(enabled);
+    backend().set_taskbar_scroll_volume(enabled);
 }
 
-/// Pushes the accent preset to the native volume OSD so its level bar stays
-/// in family with the palette accent.
 #[tauri::command]
 fn set_osd_accent(accent: String) {
-    crate::audio_osd::set_accent(&accent);
+    backend().set_osd_accent(accent);
 }
 
 #[tauri::command]
-async fn set_custom_start_icon(app: tauri::AppHandle, base64_png: String) -> Result<(), String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        taskbar_customization::set_custom_start_icon(&app, &base64_png)
-    })
-    .await
-    .map_err(|error| format!("taskbar icon task failed: {error}"))?
+async fn set_custom_start_icon(base64_png: String) -> Result<(), String> {
+    backend().set_custom_start_icon(base64_png).await
 }
 
 #[tauri::command]
-async fn select_custom_start_icon(app: tauri::AppHandle, id: String) -> Result<(), String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        taskbar_customization::select_custom_start_icon(&app, &id)
-    })
-    .await
-    .map_err(|error| format!("taskbar icon selection task failed: {error}"))?
+async fn select_custom_start_icon(id: String) -> Result<(), String> {
+    backend().select_custom_start_icon(id).await
 }
 
 #[tauri::command]
-async fn remove_custom_start_icon(app: tauri::AppHandle, id: String) -> Result<(), String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        taskbar_customization::remove_custom_start_icon(&app, &id)
-    })
-    .await
-    .map_err(|error| format!("taskbar icon removal task failed: {error}"))?
+async fn remove_custom_start_icon(id: String) -> Result<(), String> {
+    backend().remove_custom_start_icon(id).await
 }
 
 #[tauri::command]
-async fn set_taskbar_start_icon(app: tauri::AppHandle, value: String) -> Result<(), String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        taskbar_customization::set_start_icon(&app, &value)
-    })
-    .await
-    .map_err(|error| format!("taskbar icon mode task failed: {error}"))?
+async fn set_taskbar_start_icon(value: String) -> Result<(), String> {
+    backend().set_taskbar_start_icon(value).await
 }
 
 fn is_animatable_window_width(width: u32) -> bool {
@@ -1629,465 +915,23 @@ fn set_window_style(app: tauri::AppHandle, theme: String) -> Result<(), String> 
 
 #[tauri::command]
 fn get_system_theme() -> String {
-    match theme::apps_light() {
-        Some(true) => "light".to_string(),
-        _ => "dark".to_string(),
-    }
-}
-
-/// Validates a shortcut string against the whitelist and (for non-Win
-/// combos) the platform parser.
-fn validate_shortcut(combo: &str) -> Result<(), String> {
-    if !ALLOWED_SHORTCUTS.contains(&combo) {
-        return Err(format!(
-            "shortcut '{combo}' is not supported; pick one of: {}",
-            ALLOWED_SHORTCUTS.join(", ")
-        ));
-    }
-    if combo != "Win" {
-        combo
-            .parse::<Shortcut>()
-            .map_err(|_| format!("invalid shortcut '{combo}'"))?;
-    }
-    Ok(())
-}
-
-fn startup_shortcut(state: Option<&serde_json::Value>) -> String {
-    state
-        .and_then(|value| value.get("settings"))
-        .and_then(|settings| settings.get("shortcut"))
-        .and_then(|shortcut| shortcut.as_str())
-        .filter(|shortcut| validate_shortcut(shortcut).is_ok())
-        .unwrap_or(DEFAULT_SHORTCUT)
-        .to_string()
-}
-
-fn startup_taskbar_alignment(state: Option<&serde_json::Value>) -> String {
-    state
-        .and_then(|value| value.get("settings"))
-        .and_then(|settings| settings.get("taskbarAlignment"))
-        .and_then(|alignment| alignment.as_str())
-        .filter(|alignment| matches!(*alignment, "left" | "center" | "right"))
-        .unwrap_or("center")
-        .to_string()
-}
-
-fn startup_window_theme(
-    state: Option<&serde_json::Value>,
-    system_light: Option<bool>,
-) -> WindowTheme {
-    match state
-        .and_then(|value| value.get("settings"))
-        .and_then(|settings| settings.get("theme"))
-        .and_then(|theme| theme.as_str())
-    {
-        Some("light") => WindowTheme::Light,
-        Some("dark") => WindowTheme::Dark,
-        _ if system_light == Some(true) => WindowTheme::Light,
-        _ => WindowTheme::Dark,
-    }
-}
-
-fn apply_startup_shortcut(app: &tauri::AppHandle, combo: String) {
-    let generation = app
-        .state::<AppState>()
-        .shortcut_generation
-        .load(Ordering::Acquire);
-    let app = app.clone();
-    tauri::async_runtime::spawn(async move {
-        if app
-            .state::<AppState>()
-            .shortcut_generation
-            .load(Ordering::Acquire)
-            != generation
-        {
-            return;
-        }
-        let first_attempt = {
-            let attempt_app = app.clone();
-            let attempt_combo = combo.clone();
-            tauri::async_runtime::spawn_blocking(move || {
-                apply_shortcut_if_current(&attempt_app, &attempt_combo, generation)
-            })
-            .await
-        };
-        if matches!(first_attempt, Ok(Ok(()))) {
-            return;
-        }
-
-        for _ in 0..STARTUP_SHELL_RETRY_ATTEMPTS {
-            tokio::time::sleep(STARTUP_SHELL_RETRY_DELAY).await;
-            if app
-                .state::<AppState>()
-                .shortcut_generation
-                .load(Ordering::Acquire)
-                != generation
-            {
-                return;
-            }
-            let retry_app = app.clone();
-            let retry_combo = combo.clone();
-            let result = tauri::async_runtime::spawn_blocking(move || {
-                apply_shortcut_if_current(&retry_app, &retry_combo, generation)
-            })
-            .await;
-            if matches!(result, Ok(Ok(()))) {
-                return;
-            }
-        }
-        let _ = app.emit(
-            win_key::FAILED_EVENT,
-            "Explorer taskbar integration was unavailable during startup",
-        );
-    });
-}
-
-/// Applies a global shortcut. The new binding is activated and proven
-/// BEFORE the old one is released; on any failure the previous shortcut
-/// stays active and an error is returned. State is only updated on success.
-fn apply_shortcut_if_current(
-    app: &tauri::AppHandle,
-    combo: &str,
-    generation: u64,
-) -> Result<(), String> {
-    apply_shortcut_with_generation(app, combo, Some(generation))
-}
-
-fn apply_shortcut_with_generation(
-    app: &tauri::AppHandle,
-    combo: &str,
-    expected_generation: Option<u64>,
-) -> Result<(), String> {
-    validate_shortcut(combo)?;
-    let state = app.state::<AppState>();
-    let mut prev = state.shortcut.lock().map_err(|e| e.to_string())?;
-    if expected_generation
-        .is_some_and(|generation| state.shortcut_generation.load(Ordering::Acquire) != generation)
-    {
-        return Err("shortcut request was superseded".to_string());
-    }
-    if *prev == combo {
-        // Idempotent: already active.
-        return Ok(());
-    }
-
-    let gs = app.global_shortcut();
-    if combo == "Win" {
-        // Standalone Win mode uses the native hook rather than a plugin
-        // registration. If the hook later fails, it self-disables and the
-        // frontend is notified.
-        let provider_suppression = start_menu::enable(app)?;
-        win_key::set_provider_suppression(provider_suppression);
-        if let Err(error) = win_key::set_enabled(true) {
-            win_key::set_provider_suppression(false);
-            let _ = start_menu::restore(app);
-            return Err(error);
-        }
-        if let Ok(old) = prev.parse::<Shortcut>() {
-            let _ = gs.unregister(old);
-        }
-        *prev = combo.to_string();
-        Ok(())
-    } else {
-        // Register the new combo first; only release the old one after
-        // success, and never touch the hook unless everything worked.
-        register_shortcut(app, combo)?;
-        if let Err(error) = win_key::set_enabled(false) {
-            if let Ok(shortcut) = combo.parse::<Shortcut>() {
-                let _ = gs.unregister(shortcut);
-            }
-            return Err(error);
-        }
-        if let Err(error) = start_menu::restore(app) {
-            let _ = win_key::set_enabled(true);
-            if let Ok(shortcut) = combo.parse::<Shortcut>() {
-                let _ = gs.unregister(shortcut);
-            }
-            return Err(error);
-        }
-        win_key::set_provider_suppression(false);
-        if let Ok(old) = prev.parse::<Shortcut>() {
-            let _ = gs.unregister(old);
-        }
-        *prev = combo.to_string();
-        Ok(())
-    }
+    backend().get_system_theme()
 }
 
 #[tauri::command]
-async fn set_shortcut(app: tauri::AppHandle, combo: String) -> Result<(), String> {
-    validate_shortcut(&combo)?;
-    let generation = app
-        .state::<AppState>()
-        .shortcut_generation
-        .fetch_add(1, Ordering::AcqRel)
-        + 1;
-    tauri::async_runtime::spawn_blocking(move || {
-        apply_shortcut_if_current(&app, &combo, generation)
-    })
-    .await
-    .map_err(|error| format!("shortcut task failed: {error}"))?
-}
-
-/// Reads persisted state and performs the one-time 0.3.3 shortcut migration.
-/// Version 2 settings are preserved except for the shortcut, which the 0.3.3
-/// installer contract intentionally changes to the new Win default.
-fn load_state_value(app: &tauri::AppHandle) -> Result<Option<serde_json::Value>, String> {
-    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
-    let path = dir.join("prism.json");
-    if !path.exists() {
-        return Ok(None);
-    }
-    let text = std::fs::read_to_string(&path).map_err(|e| format!("failed to read state: {e}"))?;
-    let value: serde_json::Value =
-        serde_json::from_str(&text).map_err(|e| format!("corrupt state file: {e}"))?;
-    let Some((value, migrated)) = migrate_state_value(value)? else {
-        return Ok(None);
-    };
-    if migrated {
-        persist_state_value(&dir, &value)?;
-    }
-    Ok(Some(value))
-}
-
-fn migrate_state_value(
-    mut value: serde_json::Value,
-) -> Result<Option<(serde_json::Value, bool)>, String> {
-    let version = value.get("version").and_then(|v| v.as_u64());
-    if version == Some(STATE_VERSION as u64) {
-        return Ok(Some((value, false)));
-    }
-    if version != Some(LEGACY_STATE_VERSION as u64) {
-        return Ok(None);
-    }
-
-    let settings = value
-        .get_mut("settings")
-        .and_then(|settings| settings.as_object_mut())
-        .ok_or_else(|| "legacy state.settings must be an object".to_string())?;
-    settings.insert("shortcut".to_string(), serde_json::json!(DEFAULT_SHORTCUT));
-    value["version"] = serde_json::json!(STATE_VERSION);
-    validate_state(&value)?;
-    Ok(Some((value, true)))
+async fn set_shortcut(combo: String) -> Result<(), String> {
+    backend().set_shortcut(combo).await
 }
 
 #[tauri::command]
-fn load_state(app: tauri::AppHandle) -> Result<serde_json::Value, String> {
-    Ok(load_state_value(&app)?.unwrap_or(serde_json::Value::Null))
+fn load_state() -> Result<serde_json::Value, String> {
+    backend().load_state()
 }
 
 /// Persists settings atomically after validating every value.
 #[tauri::command]
-fn save_state(app: tauri::AppHandle, state: serde_json::Value) -> Result<(), String> {
-    validate_state(&state)?;
-    let mut value = state;
-    value["version"] = serde_json::json!(STATE_VERSION);
-    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
-    persist_state_value(&dir, &value)
-}
-
-fn persist_state_value(dir: &std::path::Path, value: &serde_json::Value) -> Result<(), String> {
-    std::fs::create_dir_all(dir).map_err(|e| format!("failed to create data dir: {e}"))?;
-    let text = serde_json::to_string_pretty(&value).map_err(|e| e.to_string())?;
-    let final_path = dir.join("prism.json");
-    let tmp_path = dir.join("prism.json.tmp");
-    std::fs::write(&tmp_path, text).map_err(|e| format!("failed to save state: {e}"))?;
-    files::replace_file(&tmp_path, &final_path).map_err(|e| format!("failed to commit state: {e}"))
-}
-
-/// Validates the persisted state shape; returns Err on anything unexpected.
-fn validate_state(state: &serde_json::Value) -> Result<(), String> {
-    let obj = state.as_object().ok_or("state must be an object")?;
-    let settings = obj
-        .get("settings")
-        .and_then(|v| v.as_object())
-        .ok_or("state.settings must be an object")?;
-    if let Some(accent) = settings.get("accent").and_then(|v| v.as_str()) {
-        if !matches!(accent, "iris" | "azure" | "mint" | "amber" | "rose") {
-            return Err(format!("unknown accent '{accent}'"));
-        }
-    }
-    if let Some(theme) = settings.get("theme").and_then(|v| v.as_str()) {
-        if !matches!(theme, "system" | "dark" | "light") {
-            return Err(format!("unknown theme '{theme}'"));
-        }
-    }
-    if let Some(always_on_top) = settings.get("alwaysOnTop") {
-        if !always_on_top.is_boolean() {
-            return Err("state.settings.alwaysOnTop must be a boolean".to_string());
-        }
-    }
-    if let Some(scroll_vol) = settings.get("taskbarScrollVolume") {
-        if !scroll_vol.is_boolean() {
-            return Err("state.settings.taskbarScrollVolume must be a boolean".to_string());
-        }
-    }
-    if let Some(alignment) = settings.get("taskbarAlignment") {
-        let alignment = alignment
-            .as_str()
-            .ok_or("state.settings.taskbarAlignment must be a string")?;
-        if !matches!(alignment, "left" | "center" | "right") {
-            return Err(format!("unknown taskbar alignment '{alignment}'"));
-        }
-    }
-    if let Some(shortcut) = settings.get("shortcut").and_then(|v| v.as_str()) {
-        validate_shortcut(shortcut)?;
-    }
-    if let Some(width) = settings.get("width").and_then(|v| v.as_u64()) {
-        if !matches!(width, 560 | 640 | 720) {
-            return Err(format!("unsupported width '{width}'"));
-        }
-    }
-    if let Some(zoom) = settings.get("viewZoom") {
-        let zoom = zoom
-            .as_u64()
-            .ok_or("state.settings.viewZoom must be an integer")?;
-        if !(70..=150).contains(&zoom) || zoom % 10 != 0 {
-            return Err(format!("unsupported view zoom '{zoom}'"));
-        }
-    }
-    if let Some(quick_access) = settings.get("quickAccess") {
-        let entries = quick_access
-            .as_array()
-            .ok_or("state.settings.quickAccess must be an array")?;
-        if entries.len() > 6 {
-            return Err("state.settings.quickAccess has too many entries".to_string());
-        }
-        let mut seen = std::collections::HashSet::new();
-        for entry in entries {
-            let kind = entry
-                .as_str()
-                .ok_or("quick access entries must be strings")?;
-            if !matches!(
-                kind,
-                "home" | "desktop" | "downloads" | "documents" | "pictures" | "music" | "videos"
-            ) {
-                return Err(format!("unknown quick access entry '{kind}'"));
-            }
-            if !seen.insert(kind) {
-                return Err(format!("duplicate quick access entry '{kind}'"));
-            }
-        }
-    }
-    if let Some(collapsed) = settings.get("quickAccessCollapsed") {
-        if !collapsed.is_boolean() {
-            return Err("state.settings.quickAccessCollapsed must be a boolean".to_string());
-        }
-    }
-    if let Some(section_order) = settings.get("sectionOrder") {
-        let entries = section_order
-            .as_array()
-            .ok_or("state.settings.sectionOrder must be an array")?;
-        if entries.len() > 4 {
-            return Err("state.settings.sectionOrder has too many entries".to_string());
-        }
-        let mut seen = std::collections::HashSet::new();
-        for entry in entries {
-            let id = entry
-                .as_str()
-                .ok_or("section order entries must be strings")?;
-            if !matches!(id, "pinned" | "recent" | "quick" | "apps") {
-                return Err(format!("unknown section order entry '{id}'"));
-            }
-            if !seen.insert(id) {
-                return Err(format!("duplicate section order entry '{id}'"));
-            }
-        }
-    }
-    if let Some(pinned_apps) = settings.get("pinnedApps") {
-        let entries = pinned_apps
-            .as_array()
-            .ok_or("state.settings.pinnedApps must be an array")?;
-        if entries.len() > 64 {
-            return Err("state.settings.pinnedApps has too many entries".to_string());
-        }
-        let mut seen = std::collections::HashSet::new();
-        for entry in entries {
-            let app_id = entry
-                .as_str()
-                .filter(|value| !value.is_empty() && value.len() <= 4096)
-                .ok_or("pinned app ids must be non-empty strings")?;
-            if !seen.insert(app_id) {
-                return Err("state.settings.pinnedApps contains duplicates".to_string());
-            }
-        }
-    }
-    if let Some(app_groups) = settings.get("appGroups") {
-        let groups = app_groups
-            .as_array()
-            .ok_or("state.settings.appGroups must be an array")?;
-        if groups.len() > 16 {
-            return Err("state.settings.appGroups has too many entries".to_string());
-        }
-        let mut group_ids = std::collections::HashSet::new();
-        for group in groups {
-            let group = group
-                .as_object()
-                .ok_or("app group entries must be objects")?;
-            let id = group
-                .get("id")
-                .and_then(|value| value.as_str())
-                .filter(|value| !value.is_empty() && value.len() <= 96)
-                .ok_or("app group ids must be non-empty strings")?;
-            let name = group
-                .get("name")
-                .and_then(|value| value.as_str())
-                .filter(|value| !value.trim().is_empty() && value.len() <= 64)
-                .ok_or("app group names must be non-empty strings")?;
-            if !group_ids.insert(id) {
-                return Err("state.settings.appGroups contains duplicate ids".to_string());
-            }
-            if !group
-                .get("collapsed")
-                .is_some_and(serde_json::Value::is_boolean)
-            {
-                return Err("app group collapsed must be a boolean".to_string());
-            }
-            let app_ids = group
-                .get("appIds")
-                .and_then(|value| value.as_array())
-                .ok_or("app group appIds must be an array")?;
-            if app_ids.len() > 64 {
-                return Err(format!("app group '{name}' has too many apps"));
-            }
-            let mut seen = std::collections::HashSet::new();
-            for app_id in app_ids {
-                let app_id = app_id
-                    .as_str()
-                    .filter(|value| !value.is_empty() && value.len() <= 4096)
-                    .ok_or("app group app ids must be non-empty strings")?;
-                if !seen.insert(app_id) {
-                    return Err(format!("app group '{name}' contains duplicate apps"));
-                }
-            }
-        }
-    }
-    if let Some(history) = obj.get("history") {
-        let Some(entries) = history.as_array() else {
-            return Err("state.history must be an array".to_string());
-        };
-        if entries.len() > 20 {
-            return Err("state.history has too many entries".to_string());
-        }
-        for entry in entries {
-            let Some(entry) = entry.as_object() else {
-                return Err("history entries must be objects".to_string());
-            };
-            let valid_id = entry
-                .get("id")
-                .and_then(|value| value.as_str())
-                .is_some_and(|value| !value.is_empty() && value.len() <= 4096);
-            let valid_title = entry
-                .get("title")
-                .and_then(|value| value.as_str())
-                .is_some_and(|value| !value.is_empty() && value.len() <= 512);
-            let valid_timestamp = entry.get("ts").is_some_and(|value| value.is_u64());
-            if !valid_id || !valid_title || !valid_timestamp {
-                return Err("invalid history entry".to_string());
-            }
-        }
-    }
-    Ok(())
+fn save_state(state: serde_json::Value) -> Result<(), String> {
+    backend().save_state(state)
 }
 
 #[tauri::command]
@@ -2095,15 +939,9 @@ async fn quit_app(app: tauri::AppHandle) -> Result<(), String> {
     // Ensure interception is fully torn down before exiting. Tearing down the
     // Win-key bridge can take up to two seconds (pump stop handshake); it runs
     // off the main thread so quitting never freezes the UI.
-    let teardown_app = app.clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        taskbar::release_on_exit();
-        let _ = win_key::set_enabled(false);
-        let _ = start_menu::restore(&teardown_app);
-        win_key::set_provider_suppression(false);
-    })
-    .await
-    .map_err(|error| format!("quit teardown task failed: {error}"))?;
+    tauri::async_runtime::spawn_blocking(|| backend().teardown_for_exit())
+        .await
+        .map_err(|error| format!("quit teardown task failed: {error}"))?;
     app.exit(0);
     Ok(())
 }

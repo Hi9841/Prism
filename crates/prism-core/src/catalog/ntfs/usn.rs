@@ -69,7 +69,7 @@ pub fn journal_continuity(
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct JournalReadBatch {
+pub struct JournalReadBatch {
     pub next_usn: i64,
     pub changes: Vec<NtfsChange>,
     pub record_count: u64,

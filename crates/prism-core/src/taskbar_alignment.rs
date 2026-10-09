@@ -48,14 +48,14 @@ type AppliedMoves = (Vec<(usize, i32, i32)>, std::time::Instant);
 static LAST_ALIGNMENT_APPLY: Mutex<Option<AppliedMoves>> = Mutex::new(None);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Alignment {
+pub enum Alignment {
     Left,
     Center,
     Right,
 }
 
 impl Alignment {
-    pub(crate) fn parse(value: &str) -> Result<Self, String> {
+    pub fn parse(value: &str) -> Result<Self, String> {
         match value {
             "left" => Ok(Self::Left),
             "center" => Ok(Self::Center),
@@ -100,7 +100,7 @@ impl Alignment {
 }
 
 #[derive(Clone, Copy)]
-pub(crate) struct CompanionMove {
+pub struct CompanionMove {
     pub window: HWND,
     pub x: i32,
     pub y: i32,
@@ -156,7 +156,7 @@ pub fn set(value: &str) -> Result<(), String> {
 
 /// Seeds the active alignment without enumerating Explorer windows. Startup
 /// can then return immediately while the deferred repair applies geometry.
-pub(crate) fn initialize(value: &str) -> Result<(), String> {
+pub fn initialize(value: &str) -> Result<(), String> {
     let alignment = Alignment::parse(value)?;
     let _ = write_shared_alignment(alignment);
     INITIAL_REPAIR_DONE.store(false, Ordering::Release);
@@ -164,14 +164,14 @@ pub(crate) fn initialize(value: &str) -> Result<(), String> {
     Ok(())
 }
 
-pub(crate) fn set_with_companion(
+pub fn set_with_companion(
     alignment: Alignment,
     companion: CompanionMove,
 ) -> Result<(), String> {
     set_alignment(alignment, Some(companion))
 }
 
-pub(crate) fn reapply_current() -> Result<(), String> {
+pub fn reapply_current() -> Result<(), String> {
     // A settings change may already have completed the full pass; avoid
     // enumerating Explorer a second time in that case.
     if INITIAL_REPAIR_DONE.load(Ordering::Acquire) {
@@ -183,7 +183,7 @@ pub(crate) fn reapply_current() -> Result<(), String> {
 /// Reasserts the active alignment while reopening the palette. This path does
 /// not rewrite Explorer settings; it only repairs the live HWND geometry when
 /// Explorer/StartAllBack has relaid out the taskbar since the last selection.
-pub(crate) fn reapply_with_companion(companion: CompanionMove) -> Result<(), String> {
+pub fn reapply_with_companion(companion: CompanionMove) -> Result<(), String> {
     // Presentation must never wait behind a full Explorer enumeration. The
     // watcher owns taskbar repair; opening only needs Prism's companion move.
     // When the window already sits at the target position there is nothing to
@@ -260,7 +260,7 @@ fn set_alignment(alignment: Alignment, companion: Option<CompanionMove>) -> Resu
     Ok(())
 }
 
-pub(crate) fn current() -> Alignment {
+pub fn current() -> Alignment {
     Alignment::from_code(ACTIVE_ALIGNMENT.load(Ordering::Acquire)).unwrap_or(Alignment::Center)
 }
 
@@ -662,7 +662,7 @@ fn class_name_eq(actual: &[u16], expected: &str) -> bool {
             .all(|(actual, expected)| (*actual as u8).eq_ignore_ascii_case(&expected))
 }
 
-pub(crate) fn notify_taskbars(setting: &str) {
+pub fn notify_taskbars(setting: &str) {
     let setting = wide(setting);
     for taskbar in taskbar_windows() {
         let mut result = 0usize;

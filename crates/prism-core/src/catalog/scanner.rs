@@ -167,10 +167,10 @@ pub fn reconcile_directory(
 /// efficiency speed. Without the throttle a multi-million-entry walk pins a
 /// core at full clock for minutes - priority alone only yields CPU time, it
 /// never lowers the power cost of the time it does get.
-pub(crate) struct ScanEfficiencyGuard;
+pub struct ScanEfficiencyGuard;
 
 impl ScanEfficiencyGuard {
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         unsafe {
             let _ = SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
             let throttled = THREAD_POWER_THROTTLING_STATE {

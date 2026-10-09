@@ -12,7 +12,7 @@ use crate::catalog::types::VolumeState;
 pub use crate::catalog::types::{FileSearchResponse, QuickAccessEntry};
 pub use crate::catalog::{file_thumbnails, quick_access, warm, FileIndex};
 
-pub(crate) fn replace_file(temp: &Path, destination: &Path) -> Result<(), String> {
+pub fn replace_file(temp: &Path, destination: &Path) -> Result<(), String> {
     let from: Vec<u16> = temp.as_os_str().encode_wide().chain(Some(0)).collect();
     let to: Vec<u16> = destination
         .as_os_str()

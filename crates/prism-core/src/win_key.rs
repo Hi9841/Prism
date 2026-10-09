@@ -25,7 +25,6 @@ use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, Ordering};
 use std::sync::{mpsc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-use tauri::{AppHandle, Emitter};
 use windows::core::{BOOL, PCSTR, PCWSTR};
 use windows::Win32::Devices::HumanInterfaceDevice::{
     HID_USAGE_GENERIC_KEYBOARD, HID_USAGE_PAGE_GENERIC, KEYBOARD_OVERRUN_MAKE_CODE,
@@ -369,7 +368,6 @@ impl WinKeyMachine {
 /*  Hook plumbing                                                       */
 /* ------------------------------------------------------------------ */
 
-static APP: OnceLock<AppHandle> = OnceLock::new();
 static ACTIVE: AtomicBool = AtomicBool::new(false);
 static PROVIDER_SUPPRESSES_START: AtomicBool = AtomicBool::new(false);
 static RAW_OBSERVER_ACTIVE: AtomicBool = AtomicBool::new(false);
@@ -488,10 +486,6 @@ static ACTION_RX: Mutex<Option<mpsc::Receiver<Action>>> = Mutex::new(None);
 static STOP_READY: Mutex<Option<StopReady>> = Mutex::new(None);
 static RAW_INPUT_CLASS: OnceLock<Result<(), String>> = OnceLock::new();
 
-pub fn init(app: AppHandle) {
-    let _ = APP.set(app);
-}
-
 pub fn set_provider_suppression(active: bool) {
     PROVIDER_SUPPRESSES_START.store(active, Ordering::Release);
     RAW_MACHINE.lock().map(|mut machine| machine.reset()).ok();
@@ -499,7 +493,7 @@ pub fn set_provider_suppression(active: bool) {
     clear_queued_actions();
 }
 
-pub(crate) fn notify_start_icon_changed() {
+pub fn notify_start_icon_changed() {
     let taskbar_thread = SHELL_TASKBAR_THREAD.load(Ordering::Acquire);
     let Ok(message) = shell_bridge_message() else {
         return;
@@ -516,7 +510,7 @@ pub(crate) fn notify_start_icon_changed() {
     }
 }
 
-pub(crate) fn shell_bridge_taskbar_pin(path: &Path, pinned: bool) -> Result<(), String> {
+pub fn shell_bridge_taskbar_pin(path: &Path, pinned: bool) -> Result<(), String> {
     if !SHELL_BRIDGE_ACTIVE.load(Ordering::Acquire) {
         return Err("shell bridge not active".into());
     }
@@ -590,7 +584,7 @@ pub(crate) fn shell_bridge_taskbar_pin(path: &Path, pinned: bool) -> Result<(), 
 /// permission that a medium-integrity Prism process cannot claim directly.
 /// This is the closest cheap analogue to Open-Shell hosting its Start menu as
 /// an Explorer-owned window.
-pub(crate) fn request_foreground(hwnd: isize) -> bool {
+pub fn request_foreground(hwnd: isize) -> bool {
     if !SHELL_BRIDGE_ACTIVE.load(Ordering::Acquire) || hwnd == 0 {
         return false;
     }
@@ -616,7 +610,7 @@ pub(crate) fn request_foreground(hwnd: isize) -> bool {
 /// Asks the observation pump to re-query the Start button rectangle now.
 /// Taskbar moves (alignment repair, density changes) should reposition the
 /// glyph overlay immediately rather than on the next interval tick.
-pub(crate) fn request_start_rect_refresh() {
+pub fn request_start_rect_refresh() {
     if !ACTIVE.load(Ordering::Acquire) {
         return;
     }
@@ -765,34 +759,19 @@ unsafe fn run_pump(ready: HookReady) {
                     match action {
                         Action::ToggleWin(_side) => {
                             debug_trace("action-toggle-win");
-                            if let Some(app) = APP.get() {
-                                let toggle_app = app.clone();
-                                let start_rect = shell_bridge.start_rect();
-                                let _ = app.run_on_main_thread(move || {
-                                    crate::toggle_palette_from_win(&toggle_app, start_rect);
-                                });
+                            if let Some(host) = crate::host::get() {
+                                host.toggle_from_win(shell_bridge.start_rect());
                             }
                         }
                         Action::ToggleTaskbar(click) => {
-                            if let Some(app) = APP.get() {
-                                let toggle_app = app.clone();
-                                let start_rect = shell_bridge.start_rect();
-                                let _ = app.run_on_main_thread(move || {
-                                    crate::toggle_palette_from_taskbar(
-                                        &toggle_app,
-                                        click,
-                                        start_rect,
-                                    );
-                                });
+                            if let Some(host) = crate::host::get() {
+                                host.toggle_from_taskbar(click, shell_bridge.start_rect());
                             }
                         }
                         Action::ActivateSearch => {
                             debug_trace("action-activate-search");
-                            if let Some(app) = APP.get() {
-                                let activate_app = app.clone();
-                                let _ = app.run_on_main_thread(move || {
-                                    crate::activate_palette(&activate_app);
-                                });
+                            if let Some(host) = crate::host::get() {
+                                host.activate();
                             }
                         }
                     }
@@ -840,7 +819,7 @@ unsafe fn run_pump(ready: HookReady) {
 
 /// Safe recovery path: stop observing and tell the frontend so the user can react.
 #[cfg(debug_assertions)]
-pub(crate) fn debug_trace(message: &str) {
+pub fn debug_trace(message: &str) {
     if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(
         std::env::temp_dir()
             .join("Prism")
@@ -854,7 +833,7 @@ pub(crate) fn debug_trace(message: &str) {
 }
 
 #[cfg(not(debug_assertions))]
-pub(crate) fn debug_trace(_message: &str) {}
+pub fn debug_trace(_message: &str) {}
 
 fn disable_observation(reason: &str) {
     debug_trace(&format!("observation-disabled {reason}"));
@@ -864,9 +843,7 @@ fn disable_observation(reason: &str) {
     cancel_pending_win_toggle();
     clear_queued_actions();
     LAST_TOGGLE_MS.store(0, Ordering::Release);
-    if let Some(app) = APP.get() {
-        let _ = app.emit(FAILED_EVENT, reason.to_string());
-    }
+    crate::host::emit(FAILED_EVENT, serde_json::Value::String(reason.to_string()));
 }
 
 fn clear_queued_actions() {

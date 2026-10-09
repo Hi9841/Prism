@@ -12,11 +12,11 @@ use super::types::{
 const DEFAULT_LIMIT: usize = 10;
 const MAX_LIMIT: usize = 50;
 
-pub(crate) fn clamp_limit(limit: Option<usize>) -> usize {
+pub fn clamp_limit(limit: Option<usize>) -> usize {
     limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT)
 }
 
-pub(crate) fn path_depth(path: &str) -> usize {
+pub fn path_depth(path: &str) -> usize {
     path.bytes().filter(|&b| b == b'\\' || b == b'/').count()
 }
 
@@ -239,7 +239,7 @@ pub fn search_with_generation(
 
 /// The ranking of scored candidates: score, then the shorter and
 /// alphabetically first name, then the shallower and shorter path.
-pub(crate) fn result_order(
+pub fn result_order(
     (score_a, item_a): &(i32, CandidateEntry),
     (score_b, item_b): &(i32, CandidateEntry),
 ) -> Ordering {
@@ -313,7 +313,7 @@ pub fn entry_score(entry: &CandidateEntry, tokens: &[&str], full_query: &str) ->
 /// The name-only part of `entry_score`: everything except the location
 /// penalty. The in-memory name index scores every row with this and adds the
 /// penalty it stored at load time.
-pub(crate) fn name_score(
+pub fn name_score(
     lower_name: &str,
     is_directory: bool,
     tokens: &[&str],
@@ -382,7 +382,7 @@ const NOISE_FILE_NAMES: &[&str] = &[
     "swapfile.sys",
 ];
 
-pub(crate) fn path_penalty(display_path: &str, lower_name: &str) -> i32 {
+pub fn path_penalty(display_path: &str, lower_name: &str) -> i32 {
     // Every location needle starts with a separator, so a match can only
     // begin at a backslash. Testing the needles there, instead of sliding them
     // over every byte, gives the same result for a fraction of the work - the
@@ -456,7 +456,7 @@ pub fn browse_path(query: &str, limit: usize) -> Option<Vec<FileEntry>> {
     browse_path_with_errors(query, limit).map(|result| result.unwrap_or_default())
 }
 
-pub(crate) fn browse_path_with_errors(
+pub fn browse_path_with_errors(
     query: &str,
     limit: usize,
 ) -> Option<Result<Vec<FileEntry>, String>> {
