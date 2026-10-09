@@ -4,6 +4,8 @@
 //! shortcuts. This module keeps the launch surface typed and native while
 //! discovering Control Panel applets from the current system.
 
+use std::cell::OnceCell;
+use std::collections::HashMap;
 use std::ffi::c_void;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock, RwLock};
@@ -16,7 +18,8 @@ use windows::Win32::System::Com::{
 };
 use windows::Win32::System::Registry::{
     RegCloseKey, RegEnumKeyExW, RegEnumValueW, RegOpenKeyExW, RegQueryValueExW, HKEY,
-    HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_READ, REG_EXPAND_SZ, REG_SZ, REG_VALUE_TYPE,
+    HKEY_CLASSES_ROOT, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_READ, REG_EXPAND_SZ, REG_SZ,
+    REG_VALUE_TYPE,
 };
 use windows::Win32::UI::Shell::Common::ITEMIDLIST;
 use windows::Win32::UI::Shell::{
@@ -821,6 +824,7 @@ fn add_system_tool(
     add_shell_tool_with_keywords(tools, id, title, subtitle, &path, None, icon_key, keywords);
 }
 
+#[allow(clippy::too_many_arguments)]
 fn add_shell_tool(
     tools: &mut Vec<WindowsTool>,
     id: &str,
@@ -840,6 +844,7 @@ fn add_shell_tool(
     );
 }
 
+#[allow(clippy::too_many_arguments)]
 fn add_shell_tool_with_keywords(
     tools: &mut Vec<WindowsTool>,
     id: &str,
@@ -998,6 +1003,8 @@ unsafe fn shell_control_panel_item(item: &IShellItem) -> Option<WindowsTool> {
 }
 
 fn add_control_panel_applets(tools: &mut Vec<WindowsTool>) {
+    // Built on the first registered applet only: most machines have none.
+    let titles = OnceCell::new();
     for (root, path) in [
         (
             HKEY_LOCAL_MACHINE,
@@ -1036,7 +1043,7 @@ fn add_control_panel_applets(tools: &mut Vec<WindowsTool>) {
             }
             let name = String::from_utf16_lossy(&name_buffer[..name_length as usize]);
             let default_value = unsafe { read_registry_string(key, "") };
-            add_cpl_candidate(tools, &name, default_value.as_deref());
+            add_cpl_candidate(tools, &titles, &name, default_value.as_deref());
         }
 
         for index in 0..256u32 {
@@ -1065,7 +1072,7 @@ fn add_control_panel_applets(tools: &mut Vec<WindowsTool>) {
             let name = String::from_utf16_lossy(&name_buffer[..name_length as usize]);
             let value = unsafe { read_registry_string(key, &name) };
             if let Some(value) = value {
-                add_cpl_candidate(tools, &name, Some(&value));
+                add_cpl_candidate(tools, &titles, &name, Some(&value));
             }
         }
         unsafe {
@@ -1074,12 +1081,16 @@ fn add_control_panel_applets(tools: &mut Vec<WindowsTool>) {
     }
 }
 
-fn add_cpl_candidate(tools: &mut Vec<WindowsTool>, name: &str, value: Option<&str>) {
+fn add_cpl_candidate(
+    tools: &mut Vec<WindowsTool>,
+    titles: &OnceCell<HashMap<String, String>>,
+    name: &str,
+    value: Option<&str>,
+) {
     let Some(applet) = normalize_cpl_target(name, value) else {
         return;
     };
-    let title =
-        indirect_name(cpl_path(&applet)).unwrap_or_else(|| friendly_cpl_name(cpl_path(&applet)));
+    let title = cpl_title(&applet, titles.get_or_init(control_panel_titles));
     let mut keywords = vec![
         "control panel".to_string(),
         name.to_string(),
@@ -1164,24 +1175,145 @@ fn cpl_path(parameter: &str) -> &str {
     split_cpl_resource(parameter).0
 }
 
-fn indirect_name(path: &str) -> Option<String> {
-    for resource_id in -1..=-32 {
-        let source = wide(&format!("@{path},{resource_id}"));
-        let mut output = [0u16; 256];
-        let result = unsafe { SHLoadIndirectString(PCWSTR(source.as_ptr()), &mut output, None) };
-        if result.is_err() {
+const CONTROL_PANEL_NAMESPACE: &str =
+    r"SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\ControlPanel\NameSpace";
+
+/// The title Explorer shows for an applet, in the user's language. An
+/// explicit string resource in the registry value (`desk.cpl,-1`) wins, then
+/// the Control Panel namespace title for that `.cpl` file, then the file
+/// stem.
+fn cpl_title(applet: &str, titles: &HashMap<String, String>) -> String {
+    let (path, resource) = split_cpl_resource(applet);
+    resource
+        .filter(|id| id.starts_with('-'))
+        .and_then(|id| load_indirect_string(&format!("@{path},{id}")))
+        .or_else(|| titles.get(&path.to_lowercase()).cloned())
+        .unwrap_or_else(|| friendly_cpl_name(path))
+}
+
+/// Localized Control Panel titles keyed by lowercase `.cpl` path. Windows
+/// registers each built-in applet as a namespace CLSID: its open command
+/// names the `.cpl` file and applet index, and its `LocalizedString` is the
+/// title Explorer shows. Only string resources are read - an applet's own
+/// `CPlApplet` entry point can block (desk.cpl hangs in `CPL_INIT`), so it is
+/// never called. A file with several applets keeps its lowest index, the one
+/// that opens when the file itself is run.
+fn control_panel_titles() -> HashMap<String, String> {
+    let Some(namespace) =
+        (unsafe { open_registry_key(HKEY_LOCAL_MACHINE, CONTROL_PANEL_NAMESPACE) })
+    else {
+        return HashMap::new();
+    };
+    let classes = unsafe { registry_subkeys(namespace) };
+    unsafe {
+        let _ = RegCloseKey(namespace);
+    }
+
+    let mut best: HashMap<String, (u32, String)> = HashMap::new();
+    for clsid in classes {
+        let class_path = format!(r"CLSID\{clsid}");
+        let localized = unsafe { read_class_string(&class_path, "LocalizedString") };
+        let Some(localized) = localized.map(|value| expand_environment(&value)) else {
+            continue;
+        };
+        let command =
+            unsafe { read_class_string(&format!(r"{class_path}\Shell\Open\Command"), "") };
+        let Some((path, index)) = command
+            .as_deref()
+            .and_then(control_rundll_target)
+            .or_else(|| indirect_cpl_target(&localized))
+        else {
+            continue;
+        };
+        let key = expand_environment(&path).to_lowercase();
+        if best
+            .get(&key)
+            .is_some_and(|(existing, _)| *existing <= index)
+        {
             continue;
         }
-        let end = output
-            .iter()
-            .position(|value| *value == 0)
-            .unwrap_or(output.len());
-        let value = String::from_utf16_lossy(&output[..end]).trim().to_string();
-        if !value.is_empty() && !value.starts_with('@') {
-            return Some(value);
+        if let Some(title) = load_indirect_string(&localized) {
+            best.insert(key, (index, title));
         }
     }
-    None
+    best.into_iter()
+        .map(|(path, (_, title))| (path, title))
+        .collect()
+}
+
+/// `.cpl` path and applet index from a namespace open command such as
+/// `rundll32.exe shell32.dll,Control_RunDLL C:\Windows\System32\main.cpl,@1`.
+fn control_rundll_target(command: &str) -> Option<(String, u32)> {
+    let lower = command.to_ascii_lowercase();
+    let start = lower.find("control_rundll")? + "control_rundll".len();
+    let rest = command[start..].trim_start().trim_start_matches('"');
+    let end = rest.to_ascii_lowercase().find(".cpl")? + ".cpl".len();
+    let index = rest[end..]
+        .trim_start_matches(['"', ',', ' '])
+        .strip_prefix('@')
+        .and_then(|value| {
+            value
+                .split(|c: char| !c.is_ascii_digit())
+                .next()?
+                .parse()
+                .ok()
+        })
+        .unwrap_or(0);
+    Some((rest[..end].to_string(), index))
+}
+
+/// `.cpl` path from a `LocalizedString` such as `@C:\...\appwiz.cpl,-159`,
+/// for namespace items registered without an open command.
+fn indirect_cpl_target(localized: &str) -> Option<(String, u32)> {
+    let (path, _) = localized.strip_prefix('@')?.rsplit_once(',')?;
+    path.to_ascii_lowercase()
+        .ends_with(".cpl")
+        .then(|| (path.to_string(), 0))
+}
+
+/// Resolves an `@file,-id` string resource without running the file's code.
+fn load_indirect_string(source: &str) -> Option<String> {
+    let source = wide(source);
+    let mut output = [0u16; 256];
+    unsafe { SHLoadIndirectString(PCWSTR(source.as_ptr()), &mut output, None) }.ok()?;
+    let end = output
+        .iter()
+        .position(|value| *value == 0)
+        .unwrap_or(output.len());
+    let value = String::from_utf16_lossy(&output[..end]).trim().to_string();
+    (!value.is_empty() && !value.starts_with('@')).then_some(value)
+}
+
+unsafe fn read_class_string(path: &str, name: &str) -> Option<String> {
+    let key = open_registry_key(HKEY_CLASSES_ROOT, path)?;
+    let value = read_registry_string(key, name);
+    let _ = RegCloseKey(key);
+    value
+}
+
+unsafe fn registry_subkeys(key: HKEY) -> Vec<String> {
+    let mut names = Vec::new();
+    for index in 0..1024u32 {
+        let mut name_buffer = [0u16; 256];
+        let mut name_length = name_buffer.len() as u32;
+        let result = RegEnumKeyExW(
+            key,
+            index,
+            Some(PWSTR(name_buffer.as_mut_ptr())),
+            &mut name_length,
+            None,
+            None,
+            None,
+            None,
+        );
+        if result.0 != 0 {
+            break;
+        }
+        names.push(String::from_utf16_lossy(
+            &name_buffer[..name_length as usize],
+        ));
+    }
+    names
 }
 
 fn friendly_cpl_name(path: &str) -> String {
@@ -1193,8 +1325,7 @@ fn friendly_cpl_name(path: &str) -> String {
         .rsplit_once('.')
         .map(|(stem, _)| stem)
         .unwrap_or(file)
-        .replace('_', " ")
-        .replace('-', " ");
+        .replace(['_', '-'], " ");
     let name = stem
         .split_whitespace()
         .map(|word| {
@@ -1374,12 +1505,12 @@ unsafe fn copy_pidl(pidl: *const ITEMIDLIST) -> Option<Vec<u8>> {
 }
 
 fn shell_execute_pidl(pidl: &[u8]) -> Result<(), String> {
-    if pidl.len() < 2 || pidl.len() > MAX_PIDL_BYTES || pidl.len() % 2 != 0 {
+    if pidl.len() < 2 || pidl.len() > MAX_PIDL_BYTES || !pidl.len().is_multiple_of(2) {
         return Err("invalid Windows shell item".to_string());
     }
     let _com = ComGuard::init();
     let operation = wide("open");
-    let mut storage = vec![0u16; (pidl.len() + 1) / 2];
+    let mut storage = vec![0u16; pidl.len().div_ceil(2)];
     unsafe {
         std::ptr::copy_nonoverlapping(pidl.as_ptr(), storage.as_mut_ptr().cast::<u8>(), pidl.len());
     }
@@ -1468,8 +1599,10 @@ unsafe fn read_registry_string(key: HKEY, name: &str) -> Option<String> {
         return None;
     }
     let units = buffer
-        .chunks_exact(2)
-        .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]))
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|chunk| u16::from_le_bytes(*chunk))
         .collect::<Vec<_>>();
     let end = units
         .iter()
@@ -1481,6 +1614,49 @@ unsafe fn read_registry_string(key: HKEY, name: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn namespace_commands_name_the_cpl_file_and_applet() {
+        assert_eq!(
+            control_rundll_target(
+                r"C:\WINDOWS\System32\rundll32.exe C:\WINDOWS\System32\shell32.dll,Control_RunDLL C:\WINDOWS\System32\main.cpl,@1"
+            ),
+            Some((r"C:\WINDOWS\System32\main.cpl".to_string(), 1))
+        );
+        assert_eq!(
+            control_rundll_target(
+                r#"rundll32.exe shell32.dll,Control_RunDLL "C:\WINDOWS\System32\tabletpc.cpl" @0"#
+            ),
+            Some((r"C:\WINDOWS\System32\tabletpc.cpl".to_string(), 0))
+        );
+        assert_eq!(
+            control_rundll_target(r"rundll32.exe shell32.dll,Control_RunDLL C:\x\mmsys.cpl"),
+            Some((r"C:\x\mmsys.cpl".to_string(), 0))
+        );
+        assert_eq!(control_rundll_target(r"C:\Windows\explorer.exe"), None);
+        assert_eq!(
+            indirect_cpl_target(r"@C:\WINDOWS\system32\appwiz.cpl,-159#immutable1"),
+            Some((r"C:\WINDOWS\system32\appwiz.cpl".to_string(), 0))
+        );
+        assert_eq!(indirect_cpl_target(r"@C:\x\shell32.dll,-22072"), None);
+    }
+
+    #[test]
+    fn built_in_applets_get_their_localized_titles() {
+        // Locale-independent: the title must come from the system's string
+        // resources, never the file-stem fallback ("Main", "Mmsys").
+        let titles = control_panel_titles();
+        for file in ["main.cpl", "mmsys.cpl", "appwiz.cpl"] {
+            let applet = system32_path(file).to_string_lossy().into_owned();
+            let title = cpl_title(&applet, &titles);
+            assert!(!title.is_empty(), "{file}");
+            assert_ne!(
+                title,
+                friendly_cpl_name(&applet),
+                "{file} fell back to the file stem"
+            );
+        }
+    }
 
     #[test]
     fn cpl_targets_accept_registry_names_and_indirect_values() {
