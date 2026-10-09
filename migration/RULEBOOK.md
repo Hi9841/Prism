@@ -3,7 +3,7 @@
 > The meta-rule: if two agents could answer a question differently, the answer goes in this file.
 > Read-only inside any loop. Amendments are queued for the owner and applied between batches.
 
-Status: DRAFT 1 (2026-10-09). Sections marked **DECISION** need the owner's answer before Step 2.
+Status: DRAFT 2 (2026-10-09). Owner decisions D1, D2, D4, D5 are recorded below. D3 is open.
 This is a redesign of the UI host, so this file is a design document plus the rules that keep
 agents consistent. The kit's bakeoff does not apply (README, "If you're redesigning").
 
@@ -57,7 +57,7 @@ backend (shared with the Tauri app; see DECISION D1)
 | `lucide-react` icon | SVG from the lucide set, embedded as an asset, drawn with `svg().path(...)` and tinted | same icon names as the judge's `icon.name` |
 | `null` / `undefined` | `Option<T>` | judge contract: None serializes as `null` for return values, omitted for optional fields |
 | thrown error / rejected promise | `Result<T, String>` surfaced through the existing toast path | |
-| `localeCompare(…, undefined, {numeric:true})` | ICU-equivalent collation (DECISION D5) | judge scenario `idle.sort-collation` |
+| `localeCompare(…, undefined, {numeric:true})` | `icu_collator` with the user's Windows locale, numeric ordering on (D5) | judge scenario `idle.sort-collation` |
 | JS number | `f64` for math, `i64`/`u32` where the source only uses integers | NaN/Infinity/-0 must survive (judge canaries) |
 | CSS `@keyframes` + transition classes | GPUI `with_animation` for fixed sequences; a target-driven spring for interruptible state | same durations and easings as `tokens.css` |
 
@@ -72,7 +72,7 @@ backend (shared with the Tauri app; see DECISION D1)
   The app sets no native material today (`set_effects(None)`, lib.rs:1120).
 - **Known visual gap:** four surfaces use CSS `backdrop-blur` over the palette content (PowerMenu.tsx:152,
   SettingsSheet.tsx:835 and :844, Toast.tsx:17, ResultContextMenu.tsx:183). GPUI has no backdrop
-  filter. See DECISION D4.
+  filter. Per D4 they get a near-opaque fill that matches the blurred average, logged as `BUG(port):` in the visual parity ledger.
 
 ## 4. Naming and paths
 
@@ -94,22 +94,22 @@ backend (shared with the Tauri app; see DECISION D1)
 
 ## 6. DECISIONS for the owner
 
-- **D1 — Backend sharing.** Recommended: extract a Tauri-free `prism-core` crate inside the Prism repo.
+- **D1 — Backend sharing. DECIDED 2026-10-09: extract `prism-core`.** Was recommended: extract a Tauri-free `prism-core` crate inside the Prism repo.
   The Tauri coupling is small outside `lib.rs`: about 64 sites in 10 modules
   (taskbar_customization 17, catalog/mod 16, win_key 5, start_menu 5, taskbar_icon_overlay 5,
   apps 4, windows_tools 4, audio_hook 4, audio 2, theme 2). They are mostly
   `AppHandle::emit` and window lookups and go behind a small `Host` trait.
   Both apps then share one backend.
   Alternatives: a path dependency on `src-tauri` (pulls Tauri into the GPUI binary), or a fork (two backends drift).
-- **D2 — GPUI pin.** Recommended: crates.io `gpui = "0.2.2"` (latest published). Alternative: a Zed git
+- **D2 — GPUI pin. DECIDED 2026-10-09: crates.io `gpui = "0.2.2"`.** Was recommended: crates.io `gpui = "0.2.2"` (latest published). Alternative: a Zed git
   commit (newer Windows fixes, less reproducible). The Step 2 spike decides if 0.2.2 is enough.
-- **D3 — Shipping.** Recommended: the GPUI build ships as a separate preview channel until Step 6 passes,
+- **D3 — Shipping. OPEN.** Recommended: the GPUI build ships as a separate preview channel until Step 6 passes,
   then replaces the Tauri build under the same app id and updater key.
-- **D4 — Backdrop blur.** Options: (a) raise those four surfaces to an opaque or near-opaque fill that
+- **D4 — Backdrop blur. DECIDED 2026-10-09: option (a), near-opaque fill.** Options: (a) raise those four surfaces to an opaque or near-opaque fill that
   matches the blurred average (closest 1:1 without a blur pass); (b) write a custom blur
   shader for GPUI (large); (c) accept the difference. Recommended: (a), marked `BUG(port):`
   in the visual parity ledger.
-- **D5 — Collation.** Recommended: `icu_collator` with the user's locale (the WebView uses
+- **D5 — Collation. DECIDED 2026-10-09: `icu_collator` with the user's locale.** Was recommended: `icu_collator` with the user's locale (the WebView uses
   `navigator.language`). Alternative: a simple case-insensitive numeric comparator that matches
   en-US for ASCII only.
 
