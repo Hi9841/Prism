@@ -361,10 +361,7 @@ impl WinKeyMachine {
     }
 
     fn take_search_combo(&mut self, now: Instant) -> bool {
-        match self.search_combo_until.take() {
-            Some(until) if now < until => true,
-            _ => false,
-        }
+        matches!(self.search_combo_until.take(), Some(until) if now < until)
     }
 }
 
