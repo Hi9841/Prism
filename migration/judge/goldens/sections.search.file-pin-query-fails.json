@@ -1,0 +1,101 @@
+{
+  "flatIds": [
+    "file::f::C:\\Users\\You\\Downloads\\setup.exe"
+  ],
+  "sections": [
+    {
+      "collapsed": false,
+      "collapsible": false,
+      "id": "files",
+      "items": [
+        {
+          "dragFile": {
+            "calls": [
+              {
+                "args": {
+                  "paths": [
+                    "C:\\Users\\You\\Downloads\\setup.exe"
+                  ]
+                },
+                "cmd": "start_file_drag"
+              }
+            ]
+          },
+          "historyTitle": "setup.exe",
+          "icon": {
+            "kind": "tile",
+            "name": "File",
+            "tint": "slate"
+          },
+          "id": "file::f::C:\\Users\\You\\Downloads\\setup.exe",
+          "isPicture": false,
+          "keywords": [
+            "C:\\Users\\You\\Downloads\\setup.exe",
+            "C:\\Users\\You\\Downloads"
+          ],
+          "openLocation": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You\\Downloads\\setup.exe"
+                },
+                "cmd": "open_path_location"
+              }
+            ]
+          },
+          "run": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You\\Downloads\\setup.exe"
+                },
+                "cmd": "open_path"
+              }
+            ]
+          },
+          "runAsAdmin": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You\\Downloads\\setup.exe"
+                },
+                "cmd": "run_path_as_admin"
+              }
+            ]
+          },
+          "shellPath": "C:\\Users\\You\\Downloads\\setup.exe",
+          "showProperties": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You\\Downloads\\setup.exe"
+                },
+                "cmd": "show_path_properties"
+              }
+            ]
+          },
+          "subtitle": "C:\\Users\\You\\Downloads",
+          "title": "setup.exe",
+          "toggleTaskbarPin": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You\\Downloads\\setup.exe"
+                },
+                "cmd": "is_pinned_to_taskbar"
+              },
+              {
+                "args": {
+                  "path": "C:\\Users\\You\\Downloads\\setup.exe",
+                  "pinned": true
+                },
+                "cmd": "set_taskbar_pinned"
+              }
+            ]
+          }
+        }
+      ],
+      "label": "Files & Folders"
+    }
+  ]
+}

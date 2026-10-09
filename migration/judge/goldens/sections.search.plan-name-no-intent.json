@@ -1,0 +1,128 @@
+{
+  "flatIds": [
+    "app::breakfast",
+    "power-plan::381b4222-f694-41f0-9685-ff5bb260df2e"
+  ],
+  "sections": [
+    {
+      "collapsed": false,
+      "collapsible": false,
+      "groups": [],
+      "id": "apps",
+      "items": [
+        {
+          "appId": "breakfast",
+          "dragFile": {
+            "calls": [
+              {
+                "args": {
+                  "paths": [
+                    "C:\\Games\\breakfast.exe"
+                  ]
+                },
+                "cmd": "start_file_drag"
+              }
+            ]
+          },
+          "historyTitle": "Balanced Breakfast",
+          "icon": {
+            "kind": "app",
+            "name": "Balanced Breakfast"
+          },
+          "id": "app::breakfast",
+          "openLocation": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Games\\breakfast.exe"
+                },
+                "cmd": "open_path_location"
+              }
+            ]
+          },
+          "run": {
+            "calls": [
+              {
+                "args": {
+                  "id": "breakfast"
+                },
+                "cmd": "launch_app"
+              }
+            ]
+          },
+          "runAsAdmin": {
+            "calls": [
+              {
+                "args": {
+                  "id": "breakfast"
+                },
+                "cmd": "launch_app_as_admin"
+              }
+            ]
+          },
+          "shellPath": "C:\\Games\\breakfast.exe",
+          "showProperties": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Games\\breakfast.exe"
+                },
+                "cmd": "show_path_properties"
+              }
+            ]
+          },
+          "subtitle": "Application",
+          "title": "Balanced Breakfast",
+          "toggleTaskbarPin": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Games\\breakfast.exe"
+                },
+                "cmd": "is_pinned_to_taskbar"
+              },
+              {
+                "args": {
+                  "path": "C:\\Games\\breakfast.exe",
+                  "pinned": true
+                },
+                "cmd": "set_taskbar_pinned"
+              }
+            ]
+          }
+        }
+      ],
+      "label": "Apps"
+    },
+    {
+      "collapsed": false,
+      "collapsible": false,
+      "id": "power-plans",
+      "items": [
+        {
+          "historyTitle": "Balanced",
+          "icon": {
+            "kind": "tile",
+            "name": "Power",
+            "tint": "mint"
+          },
+          "id": "power-plan::381b4222-f694-41f0-9685-ff5bb260df2e",
+          "powerPlanGuid": "381b4222-f694-41f0-9685-ff5bb260df2e",
+          "run": {
+            "calls": [
+              {
+                "args": {
+                  "guid": "381b4222-f694-41f0-9685-ff5bb260df2e"
+                },
+                "cmd": "set_power_plan"
+              }
+            ]
+          },
+          "subtitle": "Power plan · active",
+          "title": "Balanced"
+        }
+      ],
+      "label": "Power plans"
+    }
+  ]
+}

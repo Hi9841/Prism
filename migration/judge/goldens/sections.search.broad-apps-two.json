@@ -1,0 +1,185 @@
+{
+  "flatIds": [
+    "file::d::C:\\Users\\You\\Downloads",
+    "app::calendar",
+    "app::Microsoft.WindowsCalculator_8wekyb3d8bbwe!App",
+    "app::portal"
+  ],
+  "sections": [
+    {
+      "collapsed": false,
+      "collapsible": false,
+      "id": "quick",
+      "items": [
+        {
+          "dragFile": {
+            "calls": [
+              {
+                "args": {
+                  "paths": [
+                    "C:\\Users\\You\\Downloads"
+                  ]
+                },
+                "cmd": "start_file_drag"
+              }
+            ]
+          },
+          "historyTitle": "Downloads",
+          "icon": {
+            "kind": "tile",
+            "name": "Download",
+            "tint": "mint"
+          },
+          "id": "file::d::C:\\Users\\You\\Downloads",
+          "keywords": [
+            "open",
+            "folder",
+            "files",
+            "downloads",
+            "C:\\Users\\You\\Downloads"
+          ],
+          "openLocation": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You\\Downloads"
+                },
+                "cmd": "open_path_location"
+              }
+            ]
+          },
+          "quickAccessKind": "downloads",
+          "run": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You\\Downloads"
+                },
+                "cmd": "open_path"
+              }
+            ]
+          },
+          "shellPath": "C:\\Users\\You\\Downloads",
+          "showProperties": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You\\Downloads"
+                },
+                "cmd": "show_path_properties"
+              }
+            ]
+          },
+          "subtitle": "C:\\Users\\You\\Downloads",
+          "title": "Downloads"
+        }
+      ],
+      "label": "Quick Access"
+    },
+    {
+      "collapsed": false,
+      "collapsible": false,
+      "groups": [],
+      "id": "apps",
+      "items": [
+        {
+          "appId": "calendar",
+          "historyTitle": "Calendar",
+          "icon": {
+            "kind": "app",
+            "name": "Calendar"
+          },
+          "id": "app::calendar",
+          "run": {
+            "calls": [
+              {
+                "args": {
+                  "id": "calendar"
+                },
+                "cmd": "launch_app"
+              }
+            ]
+          },
+          "subtitle": "Application",
+          "title": "Calendar"
+        },
+        {
+          "appId": "Microsoft.WindowsCalculator_8wekyb3d8bbwe!App",
+          "historyTitle": "Calculator",
+          "icon": {
+            "kind": "app",
+            "name": "Calculator"
+          },
+          "id": "app::Microsoft.WindowsCalculator_8wekyb3d8bbwe!App",
+          "run": {
+            "calls": [
+              {
+                "args": {
+                  "id": "Microsoft.WindowsCalculator_8wekyb3d8bbwe!App"
+                },
+                "cmd": "launch_app"
+              }
+            ]
+          },
+          "subtitle": "Application",
+          "title": "Calculator"
+        },
+        {
+          "appId": "portal",
+          "dragFile": {
+            "calls": [
+              {
+                "args": {
+                  "paths": [
+                    "https://portal.example.com/"
+                  ]
+                },
+                "cmd": "start_file_drag"
+              }
+            ]
+          },
+          "historyTitle": "Company Portal",
+          "icon": {
+            "kind": "app",
+            "name": "Company Portal"
+          },
+          "id": "app::portal",
+          "openLocation": {
+            "calls": [
+              {
+                "args": {
+                  "path": "https://portal.example.com/"
+                },
+                "cmd": "open_path_location"
+              }
+            ]
+          },
+          "run": {
+            "calls": [
+              {
+                "args": {
+                  "id": "portal"
+                },
+                "cmd": "launch_app"
+              }
+            ]
+          },
+          "shellPath": "https://portal.example.com/",
+          "showProperties": {
+            "calls": [
+              {
+                "args": {
+                  "path": "https://portal.example.com/"
+                },
+                "cmd": "show_path_properties"
+              }
+            ]
+          },
+          "subtitle": "Application",
+          "title": "Company Portal"
+        }
+      ],
+      "label": "Apps"
+    }
+  ]
+}

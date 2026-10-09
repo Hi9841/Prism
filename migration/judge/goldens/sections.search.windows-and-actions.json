@@ -1,0 +1,66 @@
+{
+  "flatIds": [
+    "window::1",
+    "action::power.lock"
+  ],
+  "sections": [
+    {
+      "collapsed": false,
+      "collapsible": false,
+      "id": "windows",
+      "items": [
+        {
+          "historyTitle": "Notes",
+          "icon": {
+            "kind": "tile",
+            "name": "AppWindow",
+            "tint": "azure"
+          },
+          "id": "window::1",
+          "run": {
+            "calls": [
+              {
+                "args": {
+                  "hwnd": 1
+                },
+                "cmd": "focus_window"
+              }
+            ]
+          },
+          "subtitle": "Open window · notepad",
+          "title": "Notes"
+        }
+      ],
+      "label": "Open windows"
+    },
+    {
+      "collapsed": false,
+      "collapsible": false,
+      "id": "commands",
+      "items": [
+        {
+          "historyTitle": "Lock",
+          "icon": {
+            "kind": "tile",
+            "name": "Lock",
+            "tint": "slate"
+          },
+          "id": "action::power.lock",
+          "run": {
+            "calls": [
+              {
+                "args": {
+                  "id": "power.lock"
+                },
+                "cmd": "execute_action"
+              }
+            ]
+          },
+          "subtitle": "Power",
+          "title": "Lock"
+        }
+      ],
+      "label": "Commands"
+    }
+  ]
+}

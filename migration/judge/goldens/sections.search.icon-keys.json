@@ -1,0 +1,520 @@
+{
+  "flatIds": [
+    "action::settings.icon-nightlight",
+    "action::settings.icon-display",
+    "action::settings.icon-hdr",
+    "action::settings.icon-bluetooth",
+    "action::settings.icon-sound",
+    "action::settings.icon-storage",
+    "action::settings.icon-power",
+    "action::settings.icon-update",
+    "action::settings.icon-network",
+    "action::settings.icon-mute",
+    "action::settings.icon-unmute",
+    "action::settings.icon-lock",
+    "action::settings.icon-sleep",
+    "action::settings.icon-shutdown",
+    "action::settings.icon-restart",
+    "action::settings.icon-window",
+    "action::settings.icon-settings",
+    "action::settings.icon-control-panel",
+    "action::settings.icon-device",
+    "action::settings.icon-performance",
+    "action::settings.icon-power-plan",
+    "action::settings.icon-tool",
+    "action::settings.icon-mystery-key"
+  ],
+  "sections": [
+    {
+      "collapsed": false,
+      "collapsible": false,
+      "id": "settings",
+      "items": [
+        {
+          "historyTitle": "Icon nightlight",
+          "icon": {
+            "kind": "tile",
+            "name": "Moon",
+            "tint": "amber"
+          },
+          "id": "action::settings.icon-nightlight",
+          "run": {
+            "calls": [
+              {
+                "args": {
+                  "id": "settings.icon-nightlight"
+                },
+                "cmd": "execute_action"
+              }
+            ]
+          },
+          "subtitle": "Windows Settings",
+          "title": "Icon nightlight"
+        },
+        {
+          "historyTitle": "Icon display",
+          "icon": {
+            "kind": "tile",
+            "name": "Monitor",
+            "tint": "azure"
+          },
+          "id": "action::settings.icon-display",
+          "run": {
+            "calls": [
+              {
+                "args": {
+                  "id": "settings.icon-display"
+                },
+                "cmd": "execute_action"
+              }
+            ]
+          },
+          "subtitle": "Windows Settings",
+          "title": "Icon display"
+        },
+        {
+          "historyTitle": "Icon hdr",
+          "icon": {
+            "kind": "tile",
+            "name": "Sun",
+            "tint": "amber"
+          },
+          "id": "action::settings.icon-hdr",
+          "run": {
+            "calls": [
+              {
+                "args": {
+                  "id": "settings.icon-hdr"
+                },
+                "cmd": "execute_action"
+              }
+            ]
+          },
+          "subtitle": "Windows Settings",
+          "title": "Icon hdr"
+        },
+        {
+          "historyTitle": "Icon bluetooth",
+          "icon": {
+            "kind": "tile",
+            "name": "Bluetooth",
+            "tint": "azure"
+          },
+          "id": "action::settings.icon-bluetooth",
+          "run": {
+            "calls": [
+              {
+                "args": {
+                  "id": "settings.icon-bluetooth"
+                },
+                "cmd": "execute_action"
+              }
+            ]
+          },
+          "subtitle": "Windows Settings",
+          "title": "Icon bluetooth"
+        },
+        {
+          "historyTitle": "Icon sound",
+          "icon": {
+            "kind": "tile",
+            "name": "Volume2",
+            "tint": "mint"
+          },
+          "id": "action::settings.icon-sound",
+          "run": {
+            "calls": [
+              {
+                "args": {
+                  "id": "settings.icon-sound"
+                },
+                "cmd": "execute_action"
+              }
+            ]
+          },
+          "subtitle": "Windows Settings",
+          "title": "Icon sound"
+        },
+        {
+          "historyTitle": "Icon storage",
+          "icon": {
+            "kind": "tile",
+            "name": "HardDrive",
+            "tint": "slate"
+          },
+          "id": "action::settings.icon-storage",
+          "run": {
+            "calls": [
+              {
+                "args": {
+                  "id": "settings.icon-storage"
+                },
+                "cmd": "execute_action"
+              }
+            ]
+          },
+          "subtitle": "Windows Settings",
+          "title": "Icon storage"
+        },
+        {
+          "historyTitle": "Icon power",
+          "icon": {
+            "kind": "tile",
+            "name": "Power",
+            "tint": "rose"
+          },
+          "id": "action::settings.icon-power",
+          "run": {
+            "calls": [
+              {
+                "args": {
+                  "id": "settings.icon-power"
+                },
+                "cmd": "execute_action"
+              }
+            ]
+          },
+          "subtitle": "Windows Settings",
+          "title": "Icon power"
+        },
+        {
+          "historyTitle": "Icon update",
+          "icon": {
+            "kind": "tile",
+            "name": "RefreshCw",
+            "tint": "azure"
+          },
+          "id": "action::settings.icon-update",
+          "run": {
+            "calls": [
+              {
+                "args": {
+                  "id": "settings.icon-update"
+                },
+                "cmd": "execute_action"
+              }
+            ]
+          },
+          "subtitle": "Windows Settings",
+          "title": "Icon update"
+        },
+        {
+          "historyTitle": "Icon network",
+          "icon": {
+            "kind": "tile",
+            "name": "Wifi",
+            "tint": "azure"
+          },
+          "id": "action::settings.icon-network",
+          "run": {
+            "calls": [
+              {
+                "args": {
+                  "id": "settings.icon-network"
+                },
+                "cmd": "execute_action"
+              }
+            ]
+          },
+          "subtitle": "Windows Settings",
+          "title": "Icon network"
+        },
+        {
+          "historyTitle": "Icon mute",
+          "icon": {
+            "kind": "tile",
+            "name": "VolumeX",
+            "tint": "rose"
+          },
+          "id": "action::settings.icon-mute",
+          "run": {
+            "calls": [
+              {
+                "args": {
+                  "id": "settings.icon-mute"
+                },
+                "cmd": "execute_action"
+              }
+            ]
+          },
+          "subtitle": "Windows Settings",
+          "title": "Icon mute"
+        },
+        {
+          "historyTitle": "Icon unmute",
+          "icon": {
+            "kind": "tile",
+            "name": "Volume2",
+            "tint": "mint"
+          },
+          "id": "action::settings.icon-unmute",
+          "run": {
+            "calls": [
+              {
+                "args": {
+                  "id": "settings.icon-unmute"
+                },
+                "cmd": "execute_action"
+              }
+            ]
+          },
+          "subtitle": "Windows Settings",
+          "title": "Icon unmute"
+        },
+        {
+          "historyTitle": "Icon lock",
+          "icon": {
+            "kind": "tile",
+            "name": "Lock",
+            "tint": "slate"
+          },
+          "id": "action::settings.icon-lock",
+          "run": {
+            "calls": [
+              {
+                "args": {
+                  "id": "settings.icon-lock"
+                },
+                "cmd": "execute_action"
+              }
+            ]
+          },
+          "subtitle": "Windows Settings",
+          "title": "Icon lock"
+        },
+        {
+          "historyTitle": "Icon sleep",
+          "icon": {
+            "kind": "tile",
+            "name": "Moon",
+            "tint": "iris"
+          },
+          "id": "action::settings.icon-sleep",
+          "run": {
+            "calls": [
+              {
+                "args": {
+                  "id": "settings.icon-sleep"
+                },
+                "cmd": "execute_action"
+              }
+            ]
+          },
+          "subtitle": "Windows Settings",
+          "title": "Icon sleep"
+        },
+        {
+          "historyTitle": "Icon shutdown",
+          "icon": {
+            "kind": "tile",
+            "name": "Power",
+            "tint": "rose"
+          },
+          "id": "action::settings.icon-shutdown",
+          "run": {
+            "calls": [
+              {
+                "args": {
+                  "id": "settings.icon-shutdown"
+                },
+                "cmd": "execute_action"
+              }
+            ]
+          },
+          "subtitle": "Windows Settings",
+          "title": "Icon shutdown"
+        },
+        {
+          "historyTitle": "Icon restart",
+          "icon": {
+            "kind": "tile",
+            "name": "RotateCcw",
+            "tint": "amber"
+          },
+          "id": "action::settings.icon-restart",
+          "run": {
+            "calls": [
+              {
+                "args": {
+                  "id": "settings.icon-restart"
+                },
+                "cmd": "execute_action"
+              }
+            ]
+          },
+          "subtitle": "Windows Settings",
+          "title": "Icon restart"
+        },
+        {
+          "historyTitle": "Icon window",
+          "icon": {
+            "kind": "tile",
+            "name": "AppWindow",
+            "tint": "azure"
+          },
+          "id": "action::settings.icon-window",
+          "run": {
+            "calls": [
+              {
+                "args": {
+                  "id": "settings.icon-window"
+                },
+                "cmd": "execute_action"
+              }
+            ]
+          },
+          "subtitle": "Windows Settings",
+          "title": "Icon window"
+        },
+        {
+          "historyTitle": "Icon settings",
+          "icon": {
+            "kind": "tile",
+            "name": "House",
+            "tint": "azure"
+          },
+          "id": "action::settings.icon-settings",
+          "run": {
+            "calls": [
+              {
+                "args": {
+                  "id": "settings.icon-settings"
+                },
+                "cmd": "execute_action"
+              }
+            ]
+          },
+          "subtitle": "Windows Settings",
+          "title": "Icon settings"
+        },
+        {
+          "historyTitle": "Icon control-panel",
+          "icon": {
+            "kind": "tile",
+            "name": "Settings2",
+            "tint": "azure"
+          },
+          "id": "action::settings.icon-control-panel",
+          "run": {
+            "calls": [
+              {
+                "args": {
+                  "id": "settings.icon-control-panel"
+                },
+                "cmd": "execute_action"
+              }
+            ]
+          },
+          "subtitle": "Windows Settings",
+          "title": "Icon control-panel"
+        },
+        {
+          "historyTitle": "Icon device",
+          "icon": {
+            "kind": "tile",
+            "name": "Cpu",
+            "tint": "azure"
+          },
+          "id": "action::settings.icon-device",
+          "run": {
+            "calls": [
+              {
+                "args": {
+                  "id": "settings.icon-device"
+                },
+                "cmd": "execute_action"
+              }
+            ]
+          },
+          "subtitle": "Windows Settings",
+          "title": "Icon device"
+        },
+        {
+          "historyTitle": "Icon performance",
+          "icon": {
+            "kind": "tile",
+            "name": "Wrench",
+            "tint": "amber"
+          },
+          "id": "action::settings.icon-performance",
+          "run": {
+            "calls": [
+              {
+                "args": {
+                  "id": "settings.icon-performance"
+                },
+                "cmd": "execute_action"
+              }
+            ]
+          },
+          "subtitle": "Windows Settings",
+          "title": "Icon performance"
+        },
+        {
+          "historyTitle": "Icon power-plan",
+          "icon": {
+            "kind": "tile",
+            "name": "BatteryCharging",
+            "tint": "mint"
+          },
+          "id": "action::settings.icon-power-plan",
+          "run": {
+            "calls": [
+              {
+                "args": {
+                  "id": "settings.icon-power-plan"
+                },
+                "cmd": "execute_action"
+              }
+            ]
+          },
+          "subtitle": "Windows Settings",
+          "title": "Icon power-plan"
+        },
+        {
+          "historyTitle": "Icon tool",
+          "icon": {
+            "kind": "tile",
+            "name": "Wrench",
+            "tint": "slate"
+          },
+          "id": "action::settings.icon-tool",
+          "run": {
+            "calls": [
+              {
+                "args": {
+                  "id": "settings.icon-tool"
+                },
+                "cmd": "execute_action"
+              }
+            ]
+          },
+          "subtitle": "Windows Settings",
+          "title": "Icon tool"
+        },
+        {
+          "historyTitle": "Icon mystery-key",
+          "icon": {
+            "kind": "tile",
+            "name": "House",
+            "tint": "azure"
+          },
+          "id": "action::settings.icon-mystery-key",
+          "run": {
+            "calls": [
+              {
+                "args": {
+                  "id": "settings.icon-mystery-key"
+                },
+                "cmd": "execute_action"
+              }
+            ]
+          },
+          "subtitle": "Windows Settings",
+          "title": "Icon mystery-key"
+        }
+      ],
+      "label": "Settings"
+    }
+  ]
+}

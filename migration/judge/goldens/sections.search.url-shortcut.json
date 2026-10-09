@@ -1,0 +1,70 @@
+{
+  "flatIds": [
+    "app::intranet"
+  ],
+  "sections": [
+    {
+      "collapsed": false,
+      "collapsible": false,
+      "groups": [],
+      "id": "apps",
+      "items": [
+        {
+          "appId": "intranet",
+          "dragFile": {
+            "calls": [
+              {
+                "args": {
+                  "paths": [
+                    "C:\\Users\\You\\Desktop\\Intranet.url"
+                  ]
+                },
+                "cmd": "start_file_drag"
+              }
+            ]
+          },
+          "historyTitle": "Intranet",
+          "icon": {
+            "kind": "app",
+            "name": "Intranet"
+          },
+          "id": "app::intranet",
+          "openLocation": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You\\Desktop\\Intranet.url"
+                },
+                "cmd": "open_path_location"
+              }
+            ]
+          },
+          "run": {
+            "calls": [
+              {
+                "args": {
+                  "id": "intranet"
+                },
+                "cmd": "launch_app"
+              }
+            ]
+          },
+          "shellPath": "C:\\Users\\You\\Desktop\\Intranet.url",
+          "showProperties": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You\\Desktop\\Intranet.url"
+                },
+                "cmd": "show_path_properties"
+              }
+            ]
+          },
+          "subtitle": "Application",
+          "title": "Intranet"
+        }
+      ],
+      "label": "Apps"
+    }
+  ]
+}

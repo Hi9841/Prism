@@ -1,0 +1,36 @@
+{
+  "flatIds": [
+    "copy::zzqx"
+  ],
+  "sections": [
+    {
+      "collapsed": false,
+      "collapsible": false,
+      "id": "fallback",
+      "items": [
+        {
+          "historyTitle": "zzqx",
+          "icon": {
+            "kind": "tile",
+            "name": "ClipboardCopy",
+            "tint": "slate"
+          },
+          "id": "copy::zzqx",
+          "run": {
+            "calls": [
+              {
+                "args": {
+                  "text": "zzqx"
+                },
+                "cmd": "clipboard.writeText"
+              }
+            ]
+          },
+          "subtitle": "No files, folders, or apps matched",
+          "title": "Copy “zzqx”"
+        }
+      ],
+      "label": "No Local Matches"
+    }
+  ]
+}

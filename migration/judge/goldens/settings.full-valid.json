@@ -1,0 +1,39 @@
+{
+  "settings": {
+    "accent": "mint",
+    "alwaysOnTop": false,
+    "appGroups": [
+      {
+        "appIds": [
+          "vscode",
+          "notepad"
+        ],
+        "collapsed": false,
+        "id": "group-dev",
+        "name": "Dev"
+      }
+    ],
+    "pinnedApps": [
+      "chrome",
+      "vscode"
+    ],
+    "quickAccess": [
+      "downloads",
+      "documents",
+      "videos"
+    ],
+    "quickAccessCollapsed": true,
+    "sectionOrder": [
+      "apps",
+      "recent",
+      "quick",
+      "pinned"
+    ],
+    "shortcut": "Ctrl+Alt+Space",
+    "taskbarAlignment": "left",
+    "taskbarScrollVolume": false,
+    "theme": "dark",
+    "viewZoom": 110,
+    "width": 720
+  }
+}
