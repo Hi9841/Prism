@@ -15,7 +15,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Manager};
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::{CloseHandle, LPARAM, WAIT_TIMEOUT, WPARAM};
 use windows::Win32::Storage::FileSystem::{
@@ -52,14 +51,14 @@ struct RestoreJournal {
 }
 
 /// Restores an override left by a previous abnormal termination.
-pub fn recover_stale(app: &AppHandle) -> Result<(), String> {
-    restore_from_journal(&journal_path(app)?)
+pub fn recover_stale() -> Result<(), String> {
+    restore_from_journal(&journal_path()?)
 }
 
 /// Makes the installed provider consume standalone Win. Returns `false` when
 /// a supported StartAllBack installation is unavailable, allowing the
 /// generic hook fallback to mask Start instead.
-pub fn enable(app: &AppHandle) -> Result<bool, String> {
+pub fn enable() -> Result<bool, String> {
     if OVERRIDE_ACTIVE.load(Ordering::Acquire) {
         return Ok(true);
     }
@@ -68,7 +67,7 @@ pub fn enable(app: &AppHandle) -> Result<bool, String> {
         return Ok(false);
     }
 
-    let journal_path = journal_path(app)?;
+    let journal_path = journal_path()?;
     if journal_path.exists() {
         restore_from_journal(&journal_path)?;
     }
@@ -109,8 +108,8 @@ pub fn enable(app: &AppHandle) -> Result<bool, String> {
 
 /// Restores the exact value (including absence) that existed before Prism
 /// claimed Win.
-pub fn restore(app: &AppHandle) -> Result<(), String> {
-    let result = restore_from_journal(&journal_path(app)?);
+pub fn restore() -> Result<(), String> {
+    let result = restore_from_journal(&journal_path()?);
     if result.is_ok() {
         OVERRIDE_ACTIVE.store(false, Ordering::Release);
     }
@@ -258,9 +257,8 @@ fn journal_has_token(path: &Path, token: u64) -> bool {
         .is_some_and(|journal| journal.version == 2 && journal.token == token)
 }
 
-fn journal_path(app: &AppHandle) -> Result<PathBuf, String> {
-    app.path()
-        .app_data_dir()
+fn journal_path() -> Result<PathBuf, String> {
+    crate::host::app_data_dir()
         .map(|path| path.join(JOURNAL_NAME))
         .map_err(|error| error.to_string())
 }

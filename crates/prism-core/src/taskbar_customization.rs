@@ -14,7 +14,6 @@ use image::codecs::png::PngDecoder;
 use image::imageops::{overlay, FilterType};
 use image::{DynamicImage, ImageDecoder, ImageFormat, RgbaImage};
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Manager};
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::LPARAM;
 use windows::Win32::System::Registry::{
@@ -93,7 +92,7 @@ struct CustomStartIcon {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct TaskbarSettings {
+pub struct TaskbarSettings {
     thickness: &'static str,
     auto_hide: bool,
     combine_buttons: &'static str,
@@ -102,14 +101,14 @@ pub(crate) struct TaskbarSettings {
     custom_start_icons: Vec<CustomStartIcon>,
 }
 
-pub(crate) fn init(app: AppHandle) {
-    let settings = read_icon_settings(&app).unwrap_or_default();
-    let initial = overlay_icon(&app, &settings).ok().flatten();
-    crate::taskbar_icon_overlay::init(app, initial);
+pub fn init() {
+    let settings = read_icon_settings().unwrap_or_default();
+    let initial = overlay_icon(&settings).ok().flatten();
+    crate::taskbar_icon_overlay::init(initial);
 }
 
-pub(crate) fn settings(app: &AppHandle) -> Result<TaskbarSettings, String> {
-    let icon_settings = read_icon_settings(app)?;
+pub fn settings() -> Result<TaskbarSettings, String> {
+    let icon_settings = read_icon_settings()?;
     let advanced = open_key(EXPLORER_ADVANCED_KEY, KEY_QUERY_VALUE)?;
     let read_advanced = |name, fallback| {
         advanced
@@ -125,12 +124,12 @@ pub(crate) fn settings(app: &AppHandle) -> Result<TaskbarSettings, String> {
         auto_hide: taskbar_auto_hide(),
         combine_buttons: combine_name(read_advanced(COMBINE_VALUE, 0)),
         start_icon: icon_settings.start_icon.name(),
-        selected_custom_icon: selected_custom_id(app, &icon_settings),
-        custom_start_icons: custom_start_icons(app)?,
+        selected_custom_icon: selected_custom_id(&icon_settings),
+        custom_start_icons: custom_start_icons()?,
     })
 }
 
-pub(crate) fn set_thickness(value: &str) -> Result<(), String> {
+pub fn set_thickness(value: &str) -> Result<(), String> {
     let (legacy_size, icon_preference) = match value {
         "compact" => (0, 0),
         "default" => (1, 1),
@@ -143,7 +142,7 @@ pub(crate) fn set_thickness(value: &str) -> Result<(), String> {
     Ok(())
 }
 
-pub(crate) fn set_auto_hide(enabled: bool) -> Result<(), String> {
+pub fn set_auto_hide(enabled: bool) -> Result<(), String> {
     let mut data = APPBARDATA {
         cbSize: std::mem::size_of::<APPBARDATA>() as u32,
         ..Default::default()
@@ -165,7 +164,7 @@ pub(crate) fn set_auto_hide(enabled: bool) -> Result<(), String> {
     }
 }
 
-pub(crate) fn set_combine_buttons(value: &str) -> Result<(), String> {
+pub fn set_combine_buttons(value: &str) -> Result<(), String> {
     let code = match value {
         "always" => 0,
         "whenFull" => 1,
@@ -178,42 +177,40 @@ pub(crate) fn set_combine_buttons(value: &str) -> Result<(), String> {
     Ok(())
 }
 
-pub(crate) fn set_start_icon(app: &AppHandle, value: &str) -> Result<(), String> {
+pub fn set_start_icon(value: &str) -> Result<(), String> {
     let selected = StartIcon::parse(value)?;
-    let mut settings = read_icon_settings(app)?;
+    let mut settings = read_icon_settings()?;
     settings.start_icon = selected;
-    let icon = overlay_icon(app, &settings)?;
-    write_icon_settings(app, &settings)?;
-    crate::taskbar_icon_overlay::set(app, icon)
+    let icon = overlay_icon(&settings)?;
+    write_icon_settings(&settings)?;
+    crate::taskbar_icon_overlay::set(icon)
 }
 
-pub(crate) fn set_custom_start_icon(app: &AppHandle, base64_png: &str) -> Result<(), String> {
+pub fn set_custom_start_icon(base64_png: &str) -> Result<(), String> {
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(base64_png)
         .map_err(|_| "The icon data was corrupted in transit".to_string())?;
     let (preview, pixels) = prepare_icon(&bytes)?;
-    let existing = custom_start_icons(app)?;
+    let existing = custom_start_icons()?;
     if existing.len() >= MAX_CUSTOM_ICONS {
         return Err(format!(
             "Remove an icon before adding another (maximum {MAX_CUSTOM_ICONS})"
         ));
     }
     let id = new_custom_icon_id();
-    write_file_atomically(&custom_icon_path_for_id(app, &id)?, &preview)?;
+    write_file_atomically(&custom_icon_path_for_id(&id)?, &preview)?;
     let settings = IconSettings {
         version: 1,
         start_icon: StartIcon::Custom,
         selected_custom_icon: Some(id),
     };
-    write_icon_settings(app, &settings)?;
-    crate::taskbar_icon_overlay::set(
-        app,
-        Some(crate::taskbar_icon_overlay::OverlayIcon { pixels }),
+    write_icon_settings(&settings)?;
+    crate::taskbar_icon_overlay::set(Some(crate::taskbar_icon_overlay::OverlayIcon { pixels }),
     )
 }
 
-pub(crate) fn select_custom_start_icon(app: &AppHandle, id: &str) -> Result<(), String> {
-    let path = custom_icon_path_for_id(app, id)?;
+pub fn select_custom_start_icon(id: &str) -> Result<(), String> {
+    let path = custom_icon_path_for_id(id)?;
     let bytes = std::fs::read(path).map_err(|_| "That custom icon no longer exists".to_string())?;
     let pixels = decode_png(&bytes)?;
     let settings = IconSettings {
@@ -221,17 +218,15 @@ pub(crate) fn select_custom_start_icon(app: &AppHandle, id: &str) -> Result<(), 
         start_icon: StartIcon::Custom,
         selected_custom_icon: (id != "legacy").then(|| id.to_string()),
     };
-    write_icon_settings(app, &settings)?;
-    crate::taskbar_icon_overlay::set(
-        app,
-        Some(crate::taskbar_icon_overlay::OverlayIcon { pixels }),
+    write_icon_settings(&settings)?;
+    crate::taskbar_icon_overlay::set(Some(crate::taskbar_icon_overlay::OverlayIcon { pixels }),
     )
 }
 
-pub(crate) fn remove_custom_start_icon(app: &AppHandle, id: &str) -> Result<(), String> {
-    let mut settings = read_icon_settings(app)?;
-    let selected = selected_custom_id(app, &settings).is_some_and(|selected| selected == id);
-    let path = custom_icon_path_for_id(app, id)?;
+pub fn remove_custom_start_icon(id: &str) -> Result<(), String> {
+    let mut settings = read_icon_settings()?;
+    let selected = selected_custom_id(&settings).is_some_and(|selected| selected == id);
+    let path = custom_icon_path_for_id(id)?;
     match std::fs::remove_file(path) {
         Ok(()) => {}
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -242,21 +237,19 @@ pub(crate) fn remove_custom_start_icon(app: &AppHandle, id: &str) -> Result<(), 
     if selected {
         settings.start_icon = StartIcon::System;
         settings.selected_custom_icon = None;
-        write_icon_settings(app, &settings)?;
-        crate::taskbar_icon_overlay::set(app, None)?;
+        write_icon_settings(&settings)?;
+        crate::taskbar_icon_overlay::set(None)?;
     }
     Ok(())
 }
 
-fn overlay_icon(
-    app: &AppHandle,
-    settings: &IconSettings,
+fn overlay_icon(settings: &IconSettings,
 ) -> Result<Option<crate::taskbar_icon_overlay::OverlayIcon>, String> {
     let bytes = match settings.start_icon {
         StartIcon::System => return Ok(None),
         StartIcon::Gem => GEM_ICON.to_vec(),
         StartIcon::Diamond => DIAMOND_ICON.to_vec(),
-        StartIcon::Custom => std::fs::read(custom_icon_path_for_settings(app, settings)?)
+        StartIcon::Custom => std::fs::read(custom_icon_path_for_settings(settings)?)
             .map_err(|_| "Choose a custom PNG before selecting Custom".to_string())?,
     };
     let pixels = decode_png(&bytes)?;
@@ -308,8 +301,8 @@ fn encode_png(image: &RgbaImage) -> Result<Vec<u8>, String> {
     Ok(output.into_inner())
 }
 
-fn read_icon_settings(app: &AppHandle) -> Result<IconSettings, String> {
-    let path = icon_settings_path(app)?;
+fn read_icon_settings() -> Result<IconSettings, String> {
+    let path = icon_settings_path()?;
     if !path.exists() {
         return Ok(IconSettings::default());
     }
@@ -324,33 +317,33 @@ fn read_icon_settings(app: &AppHandle) -> Result<IconSettings, String> {
     }
 }
 
-fn write_icon_settings(app: &AppHandle, settings: &IconSettings) -> Result<(), String> {
+fn write_icon_settings(settings: &IconSettings) -> Result<(), String> {
     let bytes = serde_json::to_vec(&settings).map_err(|error| error.to_string())?;
-    write_file_atomically(&icon_settings_path(app)?, &bytes)
+    write_file_atomically(&icon_settings_path()?, &bytes)
 }
 
-fn selected_custom_id(app: &AppHandle, settings: &IconSettings) -> Option<String> {
+fn selected_custom_id(settings: &IconSettings) -> Option<String> {
     if settings.start_icon != StartIcon::Custom {
         return None;
     }
     settings.selected_custom_icon.clone().or_else(|| {
-        custom_icon_path(app)
+        custom_icon_path()
             .ok()
             .filter(|path| path.is_file())
             .map(|_| "legacy".to_string())
     })
 }
 
-fn custom_start_icons(app: &AppHandle) -> Result<Vec<CustomStartIcon>, String> {
+fn custom_start_icons() -> Result<Vec<CustomStartIcon>, String> {
     let mut icons = Vec::new();
-    let legacy = custom_icon_path(app)?;
+    let legacy = custom_icon_path()?;
     if let Ok(preview) = std::fs::read(legacy) {
         icons.push(CustomStartIcon {
             id: "legacy".to_string(),
             preview: encode_base64(&preview),
         });
     }
-    let directory = custom_icon_dir(app)?;
+    let directory = custom_icon_dir()?;
     let entries = match std::fs::read_dir(directory) {
         Ok(entries) => entries,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(icons),
@@ -511,45 +504,40 @@ fn write_file_atomically(path: &Path, bytes: &[u8]) -> Result<(), String> {
     crate::files::replace_file(&temp, path)
 }
 
-fn icon_settings_path(app: &AppHandle) -> Result<PathBuf, String> {
-    app.path()
-        .app_data_dir()
+fn icon_settings_path() -> Result<PathBuf, String> {
+    crate::host::app_data_dir()
         .map(|path| path.join(ICON_SETTINGS_NAME))
         .map_err(|error| error.to_string())
 }
 
-fn custom_icon_path(app: &AppHandle) -> Result<PathBuf, String> {
-    app.path()
-        .app_data_dir()
+fn custom_icon_path() -> Result<PathBuf, String> {
+    crate::host::app_data_dir()
         .map(|path| path.join(CUSTOM_ICON_PNG))
         .map_err(|error| error.to_string())
 }
 
-fn custom_icon_dir(app: &AppHandle) -> Result<PathBuf, String> {
-    app.path()
-        .app_data_dir()
+fn custom_icon_dir() -> Result<PathBuf, String> {
+    crate::host::app_data_dir()
         .map(|path| path.join(CUSTOM_ICON_DIR))
         .map_err(|error| error.to_string())
 }
 
-fn custom_icon_path_for_settings(
-    app: &AppHandle,
-    settings: &IconSettings,
+fn custom_icon_path_for_settings(settings: &IconSettings,
 ) -> Result<PathBuf, String> {
     match settings.selected_custom_icon.as_deref() {
-        Some(id) => custom_icon_path_for_id(app, id),
-        None => custom_icon_path(app),
+        Some(id) => custom_icon_path_for_id(id),
+        None => custom_icon_path(),
     }
 }
 
-fn custom_icon_path_for_id(app: &AppHandle, id: &str) -> Result<PathBuf, String> {
+fn custom_icon_path_for_id(id: &str) -> Result<PathBuf, String> {
     if !valid_custom_icon_id(id) {
         return Err("Invalid custom icon identifier".to_string());
     }
     if id == "legacy" {
-        custom_icon_path(app)
+        custom_icon_path()
     } else {
-        custom_icon_dir(app).map(|directory| directory.join(format!("{id}.png")))
+        custom_icon_dir().map(|directory| directory.join(format!("{id}.png")))
     }
 }
 

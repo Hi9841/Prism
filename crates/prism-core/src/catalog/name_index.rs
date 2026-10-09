@@ -76,7 +76,7 @@ struct Names {
 
 /// A query parsed once per search: the scorer inputs plus the admission rules
 /// of the SQL candidate stages that this index replaces.
-pub(crate) struct NameQuery<'a> {
+pub struct NameQuery<'a> {
     full: &'a str,
     tokens: &'a [&'a str],
     mask: u32,
@@ -108,7 +108,7 @@ impl Default for NameIndex {
 }
 
 impl<'a> NameQuery<'a> {
-    pub(crate) fn new(full: &'a str, tokens: &'a [&'a str]) -> Self {
+    pub fn new(full: &'a str, tokens: &'a [&'a str]) -> Self {
         Self {
             full,
             tokens,
@@ -215,7 +215,7 @@ impl NameIndex {
     }
 
     /// Synchronous full load (or catch-up), batch by batch.
-    pub(crate) fn load(&self, db: &Database) -> Result<(), String> {
+    pub fn load(&self, db: &Database) -> Result<(), String> {
         if self.reload_requested.swap(false, AtomicOrdering::AcqRel) {
             self.reset();
         }
@@ -250,7 +250,7 @@ impl NameIndex {
     /// Fallback-catalog candidates for a query, best first. `None` means the
     /// index cannot answer now (not loaded, or a large backlog of new rows is
     /// pending) and the caller must use the SQL candidate path.
-    pub(crate) fn candidates(
+    pub fn candidates(
         &self,
         db: &Database,
         query: &NameQuery<'_>,

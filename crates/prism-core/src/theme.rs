@@ -2,7 +2,6 @@
 //! (`AppsUseLightTheme`), with a background watcher that emits an event
 //! whenever the OS theme flips so the UI can follow live.
 
-use tauri::{AppHandle, Emitter};
 use windows::core::PCWSTR;
 use windows::Win32::System::Registry::{
     RegCloseKey, RegNotifyChangeKeyValue, RegOpenKeyExW, RegQueryValueExW, HKEY, HKEY_CURRENT_USER,
@@ -58,7 +57,7 @@ struct ThemeEvent {
 }
 
 /// Waits for registry changes and emits `system-theme-changed` when the mode flips.
-pub fn watch(app: AppHandle) {
+pub fn watch() {
     std::thread::spawn(move || {
         let mut wide_path: Vec<u16> = PERSONALIZE_KEY.encode_utf16().chain(Some(0)).collect();
         let mut key = HKEY::default();
@@ -88,11 +87,12 @@ pub fn watch(app: AppHandle) {
             if let Some(current) = apps_light() {
                 if current != last {
                     last = current;
-                    let _ = app.emit(
+                    crate::host::emit(
                         "system-theme-changed",
-                        ThemeEvent {
+                        serde_json::to_value(ThemeEvent {
                             theme: if current { "light" } else { "dark" },
-                        },
+                        })
+                        .unwrap_or_default(),
                     );
                 }
             }

@@ -6,28 +6,27 @@
 use std::path::{Path, PathBuf};
 
 use image::RgbaImage;
-use tauri::{AppHandle, Manager};
 
 const ICON_FILE_NAME: &str = "taskbar-start-icon.rgba";
 const ICON_MAGIC: &[u8] = b"PRISICON1";
 
-pub(crate) struct OverlayIcon {
-    pub(crate) pixels: RgbaImage,
+pub struct OverlayIcon {
+    pub pixels: RgbaImage,
 }
 
-pub(crate) fn init(app: AppHandle, initial: Option<OverlayIcon>) {
-    let _ = sync_file(&app, initial.as_ref());
+pub fn init(initial: Option<OverlayIcon>) {
+    let _ = sync_file(initial.as_ref());
     crate::win_key::notify_start_icon_changed();
 }
 
-pub(crate) fn set(app: &AppHandle, icon: Option<OverlayIcon>) -> Result<(), String> {
-    sync_file(app, icon.as_ref())?;
+pub fn set(icon: Option<OverlayIcon>) -> Result<(), String> {
+    sync_file(icon.as_ref())?;
     crate::win_key::notify_start_icon_changed();
     Ok(())
 }
 
-fn sync_file(app: &AppHandle, icon: Option<&OverlayIcon>) -> Result<(), String> {
-    let path = icon_path(app)?;
+fn sync_file(icon: Option<&OverlayIcon>) -> Result<(), String> {
+    let path = icon_path()?;
     match icon {
         Some(icon) => write_icon_file(&path, &icon.pixels),
         None => match std::fs::remove_file(path) {
@@ -55,9 +54,8 @@ fn write_icon_file(path: &Path, pixels: &RgbaImage) -> Result<(), String> {
     crate::files::replace_file(&temp, path)
 }
 
-fn icon_path(app: &AppHandle) -> Result<PathBuf, String> {
-    app.path()
-        .app_data_dir()
+fn icon_path() -> Result<PathBuf, String> {
+    crate::host::app_data_dir()
         .map(|path| path.join(ICON_FILE_NAME))
         .map_err(|error| error.to_string())
 }

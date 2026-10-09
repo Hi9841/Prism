@@ -424,7 +424,7 @@ fn spawn_reader(
         .ok()
 }
 
-pub(crate) fn watcher_root_changed(current: &Path, next: &Path) -> bool {
+pub fn watcher_root_changed(current: &Path, next: &Path) -> bool {
     !current
         .as_os_str()
         .to_string_lossy()

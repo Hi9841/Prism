@@ -18,8 +18,6 @@ use std::time::Duration;
 
 use base64::Engine;
 use serde::Deserialize;
-use tauri::Emitter;
-use tauri::Manager;
 use windows::core::GUID;
 use windows::Win32::System::Com::CoTaskMemFree;
 use windows::Win32::UI::Shell::{
@@ -63,7 +61,7 @@ const RECONCILIATION_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60); // 6
                                                                             // that are new, never scanned, or stale get a sweep.
 const STARTUP_SWEEP_WINDOW: Duration = Duration::from_secs(24 * 60 * 60);
 
-pub(crate) fn catalog_debug_enabled() -> bool {
+pub fn catalog_debug_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| {
         std::env::var("PRISM_CATALOG_DEBUG")
@@ -193,7 +191,6 @@ pub struct FileIndex {
     watchers: Arc<Mutex<HashMap<String, VolumeWatcher>>>,
     scan_cancels: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>,
     app_data_dir: Arc<RwLock<PathBuf>>,
-    app_handle: Arc<Mutex<Option<tauri::AppHandle>>>,
     scan_generation: Arc<AtomicU64>,
     scope_repairs: Arc<Mutex<ScopeRepairCoordinator>>,
     source_workers: Arc<Mutex<SourceWorkerCoordinator>>,
@@ -213,7 +210,6 @@ impl Default for FileIndex {
             watchers: Arc::new(Mutex::new(HashMap::new())),
             scan_cancels: Arc::new(Mutex::new(HashMap::new())),
             app_data_dir: Arc::new(RwLock::new(PathBuf::from("."))),
-            app_handle: Arc::new(Mutex::new(None)),
             scan_generation: Arc::new(AtomicU64::new(1)),
             scope_repairs: Arc::new(Mutex::new(ScopeRepairCoordinator::default())),
             source_workers: Arc::new(Mutex::new(SourceWorkerCoordinator::default())),
@@ -347,7 +343,7 @@ impl FileIndex {
     /// "rebuild index" action).
     pub fn rebuild(&self) {
         let this = self.clone();
-        tauri::async_runtime::spawn(async move {
+        crate::runtime::spawn(async move {
             this.cancel_all_scans();
             let db = this.db.read().unwrap_or_else(|e| e.into_inner()).clone();
             if let Some(ref db) = db {
@@ -365,7 +361,7 @@ impl FileIndex {
     async fn reclaim_space(&self) {
         let db = self.db.read().unwrap_or_else(|e| e.into_inner()).clone();
         let Some(db) = db else { return };
-        let result = tauri::async_runtime::spawn_blocking(move || db.reclaim_space()).await;
+        let result = crate::runtime::spawn_blocking(move || db.reclaim_space()).await;
         match result {
             Ok(Ok(report)) if report.after < report.before => eprintln!(
                 "[Prism Catalog] reclaimed {} MB (catalog {} MB -> {} MB)",
@@ -385,32 +381,15 @@ impl FileIndex {
         }
     }
 
-    pub fn set_app_handle(&self, app: tauri::AppHandle) {
-        *self.app_handle.lock().unwrap_or_else(|e| e.into_inner()) = Some(app);
-    }
-
     /// True when the palette window is shown. The background poll loop uses
     /// this to poll journal catch-up fast while the user is searching and
     /// slowly while the launcher sits hidden.
     fn palette_visible(&self) -> bool {
-        self.app_handle
-            .lock()
-            .unwrap()
-            .as_ref()
-            .and_then(|app| app.get_webview_window("main"))
-            .map(|window| window.is_visible().unwrap_or(true))
-            .unwrap_or(true)
+        crate::host::get().is_none_or(|host| host.palette_visible())
     }
 
     fn emit_updated(&self) {
-        if let Some(app) = self
-            .app_handle
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .as_ref()
-        {
-            let _ = app.emit("file-index-updated", ());
-        }
+        crate::host::emit("file-index-updated", serde_json::Value::Null);
     }
 
     /// Synchronizes every connected volume. Local fixed NTFS volumes use the
@@ -421,7 +400,7 @@ impl FileIndex {
         let db_opt = self.db.read().unwrap_or_else(|e| e.into_inner()).clone();
         let Some(ref db) = db_opt else { return };
 
-        let discovered = tauri::async_runtime::spawn_blocking(volume::discover_volumes)
+        let discovered = crate::runtime::spawn_blocking(volume::discover_volumes)
             .await
             .unwrap_or_default();
 
@@ -504,13 +483,13 @@ impl FileIndex {
 
             let this = self.clone();
             let slots = self.scan_slots.clone();
-            tauri::async_runtime::spawn(async move {
+            crate::runtime::spawn(async move {
                 let mut pass_fresh_ok = fresh_ok;
                 loop {
                     if let Ok(permit) = slots.clone().acquire_owned().await {
                         let index = this.clone();
                         let pass_volume = volume.clone();
-                        let _ = tauri::async_runtime::spawn_blocking(move || {
+                        let _ = crate::runtime::spawn_blocking(move || {
                             index.scan_one_volume_sync(&pass_volume, pass_fresh_ok);
                         })
                         .await;
@@ -809,7 +788,7 @@ impl FileIndex {
             // The blocking task must own its volume (one small clone per NTFS
             // drive per poll tick).
             let volume = volume.clone();
-            let _ = tauri::async_runtime::spawn_blocking(move || {
+            let _ = crate::runtime::spawn_blocking(move || {
                 let Some(db) = this.db.read().unwrap_or_else(|e| e.into_inner()).clone() else {
                     return;
                 };
@@ -842,7 +821,7 @@ impl FileIndex {
         }
 
         let index = self.clone();
-        tauri::async_runtime::spawn_blocking(move || loop {
+        crate::runtime::spawn_blocking(move || loop {
             index.reconcile_scope_sync(&volume_id, &scope);
             if !index
                 .scope_repairs
@@ -1030,8 +1009,7 @@ impl FileIndex {
     }
 }
 
-pub fn warm(index: FileIndex, app_data_dir: PathBuf, app: tauri::AppHandle) {
-    index.set_app_handle(app.clone());
+pub fn warm(index: FileIndex, app_data_dir: PathBuf) {
     // Open the persisted catalog. This was previously only reachable through
     // the dead `FileIndex::new` helper - without it the index is never loaded
     // or built and filename searches return nothing.
@@ -1039,7 +1017,7 @@ pub fn warm(index: FileIndex, app_data_dir: PathBuf, app: tauri::AppHandle) {
     let legacy_cache_path = app_data_dir.join("files.json");
     index.try_migrate_legacy_cache(&legacy_cache_path);
 
-    tauri::async_runtime::spawn(async move {
+    crate::runtime::spawn(async move {
         // Startup: serve the persisted index directly. Volumes whose index is
         // fresh are not re-walked (the watcher keeps them live), so a normal
         // launch has results immediately - no indexing phase.
@@ -1049,7 +1027,7 @@ pub fn warm(index: FileIndex, app_data_dir: PathBuf, app: tauri::AppHandle) {
         let mut last_reconcile = tokio::time::Instant::now();
         let mut last_discovery = tokio::time::Instant::now();
         // Seed the known set so the first poll does not immediately re-sweep.
-        let mut current_volumes = tauri::async_runtime::spawn_blocking(volume::discover_volumes)
+        let mut current_volumes = crate::runtime::spawn_blocking(volume::discover_volumes)
             .await
             .unwrap_or_default();
         let mut known_topology = volume_topology_fingerprint(&current_volumes);
@@ -1081,7 +1059,7 @@ pub fn warm(index: FileIndex, app_data_dir: PathBuf, app: tauri::AppHandle) {
 
             if last_discovery.elapsed() >= VOLUME_DISCOVERY_INTERVAL {
                 last_discovery = tokio::time::Instant::now();
-                current_volumes = tauri::async_runtime::spawn_blocking(volume::discover_volumes)
+                current_volumes = crate::runtime::spawn_blocking(volume::discover_volumes)
                     .await
                     .unwrap_or_default();
 
@@ -1100,7 +1078,7 @@ pub fn warm(index: FileIndex, app_data_dir: PathBuf, app: tauri::AppHandle) {
                     // scan_all_volumes discovers volumes itself; refresh the
                     // snapshot so the next tick does not see a phantom change.
                     current_volumes =
-                        tauri::async_runtime::spawn_blocking(volume::discover_volumes)
+                        crate::runtime::spawn_blocking(volume::discover_volumes)
                             .await
                             .unwrap_or_default();
                     continue;

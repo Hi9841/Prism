@@ -31,10 +31,10 @@ pub struct AudioSessionEntry {
 }
 
 /// Owns COM initialization for the dedicated audio worker thread.
-pub(crate) struct ComApartment;
+pub struct ComApartment;
 
 impl ComApartment {
-    pub(crate) fn initialize() -> Result<Self, String> {
+    pub fn initialize() -> Result<Self, String> {
         unsafe {
             CoInitializeEx(None, COINIT_MULTITHREADED)
                 .ok()
@@ -349,7 +349,7 @@ struct InspectedElement {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum TaskbarTarget {
+pub enum TaskbarTarget {
     Unknown,
     Master,
     Application {
@@ -359,7 +359,7 @@ pub(crate) enum TaskbarTarget {
 }
 
 /// Identifies the application or taskbar element under the cursor point.
-pub(crate) fn identify_taskbar_target_at(point: POINT) -> TaskbarTarget {
+pub fn identify_taskbar_target_at(point: POINT) -> TaskbarTarget {
     let target = classify_taskbar_element(inspect_element_at(point));
     crate::win_key::debug_trace(&format!("audio-target {target:?}"));
     if matches!(target, TaskbarTarget::Unknown) {
@@ -747,7 +747,7 @@ pub struct VolumeChangeResult {
 }
 
 /// Main entry point: called when mouse wheel scrolls over the taskbar.
-pub(crate) fn adjust_volume_for_target(
+pub fn adjust_volume_for_target(
     target: &TaskbarTarget,
     delta: f32,
 ) -> Option<VolumeChangeResult> {

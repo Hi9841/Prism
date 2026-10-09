@@ -1561,7 +1561,7 @@ impl Database {
         Ok(out)
     }
 
-    pub(crate) fn volume_debug_status(
+    pub fn volume_debug_status(
         &self,
         volume_id: &str,
     ) -> Result<(String, String, String, u64, i64, String), String> {
@@ -1639,7 +1639,7 @@ impl Database {
     /// Fallback-catalog rows with an id above `after_id`, in id order. Feeds
     /// the in-memory name index: ids only grow, so this is both the full load
     /// (`after_id = 0`, in batches) and the incremental catch-up.
-    pub(crate) fn file_names_after(
+    pub fn file_names_after(
         &self,
         after_id: i64,
         limit: usize,
@@ -1668,7 +1668,7 @@ impl Database {
     /// Current state of each requested fallback row. A row that a scan
     /// deleted is `Missing`; a row whose volume is now served by the NTFS
     /// catalog is `Excluded` (same filter as the SQL candidate stages).
-    pub(crate) fn file_rows_by_id(&self, ids: &[i64]) -> Result<Vec<RowLookup>, String> {
+    pub fn file_rows_by_id(&self, ids: &[i64]) -> Result<Vec<RowLookup>, String> {
         let conn = self.reader.lock().map_err(|e| e.to_string())?;
         let mut stmt = conn
             .prepare_cached(
@@ -1706,7 +1706,7 @@ impl Database {
 
     /// The NTFS-catalog candidate stages alone. The in-memory name index
     /// covers the fallback `files` table; NTFS volumes keep this SQL path.
-    pub(crate) fn ntfs_candidates_until<F>(
+    pub fn ntfs_candidates_until<F>(
         &self,
         query: &str,
         limit: usize,

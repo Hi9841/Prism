@@ -8,7 +8,6 @@
 use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU64, Ordering};
 use std::sync::mpsc::{sync_channel, Receiver, SyncSender, TrySendError};
 use std::sync::OnceLock;
-use tauri::{AppHandle, Emitter};
 use windows::Win32::Foundation::{LPARAM, LRESULT, POINT, WPARAM};
 use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, DispatchMessageW, GetMessageW, SetWindowsHookExW, TranslateMessage,
@@ -40,8 +39,8 @@ struct ResolvedRequest {
     target: crate::audio::TaskbarTarget,
 }
 
-pub fn init(app: AppHandle) {
-    AUDIO_REQUESTS.get_or_init(|| start_audio_worker(app));
+pub fn init() {
+    AUDIO_REQUESTS.get_or_init(start_audio_worker);
     start_hook_thread();
 }
 
@@ -58,13 +57,13 @@ fn start_hook_thread() {
     std::thread::spawn(hook_thread_proc);
 }
 
-fn start_audio_worker(app: AppHandle) -> SyncSender<AudioRequest> {
+fn start_audio_worker() -> SyncSender<AudioRequest> {
     let (sender, receiver) = sync_channel(AUDIO_QUEUE_CAPACITY);
-    std::thread::spawn(move || audio_worker_proc(app, receiver));
+    std::thread::spawn(move || audio_worker_proc(receiver));
     sender
 }
 
-fn audio_worker_proc(app: AppHandle, receiver: Receiver<AudioRequest>) {
+fn audio_worker_proc(receiver: Receiver<AudioRequest>) {
     let Ok(_com_apartment) = crate::audio::ComApartment::initialize() else {
         return;
     };
@@ -100,7 +99,10 @@ fn audio_worker_proc(app: AppHandle, receiver: Receiver<AudioRequest>) {
                 change.muted,
                 current.point,
             );
-            let _ = app.emit("taskbar-volume-changed", &change);
+            crate::host::emit(
+                "taskbar-volume-changed",
+                serde_json::to_value(&change).unwrap_or_default(),
+            );
         }
     }
 }
