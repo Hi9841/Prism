@@ -1,0 +1,2 @@
+id	date	section	amendment	reason	status
+A1	2026-10-09	§2 (new paragraph after the construct table)	"Gap decisions for individual sites live in `migration/inventory.tsv`. A row for a site wins over the defaults in this section. A site listed in `migration/gap-sites.tsv` that has no inventory row is an inventory bug: apply the UNKNOWN rule (most conservative translation plus `TODO(port):`) and flag it. Do not invent a mapping."	prompts/02: the rulebook is how implementers learn the inventory exists. Queued for the owner; agents never apply it.	queued

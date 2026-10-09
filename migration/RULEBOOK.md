@@ -123,3 +123,4 @@ screenshot of the current app within a fixed tolerance.
 ## Deviation log
 
 - 2026-10-09: Step 0b reviewers and Step 1 map reviewers ran on Opus per the model plan. No deviation.
+- 2026-10-09: Step 1 gap inventory, first 20 rows: the two skeptic reviewers were stopped at the owner's request (fewer subagents). One in-context review replaced them; it revised 3 rows (runItem evidence, prism:close broadcast, context-menu clamp). Owner instruction: review inline by default and ask before spawning.
