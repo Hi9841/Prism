@@ -758,7 +758,16 @@ impl Element for TextElement {
 }
 
 impl Render for TextInput {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Blink only while the caret can be seen: a hidden or unfocused input
+        // would otherwise wake the app twice a second forever.
+        let blinking = self.focus_handle.is_focused(window) && window.is_window_active();
+        if blinking && self.blink.is_none() {
+            self.restart_blink(cx);
+        } else if !blinking && self.blink.is_some() {
+            self.blink = None;
+            self.caret_visible = true;
+        }
         div()
             .flex()
             .flex_1()

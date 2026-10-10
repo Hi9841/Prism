@@ -162,6 +162,16 @@ another app, Esc cancels, a click works after the drag, and a release over the p
 
 ## Deviation log
 
+- 2026-10-10: Real-app test on the owner's desktop (owner: "test for me"), with `SendInput` and clicks.
+  Findings and fixes: (1) `prism-gpui` has an inherited Low Mandatory Level label (a Codex sandbox ACL), so
+  `target/debug/prism.exe` starts at Low integrity: the catalog opens read-only and the Win-key observer
+  and the Explorer bridge fail. The ACL was not changed; the port runs from a copy in
+  `%LOCALAPPDATA%\PrismGpui`. (2) The second open stayed invisible: GPUI dropped next-frame callbacks on a
+  re-entrant frame (vendored patch 6). (3) The focus ring filled transparent buttons (patch 7). (4) The
+  shell treated a background WM_ACTIVATE as foreground and stopped the raise retries, so a Win open from
+  Chrome left focus in Chrome; the shell now checks the real foreground. One stray "notepad" + Enter went
+  to the owner's terminal before the input script checked the foreground; the script now refuses input
+  unless the palette is in the foreground.
 - 2026-10-10: Step 3 subsystems 3-6 written inline. Deviations, each measured with the new visual parity
   harness (`migration/parity`: the original in headless Chrome 154 with a mocked Tauri layer vs the port in a
   parked, never-activated window, same fixture, PrintWindow captures, SSIM-based score):

@@ -40,14 +40,28 @@ The port is complete: backend (prism-core), every view, and the app shell (`crat
   `target/parity/original-dist` (vite build of `../Prism`), `cargo build -p prism-app`. Scripts: `run-original.mjs`
   (headless Chrome + `mock-tauri.js`; `PARITY_DEBUG=1` logs pointer events; an `eval` step probes the DOM),
   `prism.exe --parity` (parked window, never activated; an `info` step prints the focused bounds).
-- Vendored gpui patches: `vendor/gpui/PRISM-PATCHES.md` (5). Deviation log: `migration/RULEBOOK.md`.
+- Vendored gpui patches: `vendor/gpui/PRISM-PATCHES.md` (7). Deviation log: `migration/RULEBOOK.md`.
 
 ## Next actions
 
-1. Real-app smoke test, only with the owner's permission: the installed Tauri Prism owns the Win key and the
-   taskbar. Do not run `prism.exe` without `--parity` while it runs.
-2. Optional polish: zoom captures (fractional font sizes), launcher-stage scale animation, hover color transitions.
-3. D3 (shipping) is the owner's decision.
+1. Real app: run it only from `%LOCALAPPDATA%\PrismGpui\prism.exe` (a copy). The repo folder has an
+   inherited Low integrity label, so an exe started from `target/` runs at Low integrity and the catalog,
+   the Win-key observer, and the Explorer bridge fail. Quit the installed Tauri Prism first (both own the
+   Win key). Tested 2026-10-10: Win toggle, Start-button click, search, launch, Escape, click-away,
+   settings, width, Tab focus ring. Test scripts: `target/tmp/scripts/` (`keys.ps1` refuses input unless
+   the palette is in the foreground). Trace: `%TEMP%\Prism\semantic-debug.log` (debug builds).
+2. Release (the next public Prism release can be this build): bump `version` in `Cargo.toml`, run
+   `packaging/build-installer.ps1` (release exe, NSIS installer from Tauri's generated script, signed with
+   `~/.prism/signing/updater.key`), then Prism's `scripts/publish-release.ps1` with `-ArtifactsDirectory`
+   pointing at `prism-gpui/artifacts` (it writes `latest.json`). Old Tauri builds update in place: same
+   endpoint, key, install folder, registry keys, hooks, and `/P /R /UPDATE /ARGS`.
+   Tested 2026-10-10 on the owner's PC: Tauri 0.11.9 -> port install as the Tauri updater runs it; in-app
+   update 0.90.0 -> 0.90.1 from a local channel (`-UpdateEndpoint`/`-UpdatePublicKey`/`-Version`, test key);
+   a tampered signature is refused; silent uninstall; fresh passive install and first run; search, Win key,
+   Start-button click, click-away. Not tested: the Tauri updater's own download step against the port
+   installer (same minisign format, signed by the same `tauri signer`).
+3. Optional polish: zoom captures (fractional font sizes), launcher-stage scale animation, hover color transitions.
+4. D3 (shipping) is the owner's decision.
 
 ## Facts to remember
 

@@ -424,11 +424,18 @@ impl bridge::Shell for GpuiShell {
     }
 
     fn app_version(&self) -> String {
-        env!("CARGO_PKG_VERSION").to_owned()
+        env!("PRISM_VERSION").to_owned()
     }
 
     fn window_activation_changed(&self, active: bool, cx: &mut App) {
         if active {
+            // GPUI reports WM_ACTIVATE, which Windows also sends when it
+            // activates the window inside its own thread but denies the
+            // foreground. Only a real foreground stops the raise retries.
+            if !is_prism_foreground() {
+                win_key::debug_trace("activate-without-foreground");
+                return;
+            }
             PALETTE_TOOK_FOREGROUND.store(true, Ordering::Release);
             ACTIVATION_FOCUS_PENDING.store(false, Ordering::Release);
             return;

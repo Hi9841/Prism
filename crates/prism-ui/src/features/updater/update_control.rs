@@ -113,7 +113,10 @@ impl UpdateControl {
                             this.view = ViewState::Available { version: update.version.clone() };
                             this.update = Some(update);
                         }
-                        Err(_) => this.view = ViewState::Failed { version: "latest".into() },
+                        Err(error) => {
+                            prism_core::win_key::debug_trace(&format!("update-check-failed {error}"));
+                            this.view = ViewState::Failed { version: "latest".into() };
+                        }
                     }
                 }
                 this.check_in_flight = None;

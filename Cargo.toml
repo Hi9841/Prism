@@ -15,3 +15,8 @@ serde_json = "1"
 # gpui 0.2.2 with the patches listed in vendor/gpui/PRISM-PATCHES.md.
 [patch.crates-io]
 gpui = { path = "vendor/gpui" }
+
+# The installed binary: no symbol tables, cross-crate inlining (thin LTO).
+[profile.release]
+strip = true
+lto = "thin"

@@ -479,10 +479,10 @@ pub fn shadow_tile() -> Vec<BoxShadow> {
 }
 
 /// One CSS box shadow, lengths in px (rem-scaled by the caller when needed).
-/// CSS blurs with sigma = blur / 2; GPUI's `blur_radius` is the sigma. GPUI's
-/// shader divides by the sigma, so a sharp (blur 0) shadow gets a sub-pixel one.
+/// CSS blurs with sigma = blur / 2; GPUI's `blur_radius` is the sigma. The
+/// vendored `paint_shadows` draws a sharp ring as a border (patch 7).
 pub fn shadow(x: f32, y: f32, blur: f32, spread: f32, color: Rgba) -> BoxShadow {
-    let sigma = (blur / 2.0).max(0.3);
+    let sigma = blur / 2.0;
     BoxShadow { color: hsla(color), offset: point(px(x), px(y)), blur_radius: px(sigma), spread_radius: px(spread) }
 }
 

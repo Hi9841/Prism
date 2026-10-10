@@ -8,8 +8,17 @@ use std::time::Duration;
 use base64::Engine;
 use serde::Deserialize;
 
-const ENDPOINT: &str = "https://github.com/Hi9841/Prism/releases/latest/download/latest.json";
-const PUBKEY: &str = "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEZFQzE1QzM0MjE1OThDMDUKUldRRmpGa2hORnpCL29ldEQyYmRRa3VVTGFoSGhsNmVvdGtVS04wSHUzcm9EUGJ6OFVWVCtGMWgK";
+/// The public channel. A test build can point at a local channel with its own
+/// key: both overrides are fixed at compile time (`PRISM_UPDATE_ENDPOINT`,
+/// `PRISM_UPDATE_PUBKEY`), so a release build cannot be redirected at runtime.
+const ENDPOINT: &str = match option_env!("PRISM_UPDATE_ENDPOINT") {
+    Some(endpoint) => endpoint,
+    None => "https://github.com/Hi9841/Prism/releases/latest/download/latest.json",
+};
+const PUBKEY: &str = match option_env!("PRISM_UPDATE_PUBKEY") {
+    Some(key) => key,
+    None => "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEZFQzE1QzM0MjE1OThDMDUKUldRRmpGa2hORnpCL29ldEQyYmRRa3VVTGFoSGhsNmVvdGtVS04wSHUzcm9EUGJ6OFVWVCtGMWgK",
+};
 const TARGET: &str = "windows-x86_64-nsis";
 const USER_AGENT: &str = concat!("prism/", env!("CARGO_PKG_VERSION"));
 

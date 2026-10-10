@@ -1027,15 +1027,23 @@ impl Window {
             let next_frame_callbacks = next_frame_callbacks.clone();
             let last_input_timestamp = last_input_timestamp.clone();
             move |request_frame_options| {
-                let next_frame_callbacks = next_frame_callbacks.take();
-                if !next_frame_callbacks.is_empty() {
-                    handle
-                        .update(&mut cx, |_, window, cx| {
-                            for callback in next_frame_callbacks {
-                                callback(window, cx);
-                            }
-                        })
-                        .log_err();
+                let mut pending = next_frame_callbacks.take();
+                if !pending.is_empty() {
+                    // PRISM PATCH 6: a frame request that arrives while the app
+                    // is already updated (a native call re-entered the window
+                    // procedure) cannot run the callbacks; keep them for the
+                    // next frame instead of dropping them.
+                    let ran = handle.update(&mut cx, |_, window, cx| {
+                        for callback in std::mem::take(&mut pending) {
+                            callback(window, cx);
+                        }
+                    });
+                    if ran.is_err() && !pending.is_empty() {
+                        let mut queued = next_frame_callbacks.borrow_mut();
+                        let later = std::mem::take(&mut *queued);
+                        *queued = pending;
+                        queued.extend(later);
+                    }
                 }
 
                 // Keep presenting the current scene for 1 extra second since the
@@ -2837,10 +2845,39 @@ impl Window {
         let content_mask = self.content_mask();
         let opacity = self.element_opacity();
         for shadow in shadows {
+            // PRISM PATCH 7: CSS paints a box shadow only outside the border
+            // box. A sharp ring (no offset, no blur) is exactly a border around
+            // the element; drawing it as a shadow would also fill the element.
+            if shadow.blur_radius <= Pixels::ZERO
+                && shadow.offset == Point::default()
+                && shadow.spread_radius > Pixels::ZERO
+            {
+                let spread = shadow.spread_radius;
+                let grow = |radius: Pixels| if radius > Pixels::ZERO { radius + spread } else { radius };
+                let radii = Corners {
+                    top_left: grow(corner_radii.top_left),
+                    top_right: grow(corner_radii.top_right),
+                    bottom_right: grow(corner_radii.bottom_right),
+                    bottom_left: grow(corner_radii.bottom_left),
+                };
+                self.next_frame.scene.insert_primitive(Quad {
+                    order: 0,
+                    bounds: bounds.dilate(spread).scale(scale_factor),
+                    content_mask: content_mask.scale(scale_factor),
+                    background: Hsla::transparent_black().into(),
+                    border_color: shadow.color.opacity(opacity),
+                    corner_radii: radii.scale(scale_factor),
+                    border_widths: Edges::all(spread).scale(scale_factor),
+                    border_style: BorderStyle::default(),
+                });
+                continue;
+            }
+            // The shader divides by the blur; a sharp shadow gets a sub-pixel one.
+            let blur_radius = shadow.blur_radius.max(px(0.3));
             let shadow_bounds = (bounds + shadow.offset).dilate(shadow.spread_radius);
             self.next_frame.scene.insert_primitive(Shadow {
                 order: 0,
-                blur_radius: shadow.blur_radius.scale(scale_factor),
+                blur_radius: blur_radius.scale(scale_factor),
                 bounds: shadow_bounds.scale(scale_factor),
                 content_mask: content_mask.scale(scale_factor),
                 corner_radii: corner_radii.scale(scale_factor),

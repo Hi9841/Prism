@@ -94,6 +94,8 @@ pub enum PaletteEvent {
 
 pub struct PaletteState {
     app: Entity<AppState>,
+    /// A file-index update arrived while the palette was hidden.
+    index_update_pending: bool,
     pub query: String,
     apps: Vec<AppEntry>,
     apps_revision: u64,
@@ -142,6 +144,22 @@ pub struct PaletteState {
 impl EventEmitter<PaletteEvent> for PaletteState {}
 
 impl PaletteState {
+    fn refresh_after_index_update(&mut self, cx: &mut Context<Self>) {
+        self.index_update_pending = false;
+        self.thumbnail_epoch += 1;
+        self.thumbnails.clear();
+        self.thumbnails_in_flight.clear();
+        strip_thumbnails(&mut self.file_results);
+        // A refresh may have flipped ready/indexing; re-query the status.
+        self.file_status_known = false;
+        self.validate_history_paths(cx);
+        self.load_history_thumbnails(cx);
+        self.search_files(cx);
+        self.rebuild(cx);
+    }
+}
+
+impl PaletteState {
     pub fn new(cx: &mut Context<Self>) -> Self {
         let app = app_state(cx);
         let app_sub = cx.subscribe(&app, |this, _, event: &AppEvent, cx| match event {
@@ -181,16 +199,17 @@ impl PaletteState {
                 .detach();
             }
             BackendEvent::FileIndexUpdated => {
-                this.thumbnail_epoch += 1;
-                this.thumbnails.clear();
-                this.thumbnails_in_flight.clear();
-                strip_thumbnails(&mut this.file_results);
-                // A refresh may have flipped ready/indexing; re-query the status.
-                this.file_status_known = false;
-                this.validate_history_paths(cx);
-                this.load_history_thumbnails(cx);
-                this.search_files(cx);
-                this.rebuild(cx);
+                // The watcher reports disk activity every 750 ms. While the
+                // palette is hidden nobody sees the refresh: defer it to the
+                // next open instead of re-validating and re-querying each time.
+                if bridge::shell(cx).is_window_visible(cx) {
+                    this.refresh_after_index_update(cx);
+                } else {
+                    this.index_update_pending = true;
+                }
+            }
+            BackendEvent::Toggle { open: true } if this.index_update_pending => {
+                this.refresh_after_index_update(cx);
             }
             BackendEvent::WindowFocused(true) => this.validate_history_paths(cx),
             _ => {}
@@ -211,6 +230,7 @@ impl PaletteState {
             files_error: false,
             file_error: None,
             file_index_ready: false,
+            index_update_pending: false,
             file_indexing: true,
             file_path_browse: false,
             phase1: None,

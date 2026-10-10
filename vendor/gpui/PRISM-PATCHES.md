@@ -15,3 +15,13 @@
 5. `Frame::focused_bounds` (`src/window.rs`, set in `src/elements/div.rs`) and
    `Window::focused_bounds`: where the focused element painted. Scroll
    containers use it to scroll a newly focused element into view.
+6. `src/window.rs`, the `on_request_frame` callback: next-frame callbacks that
+   cannot run (the window update fails because a native call re-entered the
+   window procedure during an app update) stay queued for the next frame.
+   Before, they were dropped, and the second palette open stayed invisible in
+   the `Preparing` phase (found in the real app, 2026-10-10).
+7. `src/window.rs`, `Window::paint_shadows`: a sharp ring shadow (no offset, no
+   blur, spread > 0) paints as a border quad outside the element, with radii
+   grown by the spread, as CSS does. Before, the shadow also filled the
+   element, so the focus ring filled transparent buttons with the accent. Other
+   sharp shadows keep a 0.3 px blur (the shader divides by the blur).

@@ -247,7 +247,9 @@ pub struct WheelScroll {
 const WHEEL_SCROLL_MS: f32 = 160.0;
 
 impl WheelScroll {
-    /// Advances the animation; returns true while it runs.
+    /// Advances the animation; returns true when it moved the offset. The
+    /// layer steps during paint, after the container painted, so the caller
+    /// needs one more frame to show the offset set here (also the last one).
     fn step(&mut self, handle: &gpui::ScrollHandle) -> bool {
         let (Some(target), Some(start)) = (self.target, self.start) else { return false };
         let t = (start.elapsed().as_secs_f32() * 1000.0 / WHEEL_SCROLL_MS).min(1.0);
@@ -258,7 +260,6 @@ impl WheelScroll {
         if t >= 1.0 {
             self.target = None;
             self.start = None;
-            return false;
         }
         true
     }

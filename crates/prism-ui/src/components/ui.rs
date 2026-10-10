@@ -136,8 +136,11 @@ pub fn kbd(label: &str, t: &Theme) -> gpui::Div {
 }
 
 /// `box-shadow: inset 0 1px 0 <color>`: a 1px highlight along the top edge.
+/// `box-shadow: inset 0 1px 0 color` on a box with corner `radius`: a top
+/// border on a rounded overlay, so the line follows the corner curves and
+/// tapers like the CSS shadow (a straight line would leave the curve).
 pub fn inset_top_highlight(color: Rgba, radius: f32) -> gpui::Div {
-    div().absolute().top_0().left(r(radius * 0.6)).right(r(radius * 0.6)).h(px(1.)).bg(hsla(color))
+    div().absolute().inset_0().rounded(r(radius)).border_t(px(1.)).border_color(hsla(color))
 }
 
 /* ---------------- Row icon ---------------- */

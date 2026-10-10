@@ -288,7 +288,8 @@ fn shell(t: &Theme, content: AnyElement) -> gpui::Div {
         .bg(t.shell_solid.background())
         .child(
             // radial-gradient(120% 90% at 50% -20%, accent 8%, transparent 55%)
-            div().absolute().top_0().left_0().right_0().h(relative(0.3)).bg(gpui::linear_gradient(
+            // GPUI clips children to a rectangle: the glow keeps the shell's top radii.
+            div().absolute().top_0().left_0().right_0().h(relative(0.3)).rounded_tl(r(23.)).rounded_tr(r(23.)).bg(gpui::linear_gradient(
                 180.,
                 gpui::linear_color_stop(hsla(fade(t.accent, 4.8)), 0.0),
                 gpui::linear_color_stop(hsla(fade(t.accent, 0.0)), 1.0),

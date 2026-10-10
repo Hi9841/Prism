@@ -140,17 +140,22 @@ pub fn reveal_focused(
         *last = focused;
         return;
     }
+    // Focus outside this scroll container (the search input, for example)
+    // needs no reveal; never wait for its bounds.
+    if !window.context_stack().iter().any(|key_context| key_context.contains(context)) {
+        *last = focused;
+        return;
+    }
     let Some(target) = window.focused_bounds() else {
         // The new focus has not painted yet.
         window.request_animation_frame();
         return;
     };
     *last = focused;
-    let inside = window.context_stack().iter().any(|key_context| key_context.contains(context));
     let view = handle.bounds();
     let offset = handle.offset();
     let max = handle.max_offset();
-    if !inside || (target.top() >= view.top() && target.bottom() <= view.bottom()) {
+    if target.top() >= view.top() && target.bottom() <= view.bottom() {
         return;
     }
     let hidden = target.bottom() <= view.top() || target.top() >= view.bottom();
