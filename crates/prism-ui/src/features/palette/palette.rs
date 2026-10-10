@@ -770,6 +770,9 @@ impl Palette {
                 let item = item.clone();
                 cx.listener(move |this, event: &MouseDownEvent, window, cx| {
                     if has_result_actions(&item) {
+                        // The menu takes focus; the row must not take it back
+                        // on this press (Escape then reaches the menu).
+                        window.prevent_default();
                         this.open_result_menu(item.clone(), index, event.position, window, cx);
                     }
                 })

@@ -74,8 +74,11 @@ impl EventEmitter<MenuEvent> for ResultContextMenu {}
 impl ResultContextMenu {
     pub fn new(item: PaletteItem, position: ContextMenuPosition, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let focus = cx.focus_handle();
-        // Focus the first menu item.
+        // Focus the first menu item, after the right-button press finished
+        // dispatching (the row under the cursor is focusable).
         window.focus(&focus);
+        let deferred = focus.clone();
+        window.defer(cx, move |window, _| window.focus(&deferred));
         // The shell owns the pin state; resolve it lazily so the menu reads
         // "Unpin from taskbar" exactly when the target is already pinned.
         let pin_query = match (&item.toggle_taskbar_pin, &item.shell_path) {
