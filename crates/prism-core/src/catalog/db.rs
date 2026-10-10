@@ -1072,6 +1072,10 @@ impl Database {
                 last_scanned_at = CASE WHEN backend = 'ntfs' THEN 0 ELSE last_scanned_at END,
                 index_status = CASE
                     WHEN backend = 'ntfs' AND index_status = 'ready' THEN index_status
+                    -- A ready directory catalog stays ready: the startup
+                    -- freshness check needs it, or every launch re-walks the
+                    -- whole volume.
+                    WHEN backend = 'fallback' AND index_status = 'ready' THEN index_status
                     ELSE 'needs_rebuild'
                 END
              WHERE volume_id = ?1;",
