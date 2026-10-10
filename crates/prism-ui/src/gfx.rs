@@ -308,4 +308,34 @@ pub fn wheel_scroll_layer(handle: gpui::ScrollHandle, state: std::rc::Rc<std::ce
     .size_full()
 }
 
+/* ---------------- Settings panel shadow ---------------- */
+
+// The settings panel's border box in the current frame. Set in prepaint;
+// `None` at the start of every frame.
+thread_local! {
+    static SHEET_PANEL: std::cell::Cell<Option<gpui::Bounds<gpui::Pixels>>> = const { std::cell::Cell::new(None) };
+}
+
+pub fn set_sheet_panel(panel: Option<gpui::Bounds<gpui::Pixels>>) {
+    SHEET_PANEL.with(|cell| cell.set(panel));
+}
+
+/// The panel's `box-shadow`: CSS paints an outer shadow outside the border box
+/// only, so it is clipped to the area left of the panel.
+pub fn sheet_panel_shadow(shadows: Vec<BoxShadow>, radii: gpui::Corners<gpui::Pixels>) -> impl IntoElement {
+    gpui::canvas(
+        |_, _, _| (),
+        move |bounds, _, window, _| {
+            // The panel prepaints after this element, but every prepaint precedes paint.
+            let Some(panel) = SHEET_PANEL.with(|cell| cell.get()) else { return };
+            let outside = gpui::Bounds::from_corners(bounds.origin, gpui::point(panel.left(), bounds.bottom()));
+            window.with_content_mask(Some(gpui::ContentMask { bounds: outside }), |window| {
+                window.paint_shadows(panel, radii, &shadows);
+            });
+        },
+    )
+    .absolute()
+    .size_full()
+}
+
 // PORT STATUS: confidence=medium todos=0

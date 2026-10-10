@@ -92,7 +92,7 @@ pub fn render_search_input(
             .child(kbd(&props.shortcut, t))
             .child(icon_button(
                 "settings-trigger",
-                IconButtonProps { active: props.settings_open, disabled: false },
+                IconButtonProps { label: "Settings", active: props.settings_open, disabled: false, focus: Some(crate::components::focus::settings_trigger(cx)) },
                 t,
                 "settings-2",
                 16.,

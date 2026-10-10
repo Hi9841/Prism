@@ -63,6 +63,16 @@ pub fn fade(color: Rgba, percent: f32) -> Rgba {
     Rgba { a: color.a * percent / 100.0, ..color }
 }
 
+/// Source-over compositing of two translucent colors (sRGB, as browsers paint).
+pub fn over(top: Rgba, bottom: Rgba) -> Rgba {
+    let a = top.a + bottom.a * (1.0 - top.a);
+    if a <= 0.0 {
+        return Rgba { a: 0.0, ..top };
+    }
+    let channel = |t: f32, b: f32| (t * top.a + b * bottom.a * (1.0 - top.a)) / a;
+    Rgba { r: channel(top.r, bottom.r), g: channel(top.g, bottom.g), b: channel(top.b, bottom.b), a }
+}
+
 /// `rgb(r g b / alpha)`.
 pub fn rgb_a(r: u8, g: u8, b: u8, alpha: f32) -> Rgba {
     Rgba { r: r as f32 / 255.0, g: g as f32 / 255.0, b: b as f32 / 255.0, a: alpha }
@@ -469,8 +479,11 @@ pub fn shadow_tile() -> Vec<BoxShadow> {
 }
 
 /// One CSS box shadow, lengths in px (rem-scaled by the caller when needed).
+/// CSS blurs with sigma = blur / 2; GPUI's `blur_radius` is the sigma. GPUI's
+/// shader divides by the sigma, so a sharp (blur 0) shadow gets a sub-pixel one.
 pub fn shadow(x: f32, y: f32, blur: f32, spread: f32, color: Rgba) -> BoxShadow {
-    BoxShadow { color: hsla(color), offset: point(px(x), px(y)), blur_radius: px(blur), spread_radius: px(spread) }
+    let sigma = (blur / 2.0).max(0.3);
+    BoxShadow { color: hsla(color), offset: point(px(x), px(y)), blur_radius: px(sigma), spread_radius: px(spread) }
 }
 
 pub const FONT_SANS: &str = "Segoe UI Variable Text";

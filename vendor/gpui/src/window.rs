@@ -685,6 +685,8 @@ pub(crate) struct Frame {
     #[cfg(any(feature = "inspector", debug_assertions))]
     pub(crate) inspector_hitboxes: FxHashMap<HitboxId, crate::InspectorElementId>,
     pub(crate) tab_stops: TabStopMap,
+    /// prism-gpui patch: the bounds of the focused element, as painted.
+    pub(crate) focused_bounds: Option<Bounds<Pixels>>,
 }
 
 #[derive(Clone, Default)]
@@ -734,6 +736,7 @@ impl Frame {
             #[cfg(any(feature = "inspector", debug_assertions))]
             inspector_hitboxes: FxHashMap::default(),
             tab_stops: TabStopMap::default(),
+            focused_bounds: None,
         }
     }
 
@@ -751,6 +754,7 @@ impl Frame {
         self.deferred_draws.clear();
         self.tab_stops.clear();
         self.focus = None;
+        self.focused_bounds = None;
 
         #[cfg(any(feature = "inspector", debug_assertions))]
         {
@@ -1418,6 +1422,24 @@ impl Window {
         if let Some(handle) = self.rendered_frame.tab_stops.next(self.focus.as_ref()) {
             self.focus(&handle)
         }
+    }
+
+    /// prism-gpui patch: the bounds of the focused element in the last painted
+    /// frame (to scroll it into view, as browsers do on focus).
+    pub fn focused_bounds(&self) -> Option<Bounds<Pixels>> {
+        // Only when the last frame painted the current focus.
+        if self.rendered_frame.focus == self.focus {
+            self.rendered_frame.focused_bounds
+        } else {
+            None
+        }
+    }
+
+    /// prism-gpui patch: the focused element is the last tab stop (`reverse`: the first).
+    pub fn focus_at_tab_end(&self, reverse: bool) -> bool {
+        self.focus
+            .as_ref()
+            .is_some_and(|focused| self.rendered_frame.tab_stops.is_at_end(focused, reverse))
     }
 
     /// Move focus to previous tab stop.
@@ -3559,6 +3581,11 @@ impl Window {
         }
 
         false
+    }
+
+    /// prism-gpui patch: dispatch the release of a keystroke (parity runner).
+    pub fn dispatch_key_up(&mut self, keystroke: Keystroke, cx: &mut App) {
+        self.dispatch_event(PlatformInput::KeyUp(crate::KeyUpEvent { keystroke }), cx);
     }
 
     /// Return a key binding string for an action, to display in the UI. Uses the highest precedence

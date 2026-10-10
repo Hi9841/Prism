@@ -108,7 +108,8 @@ impl EventEmitter<Changed> for TextInput {}
 
 impl TextInput {
     pub fn new(placeholder: impl Into<SharedString>, style: InputStyle, cx: &mut Context<Self>) -> Self {
-        let focus_handle = cx.focus_handle();
+        // An `<input>` is a tab stop.
+        let focus_handle = cx.focus_handle().tab_stop(true);
         Self {
             focus_handle,
             content: SharedString::default(),

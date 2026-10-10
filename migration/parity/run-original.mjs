@@ -35,7 +35,7 @@ rmSync(profile, { recursive: true, force: true });
 mkdirSync(profile, { recursive: true });
 const proc = spawn(
   chrome,
-  ["--headless=new", "--no-first-run", "--hide-scrollbars=false", `--user-data-dir=${profile}`, "--remote-debugging-port=0", "about:blank"],
+  ["--headless=new", "--no-first-run", "--hide-scrollbars=false", `--user-data-dir=${profile}`, "--remote-debugging-port=0", ...(process.env.PARITY_CHROME_FLAGS ?? "").split(" ").filter(Boolean), "about:blank"],
   { stdio: "ignore" },
 );
 const portFile = join(profile, "DevToolsActivePort");
@@ -93,7 +93,8 @@ document.addEventListener("DOMContentLoaded", () => {
   const style = document.createElement("style");
   style.textContent = "input { caret-color: transparent !important; }";
   document.head.appendChild(style);
-});`,
+});
+${process.env.PARITY_DEBUG ? `for (const t of ["pointerdown","pointermove","pointerup","gotpointercapture","lostpointercapture","pointercancel"]) window.addEventListener(t, (e) => __prismMock.calls.push({ cmd: "#" + t, args: { x: e.clientX, y: e.clientY, b: e.buttons, id: e.pointerId, target: e.target.className?.toString().slice(0, 40) } }), true);` : ""}`,
 });
 await cdp("Page.navigate", { url: `http://127.0.0.1:${server.port}/` });
 await Bun.sleep(400);
@@ -115,6 +116,7 @@ const KEYS = {
   k: ["k", "KeyK", 75],
   w: ["w", "KeyW", 87],
   menu: ["ContextMenu", "ContextMenu", 93],
+  space: [" ", "Space", 32],
 };
 
 async function key(spec) {
@@ -125,13 +127,32 @@ async function key(spec) {
   if (parts.includes("ctrl")) modifiers |= 2;
   if (parts.includes("shift")) modifiers |= 8;
   const [k, code, vk] = KEYS[name] ?? [name, `Key${name.toUpperCase()}`, name.toUpperCase().charCodeAt(0)];
-  await cdp("Input.dispatchKeyEvent", { type: "rawKeyDown", key: k, code, windowsVirtualKeyCode: vk, modifiers });
+  // Enter and Space carry text so a focused button activates, as with a real key press.
+  const text = modifiers === 0 ? { enter: "\r", space: " " }[name] : undefined;
+  await cdp("Input.dispatchKeyEvent", text
+    ? { type: "keyDown", key: k, code, windowsVirtualKeyCode: vk, modifiers, text, unmodifiedText: text }
+    : { type: "rawKeyDown", key: k, code, windowsVirtualKeyCode: vk, modifiers });
   await cdp("Input.dispatchKeyEvent", { type: "keyUp", key: k, code, windowsVirtualKeyCode: vk, modifiers });
 }
 
+// A WebView zoom or width change resizes the native window.
+async function syncMetrics() {
+  const state = await evaluate("({ zoom: __prismMock.zoom, width: __prismMock.width })");
+  if (state && (state.zoom !== zoom || (state.width && state.width !== width))) {
+    zoom = state.zoom;
+    if (state.width) width = state.width;
+    await applyMetrics();
+  }
+}
+
+let pressed = false;
 for (const step of scenario.steps) {
   if (step.wait !== undefined) {
-    await Bun.sleep(step.wait);
+    // Follow native resizes while the UI animates.
+    for (let left = step.wait; left > 0; left -= 50) {
+      await Bun.sleep(Math.min(50, left));
+      await syncMetrics();
+    }
     continue;
   }
   if (step.open) {
@@ -141,7 +162,14 @@ for (const step of scenario.steps) {
   } else if (step.key) {
     await key(step.key);
   } else if (step.move) {
-    await cdp("Input.dispatchMouseEvent", { type: "mouseMoved", x: step.move[0] / zoom, y: step.move[1] / zoom });
+    await cdp("Input.dispatchMouseEvent", { type: "mouseMoved", x: step.move[0] / zoom, y: step.move[1] / zoom, buttons: pressed ? 1 : 0, button: pressed ? "left" : "none" });
+  } else if (step.down) {
+    pressed = true;
+    await cdp("Input.dispatchMouseEvent", { type: "mouseMoved", x: step.down[0] / zoom, y: step.down[1] / zoom });
+    await cdp("Input.dispatchMouseEvent", { type: "mousePressed", x: step.down[0] / zoom, y: step.down[1] / zoom, button: "left", buttons: 1, clickCount: 1 });
+  } else if (step.up) {
+    pressed = false;
+    await cdp("Input.dispatchMouseEvent", { type: "mouseReleased", x: step.up[0] / zoom, y: step.up[1] / zoom, button: "left", buttons: 0, clickCount: 1 });
   } else if (step.click) {
     const button = step.button === "right" ? "right" : "left";
     const [x, y] = [step.click[0] / zoom, step.click[1] / zoom];
@@ -161,19 +189,21 @@ for (const step of scenario.steps) {
     });
   } else if (step.capture) {
     await Bun.sleep(120);
+    await syncMetrics();
+    await Bun.sleep(60);
     const shot = await cdp("Page.captureScreenshot", { format: "png" });
     writeFileSync(join(outDir, `${step.capture}.png`), Buffer.from(shot.result.data, "base64"));
+  } else if (step.eval) {
+    // Debug probe: the value lands in the calls file as `#eval`.
+    const value = await evaluate(step.eval);
+    await evaluate(`__prismMock.calls.push({ cmd: "#eval", args: ${JSON.stringify(value ?? null)} })`);
   }
-  // A WebView zoom or width change resizes the native window.
-  const mock = await evaluate("({ zoom: __prismMock.zoom, width: __prismMock.width })");
-  if (mock && (mock.zoom !== zoom || (mock.width && mock.width !== width))) {
-    zoom = mock.zoom;
-    if (mock.width) width = mock.width;
-    await applyMetrics();
-  }
+  await syncMetrics();
   await Bun.sleep(30);
 }
 
+const calls = await evaluate("JSON.stringify(__prismMock.calls)");
+writeFileSync(join(outDir, `${scenarioName}.calls.json`), calls ?? "[]");
 ws.close();
 proc.kill();
 server.stop(true);

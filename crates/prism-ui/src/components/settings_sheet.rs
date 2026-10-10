@@ -10,8 +10,9 @@ use gpui::{
 
 use crate::components::taskbar_customization::TaskbarCustomization;
 use crate::components::text_input::{Changed, InputStyle, TextInput};
+use crate::components::focus;
 use crate::components::ui::{
-    SegmentOption, row_icon, segmented, settings_row, theme, toggle, truncate, weight,
+    SegmentOption, row_icon, segmented, settings_row, theme, title_tooltip, toggle, truncate, weight,
 };
 use crate::gfx::{icon, icon_stroke, r, reduced_motion, zoomed};
 use crate::lib::bridge;
@@ -22,7 +23,7 @@ use crate::lib::types::{
 };
 use crate::state::app::{AppEvent, AppState, SHORTCUT_OPTIONS, THEME_OPTIONS, ToastKind, app_state, error_string};
 use crate::state::palette::{PaletteState, palette_state};
-use crate::theme::{Accent, Rgba, Theme, fade, hsla, motion, shadow, white};
+use crate::theme::{Accent, Rgba, Theme, fade, hsla, motion, over, shadow, white};
 
 /// "Ctrl+Alt+Space" -> "Ctrl + Alt + Space"
 pub fn display_shortcut(combo: &str) -> String {
@@ -73,7 +74,11 @@ pub struct SettingsSheet {
     app: Entity<AppState>,
     palette: Entity<PaletteState>,
     focus: FocusHandle,
+    /// The first button (Close): focused on open.
+    close_focus: FocusHandle,
     scroll: ScrollHandle,
+    /// The focus already scrolled into view.
+    revealed: Option<FocusHandle>,
     wheel: std::rc::Rc<std::cell::RefCell<crate::gfx::WheelScroll>>,
     opened_at: Instant,
     closing: Option<Instant>,
@@ -111,10 +116,12 @@ impl SettingsSheet {
                     this.close_task = None;
                     this.closing = None;
                     this.opened_at = Instant::now();
-                    window.focus(&this.focus);
+                    window.focus(&this.close_focus);
                 } else {
                     this.reset_confirming = false;
                     this.open_group_id = None;
+                    // Focus returns to the settings button in the search field.
+                    window.focus(&focus::settings_trigger(cx));
                 }
             }
             cx.notify();
@@ -129,7 +136,9 @@ impl SettingsSheet {
             app,
             palette,
             focus: cx.focus_handle(),
+            close_focus: cx.focus_handle(),
             scroll: ScrollHandle::new(),
+            revealed: None,
             wheel: Default::default(),
             opened_at: Instant::now(),
             closing: None,
@@ -459,8 +468,7 @@ fn section_title(label: &str, first: bool, t: &Theme) -> gpui::Div {
 
 /// A small pill button used by several pickers.
 fn chip(id: impl Into<gpui::ElementId>, active: bool, t: &Theme) -> gpui::Stateful<gpui::Div> {
-    div()
-        .id(id.into())
+    focus::button(div().id(id.into()), true, &t)
         .flex()
         .items_center()
         .rounded(r(9.))
@@ -534,10 +542,10 @@ impl SettingsSheet {
         let at_min = zoom == VIEW_ZOOM_LEVELS[0];
         let at_max = zoom == VIEW_ZOOM_LEVELS[VIEW_ZOOM_LEVELS.len() - 1];
         let at_default = zoom == Settings::default().view_zoom;
-        let button = |id: &'static str, glyph: &'static str, disabled: bool, action: Box<dyn Fn(&mut AppState, &mut Context<AppState>)>, app: Entity<AppState>| {
-            div()
-                .id(id)
+        let button = |id: &'static str, title: &'static str, glyph: &'static str, disabled: bool, action: Box<dyn Fn(&mut AppState, &mut Context<AppState>)>, app: Entity<AppState>| {
+            focus::button(div().id(id), !disabled, &t)
                 .group(id)
+                .tooltip(title_tooltip(title))
                 .flex()
                 .items_center()
                 .justify_center()
@@ -560,6 +568,7 @@ impl SettingsSheet {
             .p(r(3.))
             .child(button(
                 "zoom-out",
+                "Zoom out",
                 "minus",
                 at_min,
                 Box::new(move |app, cx| {
@@ -580,6 +589,7 @@ impl SettingsSheet {
             )
             .child(button(
                 "zoom-in",
+                "Zoom in",
                 "plus",
                 at_max,
                 Box::new(move |app, cx| {
@@ -590,6 +600,7 @@ impl SettingsSheet {
             ))
             .child(button(
                 "zoom-reset",
+                "Reset zoom",
                 "rotate-ccw",
                 at_default,
                 Box::new(|app, cx| app.reset_view_zoom(cx)),
@@ -610,8 +621,7 @@ impl SettingsSheet {
                 let disabled = !active && settings.quick_access.len() >= QUICK_ACCESS_LIMIT;
                 let kind = kind.to_string();
                 let app = app.clone();
-                div()
-                    .id(("quick-access-option", index))
+                focus::button(div().id(("quick-access-option", index)), true, &t)
                     .flex()
                     .h(r(32.))
                     .min_w_0()
@@ -681,8 +691,8 @@ impl SettingsSheet {
                         .child(self.new_name.clone()),
                 )
                 .child(
-                    div()
-                        .id("create-collection")
+                    focus::button(div().id("create-collection"), true, &t)
+                        .tooltip(title_tooltip("Create app collection"))
                         .flex()
                         .flex_none()
                         .items_center()
@@ -733,15 +743,15 @@ impl SettingsSheet {
                                 .flex_none()
                                 .items_center()
                                 .gap(r(2.))
-                                .child(self.small_icon_button(("group-up", group_index), "chevron-up", first, false, t, {
+                                .child(self.small_icon_button(("group-up", group_index), "Move up", "chevron-up", first, false, t, {
                                     let gid = gid.clone();
                                     cx.listener(move |this, _, _, cx| this.move_group(&gid, -1, cx))
                                 }))
-                                .child(self.small_icon_button(("group-down", group_index), "chevron-down", last, false, t, {
+                                .child(self.small_icon_button(("group-down", group_index), "Move down", "chevron-down", last, false, t, {
                                     let gid = gid.clone();
                                     cx.listener(move |this, _, _, cx| this.move_group(&gid, 1, cx))
                                 }))
-                                .child(self.small_icon_button(("group-delete", group_index), "trash-2", false, true, t, {
+                                .child(self.small_icon_button(("group-delete", group_index), "Delete collection", "trash-2", false, true, t, {
                                     let gid = gid.clone();
                                     cx.listener(move |this, _, _, cx| this.remove_group(&gid, cx))
                                 })),
@@ -749,8 +759,7 @@ impl SettingsSheet {
                 );
             // The picker trigger.
             let chevron_turn = if is_open { std::f32::consts::PI } else { 0.0 };
-            let trigger = div()
-                .id(("group-add-apps", group_index))
+            let trigger = focus::button(div().id(("group-add-apps", group_index)), true, &t)
                 .group("group-trigger")
                 .flex()
                 .h(r(36.))
@@ -803,8 +812,8 @@ impl SettingsSheet {
                     |(index, entry)| {
                         let gid = gid.clone();
                         let app_id = entry.app_id.clone();
-                        div()
-                            .id(gpui::ElementId::Name(format!("assigned-{}-{index}", group.id).into()))
+                        focus::button(div().id(gpui::ElementId::Name(format!("assigned-{}-{index}", group.id).into())), true, &t)
+                            .tooltip(title_tooltip(format!("Remove {}", entry.name)))
                             .flex()
                             .max_w_full()
                             .items_center()
@@ -832,15 +841,16 @@ impl SettingsSheet {
     fn small_icon_button(
         &self,
         id: impl Into<gpui::ElementId>,
+        title: &'static str,
         glyph: &str,
         disabled: bool,
         danger: bool,
         t: &Theme,
         on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
     ) -> gpui::Stateful<gpui::Div> {
-        div()
-            .id(id.into())
+        focus::button(div().id(id.into()), !disabled, &t)
             .group("small-icon-button")
+            .tooltip(title_tooltip(title))
             .flex()
             .items_center()
             .justify_center()
@@ -888,8 +898,8 @@ impl SettingsSheet {
                     let disabled = !selected && full;
                     let (gid, app_id) = (gid.clone(), entry.app_id.clone());
                     let icon_value = PaletteIcon::App { name: entry.name.clone(), icon: self.picker_icons.get(&entry.app_id).cloned() };
-                    div()
-                        .id(("picker-app", index))
+                    focus::button(div().id(("picker-app", index)), !disabled, &t)
+                        .when(disabled, |d| d.tooltip(title_tooltip(format!("{} is full", group.name))))
                         .flex()
                         .min_h(r(40.))
                         .w_full()
@@ -982,8 +992,8 @@ impl SettingsSheet {
                     )
                     .when(has_query, |d| {
                         d.child(
-                            div()
-                                .id("clear-app-filter")
+                            focus::button(div().id("clear-app-filter"), true, &t)
+                                .tooltip(title_tooltip("Clear filter"))
                                 .group("clear-filter")
                                 .flex()
                                 .flex_none()
@@ -1034,8 +1044,7 @@ impl SettingsSheet {
                             .child(format!("{} of {APP_GROUP_APP_LIMIT} selected", group.app_ids.len())),
                     )
                     .child(
-                        div()
-                            .id("app-picker-done")
+                        focus::button(div().id("app-picker-done"), true, &t)
                             .rounded(r(7.))
                             .bg(hsla(t.accent_soft))
                             .px(r(10.))
@@ -1058,10 +1067,11 @@ impl SettingsSheet {
 
 impl Render for SettingsSheet {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let app = self.app.read(cx);
-        if !app.open_settings {
+        if !self.app.read(cx).open_settings {
             return div().into_any_element();
         }
+        focus::reveal_focused(&self.scroll, "SettingsScroll", &mut self.revealed, window, cx);
+        let app = self.app.read(cx);
         let (t, zoom) = theme(cx);
         let settings = app.settings.clone();
         let persistence_error = app.persistence_error.clone();
@@ -1086,6 +1096,13 @@ impl Render for SettingsSheet {
         if animating {
             window.request_animation_frame();
         }
+        let panel_shadow = zoomed(vec![shadow(-24., 0., 64., 0., crate::theme::black(0.35 * panel_opacity))], zoom);
+        let panel_radii = gpui::Corners {
+            top_left: gpui::px(0.),
+            top_right: gpui::px(24. * zoom),
+            bottom_right: gpui::px(8. * zoom),
+            bottom_left: gpui::px(0.),
+        };
 
         let reset_confirming = self.reset_confirming;
         let reset_busy = self.reset_busy;
@@ -1167,8 +1184,7 @@ impl Render for SettingsSheet {
             } else {
                 vec![shadow(0., 1., 3., 0., crate::theme::black(0.4))]
             };
-            div()
-                .id(("accent", index))
+            focus::button(div().id(("accent", index)), true, &t)
                 .relative()
                 .size(r(if active { 26.4 } else { 24. }))
                 .m(r(if active { -1.2 } else { 0. }))
@@ -1183,8 +1199,7 @@ impl Render for SettingsSheet {
         }));
         let clear_history = {
             let app = app_entity.clone();
-            div()
-                .id("clear-history")
+            focus::button(div().id("clear-history"), true, &t)
                 .group("clear-history")
                 .flex()
                 .items_center()
@@ -1211,10 +1226,26 @@ impl Render for SettingsSheet {
         let panel = div()
             .id("settings-panel")
             .track_focus(&self.focus)
-            .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 if event.keystroke.key == "escape" {
                     cx.stop_propagation();
                     this.app.update(cx, |app, cx| app.set_open_settings(false, cx));
+                    return;
+                }
+                // Focus trap: Tab and Shift+Tab cycle within the sheet.
+                let modifiers = event.keystroke.modifiers;
+                if event.keystroke.key == "tab" && !modifiers.control && !modifiers.alt && !modifiers.platform {
+                    cx.stop_propagation();
+                    for _ in 0..512 {
+                        if modifiers.shift {
+                            window.focus_prev();
+                        } else {
+                            window.focus_next();
+                        }
+                        if this.focus.contains_focused(window, cx) && !this.focus.is_focused(window) {
+                            break;
+                        }
+                    }
                 }
             }))
             .relative()
@@ -1230,11 +1261,24 @@ impl Render for SettingsSheet {
             .rounded_br(r(8.))
             .border_l_1()
             .border_color(hsla(t.line))
-            // D4: the backdrop blur becomes a near-opaque fill.
-            .bg(hsla(Rgba { a: 0.97, ..t.bg_raised }))
-            .shadow(zoomed(vec![shadow(-24., 0., 64., 0., crate::theme::black(0.35))], zoom))
+            // `backdrop-blur-2xl`: the animated `.settings-backdrop` is the backdrop root, so
+            // the blur sees only the uniform backdrop fill. The panel paints that fill a second
+            // time under `bg-raised`; the palette shows through, unblurred.
+            .bg(hsla(over(t.bg_raised, Rgba { a: t.backdrop.a * backdrop_opacity, ..t.backdrop })))
             .opacity(panel_opacity)
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .child(
+                gpui::canvas(
+                    move |bounds, _, _| {
+                        // The border box: the absolute child starts inside the 1px left border.
+                        let bounds = gpui::Bounds::from_corners(gpui::point(bounds.left() - gpui::px(1.), bounds.top()), bounds.bottom_right());
+                        crate::gfx::set_sheet_panel(Some(bounds));
+                    },
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .size_full(),
+            )
             .child(
                 div()
                     .flex()
@@ -1252,8 +1296,7 @@ impl Render for SettingsSheet {
                             .child("Settings"),
                     )
                     .child(
-                        div()
-                            .id("close-settings")
+                        focus::button_with(div().id("close-settings"), &self.close_focus, true, &t)
                             .group("close-settings")
                             .flex()
                             .items_center()
@@ -1299,8 +1342,7 @@ impl Render for SettingsSheet {
                                     ),
                             )
                             .child(
-                                div()
-                                    .id("reset-settings")
+                                focus::button(div().id("reset-settings"), true, &t)
                                     .group("reset-settings")
                                     .flex()
                                     .flex_none()
@@ -1347,8 +1389,7 @@ impl Render for SettingsSheet {
                                 .text_color(hsla(t.danger))
                                 .child("This cannot be undone.")
                                 .child(
-                                    div()
-                                        .id("reset-cancel")
+                                    focus::button(div().id("reset-cancel"), true, &t)
                                         .flex_none()
                                         .rounded(r(6.))
                                         .px(r(8.))
@@ -1381,8 +1422,7 @@ impl Render for SettingsSheet {
                         .text_color(hsla(t.danger))
                         .child(div().min_w_0().text_size(r(11.5)).line_height(relative(1.625)).child(crate::components::pretty_text::pretty(error)))
                         .child(
-                            div()
-                                .id("retry-save")
+                            focus::button(div().id("retry-save"), true, &t)
                                 .flex()
                                 .flex_none()
                                 .items_center()
@@ -1410,6 +1450,7 @@ impl Render for SettingsSheet {
                     .child(
                 div()
                     .id("settings-scroll")
+                    .key_context("SettingsScroll")
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scroll()
@@ -1464,8 +1505,7 @@ impl Render for SettingsSheet {
                                     ),
                             )
                             .child(
-                                div()
-                                    .id("quit-prism")
+                                focus::button(div().id("quit-prism"), true, &t)
                                     .flex()
                                     .items_center()
                                     .gap(r(6.))
@@ -1508,6 +1548,7 @@ impl Render for SettingsSheet {
                     .opacity(backdrop_opacity)
                     .on_click(cx.listener(|this, _, _, cx| this.request_close(cx))),
             )
+            .child(crate::gfx::sheet_panel_shadow(panel_shadow, panel_radii))
             .child(panel)
             .into_any_element()
     }

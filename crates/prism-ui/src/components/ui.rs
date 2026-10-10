@@ -27,6 +27,58 @@ pub fn truncate(text: impl Into<SharedString>) -> gpui::Div {
     div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(text.into())
 }
 
+/* ---------------- Native tooltip ---------------- */
+
+/// The `title` attribute. WebView2 shows the Windows tooltip control after the
+/// hover delay, below the pointer, in system metrics (the view zoom does not apply).
+/// Use with `.tooltip(title_tooltip(..))`.
+pub fn title_tooltip(text: impl Into<SharedString>) -> impl Fn(&mut Window, &mut App) -> gpui::AnyView + 'static {
+    let text: SharedString = text.into();
+    move |_, cx| {
+        let dark = theme(cx).0.mode == crate::theme::Mode::Dark;
+        // Headless Chrome does not capture the native tooltip: parity captures skip it.
+        let text = if crate::gfx::parity().is_some() { SharedString::default() } else { text.clone() };
+        cx.new(|_| TitleTooltip { text, dark }).into()
+    }
+}
+
+struct TitleTooltip {
+    text: SharedString,
+    dark: bool,
+}
+
+impl gpui::Render for TitleTooltip {
+    fn render(&mut self, _: &mut Window, _: &mut gpui::Context<Self>) -> impl IntoElement {
+        // Windows 11 tooltip colors (comctl32, small rounded corners).
+        let (bg, line, fg) = if self.dark {
+            (gpui::rgb(0x2b2b2b), gpui::rgb(0x3d3d3d), gpui::rgb(0xffffff))
+        } else {
+            (gpui::rgb(0xf9f9f9), gpui::rgb(0xe5e5e5), gpui::rgb(0x1a1a1a))
+        };
+        if self.text.is_empty() {
+            return div();
+        }
+        // The control sits under the cursor image (about 20 px tall).
+        div().pt(px(19.)).child(
+            div()
+                .max_w(px(500.))
+                .px(px(8.))
+                .py(px(5.))
+                .rounded(px(4.))
+                .border_1()
+                .border_color(line)
+                .bg(bg)
+                .shadow(vec![shadow(0., 2., 6., 0., crate::theme::black(0.18))])
+                .font_family(crate::theme::FONT_SANS_FALLBACK)
+                .text_size(px(12.))
+                .line_height(px(16.))
+                .font_weight(weight(400.))
+                .text_color(fg)
+                .child(self.text.clone()),
+        )
+    }
+}
+
 /* ---------------- Settings row ---------------- */
 
 pub fn settings_row(title: &str, detail: Option<&str>, control: impl IntoElement, t: &Theme) -> gpui::Div {
@@ -224,8 +276,14 @@ pub fn toggle(
     let progress = knob.read(cx).animate(window);
     let color = track.read(cx).animate(window);
     let background = blend(t.track, t.accent, color);
-    div()
+    let on_change = std::rc::Rc::new(on_change);
+    let key_change = on_change.clone();
+    let track = div()
         .id(id.clone())
+        // A `<button role="switch">`: focusable, Enter and Space toggle it.
+        .when(!disabled, |d| {
+            crate::components::focus::button(d, true, t).on_click(move |_, window, cx| key_change(!checked, window, cx))
+        })
         .relative()
         .flex_none()
         .h(r(24.))
@@ -253,10 +311,16 @@ pub fn toggle(
                 .left(r(-10.))
                 .right(r(-10.))
                 .when(!disabled, |d| {
-                    d.on_click(move |_, window, cx| on_change(!checked, window, cx))
+                    d.on_click(move |_, window, cx| {
+                        // The track's own click listener must not fire twice.
+                        cx.stop_propagation();
+                        on_change(!checked, window, cx)
+                    })
                 }),
-        )
-        .into_any_element()
+        );
+    // The switch is an inline-block on the row's text baseline (14px Segoe UI,
+    // line-height 1.45): its line box adds the 5.3px font descent below it.
+    div().flex_none().h(r(24. + 5.296875)).child(track).into_any_element()
 }
 
 /// Linear sRGB interpolation of two colors (CSS color transitions).
@@ -319,8 +383,31 @@ pub fn segmented(
     }
     let position = pill.read(cx).animate(window);
     let on_change = std::rc::Rc::new(on_change);
+    // Roving focus: the active option is the tab stop; arrows, Home and End
+    // select and focus a neighbor (`selectWithKeyboard`).
+    let handles: Vec<gpui::FocusHandle> = (0..options.len())
+        .map(|index| crate::components::focus::keyed_handle(ElementId::Name(format!("{id}-focus-{index}").into()), window, cx))
+        .collect();
+    let values: Vec<SharedString> = options.iter().map(|o| o.value.clone()).collect();
+    let key_handles = handles.clone();
+    let key_change = on_change.clone();
     div()
         .id(id.clone())
+        .when(!disabled, |d| {
+            d.on_key_down(move |event: &gpui::KeyDownEvent, window, cx| {
+                let count = values.len();
+                let next = match event.keystroke.key.as_str() {
+                    "left" => (active_index + count - 1) % count,
+                    "right" => (active_index + 1) % count,
+                    "home" => 0,
+                    "end" => count - 1,
+                    _ => return,
+                };
+                cx.stop_propagation();
+                key_change(values[next].clone(), window, cx);
+                window.focus(&key_handles[next]);
+            })
+        })
         .relative()
         .flex()
         .flex_none()
@@ -347,6 +434,7 @@ pub fn segmented(
             let value = option.value.clone();
             div()
                 .id(ElementId::Name(format!("{id}-{index}").into()))
+                .when(!disabled, |d| crate::components::focus::button_with(d, &handles[index], active, t))
                 .relative()
                 .flex()
                 .justify_center()
@@ -368,8 +456,12 @@ pub fn segmented(
 /* ---------------- Icon button ---------------- */
 
 pub struct IconButtonProps {
+    /// `aria-label` and `title`.
+    pub label: &'static str,
     pub active: bool,
     pub disabled: bool,
+    /// A handle the caller focuses (`[data-settings-trigger]`).
+    pub focus: Option<gpui::FocusHandle>,
 }
 
 /// A 32px square icon button (`IconButton`) with a lucide icon.
@@ -381,15 +473,20 @@ pub fn icon_button(
     icon_size: f32,
     on_click: impl Fn(&mut Window, &mut App) + 'static,
 ) -> gpui::Stateful<gpui::Div> {
-    let IconButtonProps { active, disabled } = props;
+    let IconButtonProps { label, active, disabled, focus } = props;
     let glyph = icon(icon_name, icon_size, if active { t.fg } else { t.fg_tertiary });
     let glyph = if active || disabled {
         glyph
     } else {
         glyph.group_hover("icon-button", |s| s.text_color(hsla(t.fg_secondary)))
     };
-    div()
-        .id(id.into())
+    let button = div().id(id.into());
+    // `aria-disabled` keeps the button focusable.
+    let button = match &focus {
+        Some(handle) => crate::components::focus::button_with(button, handle, true, t),
+        None => crate::components::focus::button(button, true, t),
+    };
+    button
         .group("icon-button")
         .relative()
         .flex()
@@ -408,6 +505,7 @@ pub fn icon_button(
             }
         })
         .when(!disabled, |d| d.on_click(move |_, window, cx| on_click(window, cx)))
+        .tooltip(title_tooltip(label))
         .child(glyph)
 }
 

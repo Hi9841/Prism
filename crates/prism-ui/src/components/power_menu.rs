@@ -164,7 +164,7 @@ impl Render for PowerMenu {
         let expanded = open && !self.closing;
         let trigger = icon_button(
             "power-trigger",
-            IconButtonProps { active: open, disabled: false },
+            IconButtonProps { label: "Power options", active: open, disabled: false, focus: None },
             &t,
             "power",
             14.,

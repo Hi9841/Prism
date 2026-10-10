@@ -303,8 +303,15 @@ impl Render for Launcher {
         let (t, zoom) = theme(cx);
         // View zoom through the rem size only (A11).
         window.set_rem_size(px(16.0 * zoom));
+        // A new frame: the settings panel records itself again when it renders.
+        crate::gfx::set_sheet_panel(None);
         let opacity = self.stage.animate(window);
         let interactive = self.phase == LauncherPhase::Visible;
+        let body = crate::components::focus::body(cx);
+        // A focused element that left the tree hands focus to the body.
+        if window.focused(cx).is_none() && interactive {
+            window.focus(&body);
+        }
 
         // Ctrl + wheel zoom (capture phase, before the lists scroll).
         let weak = cx.weak_entity();
@@ -335,12 +342,12 @@ impl Render for Launcher {
 
         let toasts = render_toast_stack(&self.app, &t, zoom, window, cx);
         let backdrop = crate::gfx::parity().map(|p| div().absolute().inset_0().bg(hsla(p.backdrop)));
-        div()
-            .id("launcher-root")
+        crate::components::focus::root_keys(div().id("launcher-root"), &body)
             .relative()
             .size_full()
             .children(backdrop)
             .child(self.render_stage(opacity, interactive, toasts, wheel, &t))
+            .child(crate::components::focus::root_listeners(zoom))
     }
 }
 

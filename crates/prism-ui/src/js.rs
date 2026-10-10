@@ -60,6 +60,28 @@ pub fn number_to_string(n: f64) -> String {
     buffer.format_finite(n).to_owned()
 }
 
+/// `n.toLocaleString()` for counts (en-US grouping: `1,234,567`; at most three
+/// fraction digits). Other system locales group differently in WebView2.
+pub fn to_locale_string(n: f64) -> String {
+    if !n.is_finite() {
+        return number_to_string(n);
+    }
+    let rounded = (n.abs() * 1000.0).round() / 1000.0;
+    let int = rounded.trunc() as u64;
+    let digits = int.to_string();
+    let mut out = String::new();
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    let fraction = format!("{:.3}", rounded.fract());
+    let fraction = fraction.trim_start_matches('0').trim_end_matches('0').trim_end_matches('.');
+    let sign = if n < 0.0 && rounded != 0.0 { "-" } else { "" };
+    format!("{sign}{out}{fraction}")
+}
+
 /// `Number.isInteger`.
 pub fn is_integer(n: f64) -> bool {
     n.is_finite() && n.trunc() == n

@@ -108,6 +108,18 @@ impl TabStopMap {
         self.order = SumTree::new(());
     }
 
+    /// prism-gpui patch: no tab stop follows (or precedes) the focused one.
+    pub fn is_at_end(&self, focused_id: &FocusId, reverse: bool) -> bool {
+        let Some(node) = self.tab_node_for_focus_id(focused_id) else {
+            return false;
+        };
+        if reverse {
+            self.prev_inner(node).is_none()
+        } else {
+            self.next_inner(node).is_none()
+        }
+    }
+
     pub fn next(&self, focused_id: Option<&FocusId>) -> Option<FocusHandle> {
         let Some(focused_id) = focused_id else {
             let first = self.order.first()?;

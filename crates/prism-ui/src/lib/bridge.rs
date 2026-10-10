@@ -138,6 +138,7 @@ pub fn emit_event(event: BackendEvent, cx: &mut App) {
 /* ---------------- clipboard ---------------- */
 
 pub fn copy_text(text: &str, cx: &mut App) {
+    fixture::record("plugin:clipboard-manager|write_text", serde_json::json!({ "text": text }));
     if fixture::get().is_some() {
         return; // parity runs never touch the real clipboard
     }
@@ -154,6 +155,7 @@ impl crate::lib::types::Invoke for CoreInvoker {
     fn invoke(&mut self, cmd: &'static str, args: serde_json::Value) -> BridgeResult<serde_json::Value> {
         use serde_json::Value;
         let text = |key: &str| args.get(key).and_then(Value::as_str).unwrap_or_default().to_owned();
+        fixture::record(cmd, args.clone());
         if let Some(fixture) = fixture::get() {
             return Ok(match cmd {
                 "is_pinned_to_taskbar" => Value::Bool(fixture.pinned_to_taskbar.contains(&text("path"))),
@@ -217,7 +219,8 @@ fn answer_infallible<T: Send + 'static>(
 }
 
 /// A command with no fixture answer beyond success.
-fn command(live: impl Future<Output = BridgeResult<()>> + Send + 'static) -> Reply<()> {
+fn command(cmd: &str, args: serde_json::Value, live: impl Future<Output = BridgeResult<()>> + Send + 'static) -> Reply<()> {
+    fixture::record(cmd, args);
     answer(|_| Ok(()), live)
 }
 
@@ -232,7 +235,14 @@ pub fn get_app_icons(ids: Vec<String>) -> Reply<HashMap<String, String>> {
 }
 
 pub fn refresh_apps() -> Reply<Vec<AppEntry>> {
-    answer(|f| reshape(f.apps_without_icons()), async { reshape(backend().refresh_apps().await?) })
+    // A rescan is an action: the fixture records it, as `command` does.
+    answer(
+        |f| {
+            fixture::record("refresh_apps", serde_json::json!({}));
+            reshape(f.apps_without_icons())
+        },
+        async { reshape(backend().refresh_apps().await?) },
+    )
 }
 
 pub fn query_phase1(query: String, recent: Vec<RecentCommand>) -> Reply<Phase1Response> {
@@ -251,15 +261,15 @@ pub fn query_power_plans(query: String) -> Reply<Vec<PowerPlanHit>> {
 }
 
 pub fn execute_action(id: String) -> Reply<()> {
-    command(async move { backend().execute_action(id).await })
+    command("execute_action", serde_json::json!({ "id": id }), async move { backend().execute_action(id).await })
 }
 
 pub fn accept_intent(query: String, action_id: String) -> Reply<()> {
-    command(async move { backend().accept_intent(query, action_id) })
+    command("accept_intent", serde_json::json!({ "query": query, "actionId": action_id }), async move { backend().accept_intent(query, action_id) })
 }
 
 pub fn focus_window(hwnd: i64) -> Reply<()> {
-    command(async move { backend().focus_window(hwnd) })
+    command("focus_window", serde_json::json!({ "hwnd": hwnd }), async move { backend().focus_window(hwnd) })
 }
 
 pub fn search_files(query: String, limit: usize) -> Reply<FileSearchResponse> {
@@ -270,7 +280,7 @@ pub fn search_files(query: String, limit: usize) -> Reply<FileSearchResponse> {
 }
 
 pub fn rebuild_file_index() -> Reply<()> {
-    command(async {
+    command("rebuild_file_index", serde_json::json!({}), async {
         backend().rebuild_file_index();
         Ok(())
     })
@@ -292,7 +302,7 @@ pub fn get_quick_access() -> Reply<Vec<QuickAccessEntry>> {
 }
 
 pub fn perform_power_action(action: &'static str) -> Reply<()> {
-    command(async move { backend().perform_power_action(action.to_owned()).await })
+    command("perform_power_action", serde_json::json!({ "action": action }), async move { backend().perform_power_action(action.to_owned()).await })
 }
 
 pub fn existing_paths(paths: Vec<String>) -> Reply<Vec<String>> {
@@ -301,6 +311,7 @@ pub fn existing_paths(paths: Vec<String>) -> Reply<Vec<String>> {
 }
 
 pub fn is_pinned_to_taskbar(path: String) -> Reply<bool> {
+    fixture::record("is_pinned_to_taskbar", serde_json::json!({ "path": path }));
     let canned = path.clone();
     answer_infallible(move |f| f.pinned_to_taskbar.contains(&canned), async move {
         backend().is_pinned_to_taskbar(path).await
@@ -308,7 +319,7 @@ pub fn is_pinned_to_taskbar(path: String) -> Reply<bool> {
 }
 
 pub fn set_power_plan(guid: String) -> Reply<()> {
-    command(async move { backend().set_power_plan(guid).await })
+    command("set_power_plan", serde_json::json!({ "guid": guid }), async move { backend().set_power_plan(guid).await })
 }
 
 pub fn get_taskbar_settings() -> Reply<TaskbarSettings> {
@@ -316,33 +327,33 @@ pub fn get_taskbar_settings() -> Reply<TaskbarSettings> {
 }
 
 pub fn set_taskbar_thickness(value: String) -> Reply<()> {
-    command(async move { backend().set_taskbar_thickness(value) })
+    command("set_taskbar_thickness", serde_json::json!({ "value": value }), async move { backend().set_taskbar_thickness(value) })
 }
 
 pub fn set_taskbar_auto_hide(enabled: bool) -> Reply<()> {
-    command(async move { backend().set_taskbar_auto_hide(enabled) })
+    command("set_taskbar_auto_hide", serde_json::json!({ "enabled": enabled }), async move { backend().set_taskbar_auto_hide(enabled) })
 }
 
 pub fn set_taskbar_combine_buttons(value: String) -> Reply<()> {
-    command(async move { backend().set_taskbar_combine_buttons(value) })
+    command("set_taskbar_combine_buttons", serde_json::json!({ "value": value }), async move { backend().set_taskbar_combine_buttons(value) })
 }
 
 pub fn set_taskbar_start_icon(value: String) -> Reply<()> {
-    command(async move { backend().set_taskbar_start_icon(value).await })
+    command("set_taskbar_start_icon", serde_json::json!({ "value": value }), async move { backend().set_taskbar_start_icon(value).await })
 }
 
 pub fn set_custom_start_icon(png: Vec<u8>) -> Reply<()> {
     use base64::Engine;
     let base64_png = base64::engine::general_purpose::STANDARD.encode(png);
-    command(async move { backend().set_custom_start_icon(base64_png).await })
+    command("set_custom_start_icon", serde_json::json!({}), async move { backend().set_custom_start_icon(base64_png).await })
 }
 
 pub fn select_custom_start_icon(id: String) -> Reply<()> {
-    command(async move { backend().select_custom_start_icon(id).await })
+    command("select_custom_start_icon", serde_json::json!({ "id": id }), async move { backend().select_custom_start_icon(id).await })
 }
 
 pub fn remove_custom_start_icon(id: String) -> Reply<()> {
-    command(async move { backend().remove_custom_start_icon(id).await })
+    command("remove_custom_start_icon", serde_json::json!({ "id": id }), async move { backend().remove_custom_start_icon(id).await })
 }
 
 pub fn get_system_theme() -> String {
@@ -354,16 +365,18 @@ pub fn get_system_theme() -> String {
 }
 
 pub fn set_shortcut(combo: String) -> Reply<()> {
-    command(async move { backend().set_shortcut(combo).await })
+    command("set_shortcut", serde_json::json!({ "combo": combo }), async move { backend().set_shortcut(combo).await })
 }
 
 pub fn set_taskbar_scroll_volume(enabled: bool) {
+    fixture::record("set_taskbar_scroll_volume", serde_json::json!({ "enabled": enabled }));
     if fixture::get().is_none() {
         backend().set_taskbar_scroll_volume(enabled);
     }
 }
 
 pub fn set_osd_accent(accent: &str) {
+    fixture::record("set_osd_accent", serde_json::json!({ "accent": accent }));
     if fixture::get().is_none() {
         backend().set_osd_accent(accent.to_owned());
     }
@@ -374,7 +387,7 @@ pub fn load_state() -> Reply<serde_json::Value> {
 }
 
 pub fn save_state(state: serde_json::Value) -> Reply<()> {
-    command(async move { backend().save_state(state) })
+    command("save_state", serde_json::json!({ "state": state.clone() }), async move { backend().save_state(state) })
 }
 
 // PORT STATUS: confidence=high todos=0

@@ -32,6 +32,20 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 use windows::Win32::System::SystemServices::{MK_CONTROL, MK_LBUTTON, MK_RBUTTON};
 
+/// Sets this thread's Ctrl key state (only the runner's own thread).
+fn set_ctrl(down: bool) {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{SetKeyboardState, VK_CONTROL, VK_LCONTROL, VK_NUMLOCK};
+    let mut state = [0u8; 256];
+    state[VK_NUMLOCK.0 as usize] = 1;
+    if down {
+        state[VK_CONTROL.0 as usize] = 0x80;
+        state[VK_LCONTROL.0 as usize] = 0x80;
+    }
+    unsafe {
+        let _ = SetKeyboardState(&state);
+    }
+}
+
 /// Posts a mouse message to this process's own window (client coordinates).
 fn post_mouse(hwnd: HWND, message: u32, keys: usize, at: Point<gpui::Pixels>) {
     let (x, y) = (f32::from(at.x).round() as i32, f32::from(at.y).round() as i32);
@@ -79,7 +93,8 @@ impl bridge::Shell for ParityShell {
         Ok(true)
     }
 
-    fn hide_palette(&self, _defer: bool, _cx: &mut App) -> BridgeResult<()> {
+    fn hide_palette(&self, defer: bool, _cx: &mut App) -> BridgeResult<()> {
+        fixture::record("hide_palette", serde_json::json!({ "defer": defer }));
         unsafe {
             let _ = ShowWindow(self.hwnd(), SW_HIDE);
         }
@@ -90,30 +105,36 @@ impl bridge::Shell for ParityShell {
         unsafe { IsWindowVisible(self.hwnd()) }.as_bool()
     }
 
-    fn set_always_on_top(&self, _on: bool, _cx: &mut App) -> BridgeResult<()> {
+    fn set_always_on_top(&self, on: bool, _cx: &mut App) -> BridgeResult<()> {
+        fixture::record("plugin:window|set_always_on_top", serde_json::json!({ "value": on }));
         Ok(())
     }
 
-    fn set_window_style(&self, _theme: &str, _cx: &mut App) -> BridgeResult<()> {
+    fn set_window_style(&self, theme: &str, _cx: &mut App) -> BridgeResult<()> {
+        fixture::record("set_window_style", serde_json::json!({ "theme": theme }));
         Ok(())
     }
 
     fn set_window_width(&self, width: u32, cx: &mut App) -> BridgeResult<()> {
+        fixture::record("set_window_width", serde_json::json!({ "width": width }));
         self.width.set(width as i32);
         let hwnd = self.hwnd.get();
         cx.spawn(async move |_: &mut AsyncApp| place(HWND(hwnd as *mut _), width as i32)).detach();
         Ok(())
     }
 
-    fn set_taskbar_alignment(&self, _alignment: &str, _cx: &mut App) -> BridgeResult<()> {
+    fn set_taskbar_alignment(&self, alignment: &str, _cx: &mut App) -> BridgeResult<()> {
+        fixture::record("set_taskbar_alignment", serde_json::json!({ "alignment": alignment }));
         Ok(())
     }
 
-    fn start_file_drag(&self, _paths: Vec<String>, _cx: &mut App) -> Task<BridgeResult<bool>> {
+    fn start_file_drag(&self, paths: Vec<String>, _cx: &mut App) -> Task<BridgeResult<bool>> {
+        fixture::record("start_file_drag", serde_json::json!({ "paths": paths }));
         Task::ready(Ok(false))
     }
 
     fn quit(&self, _cx: &mut App) -> Task<BridgeResult<()>> {
+        fixture::record("quit_app", serde_json::json!({}));
         Task::ready(Ok(()))
     }
 
@@ -167,7 +188,9 @@ fn capture(hwnd: HWND) -> Result<image::RgbaImage, String> {
 
 fn key_event(window: &mut gpui::Window, spec: &str, cx: &mut App) {
     if let Ok(keystroke) = Keystroke::parse(spec) {
-        window.dispatch_keystroke(keystroke, cx);
+        window.dispatch_keystroke(keystroke.clone(), cx);
+        // The release: GPUI clicks a focused element on Enter or Space key-up.
+        window.dispatch_key_up(keystroke, cx);
     }
 }
 
@@ -179,6 +202,7 @@ fn point_of(value: &Value) -> Point<gpui::Pixels> {
 
 async fn run_steps(steps: Vec<Value>, window: AnyWindowHandle, shell: Rc<ParityShell>, out: PathBuf, cx: &mut AsyncApp) -> Result<(), String> {
     let mut mouse = point(px(-10.), px(-10.));
+    let mut pressed = false;
     for step in steps {
         if let Some(ms) = step.get("wait").and_then(Value::as_u64) {
             Timer::after(Duration::from_millis(ms)).await;
@@ -204,7 +228,16 @@ async fn run_steps(steps: Vec<Value>, window: AnyWindowHandle, shell: Rc<ParityS
             cx.update_window(window, |_, window, cx| key_event(window, &spec, cx)).map_err(|e| e.to_string())?;
         } else if let Some(position) = step.get("move") {
             mouse = point_of(position);
+            post_mouse(shell.hwnd(), WM_MOUSEMOVE, if pressed { MK_LBUTTON.0 as usize } else { 0 }, mouse);
+        } else if let Some(position) = step.get("down") {
+            mouse = point_of(position);
+            pressed = true;
             post_mouse(shell.hwnd(), WM_MOUSEMOVE, 0, mouse);
+            post_mouse(shell.hwnd(), WM_LBUTTONDOWN, MK_LBUTTON.0 as usize, mouse);
+        } else if let Some(position) = step.get("up") {
+            mouse = point_of(position);
+            pressed = false;
+            post_mouse(shell.hwnd(), WM_LBUTTONUP, 0, mouse);
         } else if let Some(position) = step.get("click") {
             mouse = point_of(position);
             let right = step.get("button").and_then(Value::as_str) == Some("right");
@@ -227,9 +260,13 @@ async fn run_steps(steps: Vec<Value>, window: AnyWindowHandle, shell: Rc<ParityS
             let keys = if ctrl { MK_CONTROL.0 as usize } else { 0 };
             let wparam = ((notches as u16 as usize) << 16) | keys;
             let lparam = ((screen.x as u16 as u32) | ((screen.y as u16 as u32) << 16)) as i32 as isize;
+            // GPUI reads modifiers from this thread's key state, not from the message.
+            set_ctrl(ctrl);
             unsafe {
                 let _ = PostMessageW(Some(shell.hwnd()), WM_MOUSEWHEEL, WPARAM(wparam), LPARAM(lparam));
             }
+            Timer::after(Duration::from_millis(60)).await;
+            set_ctrl(false);
         } else if step.get("info").is_some() {
             let hwnd = shell.hwnd();
             let mut window_rect = Default::default();
@@ -239,7 +276,7 @@ async fn run_steps(steps: Vec<Value>, window: AnyWindowHandle, shell: Rc<ParityS
                 let _ = windows::Win32::UI::WindowsAndMessaging::GetClientRect(hwnd, &mut client_rect);
             }
             let viewport = cx
-                .update_window(window, |_, window, _| (window.viewport_size(), window.bounds(), window.scale_factor()))
+                .update_window(window, |_, window, _| (window.viewport_size(), window.bounds(), window.scale_factor(), window.focused_bounds()))
                 .map_err(|e| e.to_string())?;
             eprintln!("parity-info window={window_rect:?} client={client_rect:?} gpui={viewport:?}");
         } else if let Some(name) = step.get("capture").and_then(Value::as_str) {
@@ -274,6 +311,7 @@ pub fn run(args: &[String]) {
     fixture::install(fixture);
     prism_ui::gfx::enable_parity(prism_ui::gfx::ParityOptions { backdrop: parse_hex(&backdrop) });
 
+    let scenario_label = scenario_name.clone();
     Application::new().with_assets(prism_ui::gfx::Assets).run(move |cx: &mut App| {
         prism_ui::components::text_input::bind_keys(cx);
         bridge::install_event_hub(cx);
@@ -311,9 +349,12 @@ pub fn run(args: &[String]) {
         cx.spawn(async move |cx| {
             // Settings load and the first layout.
             Timer::after(Duration::from_millis(400)).await;
+            let calls_path = out.join(format!("{scenario_label}.calls.json"));
             if let Err(error) = run_steps(steps, any_window, shell, out, cx).await {
                 eprintln!("parity: {error}");
             }
+            let calls = fixture::take_calls();
+            let _ = std::fs::write(calls_path, serde_json::to_string(&calls).unwrap_or_default());
             let _ = cx.update(|cx| cx.quit());
         })
         .detach();

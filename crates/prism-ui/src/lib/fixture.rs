@@ -28,6 +28,18 @@ pub struct Fixture {
 }
 
 static FIXTURE: OnceLock<Fixture> = OnceLock::new();
+static CALLS: std::sync::Mutex<Vec<Value>> = std::sync::Mutex::new(Vec::new());
+
+/// Records a backend or window call (parity runs compare them with the original's).
+pub fn record(cmd: &str, args: Value) {
+    if get().is_some() {
+        CALLS.lock().unwrap_or_else(|e| e.into_inner()).push(json!({ "cmd": cmd, "args": args }));
+    }
+}
+
+pub fn take_calls() -> Vec<Value> {
+    std::mem::take(&mut *CALLS.lock().unwrap_or_else(|e| e.into_inner()))
+}
 
 pub fn install(fixture: Fixture) {
     let _ = FIXTURE.set(fixture);

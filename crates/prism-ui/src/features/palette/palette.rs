@@ -16,7 +16,8 @@ use gpui::{
 use crate::components::power_menu::PowerMenu;
 use crate::components::settings_sheet::display_shortcut;
 use crate::components::text_input::{Changed, TextInput};
-use crate::components::ui::{IconButtonProps, icon_button, kbd, row_icon, section_label, theme, truncate, weight};
+use crate::components::focus;
+use crate::components::ui::{IconButtonProps, icon_button, kbd, row_icon, section_label, theme, title_tooltip, truncate, weight};
 use crate::features::palette::palette_search_input::{
     SearchInputProps, SearchKey, input_style, render_search_input, search_key,
 };
@@ -102,6 +103,8 @@ struct HitTargets {
     sections: Vec<(String, Bounds<Pixels>)>,
     groups: Vec<(String, Bounds<Pixels>)>,
     viewport: Option<Bounds<Pixels>>,
+    /// The results' scroll offset when the bounds above were recorded.
+    painted_offset: Point<Pixels>,
 }
 
 pub struct Palette {
@@ -110,6 +113,8 @@ pub struct Palette {
     pub input: Entity<TextInput>,
     focus: FocusHandle,
     scroll: ScrollHandle,
+    /// The focus already scrolled into view.
+    revealed: Option<FocusHandle>,
     wheel: Rc<RefCell<crate::gfx::WheelScroll>>,
     targets: Rc<RefCell<HitTargets>>,
     reorder_drag: Option<ReorderDragState>,
@@ -184,6 +189,7 @@ impl Palette {
             input,
             focus: cx.focus_handle(),
             scroll: ScrollHandle::new(),
+            revealed: None,
             wheel: Rc::default(),
             targets: Rc::default(),
             reorder_drag: None,
@@ -254,6 +260,10 @@ impl Palette {
         // Escape also cancels a drag in progress (a window keydown listener).
         if event.keystroke.key == "escape" && (self.reorder_drag.is_some() || self.category_drag.is_some() || self.file_drag.is_some()) {
             self.cancel_drags(cx);
+        }
+        // The search field's `onKeyDown`: a focused button gets no palette keys.
+        if !self.input.read(cx).focus_handle(cx).is_focused(window) {
+            return;
         }
         let Some(command) = search_key(event, composing) else { return };
         cx.stop_propagation();
@@ -437,6 +447,26 @@ impl Palette {
             if quick != settings.quick_access {
                 self.app.update(cx, |app, cx| app.update_settings(cx, |s| s.quick_access = quick));
             }
+        }
+    }
+
+    /// The grip's Up and Down keys (`moveItem`): swap with the neighbor.
+    fn move_item(&mut self, item: &PaletteItem, direction: i32, cx: &mut Context<Self>) {
+        let settings = self.app.read(cx).settings.clone();
+        let neighbor = |list: &[String], id: &str| {
+            let index = list.iter().position(|candidate| candidate == id)? as i32 + direction;
+            usize::try_from(index).ok().and_then(|index| list.get(index)).cloned()
+        };
+        if let Some(app_id) = &item.app_id {
+            if let Some(target) = neighbor(&settings.pinned_apps, app_id) {
+                self.reorder_item(item, &format!("app:{target}"), cx);
+            }
+            return;
+        }
+        if let Some(kind) = &item.quick_access_kind
+            && let Some(target) = neighbor(&settings.quick_access, kind)
+        {
+            self.reorder_item(item, &format!("quick:{target}"), cx);
         }
     }
 
@@ -631,6 +661,8 @@ impl Palette {
         let targets = self.targets.borrow();
         let (Some(row), Some(viewport)) = (targets.rows.get(&selected).copied(), targets.viewport) else { return };
         let mut offset = self.scroll.offset();
+        // The row bounds are from the last frame; a scroll since then moved the row.
+        let row = Bounds { origin: point(row.origin.x, row.origin.y + offset.y - targets.painted_offset.y), size: row.size };
         if row.top() < viewport.top() {
             offset.y += viewport.top() - row.top();
         } else if row.bottom() > viewport.bottom() {
@@ -639,6 +671,8 @@ impl Palette {
             return;
         }
         drop(targets);
+        // Chromium keeps scroll offsets on whole device pixels.
+        offset.y = offset.y.round();
         self.scroll.set_offset(offset);
         cx.notify();
     }
@@ -754,27 +788,17 @@ impl Palette {
                 |_, _, _, _| {},
             )
             .absolute()
-            .size_full(),
+            // The border box: a selected or drop-target row draws its ring as a 1px border.
+            .map(|c| {
+                let edge = if selected || drop_target { px(-1.) } else { px(0.) };
+                c.top(edge).bottom(edge).left(edge).right(edge)
+            }),
         );
 
-        // Icon cell: a drag handle for reorderable and draggable rows.
-        let icon_cell = {
-            let mut cell = div().flex_none().child(row_icon(&item.icon, 40., t, zoom));
-            if can_reorder || can_drag_file {
-                let drag_item = item.clone();
-                cell = cell.cursor_grab().on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(move |this, event: &MouseDownEvent, _, cx| {
-                        if can_reorder {
-                            this.start_reorder_drag(drag_item.clone(), event.position, cx);
-                        } else {
-                            this.start_file_drag(drag_item.clone(), event.position, cx);
-                        }
-                    }),
-                );
-            }
-            cell
-        };
+        // Icon cell. The original gives the icon a drag handler, but the row's
+        // full-size open button paints above it (z-0 positioned inside the z-[1]
+        // cell), so Chromium never routes a press to it: the icon acts as the row.
+        let icon_cell = div().flex_none().child(row_icon(&item.icon, 40., t, zoom));
 
         let title_color = if selected { hsla(t.fg) } else { crate::gfx::alpha(t.fg, 0.9) };
         let text_cell = div()
@@ -823,14 +847,35 @@ impl Palette {
         };
         if can_reorder {
             let drag_item = item.clone();
+            let key_item = item.clone();
             let grabbing = dragged;
+            // Keyed by item, so focus follows the item when it moves.
+            let grip = div().id(gpui::ElementId::Name(format!("reorder-grip-{}", item.id).into()));
             trailing = trailing.child(
-                square(("reorder-grip", index))
+                focus::button(grip, selected, t)
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .justify_center()
+                    .size(r(32.))
+                    .rounded(r(8.))
                     .group("grip")
+                    .tooltip(title_tooltip(format!("Reorder {}", item.title)))
+                    .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _, cx| {
+                        let direction = match event.keystroke.key.as_str() {
+                            "up" => -1,
+                            "down" => 1,
+                            _ => return,
+                        };
+                        cx.stop_propagation();
+                        this.move_item(&key_item, direction, cx);
+                    }))
                     .map(|d| if grabbing { d.bg(hsla(t.accent_soft)).cursor_grabbing() } else { d.cursor_grab().hover(|s| s.bg(hsla(t.surface_hover))) })
                     .on_mouse_down(
                         MouseButton::Left,
-                        cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                        cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                            // `preventDefault()` on pointerdown: the press does not move focus.
+                            window.prevent_default();
                             cx.stop_propagation();
                             this.start_reorder_drag(drag_item.clone(), event.position, cx);
                         }),
@@ -845,8 +890,9 @@ impl Palette {
         let remove_button = |this: &Self, cx: &mut Context<Self>| {
             let id = item.id.clone();
             let app = this.app.clone();
-            square(("remove-recent", index))
+            focus::button(square(("remove-recent", index)), selected, t)
                 .group("remove")
+                .tooltip(title_tooltip("Remove from Recent"))
                 .opacity(if row_hovered { 1.0 } else { 0.6 })
                 .hover(|s| s.bg(hsla(t.danger_soft)))
                 .on_click(cx.listener(move |_, _, _, cx| {
@@ -875,8 +921,9 @@ impl Palette {
                     .when(!pinned, |s| s.group_hover("pin", |s| s.text_color(hsla(t.fg))))
             };
             trailing = trailing.child(
-                square(("pin-toggle", index))
+                focus::button(square(("pin-toggle", index)), selected, t)
                     .group("pin")
+                    .tooltip(title_tooltip(format!("{} {}", if pinned { "Unpin" } else { "Pin" }, item.title)))
                     .opacity(if row_hovered { 1.0 } else { 0.0 })
                     .map(|d| if pinned { d.bg(hsla(t.accent_soft)) } else { d.hover(|s| s.bg(hsla(t.surface_hover))) })
                     .on_click(cx.listener(move |this, _, window, cx| {
@@ -923,13 +970,15 @@ impl Palette {
                         )
                     })
                     .child(
-                        square(("file-grip", index))
+                        focus::button(square(("file-grip", index)), selected, t)
                             .group("file-grip")
+                            .tooltip(title_tooltip(format!("Drag {} into another app (Discord, Explorer, etc.)", item.title)))
                             .cursor_grab()
                             .hover(|s| s.bg(hsla(t.surface_hover)))
                             .on_mouse_down(
                                 MouseButton::Left,
-                                cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                                cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                                    window.prevent_default();
                                     cx.stop_propagation();
                                     this.start_file_drag(drag_item.clone(), event.position, cx);
                                 }),
@@ -963,8 +1012,7 @@ impl Palette {
         let drag_id = id.to_owned();
         let drag_label = label.to_owned();
         let prefix = if kind == CategoryKind::Section { "section-grip" } else { "group-grip" };
-        div()
-            .id(gpui::ElementId::Name(format!("{prefix}-{id}").into()))
+        focus::button(div().id(gpui::ElementId::Name(format!("{prefix}-{id}").into())), true, t)
             .group("category-grip")
             .flex()
             .flex_none()
@@ -973,14 +1021,16 @@ impl Palette {
             .size(r(28.))
             .rounded(r(7.))
             .when(margin_right, |d| d.mr(r(14.)))
+            .tooltip(title_tooltip(format!("Reorder {label}")))
             .cursor_grab()
             .hover(|s| s.bg(hsla(t.surface_hover)))
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                cx.listener(move |this, event: &MouseDownEvent, window, cx| {
                     if !js::trim(&this.palette.read(cx).query).is_empty() {
                         return;
                     }
+                    window.prevent_default();
                     this.start_category_drag(kind, drag_id.clone(), drag_label.clone(), event.position, cx);
                 }),
             )
@@ -1009,8 +1059,8 @@ impl Palette {
         }
         let turn = chevron.read(cx).animate(window);
         let group = format!("collapse-{id}");
-        div()
-            .id(gpui::ElementId::Name(format!("collapse-{id}").into()))
+        let (t, _) = theme(cx);
+        focus::button(div().id(gpui::ElementId::Name(format!("collapse-{id}").into())), true, &t)
             .group(group.clone())
             .flex()
             .w_full()
@@ -1059,6 +1109,7 @@ impl Palette {
             targets.groups.clear();
         }
         let targets = self.targets.clone();
+        let painted_scroll = self.scroll.clone();
         // The scroll container carries Chromium's wheel line (100/3 px); the
         // content resets the line height (gfx::CHROMIUM_LINE_PX).
         let viewport = div()
@@ -1068,7 +1119,14 @@ impl Palette {
             .flex_1()
             .min_h_0()
             .child(
-                canvas(move |bounds, _, _| targets.borrow_mut().viewport = Some(bounds), |_, _, _, _| {})
+                canvas(
+                    move |bounds, _, _| {
+                        let mut targets = targets.borrow_mut();
+                        targets.viewport = Some(bounds);
+                        targets.painted_offset = painted_scroll.offset();
+                    },
+                    |_, _, _, _| {},
+                )
                     .absolute()
                     .size_full(),
             );
@@ -1080,6 +1138,7 @@ impl Palette {
             .min_h_0()
             .overflow_y_scroll()
             .track_scroll(&self.scroll)
+            .key_context("PaletteResults")
             .line_height(px(crate::gfx::CHROMIUM_LINE_PX));
         let mut list = div().flex().flex_col().line_height(relative(1.45)).px(r(10.)).pb(r(8.));
 
@@ -1567,6 +1626,16 @@ impl Palette {
         let apps_error = palette.apps_error;
         let file_indexing = palette.file_indexing;
         let query_empty = palette.query.is_empty();
+        let indexing_title = if palette.volumes.is_empty() {
+            "Indexing file catalog...".to_owned()
+        } else {
+            palette
+                .volumes
+                .iter()
+                .map(|v| format!("{}: {} ({} items)", v.drive, v.state, js::to_locale_string(v.indexed_count)))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
         let hint = |label: &str| {
             div().px(r(4.)).child(label.to_owned())
         };
@@ -1631,7 +1700,9 @@ impl Palette {
                     .gap(r(6.))
                     .child(self.update_control.clone())
                     .when(!apps_loaded && query_empty, |d| d.child(spinner("indexing apps")))
-                    .when(file_indexing && apps_loaded, |d| d.child(spinner("indexing files")))
+                    .when(file_indexing && apps_loaded, |d| {
+                        d.child(spinner("indexing files").id("file-indexing").tooltip(title_tooltip(indexing_title)))
+                    })
                     .when(apps_error && query_empty, |d| {
                         d.child(
                             div()
@@ -1643,7 +1714,7 @@ impl Palette {
                     })
                     .child(icon_button(
                         "rebuild-index",
-                        IconButtonProps { active: false, disabled: file_indexing },
+                        IconButtonProps { label: "Rebuild file index", active: false, disabled: file_indexing, focus: None },
                         t,
                         "folder-sync",
                         14.,
@@ -1651,7 +1722,7 @@ impl Palette {
                     ))
                     .child(icon_button(
                         "refresh-apps",
-                        IconButtonProps { active: false, disabled: !apps_loaded },
+                        IconButtonProps { label: "Refresh applications and Windows tools", active: false, disabled: !apps_loaded, focus: None },
                         t,
                         "refresh-cw",
                         14.,
@@ -1679,6 +1750,7 @@ impl Render for Palette {
         if std::mem::take(&mut self.reveal_pending) {
             self.reveal_selected(cx);
         }
+        focus::reveal_focused(&self.scroll, "PaletteResults", &mut self.revealed, window, cx);
         let shortcut = display_shortcut(&self.app.read(cx).settings.shortcut);
         let settings_open = self.app.read(cx).open_settings;
         let app = self.app.clone();

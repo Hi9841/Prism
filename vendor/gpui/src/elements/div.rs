@@ -2018,6 +2018,10 @@ impl Interactivity {
             .as_ref()
             .map(|handle| handle.is_focused(window))
             .unwrap_or(false);
+        if is_focused {
+            // prism-gpui patch: record where the focused element paints.
+            window.next_frame.focused_bounds = Some(hitbox.bounds);
+        }
 
         // If this element can be focused, register a mouse down listener
         // that will automatically transfer focus when hitting the element.

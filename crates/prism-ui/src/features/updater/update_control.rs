@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use gpui::{Context, Entity, ParentElement, Render, Styled, Task, Timer, Window, div, prelude::*, relative};
 
-use crate::components::ui::{text_width, theme, truncate, weight};
+use crate::components::ui::{text_width, theme, title_tooltip, truncate, weight};
 use crate::features::updater::update_policy::should_check_for_update;
 use crate::features::updater::update_progress::update_percent;
 use crate::features::updater::updater::{self, DownloadEvent, Update};
@@ -256,8 +256,8 @@ impl Render for UpdateControl {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let (t, _zoom) = theme(cx);
         if self.view == ViewState::Hidden {
-            return div()
-                .id("update-check")
+            return crate::components::focus::button(div().id("update-check"), true, &t)
+                .tooltip(title_tooltip("Check for updates"))
                 .group("update-check")
                 .flex()
                 .flex_none()
@@ -297,6 +297,13 @@ impl Render for UpdateControl {
             _ => "Retry update".into(),
         };
         let _ = text_width;
+        let title = if failed {
+            format!("Retry Prism v{version} update")
+        } else if busy {
+            format!("{label} Prism v{version}")
+        } else {
+            format!("Install Prism v{version}")
+        };
         let (bg, fg, hover_bg, hover_fg) = if failed {
             (t.danger_soft, t.danger, t.danger_soft, t.danger)
         } else if busy {
@@ -305,8 +312,8 @@ impl Render for UpdateControl {
             (t.accent_soft, t.accent, t.surface_active, t.fg)
         };
         let icon_color = fg;
-        div()
-            .id("update-install")
+        crate::components::focus::button(div().id("update-install"), !busy, &t)
+            .tooltip(title_tooltip(title))
             .flex()
             .flex_none()
             .items_center()

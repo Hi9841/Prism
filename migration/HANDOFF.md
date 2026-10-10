@@ -1,4 +1,4 @@
-# Handoff: Prism → GPUI port, Step 3 (translation), in progress
+# Handoff: Prism → GPUI port, Step 3 done, parity measured
 
 Paste this into a new session. Write in Simplified Technical English.
 
@@ -21,53 +21,38 @@ Paste this into a new session. Write in Simplified Technical English.
   first. Process: migration kit at `C:\Users\hi\Desktop\skills\migration-kit` (README, CLAUDE.md, `prompts/04`).
 - Original app (spec, do not edit): `C:\Users\hi\Desktop\Work\Prism`. The owner has uncommitted work there
   (not in `src/`: `src/` equals HEAD `4bc2404`).
-- Backend extraction target: git worktree `C:\Users\hi\Desktop\Work\Prism-core`, branch `gpui/prism-core`
-  (created from Prism `4bc2404`, still unchanged).
+- Backend: git worktree `C:\Users\hi\Desktop\Work\Prism-core`, branch `gpui/prism-core`, commit `0573388`:
+  `crates/prism-core` (Tauri-free, `Host` trait, tokio runtime, `Backend` command bodies). Its `src-tauri` is a
+  thin Tauri host over prism-core and still builds (it needs `dist/`, copied from `../Prism/dist`, untracked).
 - Work queue: `migration/manifest.tsv` (44 units). Status:
   `bun C:/Users/hi/Desktop/skills/migration-kit/scripts/queue_runner.mjs status` (12/44 at handoff).
 - Judge: `bun migration/judge/judge.mjs` (original). Port: `cargo build -p prism-judge`, then
   `PRISM_ADAPTER_CMD=target/debug/prism-judge.exe bun migration/judge/judge.mjs`.
 
-## State at handoff (2026-10-10)
+## State (2026-10-10)
 
-Subsystems 1 and 2 are done and committed. **The judge passes 277/277 against the port** (and 277/277 against
-the original). A deliberate break (`RECENT_LIMIT` 5 → 4) made the port fail 7 scenarios, so the judge sees the port.
+The port is complete: backend (prism-core), every view, and the app shell (`crates/prism-app`). Scores:
 
-- `crates/prism-ui` (crate root `src/prism_ui.rs`; feature `gpui` is on by default, but no GPUI code exists yet):
-  - `js.rs`: JS semantics (trim set, UTF-16 length, number printing, `toPrecision`, `Math.round`, `**`, min/max, truthiness).
-  - `lib/`: `math`, `search`, `types`, `query`, `icon_loading`, `launcher_motion`, `emoji` (`icu_collator`, Windows UI
-    language through `sys-locale`, numeric on).
-  - `lib/types.rs`: `RowAction::execute(&mut impl Invoke)` is the one copy of the action semantics (stop at the first
-    rejected call; `TogglePin` reads the pin state, a rejection counts as false, then sets `!truthy(reply)`).
-    The UI must run actions through it (implement `Invoke` on the backend handle); the judge's recorder does.
-  - `features/palette/{phase1,sections}.rs`, `features/updater/{update_policy,update_progress}.rs`.
-  - `state/app.rs`: the option lists and the sanitizers only. It has a `TODO(port)` for the `AppState` entity;
-    the queue already counts the file as done.
-- `crates/prism-judge/src/main.rs`: every op of `adapter.mjs`. Its `palette_sections` mirrors the provider the
-  way `paletteSources` in `adapter.mjs` does. When `state/palette.rs` exists, move that derivation into it and
-  call it from the judge, so the judge checks the real provider code.
-- Known `BUG(port)` notes (source defects not reproduced): Object.prototype keys in `id in icons` and in the
-  `ICONS` lookup; half surrogate pairs in monograms. `search.rs` keeps one from before.
+- Judge: 277/277 (`cargo build -p prism-judge`, then `PRISM_ADAPTER_CMD=target/debug/prism-judge.exe bun migration/judge/judge.mjs`).
+- UI parity: mean 9.80/10 over 33 captures, min 9.51 (zoom-120: text at 16.2 px). `bun migration/parity/run.mjs`.
+- UX parity: 37/37 scenarios (10.0); their captures have a mean of 9.78. `bun migration/parity/run.mjs --ux`.
+- Parity setup: `python -I migration/parity/make-fixture.py target/parity/fixture.json` (local data, never commit),
+  `target/parity/original-dist` (vite build of `../Prism`), `cargo build -p prism-app`. Scripts: `run-original.mjs`
+  (headless Chrome + `mock-tauri.js`; `PARITY_DEBUG=1` logs pointer events; an `eval` step probes the DOM),
+  `prism.exe --parity` (parked window, never activated; an `info` step prints the focused bounds).
+- Vendored gpui patches: `vendor/gpui/PRISM-PATCHES.md` (5). Deviation log: `migration/RULEBOOK.md`.
 
-## Next actions, in order
+## Next actions
 
-1. Subsystem 0 in the worktree `../Prism-core` (RULEBOOK §1 A4, §5 item 0, `migration/backend-units.tsv`,
-   `migration/backend-commands.tsv`): create `crates/prism-core` (git mv the Tauri-free modules), a `Host` trait
-   (emit an event with a JSON payload, app data dir; the runtime goes to a prism-core tokio runtime), port the 10
-   coupled modules (catalog/mod, apps, theme, audio, audio_hook, win_key, start_menu, windows_tools,
-   taskbar_icon_overlay, taskbar_customization), move the `lib.rs` command bodies to `backend.rs`, and keep the
-   Tauri app building (`cargo check` in `Prism-core/src-tauri`). The original judge must still pass on the worktree
-   (`PRISM_ROOT=../Prism-core bun migration/judge/judge.mjs`).
-2. Then subsystems 3–6 (theme, primitives, palette view, settings, app shell) per RULEBOOK §5,
-   with the §2 rules from Step 2 (A5 intercept_keystrokes, A6 pointer drags, A7 threads, A8 window, A9
-   on_next_frame, A10 reveal_nearest, A11 rem zoom + ListState::reset). Subsystem 3 adds `AppState` to `state/app.rs`.
-3. After each subsystem: append a line to `migration/cost-log.tsv`, rerun the port judge, and commit.
+1. Real-app smoke test, only with the owner's permission: the installed Tauri Prism owns the Win key and the
+   taskbar. Do not run `prism.exe` without `--parity` while it runs.
+2. Optional polish: zoom captures (fractional font sizes), launcher-stage scale animation, hover color transitions.
+3. D3 (shipping) is the owner's decision.
 
 ## Facts to remember
 
-- Incremental `cargo check` takes about 1 s; a cold gpui build takes about 90 s. `cargo check -p prism-ui
-  --no-default-features` skips GPUI.
-- GPUI 0.2.2: `PopUp` windows are tool windows but not topmost; there is no show API (use `ShowWindow` through Host);
-  `activate_window` injects an Alt key; `request_animation_frame` panics outside paint.
-- Chromium wheel: `-lines × 100/3 ÷ (zoom/100)` CSS px. Reduced motion = `!SPI_GETCLIENTAREAANIMATION`.
-- D3 (shipping) is still open; it is the owner's decision.
+- Incremental `cargo build -p prism-app` takes about 10 s; a cold gpui build takes about 90 s.
+- GPUI key listeners belong to elements on the focus path; a canvas's `on_key_event` sits on its own node.
+- GPUI focusable elements take focus on mouse down unless a listener calls `window.prevent_default()`.
+- Chromium: wheel `-lines x 100/3 / zoom`; scroll offsets on whole pixels; focus reveal is center-if-needed,
+  the selected row uses nearest. Reduced motion = `!SPI_GETCLIENTAREAANIMATION`.

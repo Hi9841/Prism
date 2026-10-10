@@ -204,8 +204,12 @@ fn paint_line(
         ),
     );
     window.paint_layer(line_bounds, |window| {
-        let padding_top = (line_height - layout.ascent - layout.descent) / 2.;
-        let baseline_offset = point(px(0.), padding_top + layout.ascent);
+        // prism-gpui patch: Chromium's baseline. Blink rounds the font ascent and
+        // descent to whole pixels and floors the half-leading to a 1/64 px layout unit.
+        let ascent = layout.ascent.round();
+        let descent = layout.descent.round();
+        let padding_top = px((((line_height - ascent - descent) / 2.).0 * 64.).floor() / 64.);
+        let baseline_offset = point(px(0.), padding_top + ascent);
         let mut decoration_runs = decoration_runs.iter();
         let mut wraps = wrap_boundaries.iter().peekable();
         let mut run_end = 0;

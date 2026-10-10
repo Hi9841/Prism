@@ -100,8 +100,7 @@ pub fn render_toast_stack(app: &Entity<AppState>, t: &Theme, zoom: f32, window: 
                 )
                 .when(is_error, |d| {
                     d.child(
-                        div()
-                            .id(("toast-dismiss", id as usize))
+                        crate::components::focus::button(div().id(("toast-dismiss", id as usize)), true, t)
                             .group("toast-dismiss")
                             .flex()
                             .flex_none()

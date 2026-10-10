@@ -1,3 +1,4 @@
+pub mod focus;
 pub mod power_menu;
 pub mod pretty_text;
 pub mod settings_sheet;

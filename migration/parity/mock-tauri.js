@@ -110,7 +110,7 @@
     },
     convertFileSrc: (path) => path,
     async invoke(cmd, args = {}) {
-      state.calls.push(cmd);
+      state.calls.push({ cmd, args });
       const handler = commands[cmd];
       if (handler) return handler(args);
       // Every other command or plugin call succeeds with no value.

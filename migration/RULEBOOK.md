@@ -172,6 +172,21 @@ another app, Esc cancels, a click works after the drag, and a release over the p
   (4) `text-wrap: pretty` is reproduced by a measured rule (`components/pretty_text.rs`, 2,320/2,320 cases).
   (5) The palette window removes GPUI's popup client insets with a window subclass and runs native
   move/resize outside GPUI updates.
+- 2026-10-10: UX parity pass (`bun migration/parity/run.mjs --ux`, 37 scenarios: recorded backend calls
+  must match and each capture must score >= 9.4). Found by measuring the original in Chromium:
+  (1) Inherited: the row icon never starts a reorder or file drag. The full-row open button paints
+  above it (positioned z-0 inside the z-[1] cell), so Chromium routes the press to the button. The port
+  drags from the grips only. (2) The settings panel's `backdrop-blur-2xl` blurs nothing: the animated
+  `.settings-backdrop` is the backdrop root, so the panel paints the backdrop fill a second time and the
+  palette shows through, unblurred. The port composes `bg-raised` over the backdrop fill. (3) CSS box
+  shadows blur with sigma = blur / 2 (GPUI takes the sigma); a 0 blur gets a sub-pixel sigma because
+  GPUI's shader divides by it. (4) Blink's baseline: rounded font ascent and descent, half-leading
+  floored to 1/64 px (vendored patch 2). (5) Keyboard focus as in WebView2 (`components/focus.rs`):
+  buttons are tab stops, Tab past the end rests on the body, Enter and Space click, `:focus-visible`
+  rings after keyboard input, the settings focus trap, roving segmented focus, Blink's
+  center-if-needed reveal, and scroll offsets on whole pixels (vendored patches 3-5). (6) `title`
+  tooltips are drawn like the Windows 11 tooltip control (headless Chrome cannot capture the native
+  one, so parity mode hides them).
 
 - 2026-10-09: Step 0b reviewers and Step 1 map reviewers ran on Opus per the model plan. No deviation.
 - 2026-10-09: Step 3 runs inline on Opus, with no subagents and no unit tests (owner: "dont use subagents
