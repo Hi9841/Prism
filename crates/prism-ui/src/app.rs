@@ -1,0 +1,370 @@
+//! The root view (`src/App.tsx`): the launcher phase machine, the open and
+//! close motion, the global zoom keys, and the shell surface.
+
+use std::time::Duration;
+
+use gpui::{
+    AnyElement, Context, DispatchPhase, Entity, Keystroke, ParentElement, Render, ScrollDelta, ScrollWheelEvent,
+    Styled, Subscription, Task, Timer, Window, canvas, div, prelude::*, px, relative,
+};
+
+use crate::components::settings_sheet::SettingsSheet;
+use crate::components::toast::render_toast_stack;
+use crate::components::ui::theme;
+use crate::features::palette::palette::Palette;
+use crate::gfx::{Tween, r, reduced_motion};
+use crate::lib::bridge::{self, BackendEvent};
+use crate::lib::launcher_motion::{
+    HideInvocation, HideOrigin, LAUNCHER_MOTION_MS, LauncherEvent, LauncherPhase, hide_palette_invocation,
+    reduce_launcher_phase,
+};
+use crate::state::app::{AppState, app_state};
+use crate::state::palette::{PaletteState, palette_state};
+use crate::theme::{Theme, fade, hsla, motion};
+
+/// Chromium on Windows: one wheel line is 100/3 CSS px (Step 2, M3).
+const CHROMIUM_PX_PER_LINE: f32 = 100.0 / 3.0;
+
+pub struct Launcher {
+    app: Entity<AppState>,
+    palette_state: Entity<PaletteState>,
+    palette: Entity<Palette>,
+    settings: Entity<SettingsSheet>,
+    phase: LauncherPhase,
+    stage: Tween,
+    close_timer: Option<Task<()>>,
+    blur_check: Option<Task<()>>,
+    present_task: Option<Task<()>>,
+    _subscriptions: Vec<Subscription>,
+}
+
+impl Launcher {
+    pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let app = app_state(cx);
+        let palette_state = palette_state(cx);
+        let palette = cx.new(|cx| Palette::new(window, cx));
+        let settings = cx.new(|cx| SettingsSheet::new(window, cx));
+        let hub = bridge::event_hub(cx);
+        let hub_sub = cx.subscribe_in(&hub, window, |this, _, event: &BackendEvent, window, cx| match event {
+            BackendEvent::Toggle { open } => this.on_toggle(*open, window, cx),
+            BackendEvent::WindowFocused(focused) => this.on_window_focused(*focused, window, cx),
+            BackendEvent::CloseRequested => this.hide(HideOrigin::Web, cx),
+            _ => {}
+        });
+        let app_obs = cx.observe(&app, |_, _, cx| cx.notify());
+        // The native focus events: the shell runs its click-away logic, then the
+        // UI hears `onFocusChanged`.
+        let activation = cx.observe_window_activation(window, |_, window, cx| {
+            let active = window.is_window_active();
+            bridge::shell(cx).window_activation_changed(active, cx);
+            bridge::emit_event(BackendEvent::WindowFocused(active), cx);
+        });
+        // Keep zoom shortcuts global so they work from both search and settings (A5).
+        let weak = cx.weak_entity();
+        let intercept = cx.intercept_keystrokes(move |event, window, cx| {
+            let handled = weak.update(cx, |this, cx| this.zoom_key(&event.keystroke, window, cx)).unwrap_or(false);
+            if handled {
+                cx.stop_propagation();
+            }
+        });
+        let mut this = Self {
+            app,
+            palette_state,
+            palette,
+            settings,
+            phase: LauncherPhase::Hidden,
+            stage: Tween::at(0.0),
+            close_timer: None,
+            blur_check: None,
+            present_task: None,
+            _subscriptions: vec![hub_sub, app_obs, activation, intercept],
+        };
+        // Cold-start sync: reflect a window that is already shown.
+        if bridge::shell(cx).is_window_visible(cx) {
+            this.set_phase(LauncherPhase::Preparing, window, cx);
+        }
+        this
+    }
+
+    fn zoom_key(&mut self, keystroke: &Keystroke, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if !self.app.read(cx).ready {
+            return false;
+        }
+        let palette_input = self.palette.read(cx).input.clone();
+        if palette_input.read(cx).is_composing() {
+            return false;
+        }
+        let m = keystroke.modifiers;
+        if !m.control || m.alt || m.platform {
+            return false;
+        }
+        // GPUI reports shifted OEM keys shifted (`+`, `_`) and numpad keys as `+`, `-`, `0`.
+        let direction = match keystroke.key.as_str() {
+            "up" | "+" | "=" => Some(1),
+            "down" | "-" | "_" => Some(-1),
+            _ => None,
+        };
+        let _ = window;
+        if keystroke.key == "0" {
+            self.app.update(cx, |app, cx| app.reset_view_zoom(cx));
+            true
+        } else if let Some(direction) = direction {
+            self.app.update(cx, |app, cx| app.change_view_zoom(direction, cx));
+            true
+        } else {
+            false
+        }
+    }
+
+    fn set_phase(&mut self, next: LauncherPhase, window: &mut Window, cx: &mut Context<Self>) {
+        if self.phase == next {
+            return;
+        }
+        self.phase = next;
+        // `.launcher-stage`: opacity (and scale) over 110 ms ease-out-soft;
+        // reduced motion keeps opacity at 100 ms.
+        let duration = if reduced_motion() { 100 } else { LAUNCHER_MOTION_MS };
+        let target = if next == LauncherPhase::Visible { 1.0 } else { 0.0 };
+        if next == LauncherPhase::Hidden {
+            self.stage.jump(0.0);
+        } else {
+            self.stage.set(target, duration, motion::ease_out_soft);
+        }
+        if next == LauncherPhase::Preparing {
+            self.present(window, cx);
+        }
+        cx.notify();
+    }
+
+    fn clear_close_timer(&mut self) {
+        self.close_timer = None;
+    }
+
+    fn hide(&mut self, origin: HideOrigin, cx: &mut Context<Self>) {
+        bridge::emit_event(BackendEvent::DismissTransientUi, cx);
+        let event = if origin == HideOrigin::Native { LauncherEvent::NativeClose } else { LauncherEvent::WebClose };
+        let next = reduce_launcher_phase(self.phase, event);
+        if next == self.phase {
+            return;
+        }
+        self.clear_close_timer();
+        self.phase = next;
+        let duration = if reduced_motion() { 100 } else { LAUNCHER_MOTION_MS };
+        if next == LauncherPhase::Hidden {
+            self.stage.jump(0.0);
+        } else {
+            self.stage.set(0.0, duration, motion::ease_out_soft);
+        }
+        match hide_palette_invocation(origin, next) {
+            HideInvocation::Instant => {
+                let _ = bridge::shell(cx).hide_palette(false, cx);
+            }
+            HideInvocation::Deferred => {
+                let _ = bridge::shell(cx).hide_palette(true, cx);
+            }
+            HideInvocation::None => {}
+        }
+        if next == LauncherPhase::Closing {
+            self.close_timer = Some(cx.spawn(async move |this, cx| {
+                Timer::after(Duration::from_millis(LAUNCHER_MOTION_MS)).await;
+                let _ = this.update(cx, |this, cx| {
+                    this.close_timer = None;
+                    let next = reduce_launcher_phase(this.phase, LauncherEvent::ExitFinished);
+                    if next != this.phase {
+                        this.phase = next;
+                        this.stage.jump(0.0);
+                        cx.notify();
+                    }
+                });
+            }));
+        }
+        cx.notify();
+    }
+
+    fn on_toggle(&mut self, open: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if !open {
+            self.hide(HideOrigin::Native, cx);
+            return;
+        }
+        bridge::emit_event(BackendEvent::DismissTransientUi, cx);
+        // Fresh state on every open: no leftover query, selection or settings
+        // overlay - the palette starts from zero.
+        self.palette_state.update(cx, |p, cx| p.reset(cx));
+        self.app.update(cx, |app, cx| app.set_open_settings(false, cx));
+        self.clear_close_timer();
+        let next = reduce_launcher_phase(self.phase, LauncherEvent::Open);
+        if next == LauncherPhase::Visible {
+            self.phase = LauncherPhase::Visible;
+            let duration = if reduced_motion() { 100 } else { LAUNCHER_MOTION_MS };
+            self.stage.set(1.0, duration, motion::ease_out_soft);
+            match bridge::shell(cx).present_palette(cx) {
+                Ok(true) => self.focus_search(window, cx),
+                _ => {
+                    let next = reduce_launcher_phase(self.phase, LauncherEvent::PresentFailed);
+                    self.set_phase(next, window, cx);
+                }
+            }
+            cx.notify();
+        } else {
+            self.set_phase(next, window, cx);
+        }
+    }
+
+    /// Commit the prepared view while the window is still hidden, then present
+    /// it and begin the entrance on the next frame.
+    fn present(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let presented = bridge::shell(cx).present_palette(cx);
+        match presented {
+            Ok(true) => {
+                let weak = cx.weak_entity();
+                window.on_next_frame(move |window, cx| {
+                    let _ = weak.update(cx, |this, cx| {
+                        let next = reduce_launcher_phase(this.phase, LauncherEvent::Presented);
+                        if next != this.phase {
+                            this.phase = next;
+                            let duration = if reduced_motion() { 100 } else { LAUNCHER_MOTION_MS };
+                            this.stage.set(1.0, duration, motion::ease_out_soft);
+                        }
+                        this.focus_search(window, cx);
+                        cx.notify();
+                    });
+                });
+            }
+            _ => {
+                let next = reduce_launcher_phase(self.phase, LauncherEvent::PresentFailed);
+                self.phase = next;
+                self.stage.jump(0.0);
+            }
+        }
+        self.present_task = None;
+    }
+
+    fn focus_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.palette.update(cx, |palette, cx| palette.focus_search(window, cx));
+    }
+
+    fn on_window_focused(&mut self, focused: bool, _window: &mut Window, cx: &mut Context<Self>) {
+        if focused {
+            self.blur_check = None;
+            return;
+        }
+        self.blur_check = Some(cx.spawn(async move |this, cx| {
+            Timer::after(Duration::from_millis(60)).await;
+            let _ = this.update(cx, |this, cx| {
+                this.blur_check = None;
+                if !bridge::shell(cx).is_window_visible(cx) {
+                    // Instant native hide (item launch) already took the window.
+                    bridge::emit_event(BackendEvent::DismissTransientUi, cx);
+                    this.clear_close_timer();
+                    this.phase = LauncherPhase::Hidden;
+                    this.stage.jump(0.0);
+                    cx.notify();
+                    return;
+                }
+                // Click-away: the window is still up for the shared hide delay.
+                if matches!(this.phase, LauncherPhase::Visible | LauncherPhase::Preparing) {
+                    this.hide(HideOrigin::Native, cx);
+                }
+            });
+        }));
+    }
+}
+
+/// The `.shell` surface: rounded 24/24/8/8, a 1px line, the accent glow over
+/// the solid gradient, and the inset top highlight.
+fn shell(t: &Theme, content: AnyElement) -> gpui::Div {
+    div()
+        .relative()
+        .flex()
+        .flex_col()
+        .size_full()
+        .overflow_hidden()
+        .rounded_tl(r(24.))
+        .rounded_tr(r(24.))
+        .rounded_bl(r(8.))
+        .rounded_br(r(8.))
+        .border_1()
+        .border_color(hsla(t.shell_line))
+        .bg(t.shell_solid.background())
+        .child(
+            // radial-gradient(120% 90% at 50% -20%, accent 8%, transparent 55%)
+            div().absolute().top_0().left_0().right_0().h(relative(0.3)).bg(gpui::linear_gradient(
+                180.,
+                gpui::linear_color_stop(hsla(fade(t.accent, 4.8)), 0.0),
+                gpui::linear_color_stop(hsla(fade(t.accent, 0.0)), 1.0),
+            )),
+        )
+        .child(crate::components::ui::inset_top_highlight(t.shell_hi, 24.))
+        .child(content)
+}
+
+impl Render for Launcher {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let (t, zoom) = theme(cx);
+        // View zoom through the rem size only (A11).
+        window.set_rem_size(px(16.0 * zoom));
+        let opacity = self.stage.animate(window);
+        let interactive = self.phase == LauncherPhase::Visible;
+
+        // Ctrl + wheel zoom (capture phase, before the lists scroll).
+        let weak = cx.weak_entity();
+        let wheel = canvas(
+            |_, _, _| (),
+            move |_, _, window, _| {
+                let weak = weak.clone();
+                window.on_mouse_event(move |event: &ScrollWheelEvent, phase, window, cx| {
+                    if phase != DispatchPhase::Capture || !event.modifiers.control {
+                        return;
+                    }
+                    let zoom = window.rem_size() / px(16.0);
+                    // Chromium's deltaY: opposite sign, 100/3 px per line, divided by the zoom.
+                    let delta_y = match event.delta {
+                        ScrollDelta::Lines(lines) => -lines.y * CHROMIUM_PX_PER_LINE / zoom,
+                        ScrollDelta::Pixels(pixels) => -f32::from(pixels.y) / zoom,
+                    };
+                    if delta_y == 0.0 {
+                        return;
+                    }
+                    cx.stop_propagation();
+                    let _ = weak.update(cx, |this, cx| this.app.update(cx, |app, cx| app.zoom_wheel(delta_y, cx)));
+                });
+            },
+        )
+        .absolute()
+        .size_full();
+
+        let toasts = render_toast_stack(&self.app, &t, zoom, window, cx);
+        let backdrop = crate::gfx::parity().map(|p| div().absolute().inset_0().bg(hsla(p.backdrop)));
+        div()
+            .id("launcher-root")
+            .relative()
+            .size_full()
+            .children(backdrop)
+            .child(self.render_stage(opacity, interactive, toasts, wheel, &t))
+    }
+}
+
+impl Launcher {
+    fn render_stage(&self, opacity: f32, interactive: bool, toasts: impl IntoElement, wheel: impl IntoElement, t: &Theme) -> impl IntoElement {
+        let t = t.clone();
+        div()
+            .id("launcher-stage")
+            .relative()
+            .size_full()
+            .font_family(crate::theme::FONT_SANS)
+            .text_size(r(14.))
+            .line_height(relative(1.45))
+            .text_color(hsla(t.fg))
+            .opacity(opacity)
+            .child(shell(&t, self.palette.clone().into_any_element()))
+            .child(self.settings.clone())
+            .child(toasts)
+            .child(wheel)
+            .when(!interactive, |d| {
+                // `pointer-events: none` outside the visible phase.
+                d.child(div().id("stage-blocker").absolute().inset_0().occlude())
+            })
+    }
+}
+
+// PORT STATUS: confidence=medium todos=0

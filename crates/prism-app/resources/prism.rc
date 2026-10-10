@@ -1,0 +1,2 @@
+// The Prism icon (the manifest comes from gpui's windows-manifest feature).
+IDI_APPLICATION_ICON ICON "icon.ico"

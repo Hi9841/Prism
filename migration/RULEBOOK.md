@@ -162,6 +162,17 @@ another app, Esc cancels, a click works after the drag, and a release over the p
 
 ## Deviation log
 
+- 2026-10-10: Step 3 subsystems 3-6 written inline. Deviations, each measured with the new visual parity
+  harness (`migration/parity`: the original in headless Chrome 154 with a mocked Tauri layer vs the port in a
+  parked, never-activated window, same fixture, PrintWindow captures, SSIM-based score):
+  (1) gpui 0.2.2 is vendored (`vendor/gpui`, patches in `PRISM-PATCHES.md`): fractional line heights as
+  in Chromium. (2) The palette list is a scroll `div` with recorded row bounds, not `ListState`; A10's
+  reveal-nearest rule is kept on those bounds. Rows are few (the original does not virtualize either).
+  (3) Wheel scrolling uses Chromium's 100/3 px per line with a short animation (`gfx::WheelScroll`).
+  (4) `text-wrap: pretty` is reproduced by a measured rule (`components/pretty_text.rs`, 2,320/2,320 cases).
+  (5) The palette window removes GPUI's popup client insets with a window subclass and runs native
+  move/resize outside GPUI updates.
+
 - 2026-10-09: Step 0b reviewers and Step 1 map reviewers ran on Opus per the model plan. No deviation.
 - 2026-10-09: Step 3 runs inline on Opus, with no subagents and no unit tests (owner: "dont use subagents
   we dont have enough usage", "dont do unit testings"). The kit's 4-agent pipeline per unit is replaced by

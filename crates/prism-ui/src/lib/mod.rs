@@ -1,4 +1,8 @@
+#[cfg(feature = "gpui")]
+pub mod bridge;
 pub mod emoji;
+#[cfg(feature = "gpui")]
+pub mod fixture;
 pub mod icon_loading;
 pub mod launcher_motion;
 pub mod math;

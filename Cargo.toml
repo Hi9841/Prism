@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/prism-ui", "crates/prism-judge"]
+members = ["crates/prism-app", "crates/prism-ui", "crates/prism-judge"]
 
 [workspace.package]
 edition = "2024"
@@ -11,3 +11,7 @@ publish = false
 gpui = "=0.2.2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+
+# gpui 0.2.2 with the patches listed in vendor/gpui/PRISM-PATCHES.md.
+[patch.crates-io]
+gpui = { path = "vendor/gpui" }
