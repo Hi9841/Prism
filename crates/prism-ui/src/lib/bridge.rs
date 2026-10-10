@@ -75,6 +75,11 @@ pub trait Shell: 'static {
     fn app_version(&self) -> String;
     /// The window gained or lost activation (the native `Focused` window event).
     fn window_activation_changed(&self, active: bool, cx: &mut App);
+    /// The foreground window belongs to Prism (a file dialog it opened): a
+    /// focus loss to it is not a click-away.
+    fn owns_foreground(&self) -> bool {
+        false
+    }
 }
 
 #[derive(Clone)]

@@ -116,6 +116,12 @@ impl SettingsSheet {
                     this.close_task = None;
                     this.closing = None;
                     this.opened_at = Instant::now();
+                    // The original unmounts the sheet when it closes: every
+                    // open starts at the top with empty fields.
+                    this.scroll.set_offset(gpui::point(gpui::px(0.), gpui::px(0.)));
+                    *this.wheel.borrow_mut() = Default::default();
+                    this.new_name.update(cx, |input, cx| input.set_text("", cx));
+                    this.app_query.update(cx, |input, cx| input.set_text("", cx));
                     window.focus(&this.close_focus);
                 } else {
                     this.reset_confirming = false;

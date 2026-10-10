@@ -74,6 +74,24 @@ pub fn remove_frame(hwnd: HWND) {
     }
 }
 
+/// Windows sends WM_SIZE synchronously inside SetWindowPos. The shell resizes
+/// from GPUI updates, where GPUI cannot run its resize callback: the renderer
+/// grew but the layout kept the old width (the width setting looked dead).
+/// A posted WM_SIZE arrives after the update and relays the new client size.
+fn repost_size(hwnd: HWND) {
+    use windows::Win32::Foundation::{LPARAM, WPARAM};
+    use windows::Win32::UI::WindowsAndMessaging::{GetClientRect, PostMessageW, SIZE_RESTORED, WM_SIZE};
+    let mut client = RECT::default();
+    if unsafe { GetClientRect(hwnd, &mut client) }.is_err() {
+        return;
+    }
+    let width = (client.right - client.left).clamp(0, 0xFFFF) as isize;
+    let height = (client.bottom - client.top).clamp(0, 0xFFFF) as isize;
+    unsafe {
+        let _ = PostMessageW(Some(hwnd), WM_SIZE, WPARAM(SIZE_RESTORED as usize), LPARAM(width | (height << 16)));
+    }
+}
+
 thread_local! {
     static INSTANCE: std::cell::RefCell<Option<std::rc::Rc<GpuiShell>>> = const { std::cell::RefCell::new(None) };
 }
@@ -143,6 +161,7 @@ impl GpuiShell {
                 SetWindowPos(hwnd, None, 0, 0, frame.width, frame.height, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE)
             }
             .map_err(|e| e.to_string())?;
+            repost_size(hwnd);
         }
         Ok((frame.x, frame.y))
     }
@@ -425,6 +444,10 @@ impl bridge::Shell for GpuiShell {
 
     fn app_version(&self) -> String {
         env!("PRISM_VERSION").to_owned()
+    }
+
+    fn owns_foreground(&self) -> bool {
+        is_prism_foreground()
     }
 
     fn window_activation_changed(&self, active: bool, cx: &mut App) {

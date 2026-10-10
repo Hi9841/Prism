@@ -261,6 +261,11 @@ impl Launcher {
                     cx.notify();
                     return;
                 }
+                // A dialog Prism opened (the custom icon picker) holds the
+                // focus: the native side keeps the window, so the view stays.
+                if bridge::shell(cx).owns_foreground() {
+                    return;
+                }
                 // Click-away: the window is still up for the shared hide delay.
                 if matches!(this.phase, LauncherPhase::Visible | LauncherPhase::Preparing) {
                     this.hide(HideOrigin::Native, cx);
