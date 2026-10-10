@@ -7,7 +7,11 @@ use tokio::runtime::Runtime;
 use tokio::task::JoinHandle;
 
 static RUNTIME: LazyLock<Runtime> = LazyLock::new(|| {
+    // The async work is light (timers, IPC-style commands); heavy work runs on
+    // the blocking pool. One worker per core (32 on the owner's machine) only
+    // added idle threads.
     tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(4)
         .enable_time()
         .thread_name("prism-core")
         .build()
