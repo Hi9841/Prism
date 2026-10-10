@@ -61,6 +61,20 @@ const RECONCILIATION_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60); // 6
                                                                             // that are new, never scanned, or stale get a sweep.
 const STARTUP_SWEEP_WINDOW: Duration = Duration::from_secs(24 * 60 * 60);
 
+/// A scoped repair re-walks its directory tree. During a burst (a build, an
+/// unzip) overflows keep arriving: wait until the scope is quiet, so one walk
+/// covers the whole burst instead of walking back to back while it lasts.
+const SCOPE_REPAIR_QUIET: Duration = Duration::from_secs(2);
+/// Freshness bound: a repair never waits longer than this after its first request.
+const SCOPE_REPAIR_MAX_DELAY: Duration = Duration::from_secs(20);
+/// Minimum time between two walks of the same scope.
+const SCOPE_REPAIR_MIN_GAP: Duration = Duration::from_secs(10);
+/// A shard root (a top-level folder such as C:\Users, after a kernel buffer
+/// overflow) re-walks millions of entries: wait for a longer quiet period so
+/// a long build or install costs one walk at its end.
+const SHARD_REPAIR_QUIET: Duration = Duration::from_secs(30);
+const SHARD_REPAIR_MAX_DELAY: Duration = Duration::from_secs(5 * 60);
+
 pub fn catalog_debug_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| {
@@ -82,23 +96,31 @@ pub struct IndexCounts {
 #[derive(Default)]
 struct ScopeRepairCoordinator {
     /// Presence means one worker owns the scope; true requests another pass.
-    running: HashMap<String, bool>,
+    /// The instant is the latest request (the burst is quiet after it).
+    running: HashMap<String, (bool, std::time::Instant)>,
 }
 
 impl ScopeRepairCoordinator {
     fn request(&mut self, key: String) -> bool {
-        if let Some(pending) = self.running.get_mut(&key) {
+        let now = std::time::Instant::now();
+        if let Some((pending, last)) = self.running.get_mut(&key) {
             *pending = true;
+            *last = now;
             false
         } else {
-            self.running.insert(key, false);
+            self.running.insert(key, (false, now));
             true
         }
     }
 
+    /// Time since the latest request for `key`.
+    fn quiet_for(&self, key: &str) -> Duration {
+        self.running.get(key).map_or(Duration::MAX, |(_, last)| last.elapsed())
+    }
+
     fn finish_pass(&mut self, key: &str) -> bool {
         match self.running.get_mut(key) {
-            Some(pending) if *pending => {
+            Some((pending, _)) if *pending => {
                 *pending = false;
                 true
             }
@@ -810,6 +832,9 @@ impl FileIndex {
     }
 
     fn request_scope_repair(&self, volume_id: String, scope: PathBuf) {
+        if catalog_debug_enabled() {
+            eprintln!("[catalog] repair requested scope={}", scope.display());
+        }
         let key = format!("{}|{}", volume_id, scope.to_string_lossy().to_lowercase());
         if !self
             .scope_repairs
@@ -821,7 +846,10 @@ impl FileIndex {
         }
 
         let index = self.clone();
+        // The volume root and top-level folders (C:\, C:\Users) are shard roots.
+        let broad = scope.components().count() <= 3;
         crate::runtime::spawn_blocking(move || loop {
+            index.wait_for_quiet_scope(&key, broad);
             index.reconcile_scope_sync(&volume_id, &scope);
             if !index
                 .scope_repairs
@@ -831,7 +859,32 @@ impl FileIndex {
             {
                 break;
             }
+            std::thread::sleep(SCOPE_REPAIR_MIN_GAP);
         });
+    }
+
+    /// Blocks until no repair request for `key` arrived for the quiet period,
+    /// or the maximum delay passed (a blocking-pool thread).
+    fn wait_for_quiet_scope(&self, key: &str, broad: bool) {
+        let (quiet_needed, max_delay) = if broad {
+            (SHARD_REPAIR_QUIET, SHARD_REPAIR_MAX_DELAY)
+        } else {
+            (SCOPE_REPAIR_QUIET, SCOPE_REPAIR_MAX_DELAY)
+        };
+        let started = std::time::Instant::now();
+        loop {
+            let quiet = self
+                .scope_repairs
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .quiet_for(key);
+            let waited = started.elapsed();
+            if quiet >= quiet_needed || waited >= max_delay {
+                return;
+            }
+            let remaining = quiet_needed - quiet;
+            std::thread::sleep(remaining.min(max_delay - waited));
+        }
     }
 
     fn reconcile_scope_sync(&self, volume_id: &str, requested_scope: &Path) {
@@ -861,6 +914,7 @@ impl FileIndex {
             .unwrap_or_else(|e| e.into_inner())
             .clone();
         for scope in scopes {
+            let started = std::time::Instant::now();
             let generation = self.scan_generation.fetch_add(1, Ordering::SeqCst);
             let cancel = Arc::new(AtomicBool::new(false));
             let result = if scope == volume_root {
@@ -882,6 +936,14 @@ impl FileIndex {
                     cancel,
                 )
             };
+            if catalog_debug_enabled() {
+                eprintln!(
+                    "[catalog] repair pass scope={} entries={:?} ms={}",
+                    scope.display(),
+                    result.as_ref().ok(),
+                    started.elapsed().as_millis()
+                );
+            }
             if let Err(error) = result {
                 eprintln!(
                     "[Prism Catalog] Scoped repair for {} failed: {}",
@@ -890,7 +952,9 @@ impl FileIndex {
                 );
             }
         }
-        let _ = db.checkpoint();
+        // No forced checkpoint: a scoped repair writes little, and SQLite's
+        // automatic checkpoint bounds the WAL. A truncating checkpoint after
+        // every small repair cost up to 2 s each during bursts.
         self.emit_updated();
     }
 

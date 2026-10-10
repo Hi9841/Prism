@@ -9,7 +9,7 @@ publish = false
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "time"] }
-rusqlite = { version = "0.33", features = ["bundled"] }
+rusqlite = { version = "0.33", features = ["bundled", "trace"] }
 windows = { version = "0.61", features = [
   "Win32_Devices_HumanInterfaceDevice",
   "Win32_Foundation",

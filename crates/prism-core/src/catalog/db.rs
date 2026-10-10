@@ -135,7 +135,7 @@ impl Database {
     }
 
     fn try_open(db_path: &Path) -> Result<Self, String> {
-        let writer = Connection::open_with_flags(
+        let mut writer = Connection::open_with_flags(
             db_path,
             OpenFlags::SQLITE_OPEN_READ_WRITE
                 | OpenFlags::SQLITE_OPEN_CREATE
@@ -145,13 +145,19 @@ impl Database {
 
         Self::configure_pragmas(&writer)?;
         Self::init_schema(&writer)?;
+        if super::catalog_debug_enabled() {
+            writer.profile(Some(Self::slow_statement));
+        }
 
-        let reader = Connection::open_with_flags(
+        let mut reader = Connection::open_with_flags(
             db_path,
             OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
         )
         .map_err(|e| e.to_string())?;
         Self::configure_pragmas(&reader)?;
+        if super::catalog_debug_enabled() {
+            reader.profile(Some(Self::slow_statement));
+        }
 
         let db = Self {
             db_path: db_path.to_path_buf(),
@@ -162,6 +168,14 @@ impl Database {
         };
         db.migrate()?;
         Ok(db)
+    }
+
+    /// PRISM_CATALOG_DEBUG: log statements slower than 20 ms.
+    fn slow_statement(sql: &str, duration: Duration) {
+        if duration >= Duration::from_millis(20) {
+            let sql: String = sql.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(160).collect();
+            eprintln!("[catalog] sql ms={} {sql}", duration.as_millis());
+        }
     }
 
     fn configure_pragmas(conn: &Connection) -> Result<(), String> {
@@ -473,8 +487,12 @@ impl Database {
             )
             .map_err(|e| e.to_string())?;
             if rebuild_needed {
+                let started = std::time::Instant::now();
                 conn.execute_batch("INSERT INTO file_fts(file_fts) VALUES('rebuild');")
                     .map_err(|e| e.to_string())?;
+                if super::catalog_debug_enabled() {
+                    eprintln!("[catalog] fts rebuild ms={}", started.elapsed().as_millis());
+                }
             }
         }
         Ok(())

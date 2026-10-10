@@ -105,6 +105,11 @@ pub fn scan_volume(
 /// Reconciles one directory subtree without completing or pruning a
 /// volume-wide generation. The per-directory `seen` sets remain authoritative
 /// only for directories reached below `root`, so rows elsewhere are untouched.
+///
+/// No bulk load here: a scoped repair writes a few thousand rows at most, and
+/// the FTS triggers keep the index current row by row. A bulk load would end
+/// with a full FTS rebuild (every name in the catalog, gigabytes of reads)
+/// after any change, on every watcher overflow.
 pub fn reconcile_scope(
     root: &Path,
     volume_id: &str,
@@ -114,8 +119,7 @@ pub fn reconcile_scope(
     cancel: Arc<AtomicBool>,
 ) -> Result<u64, String> {
     let _priority = ScanEfficiencyGuard::new();
-    db.begin_bulk_load()?;
-    let result = scan_volume_inner(
+    scan_volume_inner(
         root,
         volume_id,
         ScanPlan {
@@ -127,9 +131,7 @@ pub fn reconcile_scope(
         app_data_dir,
         &cancel,
         &|_| {},
-    );
-    let _ = db.end_bulk_load();
-    result
+    )
 }
 
 /// Reconciles only the direct children of one directory. This is used by the
@@ -142,9 +144,9 @@ pub fn reconcile_directory(
     app_data_dir: &Path,
     cancel: Arc<AtomicBool>,
 ) -> Result<u64, String> {
+    // One directory's children: the FTS triggers stay (see reconcile_scope).
     let _priority = ScanEfficiencyGuard::new();
-    db.begin_bulk_load()?;
-    let result = scan_volume_inner(
+    scan_volume_inner(
         root,
         volume_id,
         ScanPlan {
@@ -156,9 +158,7 @@ pub fn reconcile_directory(
         app_data_dir,
         &cancel,
         &|_| {},
-    );
-    let _ = db.end_bulk_load();
-    result
+    )
 }
 
 /// File enumeration is background maintenance. For its duration the worker

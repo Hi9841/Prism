@@ -23,11 +23,12 @@ use super::db::Database;
 use super::types::ScannedItem;
 use super::IndexCounts;
 
-/// ReadDirectoryChangesW on a synchronous handle accepts at most 64 KB -
-/// larger buffers fail instantly with an invalid-parameter error (which a
-/// naive retry loop turns into a hot spin). Bursts beyond 64 KB surface as
-/// overflow markers handled by scoped reconciliation instead.
-const BUFFER_SIZE: usize = 64 * 1024;
+/// The kernel keeps a change buffer of this size per watch handle between
+/// reads. With 64 KB, deleting a build folder (tens of thousands of names in a
+/// second) overflowed it, and an overflow re-walks the whole shard (all of
+/// C:\Users). The 64 KB limit applies only to network shares; the watched
+/// roots are local volumes. A failed read still backs off (no hot spin).
+const BUFFER_SIZE: usize = 512 * 1024;
 
 /// How often queued events are folded and applied as one batched write.
 /// Sub-second latency for search freshness, but a bounded number of
@@ -67,6 +68,12 @@ impl ReconnectBackoff {
 /// buffer. Once saturated, individual events are already incomplete, so keep
 /// one overflow marker and let reconciliation restore the authoritative state.
 const MAX_QUEUED_EVENTS: usize = 16 * 1024;
+
+/// A collapsed queue keeps at most this many dirty scopes. Each scope is the
+/// narrowest existing directory that covers the dropped events (a build's
+/// output folder, not all of C:\Users); past the limit, the deepest scopes
+/// merge into their parents.
+const MAX_DIRTY_SCOPES: usize = 32;
 
 #[derive(Clone, Debug)]
 pub enum WatcherEvent {
@@ -137,52 +144,90 @@ impl WatcherEventQueue {
             return;
         }
         if self.collapsed {
-            let scope = self.scope_for_event(&event);
-            self.push_dirty_scope(scope);
+            for scope in self.scopes_for_event(&event) {
+                self.push_dirty_scope(scope);
+            }
             return;
         }
         if self.events.len() >= self.limit {
-            let mut scopes: HashSet<PathBuf> = self
-                .events
-                .iter()
-                .map(|queued| self.scope_for_event(queued))
-                .collect();
-            scopes.insert(self.scope_for_event(&event));
-            self.events = scopes.into_iter().map(WatcherEvent::Overflow).collect();
+            let mut scopes: Vec<PathBuf> = Vec::new();
+            for queued in std::mem::take(&mut self.events).iter().chain(Some(&event)) {
+                scopes.extend(self.scopes_for_event(queued));
+            }
+            self.events.clear();
             self.collapsed = true;
+            for scope in scopes {
+                self.push_dirty_scope(scope);
+            }
             return;
         }
         self.events.push(event);
     }
 
+    /// Adds a dirty scope unless an existing one covers it; drops the scopes
+    /// it covers; merges the deepest scopes past MAX_DIRTY_SCOPES.
     fn push_dirty_scope(&mut self, scope: PathBuf) {
-        if !self
-            .events
-            .iter()
-            .any(|event| matches!(event, WatcherEvent::Overflow(existing) if existing == &scope))
-        {
-            self.events.push(WatcherEvent::Overflow(scope));
+        let covered = self.events.iter().any(
+            |event| matches!(event, WatcherEvent::Overflow(existing) if scope.starts_with(existing)),
+        );
+        if covered {
+            return;
+        }
+        self.events.retain(
+            |event| !matches!(event, WatcherEvent::Overflow(existing) if existing.starts_with(&scope)),
+        );
+        self.events.push(WatcherEvent::Overflow(scope));
+        while self.dirty_scope_count() > MAX_DIRTY_SCOPES {
+            let Some(deepest) = self
+                .events
+                .iter()
+                .filter_map(|event| match event {
+                    WatcherEvent::Overflow(scope) => Some(scope.clone()),
+                    _ => None,
+                })
+                .filter(|scope| scope != &self.root)
+                .max_by_key(|scope| scope.components().count())
+            else {
+                break;
+            };
+            let parent = deepest
+                .parent()
+                .filter(|parent| parent.starts_with(&self.root))
+                .map(Path::to_path_buf)
+                .unwrap_or_else(|| self.root.clone());
+            self.events.retain(
+                |event| !matches!(event, WatcherEvent::Overflow(existing) if existing.starts_with(&parent)),
+            );
+            self.events.push(WatcherEvent::Overflow(parent));
         }
     }
 
-    fn scope_for_event(&self, event: &WatcherEvent) -> PathBuf {
-        let path = match event {
-            WatcherEvent::Added(path) | WatcherEvent::Removed(path) => path,
-            WatcherEvent::Renamed { to, .. } => to,
-            WatcherEvent::Overflow(scope) => return scope.clone(),
-        };
-        let Ok(relative) = path.strip_prefix(&self.root) else {
-            return self.root.clone();
-        };
-        let Some(first) = relative.components().next() else {
-            return self.root.clone();
-        };
-        let top_level = self.root.join(first.as_os_str());
-        if top_level.is_dir() {
-            top_level
-        } else {
-            self.root.clone()
+    fn dirty_scope_count(&self) -> usize {
+        self.events.iter().filter(|event| matches!(event, WatcherEvent::Overflow(_))).count()
+    }
+
+    /// The narrowest existing directories whose reconciliation covers `event`:
+    /// the parent of each changed path (both sides of a rename).
+    fn scopes_for_event(&self, event: &WatcherEvent) -> Vec<PathBuf> {
+        match event {
+            WatcherEvent::Added(path) | WatcherEvent::Removed(path) => vec![self.existing_parent(path)],
+            WatcherEvent::Renamed { from, to } => vec![self.existing_parent(from), self.existing_parent(to)],
+            WatcherEvent::Overflow(scope) => vec![scope.clone()],
         }
+    }
+
+    fn existing_parent(&self, path: &Path) -> PathBuf {
+        let mut current = path.parent();
+        while let Some(dir) = current {
+            if !dir.starts_with(&self.root) {
+                break;
+            }
+            if dir.is_dir() {
+                return dir.to_path_buf();
+            }
+            current = dir.parent();
+        }
+        self.root.clone()
     }
 
     fn take_all(&mut self) -> Vec<WatcherEvent> {
@@ -591,6 +636,15 @@ fn sleep_with_stop(delay: Duration, stop: &AtomicBool) {
 
 /// Folds queued events to a final state per path and applies them as a
 /// handful of batched writes.
+/// Runs a closure when dropped (a trace at every return of a function).
+struct TraceOnDrop<F: FnMut()>(F);
+
+impl<F: FnMut()> Drop for TraceOnDrop<F> {
+    fn drop(&mut self) {
+        (self.0)();
+    }
+}
+
 fn apply_queued_events(
     db: &Database,
     event_queue: &Mutex<WatcherEventQueue>,
@@ -602,6 +656,13 @@ fn apply_queued_events(
         let mut q = event_queue.lock().unwrap();
         q.take_all()
     };
+    let started = std::time::Instant::now();
+    let event_count = events.len();
+    let _trace = TraceOnDrop(move || {
+        if super::catalog_debug_enabled() && event_count > 0 {
+            eprintln!("[catalog] watcher flush events={event_count} ms={}", started.elapsed().as_millis());
+        }
+    });
 
     let mut dirty_scopes: HashSet<PathBuf> = HashSet::new();
     let mut renames: Vec<(PathBuf, PathBuf)> = Vec::new();
