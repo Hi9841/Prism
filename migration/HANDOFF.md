@@ -58,8 +58,11 @@ The port is complete: backend (prism-core), every view, and the app shell (`crat
    Tested 2026-10-10 on the owner's PC: Tauri 0.11.9 -> port install as the Tauri updater runs it; in-app
    update 0.90.0 -> 0.90.1 from a local channel (`-UpdateEndpoint`/`-UpdatePublicKey`/`-Version`, test key);
    a tampered signature is refused; silent uninstall; fresh passive install and first run; search, Win key,
-   Start-button click, click-away. Not tested: the Tauri updater's own download step against the port
-   installer (same minisign format, signed by the same `tauri signer`).
+   Start-button click, click-away. Also tested: a real Tauri build (0.11.8, `tauri build --config` with the local endpoint and test key)
+   updated itself to the port through its own Update button (download, signature, install, restart).
+   Performance (PRISM_CATALOG_DEBUG=1 traces catalog work): idle hidden 0.4% of one core; a 40k-file
+   burst costs ~16 s CPU and ~1.1 GB reads (was 47 s / 3.3 GB). Remaining cost: trigram FTS upkeep per
+   changed name (the FTS serves only the fallback search path).
 3. Optional polish: zoom captures (fractional font sizes), launcher-stage scale animation, hover color transitions.
 4. D3 (shipping) is the owner's decision.
 
