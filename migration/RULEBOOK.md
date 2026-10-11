@@ -162,6 +162,10 @@ another app, Esc cancels, a click works after the drag, and a release over the p
 
 ## Deviation log
 
+- 2026-10-11: Owner request: every result has a right-click menu. "Open" is the first entry, and
+  "Copy as path" copies the quoted path (file, folder, app exe or shortcut, `shell:AppsFolder\{AUMID}`,
+  settings URI). UX scenario `ux-context-keys` now differs from the original on purpose: Down+Enter
+  picks the second entry, which is "Open location" in the port and "Properties" in the original.
 - 2026-10-10: Real-app test on the owner's desktop (owner: "test for me"), with `SendInput` and clicks.
   Findings and fixes: (1) `prism-gpui` has an inherited Low Mandatory Level label (a Codex sandbox ACL), so
   `target/debug/prism.exe` starts at Low integrity: the catalog opens read-only and the Win-key observer
