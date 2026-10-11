@@ -19,7 +19,7 @@ use gpui::{
     App, AppContext, Application, Bounds, Timer, WindowBackgroundAppearance, WindowBounds, WindowKind, WindowOptions,
     px, size,
 };
-use prism_core::backend::{backend, launched_for_autostart, load_state_value};
+use prism_core::backend::{autostart_disabled_by_user, backend, launched_for_autostart, load_state_value};
 use prism_ui::lib::bridge::{self, BackendEvent, ShellHandle};
 use windows::Win32::Foundation::{ERROR_ALREADY_EXISTS, GetLastError, HANDLE, HWND, WAIT_ABANDONED, WAIT_OBJECT_0};
 use windows::Win32::System::Threading::{CreateEventW, CreateMutexW, INFINITE, ResetEvent, SetEvent, WaitForSingleObject};
@@ -31,7 +31,9 @@ use crate::shell::{GpuiShell, LOGICAL_WIDTH};
 const PALETTE_STARTUP_DELAY: Duration = Duration::from_millis(100);
 
 /// Single instance: a second launch signals the first one to open the palette.
-fn claim_single_instance() -> Option<HANDLE> {
+/// An autostart launch does not (`open_running` false): the sign-in task and
+/// the Run entry both start Prism, and the later one must exit quietly.
+fn claim_single_instance(open_running: bool) -> Option<HANDLE> {
     /// An instance that was just killed (an update, Task Manager) still owns
     /// the mutex until Windows tears the process down.
     const DYING_OWNER_WAIT_MS: u32 = 3000;
@@ -41,7 +43,9 @@ fn claim_single_instance() -> Option<HANDLE> {
         if GetLastError() == ERROR_ALREADY_EXISTS {
             // Open the running palette at once; if the owner was only dying,
             // take over instead of exiting (no Prism would run otherwise).
-            let _ = SetEvent(activate);
+            if open_running {
+                let _ = SetEvent(activate);
+            }
             let waited = WaitForSingleObject(mutex, DYING_OWNER_WAIT_MS);
             if waited != WAIT_OBJECT_0 && waited != WAIT_ABANDONED {
                 return None;
@@ -69,9 +73,14 @@ fn main() {
     if prism_core::backend::run_start_restore_watchdog_if_requested() {
         return;
     }
-    let Some(activate_event) = claim_single_instance() else { return };
+    let autostart = launched_for_autostart();
+    // The sign-in task starts Prism even when Task Manager's switch is off.
+    if autostart && autostart_disabled_by_user() {
+        return;
+    }
+    let Some(activate_event) = claim_single_instance(!autostart) else { return };
     let startup_timer = prism_core::perf::start();
-    let show_on_start = !launched_for_autostart();
+    let show_on_start = !autostart;
 
     let (sender, mut receiver) = futures::channel::mpsc::unbounded::<HostMessage>();
     let palette_visible = Arc::new(AtomicBool::new(false));
