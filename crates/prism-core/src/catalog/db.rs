@@ -505,10 +505,6 @@ impl Database {
         self.bulk_load_dirty.store(true, Ordering::Relaxed);
     }
 
-    /// Truncates the write-ahead log. A long sweep grows the WAL by hundreds
-    /// of megabytes, and every process start pays recovery for whatever was
-    /// left un-checkpointed - checkpointing after big writes keeps launches
-    /// cheap and the app data directory small.
     /// Drops the indexes that no query reads and returns free pages to the
     /// file system. Earlier catalogs never did either: a long-lived 4.3M-row
     /// catalog measured 8.5 GB, of which 3.6 GB were free pages and 0.7 GB
@@ -574,6 +570,10 @@ impl Database {
         })
     }
 
+    /// Truncates the write-ahead log. A long sweep grows the WAL by hundreds
+    /// of megabytes, and every process start pays recovery for whatever was
+    /// left un-checkpointed - checkpointing after big writes keeps launches
+    /// cheap and the app data directory small.
     pub fn checkpoint(&self) -> Result<(), String> {
         let conn = self.writer.lock().map_err(|e| e.to_string())?;
         conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
