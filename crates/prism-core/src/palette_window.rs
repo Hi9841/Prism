@@ -12,7 +12,7 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{SetActiveWindow, SetFocus};
 use windows::Win32::UI::WindowsAndMessaging::{
     AllowSetForegroundWindow, BringWindowToTop, GetCursorPos, GetForegroundWindow,
     GetWindowThreadProcessId, LockSetForegroundWindow, SetForegroundWindow, SetWindowPos,
-    HWND_TOPMOST, LSFW_UNLOCK, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW,
+    HWND_TOPMOST, LSFW_UNLOCK, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW,
 };
 
 use crate::taskbar_alignment::Alignment;
@@ -352,6 +352,9 @@ pub fn force_foreground(hwnd: HWND) {
 /// Reasserts Prism at the front of the topmost band and asks for foreground.
 pub fn raise(hwnd: HWND) -> Result<(), String> {
     unsafe {
+        // Topmost first without activation: when the same call also asks to
+        // activate and Windows refuses, it discards the topmost request too.
+        let _ = SetWindowPos(hwnd, Some(HWND_TOPMOST), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
         SetWindowPos(
             hwnd,
             Some(HWND_TOPMOST),
