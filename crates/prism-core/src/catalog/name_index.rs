@@ -28,6 +28,9 @@ const LOAD_BATCH: usize = 100_000;
 /// New rows a search appends inline before it answers. A larger backlog (a
 /// full rescan) goes to the background loader and the search uses SQL.
 const SEARCH_CATCH_UP: usize = 10_000;
+/// Rewritten rows (a directory rename) a search applies inline. A larger
+/// rename is applied by the background sync, outside the keystroke.
+const SEARCH_REWRITES: usize = 2_000;
 const MAX_SCAN_THREADS: usize = 8;
 const MIN_ROWS_PER_THREAD: usize = 100_000;
 const CANCEL_CHECK_INTERVAL: usize = 16_384;
@@ -252,16 +255,19 @@ impl NameIndex {
             }
             self.seen_deleted.store(db.rows_deleted(), AtomicOrdering::Release);
         }
-        while !self.catch_up(db, LOAD_BATCH)? {}
+        while !self.catch_up(db, LOAD_BATCH, usize::MAX)? {}
         self.behind.store(false, AtomicOrdering::Release);
         self.loaded.store(true, AtomicOrdering::Release);
         Ok(())
     }
 
-    /// Appends up to `max_rows` rows above `max_id`. Returns true when the
-    /// index has caught up with the catalog.
-    fn catch_up(&self, db: &Database, max_rows: usize) -> Result<bool, String> {
-        self.refresh_rewritten(db)?;
+    /// Applies up to `max_rewrites` rewritten rows and appends up to
+    /// `max_rows` rows above `max_id`. Returns true when the index has caught
+    /// up with the catalog.
+    fn catch_up(&self, db: &Database, max_rows: usize, max_rewrites: usize) -> Result<bool, String> {
+        if !self.refresh_rewritten(db, max_rewrites)? {
+            return Ok(false);
+        }
         let (after, generation) = {
             let names = self.names.read().unwrap_or_else(|e| e.into_inner());
             (names.max_id, names.generation)
@@ -289,15 +295,28 @@ impl NameIndex {
     }
 
     /// Rows whose path changed in place (a directory rename moved them):
-    /// recompute their location penalty, depth, and path length.
-    fn refresh_rewritten(&self, db: &Database) -> Result<(), String> {
-        let mut ids = db.take_rewritten_ids();
+    /// recompute their location penalty, depth, and path length. Applies up
+    /// to `max` rows; returns false when more are left.
+    fn refresh_rewritten(&self, db: &Database, max: usize) -> Result<bool, String> {
+        let mut ids = db.take_rewritten_ids(max.saturating_add(1));
         if ids.is_empty() {
-            return Ok(());
+            return Ok(true);
+        }
+        let more = ids.len() > max;
+        if more {
+            db.restore_rewritten_ids(ids.split_off(max));
         }
         ids.sort_unstable();
         ids.dedup();
-        let lookups = db.file_rows_by_id(&ids)?;
+        // The database read runs before the write lock; on failure the ids
+        // go back for the next call.
+        let lookups = match db.file_rows_by_id(&ids) {
+            Ok(lookups) => lookups,
+            Err(error) => {
+                db.restore_rewritten_ids(ids);
+                return Err(error);
+            }
+        };
         let mut names = self.names.write().unwrap_or_else(|e| e.into_inner());
         for (id, lookup) in ids.iter().zip(lookups) {
             let Ok(id) = u32::try_from(*id) else { continue };
@@ -321,7 +340,7 @@ impl NameIndex {
                 RowLookup::Excluded => {}
             }
         }
-        Ok(())
+        Ok(!more)
     }
 
     /// Fallback-catalog candidates for a query, best first. `None` means the
@@ -337,7 +356,7 @@ impl NameIndex {
         if !self.is_loaded() {
             return Ok(None);
         }
-        if !self.catch_up(db, SEARCH_CATCH_UP)? {
+        if !self.catch_up(db, SEARCH_CATCH_UP, SEARCH_REWRITES)? {
             self.behind.store(true, AtomicOrdering::Release);
             return Ok(None);
         }
