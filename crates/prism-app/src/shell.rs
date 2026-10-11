@@ -37,14 +37,17 @@ static ACTIVATION_FOCUS_PENDING: AtomicBool = AtomicBool::new(false);
 /// would steal Alt-Tab and launches back.
 static PALETTE_TOOK_FOREGROUND: AtomicBool = AtomicBool::new(false);
 static PRESENTATION_ANCHOR: Mutex<Option<PresentationAnchor>> = Mutex::new(None);
-/// When the last open started (ms since the Unix epoch).
+/// When the last open started (`now_ms`).
 static LAST_OPEN_MS: AtomicU64 = AtomicU64::new(0);
 /// An open shows the window within a frame; past this, an "open" state with
 /// a hidden window is stale.
 const STALE_OPEN_MS: u64 = 500;
 
+/// Milliseconds on the monotonic clock: a wall-clock change must not make an
+/// open look stale.
 fn now_ms() -> u64 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64)
+    static START: std::sync::LazyLock<std::time::Instant> = std::sync::LazyLock::new(std::time::Instant::now);
+    START.elapsed().as_millis() as u64
 }
 pub static LOGICAL_WIDTH: AtomicU32 = AtomicU32::new(DEFAULT_LOGICAL_WIDTH);
 
