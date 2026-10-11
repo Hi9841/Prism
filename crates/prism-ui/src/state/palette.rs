@@ -202,7 +202,10 @@ impl PaletteState {
                 // The watcher reports disk activity every 750 ms. While the
                 // palette is hidden nobody sees the refresh: defer it to the
                 // next open instead of re-validating and re-querying each time.
-                if bridge::shell(cx).is_window_visible(cx) {
+                // "Open" is the toggle state: the window shows one task after
+                // the open, and an update in between must not be deferred.
+                let shell = bridge::shell(cx);
+                if shell.palette_held_open() || shell.is_window_visible(cx) {
                     this.refresh_after_index_update(cx);
                 } else {
                     this.index_update_pending = true;
