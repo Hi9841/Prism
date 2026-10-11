@@ -3931,7 +3931,7 @@ dependencies = [
 
 [[package]]
 name = "prism-app"
-version = "0.11.9"
+version = "1.0.0"
 dependencies = [
  "embed-resource",
  "futures",
@@ -3960,7 +3960,7 @@ dependencies = [
 
 [[package]]
 name = "prism-judge"
-version = "0.11.9"
+version = "1.0.0"
 dependencies = [
  "prism-ui",
  "serde",
@@ -3969,7 +3969,7 @@ dependencies = [
 
 [[package]]
 name = "prism-ui"
-version = "0.11.9"
+version = "1.0.0"
 dependencies = [
  "base64",
  "futures",
