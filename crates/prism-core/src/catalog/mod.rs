@@ -368,8 +368,10 @@ impl FileIndex {
         crate::runtime::spawn(async move {
             this.cancel_all_scans();
             let db = this.db.read().unwrap_or_else(|e| e.into_inner()).clone();
-            if let Some(ref db) = db {
-                let _ = db.clear_catalog();
+            if let Some(db) = db.clone() {
+                // A space reclaim can hold the writer for a full VACUUM; wait
+                // on the blocking pool, never on an async worker.
+                let _ = crate::runtime::spawn_blocking(move || db.clear_catalog()).await;
             }
             this.names.reset();
             this.counts.clear();
