@@ -121,6 +121,7 @@ const MOD_WIN: u32 = 0x0008;
 const MOD_KEY_MASK: u32 = MOD_ALT | MOD_CONTROL | MOD_SHIFT | MOD_WIN;
 const VK_S: u16 = 0x53;
 const VK_Q: u16 = 0x51;
+const VK_ESCAPE: u16 = 0x1B;
 const WS_POPUP: u32 = 0x8000_0000;
 const SS_BITMAP: u32 = 0x0000_000e;
 const WS_EX_TOOLWINDOW: u32 = 0x0000_0080;
@@ -149,6 +150,10 @@ static SEARCH_RECT_RIGHT: AtomicI32 = AtomicI32::new(0);
 static SEARCH_RECT_BOTTOM: AtomicI32 = AtomicI32::new(0);
 static SEARCH_RECT_READY: AtomicBool = AtomicBool::new(false);
 static START_PRESS_CAPTURED: AtomicBool = AtomicBool::new(false);
+/// Prism released Explorer's bare-Win and Ctrl+Esc hotkeys. If Explorer
+/// registers them again, their first WM_HOTKEY goes to Prism and they are
+/// released again on the thread that owns them.
+static START_HOTKEYS_RELEASED: AtomicBool = AtomicBool::new(false);
 static ICON_WINDOW: Mutex<usize> = Mutex::new(0);
 static ICON_BITMAP: Mutex<usize> = Mutex::new(0);
 static ICON_BACKGROUND: Mutex<Option<(i32, i32, Vec<u8>)>> = Mutex::new(None);
@@ -508,6 +513,17 @@ fn is_search_hotkey(message: &Msg) -> bool {
     let modifiers = packed & MOD_KEY_MASK;
     let vk = ((packed >> 16) & 0xFFFF) as u16;
     modifiers == MOD_WIN && (vk == VK_S || vk == VK_Q)
+}
+
+/// Explorer's own Start hotkeys: bare Win (MOD_WIN, no key) and Ctrl+Esc.
+fn is_start_hotkey(message: &Msg) -> bool {
+    if message.message != WM_HOTKEY {
+        return false;
+    }
+    let packed = message.lparam as u32;
+    let modifiers = packed & MOD_KEY_MASK;
+    let vk = ((packed >> 16) & 0xFFFF) as u16;
+    (modifiers == MOD_WIN && vk == 0) || (modifiers == MOD_CONTROL && vk == VK_ESCAPE)
 }
 
 /// Null the Search hotkey only after Prism was notified. Otherwise Explorer
@@ -960,6 +976,7 @@ pub unsafe extern "system" fn PrismShellGetMessageHook(
                             disabled = true;
                         }
                     }
+                    START_HOTKEYS_RELEASED.store(true, Ordering::Release);
                     let _ = notify_observer(message_id, EVENT_HOTKEY_DISABLED, disabled as isize);
                     message.message = WM_NULL;
                 }
@@ -1068,6 +1085,17 @@ pub unsafe extern "system" fn PrismShellGetMessageHook(
             // here. Forward the keyboard path so Prism can toggle even when
             // raw input is blocked by an elevated foreground window (UIPI);
             // the app de-duplicates it against the raw observer.
+            let _ = notify_observer(message_id, EVENT_SHELL_START_COMMAND, 0);
+            message.message = WM_NULL;
+        } else if START_HOTKEYS_RELEASED.load(Ordering::Acquire)
+            && is_start_hotkey(message)
+            && !observer_window().is_null()
+        {
+            // Explorer registered its Start hotkey again (it re-initialized its
+            // shell hotkeys). This message runs on the registering thread:
+            // release the hotkey here and give the press to Prism.
+            let _ = UnregisterHotKey(std::ptr::null_mut(), message.wparam as i32);
+            debug_log("start hotkey came back; released again");
             let _ = notify_observer(message_id, EVENT_SHELL_START_COMMAND, 0);
             message.message = WM_NULL;
         } else if is_search_hotkey(message) {
