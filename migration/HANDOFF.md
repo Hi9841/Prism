@@ -36,6 +36,15 @@ The port is complete: backend (prism-core), every view, and the app shell (`crat
 - Judge: 277/277 (`cargo build -p prism-judge`, then `PRISM_ADAPTER_CMD=target/debug/prism-judge.exe bun migration/judge/judge.mjs`).
 - UI parity: mean 9.80/10 over 33 captures, min 9.51 (zoom-120: text at 16.2 px). `bun migration/parity/run.mjs`.
 - UX parity: 37/37 scenarios (10.0); their captures have a mean of 9.78. `bun migration/parity/run.mjs --ux`.
+- 2026-10-11: thin Chromium scrollbars added (gutter only on overflow, arrows, thumb drag, track click).
+  The reference now draws scrollbars too (`--hide-scrollbars=false` hid them: Chrome only checks that a
+  switch is present). With it: UI mean 9.78, min 9.49 (zoom-120); UX 36/37 (`ux-context-keys` differs
+  on purpose: Open is the first menu item); judge 277/277. The review findings of 2026-10-11 are fixed,
+  except: `hooks.nsh` deletes app data on any non-update uninstall (inherited from Tauri; owner decision),
+  `repost_size` is a call-site workaround for the patch-6 root cause, and commit `32a03a7` is large.
+- Installer tests from the agent shell: set `TMP`/`TEMP` to a repo-local folder, and stop Prism first.
+  NSIS does not see a Prism started from the agent shell as the current user's process: it does not stop
+  it, cannot replace the exe, and still exits 0.
 - Parity setup: `python -I migration/parity/make-fixture.py target/parity/fixture.json` (local data, never commit),
   `target/parity/original-dist` (vite build of `../Prism`), `cargo build -p prism-app`. Scripts: `run-original.mjs`
   (headless Chrome + `mock-tauri.js`; `PARITY_DEBUG=1` logs pointer events; an `eval` step probes the DOM),
