@@ -152,12 +152,13 @@ impl Database {
         )
         .map_err(|e| e.to_string())?;
 
-        Self::configure_pragmas(&writer)?;
         // A new catalog starts with incremental auto-vacuum, so it never
-        // needs the one-time full VACUUM (no effect once tables exist).
+        // needs the one-time full VACUUM. It must come before WAL mode: that
+        // writes the first page, after which SQLite ignores the change.
         writer
             .execute_batch("PRAGMA auto_vacuum = INCREMENTAL;")
             .map_err(|e| e.to_string())?;
+        Self::configure_pragmas(&writer)?;
         Self::init_schema(&writer)?;
         if super::catalog_debug_enabled() {
             writer.profile(Some(Self::slow_statement));
@@ -2494,6 +2495,16 @@ mod ntfs_tests {
         let dir = std::env::temp_dir().join(format!("prism-{name}-{unique}"));
         std::fs::create_dir_all(&dir).unwrap();
         dir.join("catalog.db")
+    }
+
+    #[test]
+    fn new_catalog_uses_incremental_auto_vacuum() {
+        let db = Database::open(&temp_db_path("auto-vacuum")).unwrap();
+        let conn = db.writer.lock().unwrap();
+        let auto_vacuum: i64 = conn
+            .query_row("PRAGMA auto_vacuum;", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(auto_vacuum, AUTO_VACUUM_INCREMENTAL);
     }
 
     fn volume() -> VolumeInfo {
