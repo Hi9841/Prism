@@ -267,7 +267,7 @@ impl NameIndex {
         let wanted = (limit * CANDIDATES_PER_RESULT).max(MIN_CANDIDATES);
 
         let mut found = Vec::with_capacity(wanted);
-        for _ in 0..MAX_SELECTION_ROUNDS {
+        for round in 0..MAX_SELECTION_ROUNDS {
             let selected = {
                 let names = self.names.read().unwrap_or_else(|e| e.into_inner());
                 names
@@ -293,9 +293,12 @@ impl NameIndex {
                 break;
             }
             // Deleted rows held slots in this round; drop them and select
-            // again so live rows further down are not cut off.
+            // again so live rows further down are not cut off. The last round
+            // keeps its live rows: clearing them returned no results at all.
             self.mark_deleted(&missing);
-            found.clear();
+            if round + 1 < MAX_SELECTION_ROUNDS {
+                found.clear();
+            }
         }
         Ok(Some(found))
     }
