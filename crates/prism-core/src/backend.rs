@@ -690,6 +690,13 @@ impl Backend {
 
 fn schedule_startup_taskbar_alignment() {
     crate::runtime::spawn(async move {
+        // A launch at sign-in can come before Explorer's taskbar exists.
+        for _ in 0..STARTUP_SHELL_RETRY_ATTEMPTS {
+            if win_key::shell_windows_ready() {
+                break;
+            }
+            tokio::time::sleep(STARTUP_SHELL_RETRY_DELAY).await;
+        }
         tokio::time::sleep(STARTUP_ALIGNMENT_DELAY).await;
         let _ = crate::runtime::spawn_blocking(move || {
             let _ = taskbar_alignment::reapply_current();
