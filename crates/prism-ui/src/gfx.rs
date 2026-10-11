@@ -349,16 +349,17 @@ impl ScrollbarGeometry {
         if free > 0.0 { self.max / free } else { 0.0 }
     }
 
-    /// The arrow triangle in one button: 6px wide, its tip 2.5px from the end.
+    /// The arrow triangle in one button: 6px wide, at the rows Chromium
+    /// paints it (measured; the down arrow sits 1px lower).
     fn arrow(&self, up: bool) -> Option<gpui::Path<gpui::Pixels>> {
         let center = f32::from(self.thumb.left()) + SCROLLBAR_THUMB / 2.0;
         let half = SCROLLBAR_THUMB / 2.0;
         let (tip, base) = if up {
             let top = self.track_top - SCROLLBAR_BUTTON;
-            (top + 2.5, top + 7.25)
+            (top + 2.5, top + 8.0)
         } else {
             let bottom = self.track_top + self.track_len + SCROLLBAR_BUTTON;
-            (bottom - 2.5, bottom - 7.25)
+            (bottom - 1.5, bottom - 7.0)
         };
         let mut path = gpui::PathBuilder::fill();
         path.move_to(gpui::point(gpui::px(center), gpui::px(tip)));
