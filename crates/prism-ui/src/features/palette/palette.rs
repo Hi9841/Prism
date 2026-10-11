@@ -1054,6 +1054,8 @@ impl Palette {
         &self,
         id: &str,
         label: &str,
+        // Section headers are uppercase; app group headers keep their name.
+        uppercase: bool,
         collapsed: bool,
         label_color: Rgba,
         hover_color: Rgba,
@@ -1089,7 +1091,7 @@ impl Palette {
                 rotated(icon("chevron-down", 14., label_color), -std::f32::consts::FRAC_PI_2 * turn)
                     .group_hover(group, |s| s.text_color(hsla(hover_color))),
             )
-            .child(truncate(label.to_uppercase()))
+            .child(truncate(if uppercase { label.to_uppercase() } else { label.to_owned() }))
             .into_any_element()
     }
 
@@ -1216,6 +1218,7 @@ impl Palette {
                 let header = self.collapsible_header(
                     &section.id,
                     &section.label,
+                    true,
                     section.collapsed == Some(true),
                     t.fg_quiet,
                     t.fg_secondary,
@@ -1270,6 +1273,7 @@ impl Palette {
                 let header = self.collapsible_header(
                     &group.id,
                     &group.label,
+                    false,
                     group.collapsed,
                     t.fg_secondary,
                     t.fg,
