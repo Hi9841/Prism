@@ -104,16 +104,17 @@ impl Backend {
         crate::runtime::spawn_blocking(taskbar_customization::init);
         audio_hook::init();
         theme::watch();
+        // Install the persisted shortcut first: Prism must own the Win key as
+        // soon as it runs, and nothing below is needed for it. A fresh,
+        // corrupt, or incomplete state defaults natively to Win, so first-run
+        // activation never waits on the UI. The Explorer bridge is
+        // initialized off the UI thread.
+        self.apply_startup_shortcut(startup_shortcut(persisted));
         let app_data_dir = crate::host::app_data_dir_or_cwd();
         self.intent.set_path(app_data_dir.join("intent-cache.db"));
         files::warm(self.file_index.clone(), app_data_dir);
         crate::runtime::spawn_blocking(windows_tools::warm);
         self.warm_apps();
-        // Start installing the persisted shortcut during native setup. A
-        // fresh, corrupt, or incomplete state defaults natively to Win, so
-        // first-run activation never waits on the UI. The Explorer bridge is
-        // initialized off the UI thread.
-        self.apply_startup_shortcut(startup_shortcut(persisted));
     }
 
     fn warm_apps(&'static self) {
