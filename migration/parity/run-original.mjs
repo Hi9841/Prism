@@ -35,7 +35,7 @@ rmSync(profile, { recursive: true, force: true });
 mkdirSync(profile, { recursive: true });
 const proc = spawn(
   chrome,
-  ["--headless=new", "--no-first-run", "--hide-scrollbars=false", `--user-data-dir=${profile}`, "--remote-debugging-port=0", ...(process.env.PARITY_CHROME_FLAGS ?? "").split(" ").filter(Boolean), "about:blank"],
+  ["--headless=new", "--no-first-run", `--user-data-dir=${profile}`, "--remote-debugging-port=0", ...(process.env.PARITY_CHROME_FLAGS ?? "").split(" ").filter(Boolean), "about:blank"],
   { stdio: "ignore" },
 );
 const portFile = join(profile, "DevToolsActivePort");
