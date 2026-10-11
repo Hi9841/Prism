@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
 use std::os::windows::ffi::OsStringExt;
 use std::os::windows::io::AsRawHandle;
@@ -121,7 +121,13 @@ struct WatcherEventQueue {
     limit: usize,
     root: PathBuf,
     collapsed: bool,
+    /// `existing_parent` results while collapsed: a burst repeats the same
+    /// few parents, and each lookup is a file system call under the lock.
+    parents: HashMap<PathBuf, PathBuf>,
 }
+
+/// Parents remembered while collapsed, before the memo starts over.
+const MAX_REMEMBERED_PARENTS: usize = 4096;
 
 impl WatcherEventQueue {
     fn new(root: PathBuf) -> Self {
@@ -135,6 +141,7 @@ impl WatcherEventQueue {
             limit,
             root,
             collapsed: false,
+            parents: HashMap::new(),
         }
     }
 
@@ -208,7 +215,7 @@ impl WatcherEventQueue {
 
     /// The narrowest existing directories whose reconciliation covers `event`:
     /// the parent of each changed path (both sides of a rename).
-    fn scopes_for_event(&self, event: &WatcherEvent) -> Vec<PathBuf> {
+    fn scopes_for_event(&mut self, event: &WatcherEvent) -> Vec<PathBuf> {
         match event {
             WatcherEvent::Added(path) | WatcherEvent::Removed(path) => vec![self.existing_parent(path)],
             WatcherEvent::Renamed { from, to } => vec![self.existing_parent(from), self.existing_parent(to)],
@@ -216,7 +223,20 @@ impl WatcherEventQueue {
         }
     }
 
-    fn existing_parent(&self, path: &Path) -> PathBuf {
+    fn existing_parent(&mut self, path: &Path) -> PathBuf {
+        let Some(parent) = path.parent() else { return self.root.clone() };
+        if let Some(known) = self.parents.get(parent) {
+            return known.clone();
+        }
+        let found = self.find_existing_parent(path);
+        if self.parents.len() >= MAX_REMEMBERED_PARENTS {
+            self.parents.clear();
+        }
+        self.parents.insert(parent.to_path_buf(), found.clone());
+        found
+    }
+
+    fn find_existing_parent(&self, path: &Path) -> PathBuf {
         let mut current = path.parent();
         while let Some(dir) = current {
             if !dir.starts_with(&self.root) {
@@ -232,6 +252,7 @@ impl WatcherEventQueue {
 
     fn take_all(&mut self) -> Vec<WatcherEvent> {
         self.collapsed = false;
+        self.parents.clear();
         std::mem::take(&mut self.events)
     }
 
@@ -634,8 +655,6 @@ fn sleep_with_stop(delay: Duration, stop: &AtomicBool) {
     }
 }
 
-/// Folds queued events to a final state per path and applies them as a
-/// handful of batched writes.
 /// Runs a closure when dropped (a trace at every return of a function).
 struct TraceOnDrop<F: FnMut()>(F);
 
@@ -645,6 +664,8 @@ impl<F: FnMut()> Drop for TraceOnDrop<F> {
     }
 }
 
+/// Folds queued events to a final state per path and applies them as a
+/// handful of batched writes.
 fn apply_queued_events(
     db: &Database,
     event_queue: &Mutex<WatcherEventQueue>,
