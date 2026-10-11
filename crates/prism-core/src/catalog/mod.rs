@@ -1076,14 +1076,21 @@ impl FileIndex {
 }
 
 pub fn warm(index: FileIndex, app_data_dir: PathBuf) {
-    // Open the persisted catalog. This was previously only reachable through
-    // the dead `FileIndex::new` helper - without it the index is never loaded
-    // or built and filename searches return nothing.
-    index.init(&app_data_dir);
-    let legacy_cache_path = app_data_dir.join("files.json");
-    index.try_migrate_legacy_cache(&legacy_cache_path);
-
     crate::runtime::spawn(async move {
+        // Open the persisted catalog. This was previously only reachable
+        // through the dead `FileIndex::new` helper - without it the index is
+        // never loaded or built and filename searches return nothing.
+        // Opening can wait on SQLite locks or WAL recovery (a previous
+        // instance was killed, e.g. by an update): never on the startup path,
+        // which also installs the Win key.
+        let init_index = index.clone();
+        let init_dir = app_data_dir.clone();
+        let _ = crate::runtime::spawn_blocking(move || {
+            init_index.init(&init_dir);
+            init_index.try_migrate_legacy_cache(&init_dir.join("files.json"));
+        })
+        .await;
+
         // Startup: serve the persisted index directly. Volumes whose index is
         // fresh are not re-walked (the watcher keeps them live), so a normal
         // launch has results immediately - no indexing phase.
