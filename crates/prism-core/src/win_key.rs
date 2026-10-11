@@ -1643,6 +1643,17 @@ fn shell_bridge_message() -> Result<u32, String> {
         .clone()
 }
 
+/// Explorer's desktop and taskbar windows exist (the bridge can install).
+/// A cheap check for startup retries: a sign-in launch can run before
+/// Explorer has created its taskbar.
+pub fn shell_windows_ready() -> bool {
+    unsafe {
+        let taskbar = wide("Shell_TrayWnd");
+        !GetShellWindow().0.is_null()
+            && FindWindowW(PCWSTR(taskbar.as_ptr()), PCWSTR::null()).is_ok_and(|window| !window.0.is_null())
+    }
+}
+
 unsafe fn find_shell_window(class_name: &str) -> Result<HWND, String> {
     if class_name.eq_ignore_ascii_case("Progman") {
         let shell_wnd = GetShellWindow();
