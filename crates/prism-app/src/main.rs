@@ -21,8 +21,8 @@ use gpui::{
 };
 use prism_core::backend::{backend, launched_for_autostart, load_state_value};
 use prism_ui::lib::bridge::{self, BackendEvent, ShellHandle};
-use windows::Win32::Foundation::{ERROR_ALREADY_EXISTS, GetLastError, HANDLE, HWND, WAIT_OBJECT_0};
-use windows::Win32::System::Threading::{CreateEventW, CreateMutexW, INFINITE, SetEvent, WaitForSingleObject};
+use windows::Win32::Foundation::{ERROR_ALREADY_EXISTS, GetLastError, HANDLE, HWND, WAIT_ABANDONED, WAIT_OBJECT_0};
+use windows::Win32::System::Threading::{CreateEventW, CreateMutexW, INFINITE, ResetEvent, SetEvent, WaitForSingleObject};
 use windows::core::w;
 
 use crate::host::{GpuiHost, HostMessage};
@@ -32,12 +32,21 @@ const PALETTE_STARTUP_DELAY: Duration = Duration::from_millis(100);
 
 /// Single instance: a second launch signals the first one to open the palette.
 fn claim_single_instance() -> Option<HANDLE> {
+    /// An instance that was just killed (an update, Task Manager) still owns
+    /// the mutex until Windows tears the process down.
+    const DYING_OWNER_WAIT_MS: u32 = 3000;
     unsafe {
         let activate = CreateEventW(None, false, false, w!("Local\\PrismGpuiActivate")).ok()?;
-        let _mutex = CreateMutexW(None, true, w!("Local\\PrismGpuiInstance")).ok()?;
+        let mutex = CreateMutexW(None, true, w!("Local\\PrismGpuiInstance")).ok()?;
         if GetLastError() == ERROR_ALREADY_EXISTS {
+            // Open the running palette at once; if the owner was only dying,
+            // take over instead of exiting (no Prism would run otherwise).
             let _ = SetEvent(activate);
-            return None;
+            let waited = WaitForSingleObject(mutex, DYING_OWNER_WAIT_MS);
+            if waited != WAIT_OBJECT_0 && waited != WAIT_ABANDONED {
+                return None;
+            }
+            let _ = ResetEvent(activate);
         }
         Some(activate)
     }
