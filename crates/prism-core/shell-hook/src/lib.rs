@@ -132,6 +132,7 @@ const SW_SHOWNOACTIVATE: i32 = 4;
 const SWP_NOSIZE: u32 = 0x0001;
 const SWP_NOMOVE: u32 = 0x0002;
 const SWP_NOACTIVATE: u32 = 0x0010;
+const SWP_ASYNCWINDOWPOS: u32 = 0x4000;
 const SWP_SHOWWINDOW: u32 = 0x0040;
 const HWND_TOPMOST: Hwnd = -1isize as Hwnd;
 const DIB_RGB_COLORS: u32 = 0;
@@ -1076,8 +1077,17 @@ pub unsafe extern "system" fn PrismShellGetMessageHook(
                         // Windows ignores a topmost request from a process that
                         // does not hold the foreground; Explorer's is accepted.
                         // Without it a palette opened in the background could
-                        // open under other windows.
-                        let _ = SetWindowPos(target, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+                        // open under other windows. Asynchronous: a busy Prism
+                        // must never block Explorer's taskbar thread.
+                        let _ = SetWindowPos(
+                            target,
+                            HWND_TOPMOST,
+                            0,
+                            0,
+                            0,
+                            0,
+                            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS,
+                        );
                         let _ = AllowSetForegroundWindow(process_id);
                         granted = SetForegroundWindow(target) != 0;
                     }
@@ -1100,11 +1110,13 @@ pub unsafe extern "system" fn PrismShellGetMessageHook(
         {
             // Explorer registered its Start hotkey again (it re-initialized its
             // shell hotkeys). This message runs on the registering thread:
-            // release the hotkey here and give the press to Prism.
-            let _ = UnregisterHotKey(std::ptr::null_mut(), message.wparam as i32);
+            // release the hotkey for the window that owns it, and give the
+            // press to Prism. Explorer keeps it if Prism cannot take it.
+            let _ = UnregisterHotKey(message.hwnd, message.wparam as i32);
             debug_log("start hotkey came back; released again");
-            let _ = notify_observer(message_id, EVENT_SHELL_START_COMMAND, 0);
-            message.message = WM_NULL;
+            if notify_observer(message_id, EVENT_SHELL_START_COMMAND, 0) {
+                message.message = WM_NULL;
+            }
         } else if is_search_hotkey(message) {
             // Win+S / Win+Q consumed only after Prism was notified.
             let _ = intercept_search_hotkey(
