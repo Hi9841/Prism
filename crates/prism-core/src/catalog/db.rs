@@ -527,12 +527,23 @@ impl Database {
         self.rows_deleted.load(Ordering::Relaxed)
     }
 
-    /// Ids rewritten in place since the last call (see `rewritten_ids`).
-    pub fn take_rewritten_ids(&self) -> Vec<i64> {
+    /// Up to `max` ids rewritten in place since the last call (see
+    /// `rewritten_ids`).
+    pub fn take_rewritten_ids(&self, max: usize) -> Vec<i64> {
         self.rewritten_ids
             .lock()
-            .map(|mut ids| std::mem::take(&mut *ids))
+            .map(|mut ids| {
+                let keep = ids.len().saturating_sub(max);
+                ids.split_off(keep)
+            })
             .unwrap_or_default()
+    }
+
+    /// Returns taken ids that could not be applied, for a later call.
+    pub fn restore_rewritten_ids(&self, ids: Vec<i64>) {
+        if let Ok(mut pending) = self.rewritten_ids.lock() {
+            pending.extend(ids);
+        }
     }
 
     pub fn take_index_reload_request(&self) -> bool {
@@ -1787,7 +1798,7 @@ impl Database {
             );
             let mut stmt = conn.prepare_cached(&sql).map_err(|e| e.to_string())?;
             let found = stmt
-                .query_map(params_from_iter(chunk.iter()), |row| {
+                .query_map(params_from_iter(params), |row| {
                     let id: i64 = row.get(0)?;
                     Ok((
                         id,
