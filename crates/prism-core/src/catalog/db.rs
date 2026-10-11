@@ -1770,7 +1770,15 @@ impl Database {
         let mut rows: std::collections::HashMap<i64, (CandidateEntry, bool)> =
             std::collections::HashMap::with_capacity(ids.len());
         for chunk in ids.chunks(CHUNK) {
-            let placeholders = vec!["?"; chunk.len()].join(",");
+            // Three statement sizes only, padded with NULL (which matches no
+            // row): a new size per keystroke would evict the reader's other
+            // cached statements.
+            let size = [25, 100, CHUNK].into_iter().find(|&size| size >= chunk.len()).unwrap_or(CHUNK);
+            let params = chunk
+                .iter()
+                .map(|&id| Some(id))
+                .chain(std::iter::repeat_n(None, size - chunk.len()));
+            let placeholders = vec!["?"; size].join(",");
             let sql = format!(
                 "SELECT f.id, f.display_path, f.lower_name, f.is_directory, f.extension,
                         COALESCE(v.backend, 'fallback')
