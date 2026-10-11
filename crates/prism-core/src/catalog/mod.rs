@@ -1324,7 +1324,7 @@ pub fn quick_access() -> Vec<QuickAccessEntry> {
         .collect()
 }
 
-fn known_locations() -> Vec<(&'static str, PathBuf, &'static str)> {
+pub(super) fn known_locations() -> Vec<(&'static str, PathBuf, &'static str)> {
     [
         ("Home", &FOLDERID_Profile, "home"),
         ("Desktop", &FOLDERID_Desktop, "desktop"),

@@ -461,9 +461,9 @@ pub fn browse_path_with_errors(
     limit: usize,
 ) -> Option<Result<Vec<FileEntry>, String>> {
     let limit = limit.clamp(1, MAX_LIMIT);
-    let requested = expand_path_input(query)?;
+    let mut requested = expand_path_input(query)?;
     if !requested.is_absolute() {
-        return None;
+        requested = resolve_named_folder_path(query)?;
     }
 
     match std::fs::metadata(&requested) {
@@ -602,6 +602,39 @@ fn expand_path_input(query: &str) -> Option<PathBuf> {
     };
 
     Some(PathBuf::from(expanded))
+}
+
+/// A relative path whose first part names a user folder: "desktop/skills/"
+/// browses the Desktop's "skills" folder. The first part matches a known
+/// folder by its English name or its folder name (a known folder can be
+/// redirected, for example to OneDrive), then a folder directly in the user
+/// profile. Anything else is no path, and the query is a name search.
+fn resolve_named_folder_path(query: &str) -> Option<PathBuf> {
+    let (first, rest) = query.trim().split_once(['/', '\\'])?;
+    let first = first.trim().to_lowercase();
+    if first.is_empty() || first == "." || first == ".." || first.contains(':') {
+        return None;
+    }
+    let locations = super::known_locations();
+    let named = locations.iter().find(|(_, path, kind)| {
+        *kind == first
+            || path
+                .file_name()
+                .is_some_and(|name| name.to_string_lossy().to_lowercase() == first)
+    });
+    let base = match named {
+        Some((_, path, _)) => path.clone(),
+        None => {
+            let (_, profile, _) = locations.iter().find(|(_, _, kind)| *kind == "home")?;
+            let child = profile.join(&first);
+            if !child.is_dir() {
+                return None;
+            }
+            child
+        }
+    };
+    // One separator style, so listed paths read like Explorer's.
+    Some(base.join(rest.replace('/', "\\")))
 }
 
 fn path_entry(path: &Path) -> Option<FileEntry> {
