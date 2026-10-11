@@ -73,6 +73,28 @@ pub fn launched_for_autostart() -> bool {
         .any(|argument| argument == std::ffi::OsStr::new("--autostart"))
 }
 
+/// Task Manager's Startup apps switch for Prism's Run entry. Windows keeps it
+/// in `StartupApproved\Run`: an odd first byte means disabled. The sign-in
+/// task starts Prism outside the Run queue, so Prism honors the switch itself.
+pub fn autostart_disabled_by_user() -> bool {
+    use windows::core::w;
+    use windows::Win32::System::Registry::{RegGetValueW, HKEY_CURRENT_USER, RRF_RT_REG_BINARY};
+    let mut data = [0u8; 64];
+    let mut size = data.len() as u32;
+    let status = unsafe {
+        RegGetValueW(
+            HKEY_CURRENT_USER,
+            w!(r"Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run"),
+            w!("Prism"),
+            RRF_RT_REG_BINARY,
+            None,
+            Some(data.as_mut_ptr().cast()),
+            Some(&mut size),
+        )
+    };
+    status.is_ok() && size > 0 && data[0] & 1 == 1
+}
+
 fn apps_cache_path() -> PathBuf {
     crate::host::app_data_dir_or_cwd().join("apps.json")
 }
