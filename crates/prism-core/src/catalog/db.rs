@@ -144,6 +144,11 @@ impl Database {
         .map_err(|e| e.to_string())?;
 
         Self::configure_pragmas(&writer)?;
+        // A new catalog starts with incremental auto-vacuum, so it never
+        // needs the one-time full VACUUM (no effect once tables exist).
+        writer
+            .execute_batch("PRAGMA auto_vacuum = INCREMENTAL;")
+            .map_err(|e| e.to_string())?;
         Self::init_schema(&writer)?;
         if super::catalog_debug_enabled() {
             writer.profile(Some(Self::slow_statement));
