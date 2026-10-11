@@ -37,6 +37,15 @@ static ACTIVATION_FOCUS_PENDING: AtomicBool = AtomicBool::new(false);
 /// would steal Alt-Tab and launches back.
 static PALETTE_TOOK_FOREGROUND: AtomicBool = AtomicBool::new(false);
 static PRESENTATION_ANCHOR: Mutex<Option<PresentationAnchor>> = Mutex::new(None);
+/// When the last open started (ms since the Unix epoch).
+static LAST_OPEN_MS: AtomicU64 = AtomicU64::new(0);
+/// An open shows the window within a frame; past this, an "open" state with
+/// a hidden window is stale.
+const STALE_OPEN_MS: u64 = 500;
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64)
+}
 pub static LOGICAL_WIDTH: AtomicU32 = AtomicU32::new(DEFAULT_LOGICAL_WIDTH);
 
 /// GPUI gives popup windows the resize-border insets of a framed window
@@ -241,7 +250,20 @@ impl GpuiShell {
         cx: &mut App,
     ) {
         let timer = prism_core::perf::start();
+        // A press must never be spent on a stale state: "open" with no visible
+        // window (and no open in progress) means the palette is closed.
+        let now = now_ms();
+        if PALETTE_OPEN.load(Ordering::Acquire)
+            && !self.visible()
+            && now.saturating_sub(LAST_OPEN_MS.load(Ordering::Acquire)) > STALE_OPEN_MS
+        {
+            win_key::debug_trace("palette-toggle resync stale open");
+            PALETTE_OPEN.store(false, Ordering::Release);
+        }
         let opening = !PALETTE_OPEN.fetch_xor(true, Ordering::AcqRel);
+        if opening {
+            LAST_OPEN_MS.store(now, Ordering::Release);
+        }
         let transition = PALETTE_TRANSITION.fetch_add(1, Ordering::AcqRel) + 1;
         log_foreground(if opening { "toggle-open-before" } else { "toggle-close-before" });
         win_key::debug_trace(&format!("palette-toggle open={opening}"));
