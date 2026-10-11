@@ -32,9 +32,15 @@ const MAX_SCAN_THREADS: usize = 8;
 const MIN_ROWS_PER_THREAD: usize = 100_000;
 const CANCEL_CHECK_INTERVAL: usize = 16_384;
 /// Rows selected for the by-id fetch per result slot. The surplus covers rows
-/// that the final disk-existence check rejects.
-const CANDIDATES_PER_RESULT: usize = 4;
-const MIN_CANDIDATES: usize = 64;
+/// that the final disk-existence check rejects; the SQL candidate path kept
+/// `max(limit * 15, 150)`, so the index keeps the same pool (the by-id fetch
+/// is batched, so the larger pool stays cheap).
+const CANDIDATES_PER_RESULT: usize = 15;
+const MIN_CANDIDATES: usize = 150;
+/// Deleted rows the index has not seen before it reloads: a share of its
+/// rows, at least this many (bulk deletes leave dead rows it would otherwise
+/// find only one search at a time).
+const MIN_RELOAD_DELETIONS: u64 = 50_000;
 /// Selection rounds when the by-id fetch finds deleted rows.
 const MAX_SELECTION_ROUNDS: usize = 4;
 /// The SQL subsequence stage probed only the first four tokens.

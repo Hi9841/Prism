@@ -1694,39 +1694,51 @@ impl Database {
     /// deleted is `Missing`; a row whose volume is now served by the NTFS
     /// catalog is `Excluded` (same filter as the SQL candidate stages).
     pub fn file_rows_by_id(&self, ids: &[i64]) -> Result<Vec<RowLookup>, String> {
+        // One IN query per chunk (a keystroke selects hundreds of ids).
+        const CHUNK: usize = 400;
         let conn = self.reader.lock().map_err(|e| e.to_string())?;
-        let mut stmt = conn
-            .prepare_cached(
-                "SELECT f.display_path, f.lower_name, f.is_directory, f.extension,
+        let mut rows: std::collections::HashMap<i64, (CandidateEntry, bool)> =
+            std::collections::HashMap::with_capacity(ids.len());
+        for chunk in ids.chunks(CHUNK) {
+            let placeholders = vec!["?"; chunk.len()].join(",");
+            let sql = format!(
+                "SELECT f.id, f.display_path, f.lower_name, f.is_directory, f.extension,
                         COALESCE(v.backend, 'fallback')
                  FROM files f LEFT JOIN volumes v ON v.volume_id = f.volume_id
-                 WHERE f.id = ?1;",
-            )
-            .map_err(|e| e.to_string())?;
-        ids.iter()
-            .map(|&id| {
-                let row = stmt
-                    .query_row(params![id], |row| {
-                        Ok((
+                 WHERE f.id IN ({placeholders});"
+            );
+            let mut stmt = conn.prepare_cached(&sql).map_err(|e| e.to_string())?;
+            let found = stmt
+                .query_map(params_from_iter(chunk.iter()), |row| {
+                    let id: i64 = row.get(0)?;
+                    Ok((
+                        id,
+                        (
                             CandidateEntry {
                                 id,
-                                display_path: row.get(0)?,
-                                lower_name: row.get(1)?,
-                                is_directory: row.get::<_, i32>(2)? != 0,
-                                extension: row.get(3)?,
+                                display_path: row.get(1)?,
+                                lower_name: row.get(2)?,
+                                is_directory: row.get::<_, i32>(3)? != 0,
+                                extension: row.get(4)?,
                             },
-                            row.get::<_, String>(4)? == "ntfs",
-                        ))
-                    })
-                    .optional()
-                    .map_err(|e| e.to_string())?;
-                Ok(match row {
-                    None => RowLookup::Missing,
-                    Some((_, true)) => RowLookup::Excluded,
-                    Some((entry, false)) => RowLookup::Found(entry),
+                            row.get::<_, String>(5)? == "ntfs",
+                        ),
+                    ))
                 })
+                .map_err(|e| e.to_string())?;
+            for row in found {
+                let (id, value) = row.map_err(|e| e.to_string())?;
+                rows.insert(id, value);
+            }
+        }
+        Ok(ids
+            .iter()
+            .map(|id| match rows.remove(id) {
+                None => RowLookup::Missing,
+                Some((_, true)) => RowLookup::Excluded,
+                Some((entry, false)) => RowLookup::Found(entry),
             })
-            .collect()
+            .collect())
     }
 
     /// The NTFS-catalog candidate stages alone. The in-memory name index
