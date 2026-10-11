@@ -1102,6 +1102,20 @@ impl Palette {
         };
         let drop_target = self.reorder_drag.as_ref().filter(|d| d.active).and_then(|d| d.target_item_id.clone());
         let category = self.category_drag.clone();
+        // A hover whose leave event never came (the row moved under a drag,
+        // which holds the pointer) is dropped when the pointer is not over
+        // that row's last painted bounds.
+        if let Some(index) = self.hovered_row
+            && self.active_drag.is_none()
+        {
+            let pointer = window.mouse_position();
+            let targets = self.targets.borrow();
+            let inside = targets.rows.get(&index).is_some_and(|bounds| bounds.contains(&pointer))
+                && targets.viewport.is_none_or(|viewport| viewport.contains(&pointer));
+            if !inside {
+                self.hovered_row = None;
+            }
+        }
         let hovered_row = self.hovered_row;
 
         {
