@@ -80,6 +80,11 @@ pub trait Shell: 'static {
     fn owns_foreground(&self) -> bool {
         false
     }
+    /// The native side still holds the palette open (it declined a focus
+    /// loss, for example inside the activation grace period).
+    fn palette_held_open(&self) -> bool {
+        false
+    }
 }
 
 #[derive(Clone)]

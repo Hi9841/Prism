@@ -266,6 +266,12 @@ impl Launcher {
                 if bridge::shell(cx).owns_foreground() {
                     return;
                 }
+                // The native side decides click-away (it emits the close). If
+                // it kept the palette open, closing only the view would leave
+                // a visible, empty window that the next Win press would close.
+                if bridge::shell(cx).palette_held_open() {
+                    return;
+                }
                 // Click-away: the window is still up for the shared hide delay.
                 if matches!(this.phase, LauncherPhase::Visible | LauncherPhase::Preparing) {
                     this.hide(HideOrigin::Native, cx);

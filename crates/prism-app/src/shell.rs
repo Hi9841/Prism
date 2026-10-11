@@ -472,6 +472,10 @@ impl bridge::Shell for GpuiShell {
         is_prism_foreground()
     }
 
+    fn palette_held_open(&self) -> bool {
+        PALETTE_OPEN.load(Ordering::Acquire)
+    }
+
     fn window_activation_changed(&self, active: bool, cx: &mut App) {
         if active {
             // GPUI reports WM_ACTIVATE, which Windows also sends when it
