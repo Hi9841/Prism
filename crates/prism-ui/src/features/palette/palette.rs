@@ -1165,6 +1165,7 @@ impl Palette {
             .min_h_0()
             .overflow_y_scroll()
             .track_scroll(&self.scroll)
+            .pr(self.wheel.borrow().gutter())
             .key_context("PaletteResults")
             .line_height(px(crate::gfx::CHROMIUM_LINE_PX));
         let mut list = div().flex().flex_col().line_height(relative(1.45)).px(r(10.)).pb(r(8.));
@@ -1176,7 +1177,7 @@ impl Palette {
             list = list.size_full().child(self.empty_state(t, cx));
             return viewport
                 .child(scroll.child(list))
-                .child(crate::gfx::wheel_scroll_layer(self.scroll.clone(), self.wheel.clone()))
+                .child(crate::gfx::wheel_scroll_layer(self.scroll.clone(), self.wheel.clone(), t.scroll))
                 .into_any_element();
         }
 
@@ -1382,7 +1383,7 @@ impl Palette {
         }
         viewport
             .child(scroll.child(list))
-            .child(crate::gfx::wheel_scroll_layer(self.scroll.clone(), self.wheel.clone()))
+            .child(crate::gfx::wheel_scroll_layer(self.scroll.clone(), self.wheel.clone(), t.scroll))
             .into_any_element()
     }
 

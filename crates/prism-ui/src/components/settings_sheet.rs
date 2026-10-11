@@ -1027,11 +1027,10 @@ impl SettingsSheet {
                             .max_h(r(224.))
                             .overflow_y_scroll()
                             .track_scroll(&self.picker_scroll)
-                            .px(r(6.))
-                            .pb(r(6.))
-                            .child(list),
+                            .pr(self.picker_wheel.borrow().gutter())
+                            .child(div().px(r(6.)).pb(r(6.)).child(list)),
                     )
-                    .child(crate::gfx::wheel_scroll_layer(self.picker_scroll.clone(), self.picker_wheel.clone())),
+                    .child(crate::gfx::wheel_scroll_layer(self.picker_scroll.clone(), self.picker_wheel.clone(), t.scroll)),
             )
             .child(
                 div()
@@ -1461,6 +1460,7 @@ impl Render for SettingsSheet {
                     .min_h_0()
                     .overflow_y_scroll()
                     .track_scroll(&self.scroll)
+                    .pr(self.wheel.borrow().gutter())
                     // Chromium's wheel line (gfx::CHROMIUM_LINE_PX); the content resets it.
                     .line_height(px(crate::gfx::CHROMIUM_LINE_PX))
                     .child(div().line_height(relative(1.45)).px(r(20.)).pb(r(24.))
@@ -1530,7 +1530,7 @@ impl Render for SettingsSheet {
                             ),
                     )),
                     )
-                    .child(crate::gfx::wheel_scroll_layer(self.scroll.clone(), self.wheel.clone())),
+                    .child(crate::gfx::wheel_scroll_layer(self.scroll.clone(), self.wheel.clone(), t.scroll)),
             );
 
         div()

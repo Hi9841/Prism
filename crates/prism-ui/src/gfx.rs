@@ -237,14 +237,33 @@ pub fn into_any(element: impl IntoElement) -> AnyElement {
 /// scrolling, innermost hovered scroller first, and passed on at a boundary
 /// (scroll chaining). GPUI's own wheel handling scrolls by the container's
 /// rounded line height, which drifts 1% per line.
+///
+/// It also keeps the state of the container's scrollbar (`wheel_scroll_layer`).
 #[derive(Default)]
 pub struct WheelScroll {
     target: Option<f32>,
     from: f32,
     start: Option<Instant>,
+    /// The content overflowed in the last frame, so the gutter is reserved.
+    overflowing: bool,
+    /// A thumb drag: the pointer's y and the scroll offset at its start.
+    drag: Option<(f32, f32)>,
 }
 
 const WHEEL_SCROLL_MS: f32 = 160.0;
+
+/* Chromium's thin Fluent scrollbar (`.scroll-thin`: `scrollbar-width: thin`,
+ * measured on the Tauri app): an 11px gutter that is reserved only while the
+ * content overflows, 12px arrow buttons at both ends, and a 6px rounded thumb
+ * 2px from the right edge. The size follows the device scale, not CSS zoom. */
+const SCROLLBAR_GUTTER: f32 = 11.0;
+const SCROLLBAR_BUTTON: f32 = 12.0;
+const SCROLLBAR_THUMB: f32 = 6.0;
+const SCROLLBAR_RIGHT_INSET: f32 = 2.0;
+const SCROLLBAR_MIN_THUMB: f32 = 17.0;
+/// Chromium scrolls 40px for an arrow click and 87.5% of the view for a track click.
+const SCROLLBAR_ARROW_STEP: f32 = 40.0;
+const SCROLLBAR_PAGE_FRACTION: f32 = 0.875;
 
 impl WheelScroll {
     /// Advances the animation; returns true when it moved the offset. The
@@ -263,45 +282,212 @@ impl WheelScroll {
         }
         true
     }
+
+    /// The scrollbar gutter, as the container's right padding. Chromium
+    /// reserves it only while the content overflows (`overflow-y: auto`).
+    pub fn gutter(&self) -> gpui::Pixels {
+        gpui::px(if self.overflowing { SCROLLBAR_GUTTER } else { 0.0 })
+    }
+
+    /// Starts a smooth scroll by `delta` px from the current target. Returns
+    /// false at a boundary, where the scroll belongs to the next scroller.
+    fn scroll_by(&mut self, handle: &gpui::ScrollHandle, delta: f32) -> bool {
+        let max = f32::from(handle.max_offset().height).max(0.0);
+        let current = -f32::from(handle.offset().y);
+        let base = self.target.map(|t| -t).unwrap_or(current);
+        let next = (base + delta).clamp(0.0, max);
+        if (next - base).abs() < 0.01 {
+            return false;
+        }
+        self.from = -current;
+        self.target = Some(-next);
+        self.start = Some(Instant::now());
+        true
+    }
 }
 
-/// The wheel layer for a scroll container. Place it after the container as an
-/// absolute, full-size sibling inside a relative wrapper.
-pub fn wheel_scroll_layer(handle: gpui::ScrollHandle, state: std::rc::Rc<std::cell::RefCell<WheelScroll>>) -> impl IntoElement {
-    use gpui::{DispatchPhase, HitboxBehavior, ScrollDelta, ScrollWheelEvent, canvas};
+/// The scrollbar parts in the layer bounds. `None` while nothing overflows.
+struct ScrollbarGeometry {
+    gutter: gpui::Bounds<gpui::Pixels>,
+    track_top: f32,
+    track_len: f32,
+    thumb: gpui::Bounds<gpui::Pixels>,
+    max: f32,
+}
+
+impl ScrollbarGeometry {
+    fn new(bounds: gpui::Bounds<gpui::Pixels>, handle: &gpui::ScrollHandle) -> Option<Self> {
+        let max = f32::from(handle.max_offset().height);
+        let view = f32::from(bounds.size.height);
+        let track_len = view - 2.0 * SCROLLBAR_BUTTON;
+        if max <= 0.0 || track_len <= SCROLLBAR_MIN_THUMB {
+            return None;
+        }
+        let right = f32::from(bounds.right());
+        let thumb_len = (track_len * view / (view + max)).clamp(SCROLLBAR_MIN_THUMB, track_len);
+        let offset = (-f32::from(handle.offset().y)).clamp(0.0, max);
+        let track_top = f32::from(bounds.top()) + SCROLLBAR_BUTTON;
+        let thumb_top = track_top + (track_len - thumb_len) * offset / max;
+        Some(Self {
+            gutter: gpui::Bounds::new(
+                gpui::point(gpui::px(right - SCROLLBAR_GUTTER), bounds.top()),
+                gpui::size(gpui::px(SCROLLBAR_GUTTER), bounds.size.height),
+            ),
+            track_top,
+            track_len,
+            thumb: gpui::Bounds::new(
+                gpui::point(gpui::px(right - SCROLLBAR_RIGHT_INSET - SCROLLBAR_THUMB), gpui::px(thumb_top)),
+                gpui::size(gpui::px(SCROLLBAR_THUMB), gpui::px(thumb_len)),
+            ),
+            max,
+        })
+    }
+
+    /// Scroll offset per pointer pixel along the track.
+    fn offset_per_px(&self) -> f32 {
+        let free = self.track_len - f32::from(self.thumb.size.height);
+        if free > 0.0 { self.max / free } else { 0.0 }
+    }
+
+    /// The arrow triangle in one button: 6px wide, its tip 2.5px from the end.
+    fn arrow(&self, up: bool) -> Option<gpui::Path<gpui::Pixels>> {
+        let center = f32::from(self.thumb.left()) + SCROLLBAR_THUMB / 2.0;
+        let half = SCROLLBAR_THUMB / 2.0;
+        let (tip, base) = if up {
+            let top = self.track_top - SCROLLBAR_BUTTON;
+            (top + 2.5, top + 7.25)
+        } else {
+            let bottom = self.track_top + self.track_len + SCROLLBAR_BUTTON;
+            (bottom - 2.5, bottom - 7.25)
+        };
+        let mut path = gpui::PathBuilder::fill();
+        path.move_to(gpui::point(gpui::px(center), gpui::px(tip)));
+        path.line_to(gpui::point(gpui::px(center + half), gpui::px(base)));
+        path.line_to(gpui::point(gpui::px(center - half), gpui::px(base)));
+        path.close();
+        path.build().ok()
+    }
+}
+
+/// The wheel and scrollbar layer for a scroll container. Place it after the
+/// container as an absolute, full-size sibling inside a relative wrapper, and
+/// give the container `WheelScroll::gutter` as right padding. `color` paints
+/// the thumb and arrows (`scrollbar-color: var(--t-scroll) transparent`).
+pub fn wheel_scroll_layer(
+    handle: gpui::ScrollHandle,
+    state: std::rc::Rc<std::cell::RefCell<WheelScroll>>,
+    color: Rgba,
+) -> impl IntoElement {
+    use gpui::{
+        DispatchPhase, HitboxBehavior, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ScrollDelta,
+        ScrollWheelEvent, canvas,
+    };
     canvas(
         |bounds, window, _| window.insert_hitbox(bounds, HitboxBehavior::Normal),
-        move |_, hitbox, window, _| {
+        move |bounds, hitbox, window, _| {
             if state.borrow_mut().step(&handle) {
                 window.request_animation_frame();
             }
-            let handle = handle.clone();
-            let state = state.clone();
-            window.on_mouse_event(move |event: &ScrollWheelEvent, phase, window, cx| {
-                if phase != DispatchPhase::Capture || event.modifiers.control || !hitbox.should_handle_scroll(window) {
-                    return;
+            // The container used the last frame's gutter. When the overflow
+            // changed, render again with the right one. This converges: the
+            // gutter can only make the content taller.
+            let overflowing = handle.max_offset().height > gpui::px(0.);
+            if std::mem::replace(&mut state.borrow_mut().overflowing, overflowing) != overflowing {
+                window.request_animation_frame();
+            }
+
+            let geometry = ScrollbarGeometry::new(bounds, &handle);
+            if let Some(geometry) = &geometry {
+                window.paint_quad(gpui::fill(geometry.thumb, hsla(color)).corner_radii(gpui::px(SCROLLBAR_THUMB / 2.0)));
+                for up in [true, false] {
+                    if let Some(arrow) = geometry.arrow(up) {
+                        window.paint_path(arrow, hsla(color));
+                    }
                 }
-                let delta = match event.delta {
-                    ScrollDelta::Lines(lines) => -lines.y * CHROMIUM_LINE_PX,
-                    ScrollDelta::Pixels(pixels) => -f32::from(pixels.y),
-                };
-                if delta == 0.0 {
-                    return;
+            }
+
+            {
+                let handle = handle.clone();
+                let state = state.clone();
+                window.on_mouse_event(move |event: &ScrollWheelEvent, phase, window, cx| {
+                    if phase != DispatchPhase::Capture || event.modifiers.control || !hitbox.should_handle_scroll(window) {
+                        return;
+                    }
+                    let delta = match event.delta {
+                        ScrollDelta::Lines(lines) => -lines.y * CHROMIUM_LINE_PX,
+                        ScrollDelta::Pixels(pixels) => -f32::from(pixels.y),
+                    };
+                    // At the boundary the next scroller in the chain takes it.
+                    if delta != 0.0 && state.borrow_mut().scroll_by(&handle, delta) {
+                        cx.stop_propagation();
+                        window.refresh();
+                    }
+                });
+            }
+
+            let Some(geometry) = geometry else {
+                state.borrow_mut().drag = None;
+                return;
+            };
+            {
+                let handle = handle.clone();
+                let state = state.clone();
+                let ScrollbarGeometry { gutter, thumb, track_top, track_len, .. } = geometry;
+                window.on_mouse_event(move |event: &MouseDownEvent, phase, window, cx| {
+                    if phase != DispatchPhase::Bubble || event.button != MouseButton::Left || !gutter.contains(&event.position)
+                    {
+                        return;
+                    }
+                    cx.stop_propagation();
+                    window.prevent_default();
+                    let y = f32::from(event.position.y);
+                    let mut state = state.borrow_mut();
+                    if thumb.contains(&event.position) {
+                        state.target = None;
+                        state.start = None;
+                        state.drag = Some((y, -f32::from(handle.offset().y)));
+                        return;
+                    }
+                    let page = f32::from(gutter.size.height) * SCROLLBAR_PAGE_FRACTION;
+                    let delta = if y < track_top {
+                        -SCROLLBAR_ARROW_STEP
+                    } else if y >= track_top + track_len {
+                        SCROLLBAR_ARROW_STEP
+                    } else if y < f32::from(thumb.top()) {
+                        -page
+                    } else {
+                        page
+                    };
+                    if state.scroll_by(&handle, delta) {
+                        window.refresh();
+                    }
+                });
+            }
+            {
+                let handle = handle.clone();
+                let state = state.clone();
+                let per_px = geometry.offset_per_px();
+                let max = geometry.max;
+                window.on_mouse_event(move |event: &MouseMoveEvent, phase, window, cx| {
+                    if phase != DispatchPhase::Capture {
+                        return;
+                    }
+                    let Some((from_y, from_offset)) = state.borrow().drag else { return };
+                    if !event.dragging() {
+                        state.borrow_mut().drag = None;
+                        return;
+                    }
+                    cx.stop_propagation();
+                    let next = (from_offset + (f32::from(event.position.y) - from_y) * per_px).clamp(0.0, max);
+                    let offset = handle.offset();
+                    handle.set_offset(gpui::point(offset.x, gpui::px(-next)));
+                    window.refresh();
+                });
+            }
+            window.on_mouse_event(move |_: &MouseUpEvent, phase, _, cx| {
+                if phase == DispatchPhase::Capture && state.borrow_mut().drag.take().is_some() {
+                    cx.stop_propagation();
                 }
-                let max = f32::from(handle.max_offset().height);
-                let mut state = state.borrow_mut();
-                let current = -f32::from(handle.offset().y);
-                let base = state.target.map(|t| -t).unwrap_or(current);
-                let next = (base + delta).clamp(0.0, max.max(0.0));
-                if (next - base).abs() < 0.01 {
-                    // At the boundary: the next scroller in the chain takes it.
-                    return;
-                }
-                cx.stop_propagation();
-                state.from = -current;
-                state.target = Some(-next);
-                state.start = Some(Instant::now());
-                window.refresh();
             });
         },
     )
