@@ -118,6 +118,13 @@ impl ScopeRepairCoordinator {
         self.running.get(key).map_or(Duration::MAX, |(_, last)| last.elapsed())
     }
 
+    /// A walk starts now: it covers every request until this point.
+    fn start_pass(&mut self, key: &str) {
+        if let Some((pending, _)) = self.running.get_mut(key) {
+            *pending = false;
+        }
+    }
+
     fn finish_pass(&mut self, key: &str) -> bool {
         match self.running.get_mut(key) {
             Some((pending, _)) if *pending => {
@@ -850,24 +857,34 @@ impl FileIndex {
         let index = self.clone();
         // The volume root and top-level folders (C:\, C:\Users) are shard roots.
         let broad = scope.components().count() <= 3;
-        crate::runtime::spawn_blocking(move || loop {
-            index.wait_for_quiet_scope(&key, broad);
-            index.reconcile_scope_sync(&volume_id, &scope);
-            if !index
-                .scope_repairs
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .finish_pass(&key)
-            {
-                break;
+        // The waits are async: a burst can request hundreds of scopes, and
+        // only the walk itself may hold a blocking-pool thread.
+        crate::runtime::spawn(async move {
+            loop {
+                index.wait_for_quiet_scope(&key, broad).await;
+                index
+                    .scope_repairs
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .start_pass(&key);
+                let (walker, volume_id, scope) = (index.clone(), volume_id.clone(), scope.clone());
+                let _ = crate::runtime::spawn_blocking(move || walker.reconcile_scope_sync(&volume_id, &scope)).await;
+                if !index
+                    .scope_repairs
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .finish_pass(&key)
+                {
+                    break;
+                }
+                tokio::time::sleep(SCOPE_REPAIR_MIN_GAP).await;
             }
-            std::thread::sleep(SCOPE_REPAIR_MIN_GAP);
         });
     }
 
-    /// Blocks until no repair request for `key` arrived for the quiet period,
-    /// or the maximum delay passed (a blocking-pool thread).
-    fn wait_for_quiet_scope(&self, key: &str, broad: bool) {
+    /// Waits until no repair request for `key` arrived for the quiet period,
+    /// or the maximum delay passed.
+    async fn wait_for_quiet_scope(&self, key: &str, broad: bool) {
         let (quiet_needed, max_delay) = if broad {
             (SHARD_REPAIR_QUIET, SHARD_REPAIR_MAX_DELAY)
         } else {
@@ -885,7 +902,7 @@ impl FileIndex {
                 return;
             }
             let remaining = quiet_needed - quiet;
-            std::thread::sleep(remaining.min(max_delay - waited));
+            tokio::time::sleep(remaining.min(max_delay - waited)).await;
         }
     }
 
@@ -1472,6 +1489,23 @@ mod tests {
             coordinator.request(key),
             "a later request starts fresh work"
         );
+    }
+
+    #[test]
+    fn requests_before_a_walk_starts_need_no_second_pass() {
+        let mut coordinator = ScopeRepairCoordinator::default();
+        let key = "vol1|c:\\users".to_string();
+
+        assert!(coordinator.request(key.clone()));
+        // More overflows while the worker waits for quiet.
+        assert!(!coordinator.request(key.clone()));
+        coordinator.start_pass(&key);
+        assert!(!coordinator.finish_pass(&key), "the walk covered them");
+
+        assert!(coordinator.request(key.clone()));
+        coordinator.start_pass(&key);
+        assert!(!coordinator.request(key.clone()), "a request during the walk");
+        assert!(coordinator.finish_pass(&key), "needs another pass");
     }
 
     #[test]
