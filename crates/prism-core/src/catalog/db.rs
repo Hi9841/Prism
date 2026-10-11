@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -67,6 +67,15 @@ pub struct Database {
     /// sweep that changed nothing (the common overflow-reconcile case) does
     /// not re-tokenize millions of names for nothing.
     bulk_load_dirty: AtomicBool,
+    /// Rows deleted since the process started. The name index reloads once
+    /// deletions it has not seen pass a share of its rows (bulk deletes leave
+    /// dead rows it would otherwise only find one search at a time).
+    rows_deleted: AtomicU64,
+    /// Ids whose `display_path` changed in place (a directory rename moves
+    /// its descendants). The name index refreshes their ranking inputs.
+    rewritten_ids: Mutex<Vec<i64>>,
+    /// A change too large to refresh row by row: the name index reloads.
+    index_reload_requested: AtomicBool,
 }
 
 /// `PRAGMA auto_vacuum` value for INCREMENTAL.
@@ -170,6 +179,9 @@ impl Database {
             reader: Arc::new(Mutex::new(reader)),
             bulk_load_depth: Mutex::new(0),
             bulk_load_dirty: AtomicBool::new(false),
+            rows_deleted: AtomicU64::new(0),
+            rewritten_ids: Mutex::new(Vec::new()),
+            index_reload_requested: AtomicBool::new(false),
         };
         db.migrate()?;
         Ok(db)
@@ -503,6 +515,29 @@ impl Database {
         Ok(())
     }
 
+    /// Counts deleted rows for the name index (see `rows_deleted`).
+    fn note_rows_deleted(&self, rows: usize) {
+        if rows > 0 {
+            self.rows_deleted.fetch_add(rows as u64, Ordering::Relaxed);
+        }
+    }
+
+    pub fn rows_deleted(&self) -> u64 {
+        self.rows_deleted.load(Ordering::Relaxed)
+    }
+
+    /// Ids rewritten in place since the last call (see `rewritten_ids`).
+    pub fn take_rewritten_ids(&self) -> Vec<i64> {
+        self.rewritten_ids
+            .lock()
+            .map(|mut ids| std::mem::take(&mut *ids))
+            .unwrap_or_default()
+    }
+
+    pub fn take_index_reload_request(&self) -> bool {
+        self.index_reload_requested.swap(false, Ordering::AcqRel)
+    }
+
     /// Marks the FTS index as out of date: the row was written while the
     /// maintenance triggers were dropped, so the bulk-load teardown must
     /// rebuild it. Harmless outside bulk loads (nothing reads the flag then).
@@ -657,11 +692,10 @@ impl Database {
             // volume's path-keyed rows and invalidate freshness immediately;
             // an NTFS generation can remain available because its paths are
             // reconstructed from the newly persisted mount prefix.
-            tx.execute(
-                "DELETE FROM files WHERE volume_id = ?1;",
-                params![vol.volume_id],
-            )
-            .map_err(|e| e.to_string())?;
+            let removed = tx
+                .execute("DELETE FROM files WHERE volume_id = ?1;", params![vol.volume_id])
+                .map_err(|e| e.to_string())?;
+            self.note_rows_deleted(removed);
             tx.execute(
                 "UPDATE volumes SET last_scanned_at = 0,
                     scanned_entries = CASE WHEN backend = 'fallback' THEN 0 ELSE scanned_entries END,
@@ -674,11 +708,10 @@ impl Database {
         } else if matches!(change, VolumeChange::MetadataChanged) {
             // A filesystem/type change can mean the volume was reformatted.
             // Neither absolute directory rows nor the old FRN graph are valid.
-            tx.execute(
-                "DELETE FROM files WHERE volume_id = ?1;",
-                params![vol.volume_id],
-            )
-            .map_err(|e| e.to_string())?;
+            let removed = tx
+                .execute("DELETE FROM files WHERE volume_id = ?1;", params![vol.volume_id])
+                .map_err(|e| e.to_string())?;
+            self.note_rows_deleted(removed);
             tx.execute(
                 "DELETE FROM ntfs_nodes WHERE volume_id = ?1;",
                 params![vol.volume_id],
@@ -860,6 +893,7 @@ impl Database {
         let journal_id = checkpoint.journal_id.to_string();
         conn.execute_batch("BEGIN IMMEDIATE;")
             .map_err(|e| e.to_string())?;
+        let mut removed_files = 0usize;
         let result = (|| {
             conn.execute_batch(
                 "DROP TRIGGER IF EXISTS ntfs_nodes_ai;
@@ -880,7 +914,7 @@ impl Database {
                  FROM ntfs_staging WHERE volume_id = ?1 AND generation = ?2;",
                 params![volume_id, generation as i64],
             )?;
-            conn.execute(
+            removed_files = conn.execute(
                 "DELETE FROM files WHERE volume_id = ?1;",
                 params![volume_id],
             )?;
@@ -919,7 +953,11 @@ impl Database {
             Ok::<(), rusqlite::Error>(())
         })();
         match result {
-            Ok(()) => conn.execute_batch("COMMIT;").map_err(|e| e.to_string()),
+            Ok(()) => {
+                conn.execute_batch("COMMIT;").map_err(|e| e.to_string())?;
+                self.note_rows_deleted(removed_files);
+                Ok(())
+            }
             Err(error) => {
                 let _ = conn.execute_batch("ROLLBACK;");
                 Err(error.to_string())
@@ -1271,6 +1309,7 @@ impl Database {
         if removed != 0 {
             self.note_bulk_write();
         }
+        self.note_rows_deleted(removed);
         Ok(())
     }
 
@@ -1399,11 +1438,10 @@ impl Database {
     pub fn remove_volume(&self, volume_id: &str) -> Result<(), String> {
         let mut conn = self.writer.lock().map_err(|e| e.to_string())?;
         let tx = conn.transaction().map_err(|e| e.to_string())?;
-        tx.execute(
-            "DELETE FROM files WHERE volume_id = ?1;",
-            params![volume_id],
-        )
-        .map_err(|e| e.to_string())?;
+        let removed = tx
+            .execute("DELETE FROM files WHERE volume_id = ?1;", params![volume_id])
+            .map_err(|e| e.to_string())?;
+        self.note_rows_deleted(removed);
         tx.execute(
             "DELETE FROM ntfs_nodes WHERE volume_id = ?1;",
             params![volume_id],
@@ -1439,6 +1477,7 @@ impl Database {
         if removed != 0 {
             self.note_bulk_write();
         }
+        self.note_rows_deleted(removed);
         Ok(removed as i64)
     }
 
@@ -1484,6 +1523,7 @@ impl Database {
     ) -> Result<i64, String> {
         let mut conn = self.writer.lock().map_err(|e| e.to_string())?;
         let tx = conn.transaction().map_err(|e| e.to_string())?;
+        let mut rewritten: Vec<i64> = Vec::new();
 
         if new_item.is_directory {
             let old_prefix = format!("{old_normalized}\\");
@@ -1492,23 +1532,35 @@ impl Database {
             let old_display_prefix = format!("{}\\", old_normalized);
             let new_display_prefix = format!("{}\\", new_item.display_path);
 
-            // Update children paths
-            tx.execute(
-                "UPDATE files SET
-                    normalized_path = ?1 || SUBSTR(normalized_path, ?2),
-                    display_path = ?3 || SUBSTR(display_path, ?4),
-                    parent = ?3 || SUBSTR(parent, ?4)
-                 WHERE volume_id = ?5 AND normalized_path LIKE ?6 || '%' ESCAPE '!';",
-                params![
-                    new_prefix,
-                    (old_prefix.len() + 1) as i64,
-                    new_display_prefix,
-                    (old_display_prefix.len() + 1) as i64,
-                    volume_id,
-                    old_prefix_like,
-                ],
-            )
-            .map_err(|e| e.to_string())?;
+            // Update children paths. Their ids stay; the name index refreshes
+            // their path-based ranking inputs from the returned ids.
+            let mut stmt = tx
+                .prepare(
+                    "UPDATE files SET
+                        normalized_path = ?1 || SUBSTR(normalized_path, ?2),
+                        display_path = ?3 || SUBSTR(display_path, ?4),
+                        parent = ?3 || SUBSTR(parent, ?4)
+                     WHERE volume_id = ?5 AND normalized_path LIKE ?6 || '%' ESCAPE '!'
+                     RETURNING id;",
+                )
+                .map_err(|e| e.to_string())?;
+            let ids = stmt
+                .query_map(
+                    params![
+                        new_prefix,
+                        (old_prefix.len() + 1) as i64,
+                        new_display_prefix,
+                        (old_display_prefix.len() + 1) as i64,
+                        volume_id,
+                        old_prefix_like,
+                    ],
+                    |row| row.get::<_, i64>(0),
+                )
+                .map_err(|e| e.to_string())?
+                .collect::<Result<Vec<i64>, _>>()
+                .map_err(|e| e.to_string())?;
+            drop(stmt);
+            rewritten = ids;
         }
 
         // Delete old entry
@@ -1552,6 +1604,18 @@ impl Database {
 
         tx.commit().map_err(|e| e.to_string())?;
         self.note_bulk_write();
+        self.note_rows_deleted(removed);
+        if !rewritten.is_empty() {
+            const MAX_PENDING_REWRITES: usize = 200_000;
+            if let Ok(mut pending) = self.rewritten_ids.lock() {
+                if pending.len() + rewritten.len() > MAX_PENDING_REWRITES {
+                    pending.clear();
+                    self.index_reload_requested.store(true, Ordering::Release);
+                } else {
+                    pending.extend(rewritten);
+                }
+            }
+        }
         Ok(inserted as i64 - removed as i64)
     }
 

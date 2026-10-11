@@ -355,7 +355,7 @@ impl FileIndex {
             indexing,
             ready,
         );
-        if self.names.needs_sync() {
+        if self.names.needs_sync_with(db) {
             self.names.spawn_sync(Arc::clone(db));
         }
         response
