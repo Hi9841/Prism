@@ -704,6 +704,7 @@ fn pump_loop(rx: mpsc::Receiver<HookReady>) {
 /// Registers raw input and the Explorer Start-command bridge.
 unsafe fn run_pump(ready: HookReady) {
     let provider_mode = PROVIDER_SUPPRESSES_START.load(Ordering::Acquire);
+    let _ = taskbar_created_message();
     let raw_input_window = match create_raw_input_window() {
         Ok(window) => window,
         Err(error) => {
@@ -775,6 +776,25 @@ unsafe fn run_pump(ready: HookReady) {
                             }
                         }
                     }
+                }
+            }
+        }
+        if TASKBAR_RESTARTED.swap(false, Ordering::AcqRel) {
+            // A new Explorer: re-inject the hooks and release its Start hotkeys
+            // again. The old bridge's hooks died with the old process.
+            match ShellBridge::install(!provider_mode) {
+                Ok(bridge) => {
+                    let old = std::mem::replace(&mut shell_bridge, bridge);
+                    drop(old);
+                    SHELL_TASKBAR_THREAD.store(shell_bridge.taskbar_thread, Ordering::Release);
+                    notify_start_icon_changed();
+                    debug_trace("bridge-reinstalled after taskbar restart");
+                }
+                Err(error) => {
+                    // Explorer may still be starting; try again on the next tick.
+                    debug_trace(&format!("bridge-reinstall-error {error}"));
+                    TASKBAR_RESTARTED.store(true, Ordering::Release);
+                    std::thread::sleep(Duration::from_millis(500));
                 }
             }
         }
@@ -1989,12 +2009,29 @@ fn should_defer_toggle(kind: KeyKind) -> bool {
     matches!(kind, KeyKind::Win(_))
 }
 
+/// Explorer broadcasts this after it (re)creates the taskbar: a restarted
+/// Explorer has lost Prism's hooks and registered its Start hotkeys again.
+static TASKBAR_RESTARTED: AtomicBool = AtomicBool::new(false);
+static TASKBAR_CREATED_MESSAGE: OnceLock<u32> = OnceLock::new();
+
+fn taskbar_created_message() -> u32 {
+    *TASKBAR_CREATED_MESSAGE.get_or_init(|| {
+        let name = wide("TaskbarCreated");
+        unsafe { RegisterWindowMessageW(PCWSTR(name.as_ptr())) }
+    })
+}
+
 unsafe extern "system" fn raw_input_window_proc(
     window: HWND,
     message: u32,
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> LRESULT {
+    if message != 0 && message == taskbar_created_message() {
+        debug_trace("taskbar-created");
+        TASKBAR_RESTARTED.store(true, Ordering::Release);
+        return LRESULT(0);
+    }
     if shell_bridge_message().is_ok_and(|bridge_message| message == bridge_message) {
         match wparam.0 {
             SHELL_EVENT_HOTKEY_DISABLED => {
