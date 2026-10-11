@@ -129,6 +129,8 @@ const WS_EX_TOPMOST: u32 = 0x0000_0008;
 const WS_EX_NOACTIVATE: u32 = 0x0800_0000;
 const SW_HIDE: i32 = 0;
 const SW_SHOWNOACTIVATE: i32 = 4;
+const SWP_NOSIZE: u32 = 0x0001;
+const SWP_NOMOVE: u32 = 0x0002;
 const SWP_NOACTIVATE: u32 = 0x0010;
 const SWP_SHOWWINDOW: u32 = 0x0040;
 const HWND_TOPMOST: Hwnd = -1isize as Hwnd;
@@ -1071,6 +1073,11 @@ pub unsafe extern "system" fn PrismShellGetMessageHook(
                     GetWindowThreadProcessId(target, &mut process_id);
                     let mut granted = false;
                     if !target.is_null() && process_id != 0 {
+                        // Windows ignores a topmost request from a process that
+                        // does not hold the foreground; Explorer's is accepted.
+                        // Without it a palette opened in the background could
+                        // open under other windows.
+                        let _ = SetWindowPos(target, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
                         let _ = AllowSetForegroundWindow(process_id);
                         granted = SetForegroundWindow(target) != 0;
                     }
