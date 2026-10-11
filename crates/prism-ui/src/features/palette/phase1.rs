@@ -57,6 +57,7 @@ pub fn action_palette_item(hit: &Phase1Hit) -> PaletteItem {
         RowAction::call("execute_action", json!({ "id": action_id })),
     );
     item.subtitle = hit.subtitle.clone();
+    item.copy_path = hit.uri.clone().filter(|uri| !uri.is_empty());
     item
 }
 
@@ -106,6 +107,11 @@ pub fn app_hit_palette_item(
     item.app_id = Some(app_id.to_owned());
     item.run_as_admin = is_elevatable_path(hit.path.as_deref())
         .then(|| RowAction::call("launch_app_as_admin", json!({ "id": app_id })));
+    item.copy_path = hit
+        .path
+        .clone()
+        .filter(|path| !path.is_empty())
+        .or_else(|| crate::features::palette::sections::apps_folder_path(Some(app_id)));
     Some(item)
 }
 

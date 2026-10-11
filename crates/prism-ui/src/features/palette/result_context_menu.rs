@@ -36,7 +36,15 @@ pub fn clamp_context_menu_position(x: f32, y: f32, menu_height: f32, viewport: (
 
 /// Rows the menu will render; clamping sizes from it.
 pub fn result_action_count(item: &PaletteItem) -> usize {
-    [item.open_location.is_some(), item.run_as_admin.is_some(), item.toggle_taskbar_pin.is_some(), item.show_properties.is_some()]
+    // "Open" is always there: every result has a menu.
+    [
+        true,
+        item.open_location.is_some(),
+        item.run_as_admin.is_some(),
+        item.copy_path.is_some(),
+        item.toggle_taskbar_pin.is_some(),
+        item.show_properties.is_some(),
+    ]
         .into_iter()
         .filter(|present| *present)
         .count()
@@ -44,7 +52,9 @@ pub fn result_action_count(item: &PaletteItem) -> usize {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MenuChoice {
+    Open,
     OpenLocation,
+    CopyAsPath,
     RunAsAdmin,
     /// The argument is the pin state the label showed.
     ToggleTaskbarPin(bool),
@@ -108,12 +118,15 @@ impl ResultContextMenu {
     }
 
     fn choices(&self) -> Vec<MenuChoice> {
-        let mut out = Vec::new();
+        let mut out = vec![MenuChoice::Open];
         if self.item.open_location.is_some() {
             out.push(MenuChoice::OpenLocation);
         }
         if self.item.run_as_admin.is_some() {
             out.push(MenuChoice::RunAsAdmin);
+        }
+        if self.item.copy_path.is_some() {
+            out.push(MenuChoice::CopyAsPath);
         }
         if self.item.toggle_taskbar_pin.is_some()
             && let Some(pinned) = self.pinned_to_taskbar
@@ -196,16 +209,21 @@ impl Render for ResultContextMenu {
             .inset_0()
             .child(
                 // Clicks outside close the menu.
+                // The original's backdrop button covers the list: a click
+                // outside only closes the menu, it never reaches a row.
                 div()
                     .id("result-menu-backdrop")
                     .absolute()
                     .inset_0()
+                    .occlude()
                     .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| this.close(true, true, cx)))
                     .on_mouse_down(MouseButton::Right, cx.listener(|this, _, _, cx| this.close(true, true, cx))),
             )
             .child(
                 div()
                     .id("result-menu")
+                    // A choice must not also press the backdrop or the row below.
+                    .occlude()
                     .track_focus(&self.focus)
                     .on_key_down(cx.listener(Self::on_key_down))
                     .absolute()
@@ -223,6 +241,8 @@ impl Render for ResultContextMenu {
                     .opacity(eased)
                     .children(choices.into_iter().enumerate().map(|(index, choice)| {
                         let (glyph, label) = match choice {
+                            MenuChoice::Open => ("external-link", "Open"),
+                            MenuChoice::CopyAsPath => ("clipboard-copy", "Copy as path"),
                             MenuChoice::OpenLocation => ("folder-open", "Open location"),
                             MenuChoice::RunAsAdmin => ("shield-check", "Run as administrator"),
                             MenuChoice::ToggleTaskbarPin(true) => ("pin-off", "Unpin from taskbar"),

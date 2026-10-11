@@ -86,6 +86,10 @@ pub struct PaletteItem {
     pub run_as_admin: Option<RowAction>,
     pub open_location: Option<RowAction>,
     pub shell_path: Option<String>,
+    /// What "Copy as path" copies (quoted, as Explorer does): a file or
+    /// folder path, an app's exe or shortcut, `shell:AppsFolder\{AUMID}`, or
+    /// a settings URI.
+    pub copy_path: Option<String>,
     pub toggle_taskbar_pin: Option<RowAction>,
     pub show_properties: Option<RowAction>,
     pub is_picture: Option<bool>,
@@ -112,6 +116,7 @@ impl PaletteItem {
             run_as_admin: None,
             open_location: None,
             shell_path: None,
+            copy_path: None,
             toggle_taskbar_pin: None,
             show_properties: None,
             is_picture: None,

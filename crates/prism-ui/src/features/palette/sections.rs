@@ -431,7 +431,21 @@ pub fn app_palette_item(app: &AppEntry, icons: &HashMap<String, String>) -> Pale
     item.shell_path = local_target.map(str::to_owned);
     item.toggle_taskbar_pin = target.filter(|t| is_taskbar_pinable_path(Some(t))).map(toggle_taskbar_pin);
     item.show_properties = target.map(|t| path_call("show_path_properties", t));
+    item.copy_path = app_copy_path(app);
     item
+}
+
+/// The exe (or URL) an app runs, else its shortcut, else its AUMID through
+/// `shell:AppsFolder` (Windows apps such as File Explorer have no file).
+fn app_copy_path(app: &AppEntry) -> Option<String> {
+    truthy(app.path.as_deref())
+        .or_else(|| truthy(app.location.as_deref()))
+        .map(str::to_owned)
+        .or_else(|| apps_folder_path(app.aumid.as_deref().or(Some(app.app_id.as_str()))))
+}
+
+pub fn apps_folder_path(aumid: Option<&str>) -> Option<String> {
+    truthy(aumid).map(|aumid| format!("shell:AppsFolder\\{aumid}"))
 }
 
 fn calc_item(value: f64) -> PaletteItem {
@@ -488,6 +502,7 @@ pub fn quick_access_palette_item(entry: &QuickAccessEntry) -> PaletteItem {
     item.drag_file = truthy(Some(path)).map(start_file_drag);
     item.open_location = Some(path_call("open_path_location", path));
     item.shell_path = Some(entry.path.clone());
+    item.copy_path = Some(entry.path.clone());
     item.show_properties = Some(path_call("show_path_properties", path));
     item
 }
@@ -514,6 +529,7 @@ fn file_palette_item(entry: &FileEntry) -> PaletteItem {
         (!entry.is_directory && is_elevatable_path(Some(path))).then(|| path_call("run_path_as_admin", path));
     item.open_location = Some(path_call("open_path_location", path));
     item.shell_path = Some(entry.path.clone());
+    item.copy_path = Some(entry.path.clone());
     item.toggle_taskbar_pin =
         (!entry.is_directory && is_taskbar_pinable_path(Some(path))).then(|| toggle_taskbar_pin(path));
     item.show_properties = Some(path_call("show_path_properties", path));

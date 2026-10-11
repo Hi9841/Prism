@@ -342,6 +342,14 @@ impl Palette {
     fn choose_menu_action(&mut self, choice: MenuChoice, item: PaletteItem, _window: &mut Window, cx: &mut Context<Self>) {
         let app = self.app.clone();
         match choice {
+            MenuChoice::Open => self.palette.update(cx, |p, cx| p.run_item(item, cx)),
+            MenuChoice::CopyAsPath => {
+                if let Some(path) = item.copy_path.clone() {
+                    // Explorer's "Copy as path" quotes the path.
+                    bridge::copy_text(&format!("\"{path}\""), cx);
+                    app.update(cx, |app, cx| app.show_toast("Copied path", Some(path), ToastKind::Success, cx));
+                }
+            }
             MenuChoice::OpenLocation => {
                 if let Some(action) = item.open_location.clone() {
                     run_action(action, cx).detach();
