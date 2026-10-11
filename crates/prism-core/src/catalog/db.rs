@@ -549,8 +549,11 @@ impl Database {
             });
         }
         if pragma("auto_vacuum")? == AUTO_VACUUM_INCREMENTAL {
-            conn.execute_batch("PRAGMA incremental_vacuum;")
-                .map_err(|e| e.to_string())?;
+            // The pragma frees one page per step (one result row each);
+            // `execute_batch` steps once, so step it to the end.
+            let mut stmt = conn.prepare("PRAGMA incremental_vacuum;").map_err(|e| e.to_string())?;
+            let mut rows = stmt.query([]).map_err(|e| e.to_string())?;
+            while rows.next().map_err(|e| e.to_string())?.is_some() {}
         } else {
             // The connection keeps temp tables in memory; VACUUM builds a
             // full copy of the catalog as a temp database, so it must spill
