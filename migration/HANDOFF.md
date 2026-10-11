@@ -42,9 +42,11 @@ The port is complete: backend (prism-core), every view, and the app shell (`crat
   on purpose: Open is the first menu item); judge 277/277. The review findings of 2026-10-11 are fixed,
   except: `hooks.nsh` deletes app data on any non-update uninstall (inherited from Tauri; owner decision),
   `repost_size` is a call-site workaround for the patch-6 root cause, and commit `32a03a7` is large.
-- Installer tests from the agent shell: set `TMP`/`TEMP` to a repo-local folder, and stop Prism first.
-  NSIS does not see a Prism started from the agent shell as the current user's process: it does not stop
-  it, cannot replace the exe, and still exits 0.
+- Installer tests: copy the installer out of the repo first (for example to a new folder in `%LOCALAPPDATA%`).
+  The repo's Low integrity label makes it run at Low integrity: it cannot write TEMP, cannot see Prism,
+  and cannot replace the exe. From a normal folder, `/P /R /UPDATE /ARGS --autostart` stopped Prism,
+  replaced the exe, and relaunched it (2026-10-11). `Start-Process -Wait` also waits for the relaunched
+  Prism; check the processes instead.
 - Parity setup: `python -I migration/parity/make-fixture.py target/parity/fixture.json` (local data, never commit),
   `target/parity/original-dist` (vite build of `../Prism`), `cargo build -p prism-app`. Scripts: `run-original.mjs`
   (headless Chrome + `mock-tauri.js`; `PARITY_DEBUG=1` logs pointer events; an `eval` step probes the DOM),
