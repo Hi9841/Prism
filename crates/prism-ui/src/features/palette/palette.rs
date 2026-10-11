@@ -22,7 +22,7 @@ use crate::features::palette::palette_search_input::{
     SearchInputProps, SearchKey, input_style, render_search_input, search_key,
 };
 use crate::features::palette::result_context_menu::{
-    MenuChoice, MenuEvent, ResultContextMenu, menu_position_for, result_action_count,
+    MenuChoice, MenuEvent, ResultContextMenu, menu_position_for,
 };
 use crate::features::palette::sections::is_clipboard_kind;
 use crate::features::updater::update_control::UpdateControl;
@@ -88,11 +88,6 @@ fn reorder_item_id(item: &PaletteItem) -> Option<String> {
         return Some(format!("app:{app_id}"));
     }
     item.quick_access_kind.as_ref().map(|kind| format!("quick:{kind}"))
-}
-
-/// Any action that justifies opening the result context menu.
-fn has_result_actions(item: &PaletteItem) -> bool {
-    result_action_count(item) > 0
 }
 
 /// Hit-test targets recorded during prepaint (A6), in window coordinates.
@@ -282,7 +277,8 @@ impl Palette {
             let palette = self.palette.read(cx);
             (palette.selected, palette.flat_items.get(palette.selected).cloned())
         };
-        let Some(item) = item.filter(has_result_actions) else { return };
+        // Every result has a menu: Open is always in it.
+        let Some(item) = item else { return };
         let bounds = self.targets.borrow().rows.get(&selected).copied();
         let viewport = window.viewport_size();
         let point = match bounds {
@@ -304,9 +300,6 @@ impl Palette {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !has_result_actions(&item) {
-            return;
-        }
         self.palette.update(cx, |p, cx| p.select(index, cx));
         let zoom = self.zoom(cx);
         let size = window.viewport_size();
@@ -777,12 +770,10 @@ impl Palette {
             .on_mouse_down(MouseButton::Right, {
                 let item = item.clone();
                 cx.listener(move |this, event: &MouseDownEvent, window, cx| {
-                    if has_result_actions(&item) {
-                        // The menu takes focus; the row must not take it back
-                        // on this press (Escape then reaches the menu).
-                        window.prevent_default();
-                        this.open_result_menu(item.clone(), index, event.position, window, cx);
-                    }
+                    // The menu takes focus; the row must not take it back on
+                    // this press (Escape then reaches the menu).
+                    window.prevent_default();
+                    this.open_result_menu(item.clone(), index, event.position, window, cx);
                 })
             });
 
