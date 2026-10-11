@@ -15,7 +15,7 @@
 //! fetch no longer finds.
 
 use std::cmp::Ordering;
-use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering};
 use std::sync::{Arc, RwLock};
 
 use super::db::Database;
@@ -60,6 +60,8 @@ pub struct NameIndex {
     reload_requested: AtomicBool,
     /// A search found more new rows than it may append inline.
     behind: AtomicBool,
+    /// `Database::rows_deleted` when the current rows were loaded.
+    seen_deleted: AtomicU64,
 }
 
 #[derive(Default)]
@@ -78,6 +80,9 @@ struct Names {
     places: Vec<u32>,
     max_id: i64,
     deleted: usize,
+    /// Bumped by every reset. A search that read indexes or `max_id` from an
+    /// older generation must not apply them to the new buffers.
+    generation: u64,
 }
 
 /// A query parsed once per search: the scorer inputs plus the admission rules
@@ -109,6 +114,7 @@ impl Default for NameIndex {
             loader_running: AtomicBool::new(false),
             reload_requested: AtomicBool::new(false),
             behind: AtomicBool::new(false),
+            seen_deleted: AtomicU64::new(0),
         }
     }
 }
@@ -208,7 +214,9 @@ impl NameIndex {
     /// `spawn_sync` reloads from scratch.
     pub fn reset(&self) {
         self.loaded.store(false, AtomicOrdering::Release);
-        *self.names.write().unwrap_or_else(|e| e.into_inner()) = Names::default();
+        let mut names = self.names.write().unwrap_or_else(|e| e.into_inner());
+        let generation = names.generation.wrapping_add(1);
+        *names = Names { generation, ..Names::default() };
     }
 
     /// True when the background loader has work: the first load, a backlog
@@ -220,10 +228,29 @@ impl NameIndex {
             || self.reload_requested.load(AtomicOrdering::Acquire)
     }
 
+    /// `needs_sync`, plus the catalog's signals: a change too large to apply
+    /// row by row, or enough deletions that a reload beats carrying them.
+    pub fn needs_sync_with(&self, db: &Database) -> bool {
+        if db.take_index_reload_request() {
+            self.reload_requested.store(true, AtomicOrdering::Release);
+        }
+        if self.is_loaded() {
+            let rows = self.names.read().unwrap_or_else(|e| e.into_inner()).ids.len() as u64;
+            let unseen = db.rows_deleted().saturating_sub(self.seen_deleted.load(AtomicOrdering::Acquire));
+            if unseen > (rows / 8).max(MIN_RELOAD_DELETIONS) {
+                self.reload_requested.store(true, AtomicOrdering::Release);
+            }
+        }
+        self.needs_sync()
+    }
+
     /// Synchronous full load (or catch-up), batch by batch.
     pub fn load(&self, db: &Database) -> Result<(), String> {
-        if self.reload_requested.swap(false, AtomicOrdering::AcqRel) {
-            self.reset();
+        if self.reload_requested.swap(false, AtomicOrdering::AcqRel) || !self.is_loaded() {
+            if self.is_loaded() {
+                self.reset();
+            }
+            self.seen_deleted.store(db.rows_deleted(), AtomicOrdering::Release);
         }
         while !self.catch_up(db, LOAD_BATCH)? {}
         self.behind.store(false, AtomicOrdering::Release);
@@ -234,11 +261,19 @@ impl NameIndex {
     /// Appends up to `max_rows` rows above `max_id`. Returns true when the
     /// index has caught up with the catalog.
     fn catch_up(&self, db: &Database, max_rows: usize) -> Result<bool, String> {
-        let after = self.names.read().unwrap_or_else(|e| e.into_inner()).max_id;
+        self.refresh_rewritten(db)?;
+        let (after, generation) = {
+            let names = self.names.read().unwrap_or_else(|e| e.into_inner());
+            (names.max_id, names.generation)
+        };
         let rows = db.file_names_after(after, max_rows)?;
         let caught_up = rows.len() < max_rows;
         if !rows.is_empty() {
             let mut names = self.names.write().unwrap_or_else(|e| e.into_inner());
+            // A reset in between: these rows belong to the old buffers.
+            if names.generation != generation {
+                return Ok(false);
+            }
             // A concurrent catch-up can have appended some of these rows.
             let fresh = rows.partition_point(|row| row.id <= names.max_id);
             let rows = &rows[fresh..];
@@ -251,6 +286,42 @@ impl NameIndex {
             }
         }
         Ok(caught_up)
+    }
+
+    /// Rows whose path changed in place (a directory rename moved them):
+    /// recompute their location penalty, depth, and path length.
+    fn refresh_rewritten(&self, db: &Database) -> Result<(), String> {
+        let mut ids = db.take_rewritten_ids();
+        if ids.is_empty() {
+            return Ok(());
+        }
+        ids.sort_unstable();
+        ids.dedup();
+        let lookups = db.file_rows_by_id(&ids)?;
+        let mut names = self.names.write().unwrap_or_else(|e| e.into_inner());
+        for (id, lookup) in ids.iter().zip(lookups) {
+            let Ok(id) = u32::try_from(*id) else { continue };
+            // Ids are appended in ascending order.
+            let Ok(index) = names.ids.binary_search(&id) else { continue };
+            match lookup {
+                RowLookup::Found(entry) => {
+                    let penalty = path_penalty(&entry.display_path, &entry.lower_name);
+                    let keep = names.flags[index] & (FLAG_DIRECTORY | FLAG_DELETED);
+                    names.flags[index] = keep | ((penalty / PENALTY_STEP) as u16 & FLAG_PENALTY_MASK);
+                    let depth = path_depth(&entry.display_path).min(0xffff) as u32;
+                    let length = entry.display_path.len().min(0xffff) as u32;
+                    names.places[index] = depth << 16 | length;
+                }
+                RowLookup::Missing => {
+                    if names.flags[index] & FLAG_DELETED == 0 {
+                        names.flags[index] |= FLAG_DELETED;
+                        names.deleted += 1;
+                    }
+                }
+                RowLookup::Excluded => {}
+            }
+        }
+        Ok(())
     }
 
     /// Fallback-catalog candidates for a query, best first. `None` means the
@@ -274,13 +345,14 @@ impl NameIndex {
 
         let mut found = Vec::with_capacity(wanted);
         for round in 0..MAX_SELECTION_ROUNDS {
-            let selected = {
+            let (selected, generation) = {
                 let names = self.names.read().unwrap_or_else(|e| e.into_inner());
-                names
+                let selected = names
                     .top_hits(query, wanted, is_cancelled)
                     .into_iter()
                     .map(|hit| (hit.index, i64::from(names.ids[hit.index as usize])))
-                    .collect::<Vec<_>>()
+                    .collect::<Vec<_>>();
+                (selected, names.generation)
             };
             if is_cancelled() {
                 return Ok(Some(Vec::new()));
@@ -301,7 +373,7 @@ impl NameIndex {
             // Deleted rows held slots in this round; drop them and select
             // again so live rows further down are not cut off. The last round
             // keeps its live rows: clearing them returned no results at all.
-            self.mark_deleted(&missing);
+            self.mark_deleted(generation, &missing);
             if round + 1 < MAX_SELECTION_ROUNDS {
                 found.clear();
             }
@@ -309,10 +381,14 @@ impl NameIndex {
         Ok(Some(found))
     }
 
-    fn mark_deleted(&self, indexes: &[u32]) {
+    fn mark_deleted(&self, generation: u64, indexes: &[u32]) {
         let mut names = self.names.write().unwrap_or_else(|e| e.into_inner());
+        // Indexes from an older generation point into different rows.
+        if names.generation != generation {
+            return;
+        }
         for &index in indexes {
-            let flags = &mut names.flags[index as usize];
+            let Some(flags) = names.flags.get_mut(index as usize) else { continue };
             if *flags & FLAG_DELETED == 0 {
                 *flags |= FLAG_DELETED;
                 names.deleted += 1;
