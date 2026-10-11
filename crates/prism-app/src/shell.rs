@@ -486,6 +486,21 @@ impl bridge::Shell for GpuiShell {
                 return;
             }
             PALETTE_TOOK_FOREGROUND.store(true, Ordering::Release);
+            // Windows ignores z-order requests from a process without
+            // foreground rights; an open without them could leave the palette
+            // under other windows. Now that Prism holds the foreground, take
+            // the topmost band (the presentation always does).
+            unsafe {
+                let _ = SetWindowPos(
+                    self.hwnd(),
+                    Some(HWND_TOPMOST),
+                    0,
+                    0,
+                    0,
+                    0,
+                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+                );
+            }
             ACTIVATION_FOCUS_PENDING.store(false, Ordering::Release);
             return;
         }
