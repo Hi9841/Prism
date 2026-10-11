@@ -736,6 +736,11 @@ unsafe fn run_pump(ready: HookReady) {
     notify_start_icon_changed();
     let _ = ready.send(Ok(()));
     debug_trace("bridge-install-ok");
+    /// Bridge reinstall retries: the first after half a second, then doubling.
+    const REINSTALL_FIRST_DELAY: Duration = Duration::from_millis(500);
+    const REINSTALL_MAX_DELAY: Duration = Duration::from_secs(30);
+    let mut reinstall_delay = REINSTALL_FIRST_DELAY;
+    let mut reinstall_at: Option<Instant> = None;
     let mut msg = MSG::default();
     'pump: loop {
         while PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
@@ -779,22 +784,29 @@ unsafe fn run_pump(ready: HookReady) {
                 }
             }
         }
-        if TASKBAR_RESTARTED.swap(false, Ordering::AcqRel) {
+        if reinstall_at.is_none_or(|at| Instant::now() >= at) && TASKBAR_RESTARTED.swap(false, Ordering::AcqRel) {
             // A new Explorer: re-inject the hooks and release its Start hotkeys
-            // again. The old bridge's hooks died with the old process.
+            // again. Release the old bridge first: when the same Explorer
+            // still runs, its own hook must handle its icon shutdown before a
+            // newer hook chains in front of it.
+            shell_bridge.release();
+            let provider_mode = PROVIDER_SUPPRESSES_START.load(Ordering::Acquire);
             match ShellBridge::install(!provider_mode) {
                 Ok(bridge) => {
-                    let old = std::mem::replace(&mut shell_bridge, bridge);
-                    drop(old);
+                    shell_bridge = bridge;
+                    reinstall_delay = REINSTALL_FIRST_DELAY;
+                    reinstall_at = None;
                     SHELL_TASKBAR_THREAD.store(shell_bridge.taskbar_thread, Ordering::Release);
                     notify_start_icon_changed();
                     debug_trace("bridge-reinstalled after taskbar restart");
                 }
                 Err(error) => {
-                    // Explorer may still be starting; try again on the next tick.
+                    // Explorer may still be starting, or may be gone for good
+                    // (a shell replacement): retry, less and less often.
                     debug_trace(&format!("bridge-reinstall-error {error}"));
                     TASKBAR_RESTARTED.store(true, Ordering::Release);
-                    std::thread::sleep(Duration::from_millis(500));
+                    reinstall_at = Some(Instant::now() + reinstall_delay);
+                    reinstall_delay = (reinstall_delay * 2).min(REINSTALL_MAX_DELAY);
                 }
             }
         }
@@ -805,6 +817,7 @@ unsafe fn run_pump(ready: HookReady) {
         let wait = pending_win_toggle_wait()
             .into_iter()
             .chain(shell_start_fallback_wait())
+            .chain(reinstall_at.map(|at| at.saturating_duration_since(Instant::now())))
             .min()
             .unwrap_or(START_RECT_REFRESH_INTERVAL)
             .min(START_RECT_REFRESH_INTERVAL);
@@ -889,6 +902,8 @@ struct ShellBridge {
     search_rect: Option<RECT>,
     last_rect_refresh: Option<Instant>,
     library_path: PathBuf,
+    /// The hooks are gone (`release`); the struct only keeps the last rects.
+    released: bool,
 }
 
 struct StartButtonLocator {
@@ -1078,6 +1093,7 @@ impl ShellBridge {
                 search_rect,
                 last_rect_refresh: None,
                 library_path,
+                released: false,
             });
         }
 
@@ -1190,6 +1206,7 @@ impl ShellBridge {
             search_rect,
             last_rect_refresh: None,
             library_path,
+            released: false,
         })
     }
 
@@ -1562,6 +1579,16 @@ fn is_search_button_class(class_name: &[u16]) -> bool {
 
 impl Drop for ShellBridge {
     fn drop(&mut self) {
+        self.release();
+    }
+}
+
+impl ShellBridge {
+    /// Removes the hooks from Explorer. Safe to call more than once.
+    fn release(&mut self) {
+        if std::mem::replace(&mut self.released, true) {
+            return;
+        }
         request_start_icon_shutdown(self.taskbar_thread);
         unsafe {
             let _ = UnhookWindowsHookEx(self.progman_hook);
@@ -1759,6 +1786,12 @@ unsafe fn create_raw_input_window() -> Result<HWND, String> {
     if let Err(error) = ChangeWindowMessageFilterEx(window, bridge_message, MSGFLT_ALLOW, None) {
         let _ = DestroyWindow(window);
         return Err(format!("allow Explorer bridge acknowledgments: {error}"));
+    }
+    // Also Explorer's TaskbarCreated broadcast, or an elevated Prism never
+    // learns that Explorer restarted and never re-injects the bridge.
+    let taskbar_created = taskbar_created_message();
+    if taskbar_created != 0 {
+        let _ = ChangeWindowMessageFilterEx(window, taskbar_created, MSGFLT_ALLOW, None);
     }
     // INPUTSINK only observes input while Prism is in the background. It does
     // not set NOLEGACY, so normal key messages and third-party tools continue
