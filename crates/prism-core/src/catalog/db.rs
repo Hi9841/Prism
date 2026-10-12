@@ -550,7 +550,10 @@ impl Database {
             });
         }
         if free_pages == 0 {
-            // Nothing to vacuum; only the truncation below is missing.
+            // Nothing to vacuum; only the truncation is missing. A checkpoint
+            // shortens the file only while it copies frames, so write one.
+            conn.execute_batch("UPDATE meta SET value = value WHERE key = 'version';")
+                .map_err(|e| e.to_string())?;
         } else if pragma("auto_vacuum")? == AUTO_VACUUM_INCREMENTAL {
             // The pragma frees one page per step (one result row each);
             // `execute_batch` steps once, so step it to the end.

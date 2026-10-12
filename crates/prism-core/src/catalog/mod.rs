@@ -255,9 +255,16 @@ impl FileIndex {
         index
     }
 
-    pub fn init(&self, app_data_dir: &Path) {
+    /// Opens the catalog. Returns false when it cannot be opened now (for
+    /// example, locked by an instance that is still exiting).
+    pub fn init(&self, app_data_dir: &Path) -> bool {
+        *self.app_data_dir.write().unwrap_or_else(|e| e.into_inner()) = app_data_dir.to_path_buf();
         let db_path = app_data_dir.join("catalog.db");
-        if let Ok(d) = Database::open(&db_path) {
+        let opened = Database::open(&db_path);
+        if let Err(error) = &opened {
+            eprintln!("[Prism Catalog] cannot open the catalog: {error}");
+        }
+        if let Ok(d) = opened {
             let db_arc = Arc::new(d);
             if let Ok(covs) = db_arc.get_volume_coverages() {
                 for cov in &covs {
@@ -272,8 +279,9 @@ impl FileIndex {
             }
             self.names.spawn_sync(Arc::clone(&db_arc));
             *self.db.write().unwrap_or_else(|e| e.into_inner()) = Some(db_arc);
+            return true;
         }
-        *self.app_data_dir.write().unwrap_or_else(|e| e.into_inner()) = app_data_dir.to_path_buf();
+        false
     }
 
     #[cfg(test)]
@@ -388,7 +396,8 @@ impl FileIndex {
     }
 
     /// Returns unused catalog space to the file system on a blocking thread.
-    /// Searches keep running: they read through the WAL reader connection.
+    /// Searches keep running through the vacuum; they wait for the final
+    /// checkpoint, which holds the reader connection.
     async fn reclaim_space(&self) {
         let db = self.db.read().unwrap_or_else(|e| e.into_inner()).clone();
         let Some(db) = db else { return };
@@ -1100,13 +1109,27 @@ pub fn warm(index: FileIndex, app_data_dir: PathBuf) {
         // Opening can wait on SQLite locks or WAL recovery (a previous
         // instance was killed, e.g. by an update): never on the startup path,
         // which also installs the Win key.
-        let init_index = index.clone();
-        let init_dir = app_data_dir.clone();
-        let _ = crate::runtime::spawn_blocking(move || {
-            init_index.init(&init_dir);
-            init_index.try_migrate_legacy_cache(&init_dir.join("files.json"));
-        })
-        .await;
+        // A catalog that cannot be opened (still locked) gets four more
+        // tries, 1, 2, 4, and 8 seconds apart, instead of no file search.
+        for attempt in 0..5u32 {
+            if attempt > 0 {
+                tokio::time::sleep(std::time::Duration::from_secs(1 << (attempt - 1))).await;
+            }
+            let init_index = index.clone();
+            let init_dir = app_data_dir.clone();
+            let opened = crate::runtime::spawn_blocking(move || {
+                let opened = init_index.init(&init_dir);
+                if opened {
+                    init_index.try_migrate_legacy_cache(&init_dir.join("files.json"));
+                }
+                opened
+            })
+            .await
+            .unwrap_or(false);
+            if opened {
+                break;
+            }
+        }
 
         // Startup: serve the persisted index directly. Volumes whose index is
         // fresh are not re-walked (the watcher keeps them live), so a normal

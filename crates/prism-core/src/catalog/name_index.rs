@@ -277,12 +277,17 @@ impl NameIndex {
         let spawned = std::thread::Builder::new()
             .name("prism-name-index".into())
             .spawn(move || {
+                let first_load = !index.is_loaded();
                 let result = index.load(&db);
                 index.loader_running.store(false, AtomicOrdering::Release);
                 match result {
-                    // Searches made meanwhile used the SQL path, which has no
-                    // substring stage: an open palette searches again.
-                    Ok(()) => crate::host::emit("file-index-updated", serde_json::Value::Null),
+                    // Searches before the first load used the SQL path, which
+                    // has no substring stage: an open palette searches again.
+                    // Catch-ups do not: the watcher already reports changes.
+                    Ok(()) if first_load => {
+                        crate::host::emit("file-index-updated", serde_json::Value::Null)
+                    }
+                    Ok(()) => {}
                     Err(error) => eprintln!("[Prism Catalog] name index load failed: {error}"),
                 }
             });
