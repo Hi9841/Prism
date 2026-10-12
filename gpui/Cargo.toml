@@ -4,7 +4,7 @@ members = ["crates/prism-app", "crates/prism-ui", "crates/prism-judge"]
 
 [workspace.package]
 edition = "2024"
-version = "1.0.0"
+version = "1.0.1"
 publish = false
 
 [workspace.dependencies]
