@@ -53,6 +53,24 @@ The port is complete: backend (prism-core), every view, and the app shell (`crat
   `prism.exe --parity` (parked window, never activated; an `info` step prints the focused bounds).
 - Vendored gpui patches: `vendor/gpui/PRISM-PATCHES.md` (7). Deviation log: `migration/RULEBOOK.md`.
 
+## Update 2026-10-12 (prism-core `gpui/prism-core` at `66c8b81`, local only)
+
+- FFF decision (owner): keep Prism's full-drive catalog; use FFF's matcher (`neo_frizbee`) for typos.
+  FFF's `fff-search` as-is indexed 253 k of 4.44 M files on C: (its walker always skips hidden folders,
+  `.gitignore`d files, most of Program Files), had no folders, and ranked `ChromeSetup.exe` for `chrome.exe`.
+- Typo pass (`catalog/name_index.rs`): runs only when no name is an exact/prefix/substring match.
+  Names starting within 2 edits of the query rank above scattered subsequence matches. Queries with a strong
+  match are unchanged. 11-23 ms on typo queries, 1-6 ms otherwise. `PRISM_CATALOG_DEBUG` logs its timings.
+- `file_fts` dropped (schema v7, -413 MB); `reclaim_space` now really shortens the file (3,927 MB);
+  `Database::open` moves the catalog aside only on corruption; a test no longer opens File Explorer
+  (it caused "explorer.exe 0xc0000142" dialogs when run from the Low-labelled repo).
+- Resources (release build, idle, hidden): 359 MB private (204 MiB is the name index), idle CPU about 0.5%
+  of one core-second per 10 s. 69 of 107 threads are NVIDIA's D3D11 driver pool for GPUI's single device
+  (one burst at device creation; skipping GPUI's probe device did not change it, so no patch).
+- Start test builds with WMI (`Invoke-CimMethod Win32_Process Create`) from `%LOCALAPPDATA%\PrismGpui`.
+- Judge 277/277 after the change. Not done: a typed real-app test (needs the owner's go-ahead), the 1.0.0
+  installer rebuild, and the open owner decisions below.
+
 ## Next actions
 
 1. Real app: run it only from `%LOCALAPPDATA%\PrismGpui\prism.exe` (a copy). The repo folder has an
