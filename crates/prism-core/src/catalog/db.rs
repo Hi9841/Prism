@@ -540,21 +540,13 @@ impl Database {
         let file_size = || len(&self.db_path) + len(&self.db_path.with_extension("db-wal"));
         let before = file_size();
         let free_pages = pragma("freelist_count")?;
-        // A file longer than its pages: an earlier checkpoint freed them but
-        // could not truncate.
-        let untruncated = len(&self.db_path) > pragma("page_count")? * pragma("page_size")?;
-        if free_pages == 0 && !untruncated {
+        if free_pages == 0 {
             return Ok(SpaceReclaim {
                 before,
                 after: before,
             });
         }
-        if free_pages == 0 {
-            // Nothing to vacuum; only the truncation is missing. A checkpoint
-            // shortens the file only while it copies frames, so write one.
-            conn.execute_batch("UPDATE meta SET value = value WHERE key = 'version';")
-                .map_err(|e| e.to_string())?;
-        } else if pragma("auto_vacuum")? == AUTO_VACUUM_INCREMENTAL {
+        if pragma("auto_vacuum")? == AUTO_VACUUM_INCREMENTAL {
             // The pragma frees one page per step (one result row each);
             // `execute_batch` steps once, so step it to the end.
             let mut stmt = conn.prepare("PRAGMA incremental_vacuum;").map_err(|e| e.to_string())?;
