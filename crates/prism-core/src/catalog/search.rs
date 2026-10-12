@@ -329,8 +329,10 @@ pub fn entry_score(entry: &CandidateEntry, tokens: &[&str], full_query: &str) ->
 /// query character.
 pub const STRONG_TOKEN_SCORE: i32 = 2_000;
 
-/// True for a strong match: the whole name or its stem is the query, or
-/// every token is at least a substring of the name (not a scattered match).
+/// True for a strong match: the whole name or its stem is the query, or a
+/// token is at least a substring of the name. Only a name that matches every
+/// token as a scattered subsequence is weak ("annual rpt" in
+/// "annual_report.docx" is strong: "annual" is a prefix).
 pub fn is_strong_match(
     lower_name: &str,
     is_directory: bool,
@@ -339,7 +341,7 @@ pub fn is_strong_match(
 ) -> bool {
     // 9,500 and up: the exact-name and exact-stem tiers of `name_score`.
     name_score(lower_name, is_directory, tokens, full_query).is_some_and(|score| score >= 9_500)
-        || tokens.iter().all(|token| {
+        || tokens.iter().any(|token| {
             target_score(token, lower_name).is_some_and(|score| score >= STRONG_TOKEN_SCORE)
         })
 }
@@ -783,10 +785,11 @@ mod tests {
         let long = "abcdefghijklmnopqrstuvwxyz0123456789abcd";
         let scattered = long.chars().flat_map(|c| [c, '-']).collect::<String>();
         assert!(!is_strong_match(&scattered, true, &[long], long));
-        // Two tokens: both must be substrings.
+        // Two tokens: one substring is enough; all scattered is weak.
         let strong = |name| is_strong_match(name, false, &["report", "2024"], "report 2024");
         assert!(strong("annual report 2024.pdf"));
-        assert!(!strong("r-e-p-o-r-t 2024.pdf"));
+        assert!(strong("r-e-p-o-r-t 2024.pdf"));
+        assert!(!strong("r-e-p-o-r-t 2-0-2-4.pdf"));
     }
 
     #[test]
