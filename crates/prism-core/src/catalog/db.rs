@@ -71,6 +71,12 @@ pub struct Database {
     index_reload_requested: AtomicBool,
 }
 
+/// Removes the trigram index over `files` (schema v7) and its triggers.
+const DROP_FILE_FTS: &str = "DROP TRIGGER IF EXISTS files_ai;
+     DROP TRIGGER IF EXISTS files_ad;
+     DROP TRIGGER IF EXISTS files_au;
+     DROP TABLE IF EXISTS file_fts;";
+
 /// `PRAGMA auto_vacuum` value for INCREMENTAL.
 const AUTO_VACUUM_INCREMENTAL: i64 = 2;
 
@@ -332,6 +338,25 @@ impl Database {
             .unwrap_or(0);
 
         if version >= SCHEMA_VERSION as i64 {
+            // A Prism before v7 that opened this catalog (a downgrade) made
+            // file_fts and its triggers again, and they grow with every
+            // change: drop them again.
+            let stale_fts: bool = conn
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM sqlite_master
+                                   WHERE name IN ('file_fts', 'files_ai', 'files_ad', 'files_au'));",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(|e| e.to_string())?;
+            if stale_fts {
+                eprintln!("[Prism Catalog] Dropping file_fts that an older Prism made again");
+                conn.execute_batch(&format!("BEGIN IMMEDIATE; {DROP_FILE_FTS} COMMIT;"))
+                    .map_err(|error| {
+                        let _ = conn.execute_batch("ROLLBACK;");
+                        error.to_string()
+                    })?;
+            }
             return Ok(());
         }
 
@@ -415,15 +440,12 @@ impl Database {
             // trigram index cost about a tenth of the catalog file, a write
             // per changed name, and a full rebuild after every sweep. Its
             // pages go to the free list; `reclaim_space` returns them.
-            conn.execute_batch(
+            conn.execute_batch(&format!(
                 "BEGIN IMMEDIATE;
-                 DROP TRIGGER IF EXISTS files_ai;
-                 DROP TRIGGER IF EXISTS files_ad;
-                 DROP TRIGGER IF EXISTS files_au;
-                 DROP TABLE IF EXISTS file_fts;
+                 {DROP_FILE_FTS}
                  UPDATE meta SET value = '7' WHERE key = 'version';
-                 COMMIT;",
-            )
+                 COMMIT;"
+            ))
             .map_err(|error| {
                 let _ = conn.execute_batch("ROLLBACK;");
                 error.to_string()
@@ -2670,6 +2692,40 @@ mod ntfs_tests {
         );
 
         let _ = std::fs::remove_dir_all(parent);
+    }
+
+    #[test]
+    fn drops_file_fts_that_an_older_prism_made_again() {
+        let path = temp_db_path("schema-v7-downgrade");
+        {
+            // A v7 catalog that Prism 0.11.9 opened: its schema made the
+            // trigram table and the triggers again.
+            let db = Database::open(&path).unwrap();
+            let conn = db.writer.lock().unwrap();
+            conn.execute_batch(
+                "CREATE VIRTUAL TABLE file_fts USING fts5(
+                    name, tokenize='trigram', content='files', content_rowid='id'
+                 );
+                 CREATE TRIGGER files_ai AFTER INSERT ON files BEGIN
+                    INSERT INTO file_fts(rowid, name) VALUES (new.id, new.name);
+                 END;",
+            )
+            .unwrap();
+        }
+
+        let db = Database::open(&path).unwrap();
+        let conn = db.reader.lock().unwrap();
+        let fts_objects: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE name IN ('file_fts', 'files_ai');",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(fts_objects, 0);
+        drop(conn);
+        drop(db);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
     #[test]
