@@ -1,0 +1,159 @@
+{
+  "settings": {
+    "accent": "iris",
+    "alwaysOnTop": true,
+    "appGroups": [
+      {
+        "appIds": [
+          "x",
+          "y"
+        ],
+        "collapsed": true,
+        "id": "a",
+        "name": "Work"
+      },
+      {
+        "appIds": [
+          "s"
+        ],
+        "collapsed": false,
+        "id": "c",
+        "name": "Collapsed text"
+      },
+      {
+        "appIds": [
+          "app-0"
+        ],
+        "collapsed": false,
+        "id": "g0",
+        "name": "Group 0"
+      },
+      {
+        "appIds": [
+          "app-1"
+        ],
+        "collapsed": false,
+        "id": "g1",
+        "name": "Group 1"
+      },
+      {
+        "appIds": [
+          "app-2"
+        ],
+        "collapsed": false,
+        "id": "g2",
+        "name": "Group 2"
+      },
+      {
+        "appIds": [
+          "app-3"
+        ],
+        "collapsed": false,
+        "id": "g3",
+        "name": "Group 3"
+      },
+      {
+        "appIds": [
+          "app-4"
+        ],
+        "collapsed": false,
+        "id": "g4",
+        "name": "Group 4"
+      },
+      {
+        "appIds": [
+          "app-5"
+        ],
+        "collapsed": false,
+        "id": "g5",
+        "name": "Group 5"
+      },
+      {
+        "appIds": [
+          "app-6"
+        ],
+        "collapsed": false,
+        "id": "g6",
+        "name": "Group 6"
+      },
+      {
+        "appIds": [
+          "app-7"
+        ],
+        "collapsed": false,
+        "id": "g7",
+        "name": "Group 7"
+      },
+      {
+        "appIds": [
+          "app-8"
+        ],
+        "collapsed": false,
+        "id": "g8",
+        "name": "Group 8"
+      },
+      {
+        "appIds": [
+          "app-9"
+        ],
+        "collapsed": false,
+        "id": "g9",
+        "name": "Group 9"
+      },
+      {
+        "appIds": [
+          "app-10"
+        ],
+        "collapsed": false,
+        "id": "g10",
+        "name": "Group 10"
+      },
+      {
+        "appIds": [
+          "app-11"
+        ],
+        "collapsed": false,
+        "id": "g11",
+        "name": "Group 11"
+      },
+      {
+        "appIds": [
+          "app-12"
+        ],
+        "collapsed": false,
+        "id": "g12",
+        "name": "Group 12"
+      },
+      {
+        "appIds": [
+          "app-13"
+        ],
+        "collapsed": false,
+        "id": "g13",
+        "name": "Group 13"
+      }
+    ],
+    "pinnedApps": [],
+    "quickAccess": [
+      "home",
+      "desktop",
+      "downloads",
+      "documents",
+      "pictures",
+      "music"
+    ],
+    "quickAccessCollapsed": false,
+    "sectionOrder": [
+      "pinned",
+      "recent",
+      "quick",
+      "apps"
+    ],
+    "shortcut": "Win",
+    "taskbarAlignment": "center",
+    "taskbarScrollVolume": true,
+    "theme": "system",
+    "viewZoom": 100,
+    "width": 640
+  }
+}

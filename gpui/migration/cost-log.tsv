@@ -1,0 +1,10 @@
+step	timestamp	wall_clock_min	tokens	subagents	model
+0	2026-10-09T11:20Z	unknown	unknown	0	claude-opus-5-5
+00b	2026-10-09T13:30Z	unknown	unknown	4	claude-opus-5-5
+1-map	2026-10-09T14:40Z	unknown	unknown	4	claude-opus-5-5
+2-inventory-20	2026-10-09T15:20Z	unknown	unknown	0	claude-opus-5-5
+2-inventory	2026-10-09T16:30Z	unknown	unknown	0	claude-opus-5-5
+2-review-spike	2026-10-09T12:20Z	unknown	unknown	0	claude-opus-5-5
+2-gate	2026-10-09T13:05Z	unknown	unknown	0	claude-opus-5-5
+3-subsystems-1-2	2026-10-10T00:20Z	unknown	unknown	0	claude-opus-5-5
+3-subsystems-0-3-6-parity	2026-10-10T18:00Z	unknown	unknown	0	claude-opus-5-5

@@ -1,0 +1,157 @@
+{
+  "flatIds": [
+    "calc::2",
+    "app::notepad",
+    "window::5"
+  ],
+  "sections": [
+    {
+      "collapsed": false,
+      "collapsible": false,
+      "id": "calc",
+      "items": [
+        {
+          "historyTitle": "Calculate 2",
+          "icon": {
+            "kind": "tile",
+            "name": "Calculator",
+            "tint": "iris"
+          },
+          "id": "calc::2",
+          "run": {
+            "calls": [
+              {
+                "args": {
+                  "text": "2"
+                },
+                "cmd": "clipboard.writeText"
+              }
+            ]
+          },
+          "subtitle": "Copy result to clipboard",
+          "title": "2",
+          "toastDetail": "2"
+        }
+      ],
+      "label": "Calculator"
+    },
+    {
+      "collapsed": false,
+      "collapsible": false,
+      "id": "recent",
+      "items": [
+        {
+          "appId": "notepad",
+          "dragFile": {
+            "calls": [
+              {
+                "args": {
+                  "paths": [
+                    "C:\\Windows\\System32\\notepad.exe"
+                  ]
+                },
+                "cmd": "start_file_drag"
+              }
+            ]
+          },
+          "historyTitle": "Notepad",
+          "icon": {
+            "kind": "app",
+            "name": "Notepad"
+          },
+          "id": "app::notepad",
+          "openLocation": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Windows\\System32\\notepad.exe"
+                },
+                "cmd": "open_path_location"
+              }
+            ]
+          },
+          "run": {
+            "calls": [
+              {
+                "args": {
+                  "id": "notepad"
+                },
+                "cmd": "launch_app"
+              }
+            ]
+          },
+          "runAsAdmin": {
+            "calls": [
+              {
+                "args": {
+                  "id": "notepad"
+                },
+                "cmd": "launch_app_as_admin"
+              }
+            ]
+          },
+          "shellPath": "C:\\Windows\\System32\\notepad.exe",
+          "showProperties": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Windows\\System32\\notepad.exe"
+                },
+                "cmd": "show_path_properties"
+              }
+            ]
+          },
+          "subtitle": "Application",
+          "title": "Notepad",
+          "toggleTaskbarPin": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Windows\\System32\\notepad.exe"
+                },
+                "cmd": "is_pinned_to_taskbar"
+              },
+              {
+                "args": {
+                  "path": "C:\\Windows\\System32\\notepad.exe",
+                  "pinned": true
+                },
+                "cmd": "set_taskbar_pinned"
+              }
+            ]
+          }
+        }
+      ],
+      "label": "Recent"
+    },
+    {
+      "collapsed": false,
+      "collapsible": false,
+      "id": "windows",
+      "items": [
+        {
+          "historyTitle": "1+1 - Notepad",
+          "icon": {
+            "kind": "tile",
+            "name": "AppWindow",
+            "tint": "azure"
+          },
+          "id": "window::5",
+          "run": {
+            "calls": [
+              {
+                "args": {
+                  "hwnd": 5
+                },
+                "cmd": "focus_window"
+              }
+            ]
+          },
+          "subtitle": "Open window · notepad",
+          "title": "1+1 - Notepad"
+        }
+      ],
+      "label": "Open windows"
+    }
+  ]
+}

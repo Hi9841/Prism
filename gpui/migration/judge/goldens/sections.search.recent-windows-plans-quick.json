@@ -1,0 +1,611 @@
+{
+  "flatIds": [
+    "file::f::C:\\Users\\You\\Documents\\report.pdf",
+    "window::6",
+    "power-plan::381b4222-f694-41f0-9685-ff5bb260df2e",
+    "power-plan::a1841308-3541-4fab-bc81-f71556f20b4a",
+    "file::d::C:\\Users\\You\\Downloads",
+    "file::d::C:\\Users\\You\\Documents",
+    "file::d::C:\\Users\\You\\Desktop",
+    "app::discord",
+    "app::build-tools",
+    "app::vscode"
+  ],
+  "sections": [
+    {
+      "collapsed": false,
+      "collapsible": false,
+      "id": "recent",
+      "items": [
+        {
+          "dragFile": {
+            "calls": [
+              {
+                "args": {
+                  "paths": [
+                    "C:\\Users\\You\\Documents\\report.pdf"
+                  ]
+                },
+                "cmd": "start_file_drag"
+              }
+            ]
+          },
+          "historyTitle": "report.pdf",
+          "icon": {
+            "kind": "tile",
+            "name": "FileText",
+            "tint": "slate"
+          },
+          "id": "file::f::C:\\Users\\You\\Documents\\report.pdf",
+          "isPicture": false,
+          "keywords": [
+            "C:\\Users\\You\\Documents\\report.pdf",
+            "C:\\Users\\You\\Documents"
+          ],
+          "openLocation": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You\\Documents\\report.pdf"
+                },
+                "cmd": "open_path_location"
+              }
+            ]
+          },
+          "run": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You\\Documents\\report.pdf"
+                },
+                "cmd": "open_path"
+              }
+            ]
+          },
+          "shellPath": "C:\\Users\\You\\Documents\\report.pdf",
+          "showProperties": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You\\Documents\\report.pdf"
+                },
+                "cmd": "show_path_properties"
+              }
+            ]
+          },
+          "subtitle": "C:\\Users\\You\\Documents",
+          "title": "report.pdf"
+        }
+      ],
+      "label": "Recent"
+    },
+    {
+      "collapsed": false,
+      "collapsible": false,
+      "id": "windows",
+      "items": [
+        {
+          "historyTitle": "Documents",
+          "icon": {
+            "kind": "tile",
+            "name": "AppWindow",
+            "tint": "azure"
+          },
+          "id": "window::6",
+          "run": {
+            "calls": [
+              {
+                "args": {
+                  "hwnd": 6
+                },
+                "cmd": "focus_window"
+              }
+            ]
+          },
+          "subtitle": "Open window · explorer",
+          "title": "Documents"
+        }
+      ],
+      "label": "Open windows"
+    },
+    {
+      "collapsed": false,
+      "collapsible": false,
+      "id": "power-plans",
+      "items": [
+        {
+          "historyTitle": "Balanced",
+          "icon": {
+            "kind": "tile",
+            "name": "Power",
+            "tint": "mint"
+          },
+          "id": "power-plan::381b4222-f694-41f0-9685-ff5bb260df2e",
+          "powerPlanGuid": "381b4222-f694-41f0-9685-ff5bb260df2e",
+          "run": {
+            "calls": [
+              {
+                "args": {
+                  "guid": "381b4222-f694-41f0-9685-ff5bb260df2e"
+                },
+                "cmd": "set_power_plan"
+              }
+            ]
+          },
+          "subtitle": "Power plan · active",
+          "title": "Balanced"
+        },
+        {
+          "historyTitle": "Power saver",
+          "icon": {
+            "kind": "tile",
+            "name": "Power",
+            "tint": "slate"
+          },
+          "id": "power-plan::a1841308-3541-4fab-bc81-f71556f20b4a",
+          "powerPlanGuid": "a1841308-3541-4fab-bc81-f71556f20b4a",
+          "run": {
+            "calls": [
+              {
+                "args": {
+                  "guid": "a1841308-3541-4fab-bc81-f71556f20b4a"
+                },
+                "cmd": "set_power_plan"
+              }
+            ]
+          },
+          "subtitle": "Power plan",
+          "title": "Power saver"
+        }
+      ],
+      "label": "Power plans"
+    },
+    {
+      "collapsed": false,
+      "collapsible": false,
+      "id": "quick",
+      "items": [
+        {
+          "dragFile": {
+            "calls": [
+              {
+                "args": {
+                  "paths": [
+                    "C:\\Users\\You\\Downloads"
+                  ]
+                },
+                "cmd": "start_file_drag"
+              }
+            ]
+          },
+          "historyTitle": "Downloads",
+          "icon": {
+            "kind": "tile",
+            "name": "Download",
+            "tint": "mint"
+          },
+          "id": "file::d::C:\\Users\\You\\Downloads",
+          "keywords": [
+            "open",
+            "folder",
+            "files",
+            "downloads",
+            "C:\\Users\\You\\Downloads"
+          ],
+          "openLocation": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You\\Downloads"
+                },
+                "cmd": "open_path_location"
+              }
+            ]
+          },
+          "quickAccessKind": "downloads",
+          "run": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You\\Downloads"
+                },
+                "cmd": "open_path"
+              }
+            ]
+          },
+          "shellPath": "C:\\Users\\You\\Downloads",
+          "showProperties": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You\\Downloads"
+                },
+                "cmd": "show_path_properties"
+              }
+            ]
+          },
+          "subtitle": "C:\\Users\\You\\Downloads",
+          "title": "Downloads"
+        },
+        {
+          "dragFile": {
+            "calls": [
+              {
+                "args": {
+                  "paths": [
+                    "C:\\Users\\You\\Documents"
+                  ]
+                },
+                "cmd": "start_file_drag"
+              }
+            ]
+          },
+          "historyTitle": "Documents",
+          "icon": {
+            "kind": "tile",
+            "name": "FileText",
+            "tint": "slate"
+          },
+          "id": "file::d::C:\\Users\\You\\Documents",
+          "keywords": [
+            "open",
+            "folder",
+            "files",
+            "documents",
+            "C:\\Users\\You\\Documents"
+          ],
+          "openLocation": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You\\Documents"
+                },
+                "cmd": "open_path_location"
+              }
+            ]
+          },
+          "quickAccessKind": "documents",
+          "run": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You\\Documents"
+                },
+                "cmd": "open_path"
+              }
+            ]
+          },
+          "shellPath": "C:\\Users\\You\\Documents",
+          "showProperties": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You\\Documents"
+                },
+                "cmd": "show_path_properties"
+              }
+            ]
+          },
+          "subtitle": "C:\\Users\\You\\Documents",
+          "title": "Documents"
+        },
+        {
+          "dragFile": {
+            "calls": [
+              {
+                "args": {
+                  "paths": [
+                    "C:\\Users\\You\\Desktop"
+                  ]
+                },
+                "cmd": "start_file_drag"
+              }
+            ]
+          },
+          "historyTitle": "Desktop",
+          "icon": {
+            "kind": "tile",
+            "name": "Monitor",
+            "tint": "azure"
+          },
+          "id": "file::d::C:\\Users\\You\\Desktop",
+          "keywords": [
+            "open",
+            "folder",
+            "files",
+            "desktop",
+            "C:\\Users\\You\\Desktop"
+          ],
+          "openLocation": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You\\Desktop"
+                },
+                "cmd": "open_path_location"
+              }
+            ]
+          },
+          "quickAccessKind": "desktop",
+          "run": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You\\Desktop"
+                },
+                "cmd": "open_path"
+              }
+            ]
+          },
+          "shellPath": "C:\\Users\\You\\Desktop",
+          "showProperties": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You\\Desktop"
+                },
+                "cmd": "show_path_properties"
+              }
+            ]
+          },
+          "subtitle": "C:\\Users\\You\\Desktop",
+          "title": "Desktop"
+        }
+      ],
+      "label": "Quick Access"
+    },
+    {
+      "collapsed": false,
+      "collapsible": false,
+      "groups": [],
+      "id": "apps",
+      "items": [
+        {
+          "appId": "discord",
+          "dragFile": {
+            "calls": [
+              {
+                "args": {
+                  "paths": [
+                    "C:\\Users\\You\\AppData\\Local\\Discord\\Update.exe"
+                  ]
+                },
+                "cmd": "start_file_drag"
+              }
+            ]
+          },
+          "historyTitle": "Discord",
+          "icon": {
+            "kind": "app",
+            "name": "Discord"
+          },
+          "id": "app::discord",
+          "openLocation": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You\\AppData\\Local\\Discord\\Update.exe"
+                },
+                "cmd": "open_path_location"
+              }
+            ]
+          },
+          "run": {
+            "calls": [
+              {
+                "args": {
+                  "id": "discord"
+                },
+                "cmd": "launch_app"
+              }
+            ]
+          },
+          "runAsAdmin": {
+            "calls": [
+              {
+                "args": {
+                  "id": "discord"
+                },
+                "cmd": "launch_app_as_admin"
+              }
+            ]
+          },
+          "shellPath": "C:\\Users\\You\\AppData\\Local\\Discord\\Update.exe",
+          "showProperties": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You\\AppData\\Local\\Discord\\Update.exe"
+                },
+                "cmd": "show_path_properties"
+              }
+            ]
+          },
+          "subtitle": "Application",
+          "title": "Discord",
+          "toggleTaskbarPin": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You\\AppData\\Local\\Discord\\Update.exe"
+                },
+                "cmd": "is_pinned_to_taskbar"
+              },
+              {
+                "args": {
+                  "path": "C:\\Users\\You\\AppData\\Local\\Discord\\Update.exe",
+                  "pinned": true
+                },
+                "cmd": "set_taskbar_pinned"
+              }
+            ]
+          }
+        },
+        {
+          "appId": "build-tools",
+          "dragFile": {
+            "calls": [
+              {
+                "args": {
+                  "paths": [
+                    "C:\\Tools\\build.bat"
+                  ]
+                },
+                "cmd": "start_file_drag"
+              }
+            ]
+          },
+          "historyTitle": "Build Tools",
+          "icon": {
+            "kind": "app",
+            "name": "Build Tools"
+          },
+          "id": "app::build-tools",
+          "openLocation": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Tools\\build.bat"
+                },
+                "cmd": "open_path_location"
+              }
+            ]
+          },
+          "run": {
+            "calls": [
+              {
+                "args": {
+                  "id": "build-tools"
+                },
+                "cmd": "launch_app"
+              }
+            ]
+          },
+          "runAsAdmin": {
+            "calls": [
+              {
+                "args": {
+                  "id": "build-tools"
+                },
+                "cmd": "launch_app_as_admin"
+              }
+            ]
+          },
+          "shellPath": "C:\\Tools\\build.bat",
+          "showProperties": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Tools\\build.bat"
+                },
+                "cmd": "show_path_properties"
+              }
+            ]
+          },
+          "subtitle": "Application",
+          "title": "Build Tools",
+          "toggleTaskbarPin": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Tools\\build.bat"
+                },
+                "cmd": "is_pinned_to_taskbar"
+              },
+              {
+                "args": {
+                  "path": "C:\\Tools\\build.bat",
+                  "pinned": true
+                },
+                "cmd": "set_taskbar_pinned"
+              }
+            ]
+          }
+        },
+        {
+          "appId": "vscode",
+          "dragFile": {
+            "calls": [
+              {
+                "args": {
+                  "paths": [
+                    "C:\\Users\\You\\AppData\\Local\\Programs\\Microsoft VS Code\\Code.exe"
+                  ]
+                },
+                "cmd": "start_file_drag"
+              }
+            ]
+          },
+          "historyTitle": "Visual Studio Code",
+          "icon": {
+            "icon": "data:image/png;base64,VlND",
+            "kind": "app",
+            "name": "Visual Studio Code"
+          },
+          "id": "app::vscode",
+          "openLocation": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You\\AppData\\Local\\Programs\\Microsoft VS Code\\Code.exe"
+                },
+                "cmd": "open_path_location"
+              }
+            ]
+          },
+          "run": {
+            "calls": [
+              {
+                "args": {
+                  "id": "vscode"
+                },
+                "cmd": "launch_app"
+              }
+            ]
+          },
+          "runAsAdmin": {
+            "calls": [
+              {
+                "args": {
+                  "id": "vscode"
+                },
+                "cmd": "launch_app_as_admin"
+              }
+            ]
+          },
+          "shellPath": "C:\\Users\\You\\AppData\\Local\\Programs\\Microsoft VS Code\\Code.exe",
+          "showProperties": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You\\AppData\\Local\\Programs\\Microsoft VS Code\\Code.exe"
+                },
+                "cmd": "show_path_properties"
+              }
+            ]
+          },
+          "subtitle": "Application",
+          "title": "Visual Studio Code",
+          "toggleTaskbarPin": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You\\AppData\\Local\\Programs\\Microsoft VS Code\\Code.exe"
+                },
+                "cmd": "is_pinned_to_taskbar"
+              },
+              {
+                "args": {
+                  "path": "C:\\Users\\You\\AppData\\Local\\Programs\\Microsoft VS Code\\Code.exe",
+                  "pinned": true
+                },
+                "cmd": "set_taskbar_pinned"
+              }
+            ]
+          }
+        }
+      ],
+      "label": "Apps"
+    }
+  ]
+}

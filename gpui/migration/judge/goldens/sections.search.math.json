@@ -1,0 +1,37 @@
+{
+  "flatIds": [
+    "calc::14"
+  ],
+  "sections": [
+    {
+      "collapsed": false,
+      "collapsible": false,
+      "id": "calc",
+      "items": [
+        {
+          "historyTitle": "Calculate 14",
+          "icon": {
+            "kind": "tile",
+            "name": "Calculator",
+            "tint": "iris"
+          },
+          "id": "calc::14",
+          "run": {
+            "calls": [
+              {
+                "args": {
+                  "text": "14"
+                },
+                "cmd": "clipboard.writeText"
+              }
+            ]
+          },
+          "subtitle": "Copy result to clipboard",
+          "title": "14",
+          "toastDetail": "14"
+        }
+      ],
+      "label": "Calculator"
+    }
+  ]
+}

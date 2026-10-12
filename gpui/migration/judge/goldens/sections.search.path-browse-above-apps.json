@@ -1,0 +1,105 @@
+{
+  "flatIds": [
+    "file::d::C:\\Windows\\system32",
+    "app::wt"
+  ],
+  "sections": [
+    {
+      "collapsed": false,
+      "collapsible": false,
+      "id": "files",
+      "items": [
+        {
+          "dragFile": {
+            "calls": [
+              {
+                "args": {
+                  "paths": [
+                    "C:\\Windows\\system32"
+                  ]
+                },
+                "cmd": "start_file_drag"
+              }
+            ]
+          },
+          "historyTitle": "system32",
+          "icon": {
+            "kind": "tile",
+            "name": "Folder",
+            "tint": "azure"
+          },
+          "id": "file::d::C:\\Windows\\system32",
+          "isPicture": false,
+          "keywords": [
+            "C:\\Windows\\system32",
+            "C:\\Windows"
+          ],
+          "openLocation": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Windows\\system32"
+                },
+                "cmd": "open_path_location"
+              }
+            ]
+          },
+          "run": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Windows\\system32"
+                },
+                "cmd": "open_path"
+              }
+            ]
+          },
+          "shellPath": "C:\\Windows\\system32",
+          "showProperties": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Windows\\system32"
+                },
+                "cmd": "show_path_properties"
+              }
+            ]
+          },
+          "subtitle": "C:\\Windows",
+          "title": "system32"
+        }
+      ],
+      "label": "Folder Contents"
+    },
+    {
+      "collapsed": false,
+      "collapsible": false,
+      "groups": [],
+      "id": "apps",
+      "items": [
+        {
+          "appId": "wt",
+          "historyTitle": "Windows Terminal",
+          "icon": {
+            "kind": "app",
+            "name": "Windows Terminal"
+          },
+          "id": "app::wt",
+          "run": {
+            "calls": [
+              {
+                "args": {
+                  "id": "wt"
+                },
+                "cmd": "launch_app"
+              }
+            ]
+          },
+          "subtitle": "Application",
+          "title": "Windows Terminal"
+        }
+      ],
+      "label": "Apps"
+    }
+  ]
+}

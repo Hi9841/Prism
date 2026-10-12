@@ -1,0 +1,44 @@
+{
+  "history": [
+    {
+      "id": "app::chrome",
+      "title": "Google Chrome",
+      "ts": 1700000500
+    },
+    {
+      "id": "file::f::C:\\Users\\You\\Documents\\report.pdf",
+      "title": "report.pdf",
+      "ts": 1700000400
+    },
+    {
+      "id": "file::f::C:\\Users\\You\\Gone\\deleted.txt",
+      "title": "deleted.txt",
+      "ts": 1700000300
+    },
+    {
+      "id": "app::notepad",
+      "title": "Notepad",
+      "ts": 1700000900
+    },
+    {
+      "id": "file::d::C:\\Users\\You\\Projects",
+      "title": "Projects",
+      "ts": 1700000100
+    },
+    {
+      "id": "file::f::C:\\Users\\You\\Pictures\\cat.jpg",
+      "title": "cat.jpg",
+      "ts": 1700000050
+    },
+    {
+      "id": "app::steam",
+      "title": "Steam",
+      "ts": 1700000010
+    },
+    {
+      "id": "file::f::C:\\Users\\You\\Gone\\report-old.pdf",
+      "title": "report-old.pdf",
+      "ts": 1700000005
+    }
+  ]
+}

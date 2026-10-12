@@ -1,0 +1,33 @@
+[package]
+name = "prism-ui"
+edition.workspace = true
+version.workspace = true
+publish.workspace = true
+
+[lib]
+# `src/lib/` mirrors Prism's `src/lib/` (RULEBOOK §4), so the crate root cannot be `src/lib.rs`.
+path = "src/prism_ui.rs"
+
+[features]
+default = ["gpui"]
+# Views, entities, and the theme. The pure logic builds without it (the judge adapter).
+gpui = ["dep:gpui", "dep:prism-core", "dep:futures", "dep:base64", "dep:unicode-segmentation", "dep:windows", "dep:raw-window-handle", "dep:ureq", "dep:minisign-verify", "dep:semver"]
+
+[dependencies]
+gpui = { workspace = true, optional = true }
+prism-core = { path = "../../../Prism-core/crates/prism-core", optional = true }
+futures = { version = "0.3", optional = true }
+base64 = { version = "0.22", optional = true }
+unicode-segmentation = { version = "1", optional = true }
+raw-window-handle = { version = "0.6", optional = true }
+windows = { version = "0.61", optional = true, features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_UI_Shell"] }
+ureq = { version = "2", optional = true, features = ["json"] }
+minisign-verify = { version = "0.2", optional = true }
+semver = { version = "1", optional = true }
+serde.workspace = true
+serde_json.workspace = true
+regex = "1"
+ryu-js = "1"
+icu_collator = "2"
+icu_locale_core = "2"
+sys-locale = "0.3"

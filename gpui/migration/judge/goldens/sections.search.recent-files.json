@@ -1,0 +1,322 @@
+{
+  "flatIds": [
+    "file::f::C:\\Users\\You\\Documents\\report.pdf",
+    "file::f::C:\\Users\\You\\Documents\\report.pdf",
+    "file::f::C:\\Users\\You\\Documents\\report-final.docx",
+    "file::d::C:\\Users\\You\\Documents\\Reports",
+    "file::f::C:\\Users\\You\\Pictures\\report.png"
+  ],
+  "sections": [
+    {
+      "collapsed": false,
+      "collapsible": false,
+      "id": "recent",
+      "items": [
+        {
+          "dragFile": {
+            "calls": [
+              {
+                "args": {
+                  "paths": [
+                    "C:\\Users\\You\\Documents\\report.pdf"
+                  ]
+                },
+                "cmd": "start_file_drag"
+              }
+            ]
+          },
+          "historyTitle": "report.pdf",
+          "icon": {
+            "kind": "tile",
+            "name": "FileText",
+            "tint": "slate"
+          },
+          "id": "file::f::C:\\Users\\You\\Documents\\report.pdf",
+          "isPicture": false,
+          "keywords": [
+            "C:\\Users\\You\\Documents\\report.pdf",
+            "C:\\Users\\You\\Documents"
+          ],
+          "openLocation": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You\\Documents\\report.pdf"
+                },
+                "cmd": "open_path_location"
+              }
+            ]
+          },
+          "run": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You\\Documents\\report.pdf"
+                },
+                "cmd": "open_path"
+              }
+            ]
+          },
+          "shellPath": "C:\\Users\\You\\Documents\\report.pdf",
+          "showProperties": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You\\Documents\\report.pdf"
+                },
+                "cmd": "show_path_properties"
+              }
+            ]
+          },
+          "subtitle": "C:\\Users\\You\\Documents",
+          "title": "report.pdf"
+        }
+      ],
+      "label": "Recent"
+    },
+    {
+      "collapsed": false,
+      "collapsible": false,
+      "id": "files",
+      "items": [
+        {
+          "dragFile": {
+            "calls": [
+              {
+                "args": {
+                  "paths": [
+                    "C:\\Users\\You\\Documents\\report.pdf"
+                  ]
+                },
+                "cmd": "start_file_drag"
+              }
+            ]
+          },
+          "historyTitle": "report.pdf",
+          "icon": {
+            "kind": "tile",
+            "name": "FileText",
+            "tint": "slate"
+          },
+          "id": "file::f::C:\\Users\\You\\Documents\\report.pdf",
+          "isPicture": false,
+          "keywords": [
+            "C:\\Users\\You\\Documents\\report.pdf",
+            "C:\\Users\\You\\Documents"
+          ],
+          "openLocation": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You\\Documents\\report.pdf"
+                },
+                "cmd": "open_path_location"
+              }
+            ]
+          },
+          "run": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You\\Documents\\report.pdf"
+                },
+                "cmd": "open_path"
+              }
+            ]
+          },
+          "shellPath": "C:\\Users\\You\\Documents\\report.pdf",
+          "showProperties": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You\\Documents\\report.pdf"
+                },
+                "cmd": "show_path_properties"
+              }
+            ]
+          },
+          "subtitle": "C:\\Users\\You\\Documents",
+          "title": "report.pdf"
+        },
+        {
+          "dragFile": {
+            "calls": [
+              {
+                "args": {
+                  "paths": [
+                    "C:\\Users\\You\\Documents\\report-final.docx"
+                  ]
+                },
+                "cmd": "start_file_drag"
+              }
+            ]
+          },
+          "historyTitle": "report-final.docx",
+          "icon": {
+            "kind": "tile",
+            "name": "FileText",
+            "tint": "slate"
+          },
+          "id": "file::f::C:\\Users\\You\\Documents\\report-final.docx",
+          "isPicture": false,
+          "keywords": [
+            "C:\\Users\\You\\Documents\\report-final.docx",
+            "C:\\Users\\You\\Documents"
+          ],
+          "openLocation": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You\\Documents\\report-final.docx"
+                },
+                "cmd": "open_path_location"
+              }
+            ]
+          },
+          "run": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You\\Documents\\report-final.docx"
+                },
+                "cmd": "open_path"
+              }
+            ]
+          },
+          "shellPath": "C:\\Users\\You\\Documents\\report-final.docx",
+          "showProperties": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You\\Documents\\report-final.docx"
+                },
+                "cmd": "show_path_properties"
+              }
+            ]
+          },
+          "subtitle": "C:\\Users\\You\\Documents",
+          "title": "report-final.docx"
+        },
+        {
+          "dragFile": {
+            "calls": [
+              {
+                "args": {
+                  "paths": [
+                    "C:\\Users\\You\\Documents\\Reports"
+                  ]
+                },
+                "cmd": "start_file_drag"
+              }
+            ]
+          },
+          "historyTitle": "Reports",
+          "icon": {
+            "kind": "tile",
+            "name": "Folder",
+            "tint": "azure"
+          },
+          "id": "file::d::C:\\Users\\You\\Documents\\Reports",
+          "isPicture": false,
+          "keywords": [
+            "C:\\Users\\You\\Documents\\Reports",
+            "C:\\Users\\You\\Documents"
+          ],
+          "openLocation": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You\\Documents\\Reports"
+                },
+                "cmd": "open_path_location"
+              }
+            ]
+          },
+          "run": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You\\Documents\\Reports"
+                },
+                "cmd": "open_path"
+              }
+            ]
+          },
+          "shellPath": "C:\\Users\\You\\Documents\\Reports",
+          "showProperties": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You\\Documents\\Reports"
+                },
+                "cmd": "show_path_properties"
+              }
+            ]
+          },
+          "subtitle": "C:\\Users\\You\\Documents",
+          "title": "Reports"
+        },
+        {
+          "dragFile": {
+            "calls": [
+              {
+                "args": {
+                  "paths": [
+                    "C:\\Users\\You\\Pictures\\report.png"
+                  ]
+                },
+                "cmd": "start_file_drag"
+              }
+            ]
+          },
+          "historyTitle": "report.png",
+          "icon": {
+            "kind": "image",
+            "name": "report.png",
+            "src": "data:image/png;base64,UkVQ"
+          },
+          "id": "file::f::C:\\Users\\You\\Pictures\\report.png",
+          "isPicture": true,
+          "keywords": [
+            "C:\\Users\\You\\Pictures\\report.png",
+            "C:\\Users\\You\\Pictures"
+          ],
+          "openLocation": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You\\Pictures\\report.png"
+                },
+                "cmd": "open_path_location"
+              }
+            ]
+          },
+          "run": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You\\Pictures\\report.png"
+                },
+                "cmd": "open_path"
+              }
+            ]
+          },
+          "shellPath": "C:\\Users\\You\\Pictures\\report.png",
+          "showProperties": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You\\Pictures\\report.png"
+                },
+                "cmd": "show_path_properties"
+              }
+            ]
+          },
+          "subtitle": "C:\\Users\\You\\Pictures",
+          "title": "report.png"
+        }
+      ],
+      "label": "Files & Folders"
+    }
+  ]
+}

@@ -1,0 +1,865 @@
+{
+  "flatIds": [
+    "file::d::C:\\Users\\You",
+    "file::d::C:\\Users\\You\\Desktop",
+    "file::d::C:\\Users\\You\\Downloads",
+    "file::f::C:\\Users\\You\\Downloads\\setup.exe",
+    "file::f::C:\\Users\\You\\Downloads\\install.bat",
+    "file::f::C:\\Users\\You\\Videos\\holiday.mp4",
+    "file::f::C:\\Users\\You\\Music\\song.mp3",
+    "file::f::C:\\Users\\You\\Documents\\backup.zip",
+    "file::f::C:\\Users\\You\\Documents\\data.xyz",
+    "file::f::C:\\Users\\You\\Documents\\notes.txt",
+    "file::f::C:\\Users\\You\\Pictures\\broken.png",
+    "file::f::C:\\Users\\You\\Pictures\\PHOTO.JPG",
+    "file::f::C:\\Users\\You\\Videos\\clip.ts"
+  ],
+  "sections": [
+    {
+      "collapsed": false,
+      "collapsible": false,
+      "id": "quick",
+      "items": [
+        {
+          "dragFile": {
+            "calls": [
+              {
+                "args": {
+                  "paths": [
+                    "C:\\Users\\You"
+                  ]
+                },
+                "cmd": "start_file_drag"
+              }
+            ]
+          },
+          "historyTitle": "Home",
+          "icon": {
+            "kind": "tile",
+            "name": "House",
+            "tint": "iris"
+          },
+          "id": "file::d::C:\\Users\\You",
+          "keywords": [
+            "open",
+            "folder",
+            "files",
+            "home",
+            "C:\\Users\\You"
+          ],
+          "openLocation": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You"
+                },
+                "cmd": "open_path_location"
+              }
+            ]
+          },
+          "quickAccessKind": "home",
+          "run": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You"
+                },
+                "cmd": "open_path"
+              }
+            ]
+          },
+          "shellPath": "C:\\Users\\You",
+          "showProperties": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You"
+                },
+                "cmd": "show_path_properties"
+              }
+            ]
+          },
+          "subtitle": "C:\\Users\\You",
+          "title": "Home"
+        },
+        {
+          "dragFile": {
+            "calls": [
+              {
+                "args": {
+                  "paths": [
+                    "C:\\Users\\You\\Desktop"
+                  ]
+                },
+                "cmd": "start_file_drag"
+              }
+            ]
+          },
+          "historyTitle": "Desktop",
+          "icon": {
+            "kind": "tile",
+            "name": "Monitor",
+            "tint": "azure"
+          },
+          "id": "file::d::C:\\Users\\You\\Desktop",
+          "keywords": [
+            "open",
+            "folder",
+            "files",
+            "desktop",
+            "C:\\Users\\You\\Desktop"
+          ],
+          "openLocation": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You\\Desktop"
+                },
+                "cmd": "open_path_location"
+              }
+            ]
+          },
+          "quickAccessKind": "desktop",
+          "run": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You\\Desktop"
+                },
+                "cmd": "open_path"
+              }
+            ]
+          },
+          "shellPath": "C:\\Users\\You\\Desktop",
+          "showProperties": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You\\Desktop"
+                },
+                "cmd": "show_path_properties"
+              }
+            ]
+          },
+          "subtitle": "C:\\Users\\You\\Desktop",
+          "title": "Desktop"
+        },
+        {
+          "dragFile": {
+            "calls": [
+              {
+                "args": {
+                  "paths": [
+                    "C:\\Users\\You\\Downloads"
+                  ]
+                },
+                "cmd": "start_file_drag"
+              }
+            ]
+          },
+          "historyTitle": "Downloads",
+          "icon": {
+            "kind": "tile",
+            "name": "Download",
+            "tint": "mint"
+          },
+          "id": "file::d::C:\\Users\\You\\Downloads",
+          "keywords": [
+            "open",
+            "folder",
+            "files",
+            "downloads",
+            "C:\\Users\\You\\Downloads"
+          ],
+          "openLocation": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You\\Downloads"
+                },
+                "cmd": "open_path_location"
+              }
+            ]
+          },
+          "quickAccessKind": "downloads",
+          "run": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You\\Downloads"
+                },
+                "cmd": "open_path"
+              }
+            ]
+          },
+          "shellPath": "C:\\Users\\You\\Downloads",
+          "showProperties": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You\\Downloads"
+                },
+                "cmd": "show_path_properties"
+              }
+            ]
+          },
+          "subtitle": "C:\\Users\\You\\Downloads",
+          "title": "Downloads"
+        }
+      ],
+      "label": "Quick Access"
+    },
+    {
+      "collapsed": false,
+      "collapsible": false,
+      "id": "files",
+      "items": [
+        {
+          "dragFile": {
+            "calls": [
+              {
+                "args": {
+                  "paths": [
+                    "C:\\Users\\You\\Downloads\\setup.exe"
+                  ]
+                },
+                "cmd": "start_file_drag"
+              }
+            ]
+          },
+          "historyTitle": "setup.exe",
+          "icon": {
+            "kind": "tile",
+            "name": "File",
+            "tint": "slate"
+          },
+          "id": "file::f::C:\\Users\\You\\Downloads\\setup.exe",
+          "isPicture": false,
+          "keywords": [
+            "C:\\Users\\You\\Downloads\\setup.exe",
+            "C:\\Users\\You\\Downloads"
+          ],
+          "openLocation": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You\\Downloads\\setup.exe"
+                },
+                "cmd": "open_path_location"
+              }
+            ]
+          },
+          "run": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You\\Downloads\\setup.exe"
+                },
+                "cmd": "open_path"
+              }
+            ]
+          },
+          "runAsAdmin": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You\\Downloads\\setup.exe"
+                },
+                "cmd": "run_path_as_admin"
+              }
+            ]
+          },
+          "shellPath": "C:\\Users\\You\\Downloads\\setup.exe",
+          "showProperties": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You\\Downloads\\setup.exe"
+                },
+                "cmd": "show_path_properties"
+              }
+            ]
+          },
+          "subtitle": "C:\\Users\\You\\Downloads",
+          "title": "setup.exe",
+          "toggleTaskbarPin": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You\\Downloads\\setup.exe"
+                },
+                "cmd": "is_pinned_to_taskbar"
+              },
+              {
+                "args": {
+                  "path": "C:\\Users\\You\\Downloads\\setup.exe",
+                  "pinned": false
+                },
+                "cmd": "set_taskbar_pinned"
+              }
+            ]
+          }
+        },
+        {
+          "dragFile": {
+            "calls": [
+              {
+                "args": {
+                  "paths": [
+                    "C:\\Users\\You\\Downloads\\install.bat"
+                  ]
+                },
+                "cmd": "start_file_drag"
+              }
+            ]
+          },
+          "historyTitle": "install.bat",
+          "icon": {
+            "kind": "tile",
+            "name": "FileText",
+            "tint": "slate"
+          },
+          "id": "file::f::C:\\Users\\You\\Downloads\\install.bat",
+          "isPicture": false,
+          "keywords": [
+            "C:\\Users\\You\\Downloads\\install.bat",
+            "C:\\Users\\You\\Downloads"
+          ],
+          "openLocation": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You\\Downloads\\install.bat"
+                },
+                "cmd": "open_path_location"
+              }
+            ]
+          },
+          "run": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You\\Downloads\\install.bat"
+                },
+                "cmd": "open_path"
+              }
+            ]
+          },
+          "runAsAdmin": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You\\Downloads\\install.bat"
+                },
+                "cmd": "run_path_as_admin"
+              }
+            ]
+          },
+          "shellPath": "C:\\Users\\You\\Downloads\\install.bat",
+          "showProperties": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You\\Downloads\\install.bat"
+                },
+                "cmd": "show_path_properties"
+              }
+            ]
+          },
+          "subtitle": "C:\\Users\\You\\Downloads",
+          "title": "install.bat",
+          "toggleTaskbarPin": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You\\Downloads\\install.bat"
+                },
+                "cmd": "is_pinned_to_taskbar"
+              },
+              {
+                "args": {
+                  "path": "C:\\Users\\You\\Downloads\\install.bat",
+                  "pinned": false
+                },
+                "cmd": "set_taskbar_pinned"
+              }
+            ]
+          }
+        },
+        {
+          "dragFile": {
+            "calls": [
+              {
+                "args": {
+                  "paths": [
+                    "C:\\Users\\You\\Videos\\holiday.mp4"
+                  ]
+                },
+                "cmd": "start_file_drag"
+              }
+            ]
+          },
+          "historyTitle": "holiday.mp4",
+          "icon": {
+            "kind": "tile",
+            "name": "FileVideo",
+            "tint": "rose"
+          },
+          "id": "file::f::C:\\Users\\You\\Videos\\holiday.mp4",
+          "isPicture": false,
+          "keywords": [
+            "C:\\Users\\You\\Videos\\holiday.mp4",
+            "C:\\Users\\You\\Videos"
+          ],
+          "openLocation": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You\\Videos\\holiday.mp4"
+                },
+                "cmd": "open_path_location"
+              }
+            ]
+          },
+          "run": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You\\Videos\\holiday.mp4"
+                },
+                "cmd": "open_path"
+              }
+            ]
+          },
+          "shellPath": "C:\\Users\\You\\Videos\\holiday.mp4",
+          "showProperties": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You\\Videos\\holiday.mp4"
+                },
+                "cmd": "show_path_properties"
+              }
+            ]
+          },
+          "subtitle": "C:\\Users\\You\\Videos",
+          "title": "holiday.mp4"
+        },
+        {
+          "dragFile": {
+            "calls": [
+              {
+                "args": {
+                  "paths": [
+                    "C:\\Users\\You\\Music\\song.mp3"
+                  ]
+                },
+                "cmd": "start_file_drag"
+              }
+            ]
+          },
+          "historyTitle": "song.mp3",
+          "icon": {
+            "kind": "tile",
+            "name": "Music",
+            "tint": "mint"
+          },
+          "id": "file::f::C:\\Users\\You\\Music\\song.mp3",
+          "isPicture": false,
+          "keywords": [
+            "C:\\Users\\You\\Music\\song.mp3",
+            "C:\\Users\\You\\Music"
+          ],
+          "openLocation": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You\\Music\\song.mp3"
+                },
+                "cmd": "open_path_location"
+              }
+            ]
+          },
+          "run": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You\\Music\\song.mp3"
+                },
+                "cmd": "open_path"
+              }
+            ]
+          },
+          "shellPath": "C:\\Users\\You\\Music\\song.mp3",
+          "showProperties": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You\\Music\\song.mp3"
+                },
+                "cmd": "show_path_properties"
+              }
+            ]
+          },
+          "subtitle": "C:\\Users\\You\\Music",
+          "title": "song.mp3"
+        },
+        {
+          "dragFile": {
+            "calls": [
+              {
+                "args": {
+                  "paths": [
+                    "C:\\Users\\You\\Documents\\backup.zip"
+                  ]
+                },
+                "cmd": "start_file_drag"
+              }
+            ]
+          },
+          "historyTitle": "backup.zip",
+          "icon": {
+            "kind": "tile",
+            "name": "FileArchive",
+            "tint": "amber"
+          },
+          "id": "file::f::C:\\Users\\You\\Documents\\backup.zip",
+          "isPicture": false,
+          "keywords": [
+            "C:\\Users\\You\\Documents\\backup.zip",
+            "C:\\Users\\You\\Documents"
+          ],
+          "openLocation": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You\\Documents\\backup.zip"
+                },
+                "cmd": "open_path_location"
+              }
+            ]
+          },
+          "run": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You\\Documents\\backup.zip"
+                },
+                "cmd": "open_path"
+              }
+            ]
+          },
+          "shellPath": "C:\\Users\\You\\Documents\\backup.zip",
+          "showProperties": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You\\Documents\\backup.zip"
+                },
+                "cmd": "show_path_properties"
+              }
+            ]
+          },
+          "subtitle": "C:\\Users\\You\\Documents",
+          "title": "backup.zip"
+        },
+        {
+          "dragFile": {
+            "calls": [
+              {
+                "args": {
+                  "paths": [
+                    "C:\\Users\\You\\Documents\\data.xyz"
+                  ]
+                },
+                "cmd": "start_file_drag"
+              }
+            ]
+          },
+          "historyTitle": "data.xyz",
+          "icon": {
+            "kind": "tile",
+            "name": "File",
+            "tint": "slate"
+          },
+          "id": "file::f::C:\\Users\\You\\Documents\\data.xyz",
+          "isPicture": false,
+          "keywords": [
+            "C:\\Users\\You\\Documents\\data.xyz",
+            "C:\\Users\\You\\Documents"
+          ],
+          "openLocation": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You\\Documents\\data.xyz"
+                },
+                "cmd": "open_path_location"
+              }
+            ]
+          },
+          "run": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You\\Documents\\data.xyz"
+                },
+                "cmd": "open_path"
+              }
+            ]
+          },
+          "shellPath": "C:\\Users\\You\\Documents\\data.xyz",
+          "showProperties": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You\\Documents\\data.xyz"
+                },
+                "cmd": "show_path_properties"
+              }
+            ]
+          },
+          "subtitle": "C:\\Users\\You\\Documents",
+          "title": "data.xyz"
+        },
+        {
+          "dragFile": {
+            "calls": [
+              {
+                "args": {
+                  "paths": [
+                    "C:\\Users\\You\\Documents\\notes.txt"
+                  ]
+                },
+                "cmd": "start_file_drag"
+              }
+            ]
+          },
+          "historyTitle": "notes.txt",
+          "icon": {
+            "kind": "tile",
+            "name": "FileText",
+            "tint": "slate"
+          },
+          "id": "file::f::C:\\Users\\You\\Documents\\notes.txt",
+          "isPicture": false,
+          "keywords": [
+            "C:\\Users\\You\\Documents\\notes.txt",
+            "C:\\Users\\You\\Documents"
+          ],
+          "openLocation": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You\\Documents\\notes.txt"
+                },
+                "cmd": "open_path_location"
+              }
+            ]
+          },
+          "run": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You\\Documents\\notes.txt"
+                },
+                "cmd": "open_path"
+              }
+            ]
+          },
+          "shellPath": "C:\\Users\\You\\Documents\\notes.txt",
+          "showProperties": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You\\Documents\\notes.txt"
+                },
+                "cmd": "show_path_properties"
+              }
+            ]
+          },
+          "subtitle": "C:\\Users\\You\\Documents",
+          "title": "notes.txt"
+        },
+        {
+          "dragFile": {
+            "calls": [
+              {
+                "args": {
+                  "paths": [
+                    "C:\\Users\\You\\Pictures\\broken.png"
+                  ]
+                },
+                "cmd": "start_file_drag"
+              }
+            ]
+          },
+          "historyTitle": "broken.png",
+          "icon": {
+            "kind": "tile",
+            "name": "FileImage",
+            "tint": "amber"
+          },
+          "id": "file::f::C:\\Users\\You\\Pictures\\broken.png",
+          "isPicture": true,
+          "keywords": [
+            "C:\\Users\\You\\Pictures\\broken.png",
+            "C:\\Users\\You\\Pictures"
+          ],
+          "openLocation": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You\\Pictures\\broken.png"
+                },
+                "cmd": "open_path_location"
+              }
+            ]
+          },
+          "run": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You\\Pictures\\broken.png"
+                },
+                "cmd": "open_path"
+              }
+            ]
+          },
+          "shellPath": "C:\\Users\\You\\Pictures\\broken.png",
+          "showProperties": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You\\Pictures\\broken.png"
+                },
+                "cmd": "show_path_properties"
+              }
+            ]
+          },
+          "subtitle": "C:\\Users\\You\\Pictures",
+          "title": "broken.png"
+        },
+        {
+          "dragFile": {
+            "calls": [
+              {
+                "args": {
+                  "paths": [
+                    "C:\\Users\\You\\Pictures\\PHOTO.JPG"
+                  ]
+                },
+                "cmd": "start_file_drag"
+              }
+            ]
+          },
+          "historyTitle": "PHOTO.JPG",
+          "icon": {
+            "kind": "tile",
+            "name": "FileImage",
+            "tint": "amber"
+          },
+          "id": "file::f::C:\\Users\\You\\Pictures\\PHOTO.JPG",
+          "isPicture": true,
+          "keywords": [
+            "C:\\Users\\You\\Pictures\\PHOTO.JPG",
+            "C:\\Users\\You\\Pictures"
+          ],
+          "openLocation": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You\\Pictures\\PHOTO.JPG"
+                },
+                "cmd": "open_path_location"
+              }
+            ]
+          },
+          "run": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You\\Pictures\\PHOTO.JPG"
+                },
+                "cmd": "open_path"
+              }
+            ]
+          },
+          "shellPath": "C:\\Users\\You\\Pictures\\PHOTO.JPG",
+          "showProperties": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You\\Pictures\\PHOTO.JPG"
+                },
+                "cmd": "show_path_properties"
+              }
+            ]
+          },
+          "subtitle": "C:\\Users\\You\\Pictures",
+          "title": "PHOTO.JPG"
+        },
+        {
+          "dragFile": {
+            "calls": [
+              {
+                "args": {
+                  "paths": [
+                    "C:\\Users\\You\\Videos\\clip.ts"
+                  ]
+                },
+                "cmd": "start_file_drag"
+              }
+            ]
+          },
+          "historyTitle": "clip.ts",
+          "icon": {
+            "kind": "tile",
+            "name": "FileVideo",
+            "tint": "rose"
+          },
+          "id": "file::f::C:\\Users\\You\\Videos\\clip.ts",
+          "isPicture": false,
+          "keywords": [
+            "C:\\Users\\You\\Videos\\clip.ts",
+            "C:\\Users\\You\\Videos"
+          ],
+          "openLocation": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You\\Videos\\clip.ts"
+                },
+                "cmd": "open_path_location"
+              }
+            ]
+          },
+          "run": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You\\Videos\\clip.ts"
+                },
+                "cmd": "open_path"
+              }
+            ]
+          },
+          "shellPath": "C:\\Users\\You\\Videos\\clip.ts",
+          "showProperties": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You\\Videos\\clip.ts"
+                },
+                "cmd": "show_path_properties"
+              }
+            ]
+          },
+          "subtitle": "C:\\Users\\You\\Videos",
+          "title": "clip.ts"
+        }
+      ],
+      "label": "Files & Folders"
+    }
+  ]
+}

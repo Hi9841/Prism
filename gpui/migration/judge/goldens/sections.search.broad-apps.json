@@ -1,0 +1,565 @@
+{
+  "flatIds": [
+    "calc::2.718281828459045",
+    "file::d::C:\\Users\\You\\Desktop",
+    "file::d::C:\\Users\\You",
+    "file::d::C:\\Users\\You\\Documents",
+    "app::Microsoft.WindowsTerminal_8wekyb3d8bbwe!App",
+    "app::steam",
+    "app::relative-tool",
+    "app::notepad",
+    "app::calendar",
+    "app::share-tool"
+  ],
+  "sections": [
+    {
+      "collapsed": false,
+      "collapsible": false,
+      "id": "calc",
+      "items": [
+        {
+          "historyTitle": "Calculate 2.71828",
+          "icon": {
+            "kind": "tile",
+            "name": "Calculator",
+            "tint": "iris"
+          },
+          "id": "calc::2.718281828459045",
+          "run": {
+            "calls": [
+              {
+                "args": {
+                  "text": "2.71828"
+                },
+                "cmd": "clipboard.writeText"
+              }
+            ]
+          },
+          "subtitle": "Copy result to clipboard",
+          "title": "2.71828",
+          "toastDetail": "2.71828"
+        }
+      ],
+      "label": "Calculator"
+    },
+    {
+      "collapsed": false,
+      "collapsible": false,
+      "id": "quick",
+      "items": [
+        {
+          "dragFile": {
+            "calls": [
+              {
+                "args": {
+                  "paths": [
+                    "C:\\Users\\You\\Desktop"
+                  ]
+                },
+                "cmd": "start_file_drag"
+              }
+            ]
+          },
+          "historyTitle": "Desktop",
+          "icon": {
+            "kind": "tile",
+            "name": "Monitor",
+            "tint": "azure"
+          },
+          "id": "file::d::C:\\Users\\You\\Desktop",
+          "keywords": [
+            "open",
+            "folder",
+            "files",
+            "desktop",
+            "C:\\Users\\You\\Desktop"
+          ],
+          "openLocation": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You\\Desktop"
+                },
+                "cmd": "open_path_location"
+              }
+            ]
+          },
+          "quickAccessKind": "desktop",
+          "run": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You\\Desktop"
+                },
+                "cmd": "open_path"
+              }
+            ]
+          },
+          "shellPath": "C:\\Users\\You\\Desktop",
+          "showProperties": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You\\Desktop"
+                },
+                "cmd": "show_path_properties"
+              }
+            ]
+          },
+          "subtitle": "C:\\Users\\You\\Desktop",
+          "title": "Desktop"
+        },
+        {
+          "dragFile": {
+            "calls": [
+              {
+                "args": {
+                  "paths": [
+                    "C:\\Users\\You"
+                  ]
+                },
+                "cmd": "start_file_drag"
+              }
+            ]
+          },
+          "historyTitle": "Home",
+          "icon": {
+            "kind": "tile",
+            "name": "House",
+            "tint": "iris"
+          },
+          "id": "file::d::C:\\Users\\You",
+          "keywords": [
+            "open",
+            "folder",
+            "files",
+            "home",
+            "C:\\Users\\You"
+          ],
+          "openLocation": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You"
+                },
+                "cmd": "open_path_location"
+              }
+            ]
+          },
+          "quickAccessKind": "home",
+          "run": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You"
+                },
+                "cmd": "open_path"
+              }
+            ]
+          },
+          "shellPath": "C:\\Users\\You",
+          "showProperties": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You"
+                },
+                "cmd": "show_path_properties"
+              }
+            ]
+          },
+          "subtitle": "C:\\Users\\You",
+          "title": "Home"
+        },
+        {
+          "dragFile": {
+            "calls": [
+              {
+                "args": {
+                  "paths": [
+                    "C:\\Users\\You\\Documents"
+                  ]
+                },
+                "cmd": "start_file_drag"
+              }
+            ]
+          },
+          "historyTitle": "Documents",
+          "icon": {
+            "kind": "tile",
+            "name": "FileText",
+            "tint": "slate"
+          },
+          "id": "file::d::C:\\Users\\You\\Documents",
+          "keywords": [
+            "open",
+            "folder",
+            "files",
+            "documents",
+            "C:\\Users\\You\\Documents"
+          ],
+          "openLocation": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You\\Documents"
+                },
+                "cmd": "open_path_location"
+              }
+            ]
+          },
+          "quickAccessKind": "documents",
+          "run": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You\\Documents"
+                },
+                "cmd": "open_path"
+              }
+            ]
+          },
+          "shellPath": "C:\\Users\\You\\Documents",
+          "showProperties": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You\\Documents"
+                },
+                "cmd": "show_path_properties"
+              }
+            ]
+          },
+          "subtitle": "C:\\Users\\You\\Documents",
+          "title": "Documents"
+        }
+      ],
+      "label": "Quick Access"
+    },
+    {
+      "collapsed": false,
+      "collapsible": false,
+      "groups": [],
+      "id": "apps",
+      "items": [
+        {
+          "appId": "Microsoft.WindowsTerminal_8wekyb3d8bbwe!App",
+          "historyTitle": "Terminal",
+          "icon": {
+            "kind": "app",
+            "name": "Terminal"
+          },
+          "id": "app::Microsoft.WindowsTerminal_8wekyb3d8bbwe!App",
+          "run": {
+            "calls": [
+              {
+                "args": {
+                  "id": "Microsoft.WindowsTerminal_8wekyb3d8bbwe!App"
+                },
+                "cmd": "launch_app"
+              }
+            ]
+          },
+          "subtitle": "Application",
+          "title": "Terminal"
+        },
+        {
+          "appId": "steam",
+          "dragFile": {
+            "calls": [
+              {
+                "args": {
+                  "paths": [
+                    "C:\\Program Files (x86)\\Steam\\steam.exe"
+                  ]
+                },
+                "cmd": "start_file_drag"
+              }
+            ]
+          },
+          "historyTitle": "Steam",
+          "icon": {
+            "kind": "app",
+            "name": "Steam"
+          },
+          "id": "app::steam",
+          "openLocation": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Program Files (x86)\\Steam\\steam.exe"
+                },
+                "cmd": "open_path_location"
+              }
+            ]
+          },
+          "run": {
+            "calls": [
+              {
+                "args": {
+                  "id": "steam"
+                },
+                "cmd": "launch_app"
+              }
+            ]
+          },
+          "runAsAdmin": {
+            "calls": [
+              {
+                "args": {
+                  "id": "steam"
+                },
+                "cmd": "launch_app_as_admin"
+              }
+            ]
+          },
+          "shellPath": "C:\\Program Files (x86)\\Steam\\steam.exe",
+          "showProperties": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Program Files (x86)\\Steam\\steam.exe"
+                },
+                "cmd": "show_path_properties"
+              }
+            ]
+          },
+          "subtitle": "Application",
+          "title": "Steam",
+          "toggleTaskbarPin": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Program Files (x86)\\Steam\\steam.exe"
+                },
+                "cmd": "is_pinned_to_taskbar"
+              },
+              {
+                "args": {
+                  "path": "C:\\Program Files (x86)\\Steam\\steam.exe",
+                  "pinned": true
+                },
+                "cmd": "set_taskbar_pinned"
+              }
+            ]
+          }
+        },
+        {
+          "appId": "relative-tool",
+          "historyTitle": "Relative Tool",
+          "icon": {
+            "kind": "app",
+            "name": "Relative Tool"
+          },
+          "id": "app::relative-tool",
+          "run": {
+            "calls": [
+              {
+                "args": {
+                  "id": "relative-tool"
+                },
+                "cmd": "launch_app"
+              }
+            ]
+          },
+          "runAsAdmin": {
+            "calls": [
+              {
+                "args": {
+                  "id": "relative-tool"
+                },
+                "cmd": "launch_app_as_admin"
+              }
+            ]
+          },
+          "subtitle": "Application",
+          "title": "Relative Tool"
+        },
+        {
+          "appId": "notepad",
+          "dragFile": {
+            "calls": [
+              {
+                "args": {
+                  "paths": [
+                    "C:\\Windows\\System32\\notepad.exe"
+                  ]
+                },
+                "cmd": "start_file_drag"
+              }
+            ]
+          },
+          "historyTitle": "Notepad",
+          "icon": {
+            "kind": "app",
+            "name": "Notepad"
+          },
+          "id": "app::notepad",
+          "openLocation": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Windows\\System32\\notepad.exe"
+                },
+                "cmd": "open_path_location"
+              }
+            ]
+          },
+          "run": {
+            "calls": [
+              {
+                "args": {
+                  "id": "notepad"
+                },
+                "cmd": "launch_app"
+              }
+            ]
+          },
+          "runAsAdmin": {
+            "calls": [
+              {
+                "args": {
+                  "id": "notepad"
+                },
+                "cmd": "launch_app_as_admin"
+              }
+            ]
+          },
+          "shellPath": "C:\\Windows\\System32\\notepad.exe",
+          "showProperties": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Windows\\System32\\notepad.exe"
+                },
+                "cmd": "show_path_properties"
+              }
+            ]
+          },
+          "subtitle": "Application",
+          "title": "Notepad",
+          "toggleTaskbarPin": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Windows\\System32\\notepad.exe"
+                },
+                "cmd": "is_pinned_to_taskbar"
+              },
+              {
+                "args": {
+                  "path": "C:\\Windows\\System32\\notepad.exe",
+                  "pinned": true
+                },
+                "cmd": "set_taskbar_pinned"
+              }
+            ]
+          }
+        },
+        {
+          "appId": "calendar",
+          "historyTitle": "Calendar",
+          "icon": {
+            "kind": "app",
+            "name": "Calendar"
+          },
+          "id": "app::calendar",
+          "run": {
+            "calls": [
+              {
+                "args": {
+                  "id": "calendar"
+                },
+                "cmd": "launch_app"
+              }
+            ]
+          },
+          "subtitle": "Application",
+          "title": "Calendar"
+        },
+        {
+          "appId": "share-tool",
+          "dragFile": {
+            "calls": [
+              {
+                "args": {
+                  "paths": [
+                    "\\\\server\\share\\tool.exe"
+                  ]
+                },
+                "cmd": "start_file_drag"
+              }
+            ]
+          },
+          "historyTitle": "Share Tool",
+          "icon": {
+            "kind": "app",
+            "name": "Share Tool"
+          },
+          "id": "app::share-tool",
+          "openLocation": {
+            "calls": [
+              {
+                "args": {
+                  "path": "\\\\server\\share\\tool.exe"
+                },
+                "cmd": "open_path_location"
+              }
+            ]
+          },
+          "run": {
+            "calls": [
+              {
+                "args": {
+                  "id": "share-tool"
+                },
+                "cmd": "launch_app"
+              }
+            ]
+          },
+          "runAsAdmin": {
+            "calls": [
+              {
+                "args": {
+                  "id": "share-tool"
+                },
+                "cmd": "launch_app_as_admin"
+              }
+            ]
+          },
+          "shellPath": "\\\\server\\share\\tool.exe",
+          "showProperties": {
+            "calls": [
+              {
+                "args": {
+                  "path": "\\\\server\\share\\tool.exe"
+                },
+                "cmd": "show_path_properties"
+              }
+            ]
+          },
+          "subtitle": "Application",
+          "title": "Share Tool",
+          "toggleTaskbarPin": {
+            "calls": [
+              {
+                "args": {
+                  "path": "\\\\server\\share\\tool.exe"
+                },
+                "cmd": "is_pinned_to_taskbar"
+              },
+              {
+                "args": {
+                  "path": "\\\\server\\share\\tool.exe",
+                  "pinned": true
+                },
+                "cmd": "set_taskbar_pinned"
+              }
+            ]
+          }
+        }
+      ],
+      "label": "Apps"
+    }
+  ]
+}

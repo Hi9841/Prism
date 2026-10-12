@@ -1,0 +1,14 @@
+{
+  "history": [
+    {
+      "id": "app::chrome",
+      "title": "Chrome",
+      "ts": 5
+    },
+    {
+      "id": "app::extra",
+      "title": "Extra fields",
+      "ts": 3
+    }
+  ]
+}

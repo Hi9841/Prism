@@ -1,0 +1,36 @@
+{
+  "flatIds": [
+    "action::settings.nightlight"
+  ],
+  "sections": [
+    {
+      "collapsed": false,
+      "collapsible": false,
+      "id": "settings",
+      "items": [
+        {
+          "historyTitle": "Night Light",
+          "icon": {
+            "kind": "tile",
+            "name": "Moon",
+            "tint": "amber"
+          },
+          "id": "action::settings.nightlight",
+          "run": {
+            "calls": [
+              {
+                "args": {
+                  "id": "settings.nightlight"
+                },
+                "cmd": "execute_action"
+              }
+            ]
+          },
+          "subtitle": "Windows Settings · from your wording",
+          "title": "Night Light"
+        }
+      ],
+      "label": "Settings"
+    }
+  ]
+}
