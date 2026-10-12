@@ -463,10 +463,14 @@ mod tests {
         assert!(total >= 14);
 
         let gen = AtomicU64::new(0);
+        // Results named like the query: a query with no such file gets typo
+        // matches for the other targets instead.
         let hits = |query: &str| {
             search(query, Some(5), &db, &gen, &[], total, false, true)
                 .items
-                .len()
+                .iter()
+                .filter(|item| item.name.starts_with(query))
+                .count()
         };
 
         assert_eq!(hits("deep_target"), 1);

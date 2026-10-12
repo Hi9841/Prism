@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 
 use super::db::Database;
-use super::name_index::{NameIndex, NameQuery};
+use super::name_index::{IndexCandidates, NameIndex, NameQuery};
 use super::types::{
     CandidateEntry, FileEntry, FileSearchError, FileSearchErrorKind, FileSearchResponse,
     VolumeCoverage,
@@ -114,7 +114,10 @@ pub fn search_with_generation(
     let cancelled = || is_cancelled(search_generation, generation);
 
     let candidate_limit = (limit * 15).max(150);
-    let candidates = match candidates(
+    let IndexCandidates {
+        entries: candidates,
+        typos,
+    } = match candidates(
         db,
         names,
         query_trimmed,
@@ -171,6 +174,8 @@ pub fn search_with_generation(
             scored.push((score, candidate));
         }
     }
+    // Typo matches carry their rank: below every scored name.
+    scored.extend(typos.into_iter().map(|(candidate, rank)| (rank, candidate)));
 
     scored.sort_by(result_order);
 
@@ -258,7 +263,8 @@ pub fn result_order(
 }
 
 /// Fallback-catalog candidates come from the in-memory name index when it can
-/// answer, else from the SQL stages. NTFS volumes always use SQL.
+/// answer, else from the SQL stages (no typo matches). NTFS volumes always use
+/// SQL.
 #[allow(clippy::too_many_arguments)]
 fn candidates(
     db: &Database,
@@ -269,15 +275,20 @@ fn candidates(
     limit: usize,
     candidate_limit: usize,
     cancelled: &(dyn Fn() -> bool + Sync),
-) -> Result<Vec<CandidateEntry>, String> {
+) -> Result<IndexCandidates, String> {
     if let Some(names) = names {
         let parsed = NameQuery::new(query_lower, tokens);
         if let Some(mut found) = names.candidates(db, &parsed, limit, cancelled)? {
-            found.extend(db.ntfs_candidates_until(query, candidate_limit, cancelled)?);
+            found
+                .entries
+                .extend(db.ntfs_candidates_until(query, candidate_limit, cancelled)?);
             return Ok(found);
         }
     }
-    db.search_candidates_until(query, candidate_limit, cancelled)
+    Ok(IndexCandidates {
+        entries: db.search_candidates_until(query, candidate_limit, cancelled)?,
+        typos: Vec::new(),
+    })
 }
 
 fn is_cancelled(search_generation: &AtomicU64, generation: u64) -> bool {
