@@ -11,10 +11,16 @@ $package = Get-Content -LiteralPath (Join-Path $repoRoot "package.json") -Raw | 
 $tauri = Get-Content -LiteralPath (Join-Path $repoRoot "src-tauri\tauri.conf.json") -Raw | ConvertFrom-Json
 $cargoToml = Get-Content -LiteralPath (Join-Path $repoRoot "src-tauri\Cargo.toml") -Raw
 $cargoLock = Get-Content -LiteralPath (Join-Path $repoRoot "src-tauri\Cargo.lock") -Raw
+$gpuiToml = Get-Content -LiteralPath (Join-Path $repoRoot "gpui\Cargo.toml") -Raw
 
 $cargoVersion = [regex]::Match(
   $cargoToml,
   '(?ms)^\[package\].*?^version\s*=\s*"([^"]+)"'
+).Groups[1].Value
+# The GPUI app (gpui/) ships the release; its workspace version must match.
+$gpuiVersion = [regex]::Match(
+  $gpuiToml,
+  '(?ms)^\[workspace\.package\].*?^version\s*=\s*"([^"]+)"'
 ).Groups[1].Value
 $lockVersion = [regex]::Match(
   $cargoLock,
@@ -25,10 +31,11 @@ $versions = @(
   [string]$package.version,
   [string]$tauri.version,
   $cargoVersion,
-  $lockVersion
+  $lockVersion,
+  $gpuiVersion
 )
 if ($versions | Where-Object { $_ -ne $versions[0] }) {
-  throw "Version mismatch: package=$($versions[0]), tauri=$($versions[1]), cargo=$($versions[2]), lock=$($versions[3])"
+  throw "Version mismatch: package=$($versions[0]), tauri=$($versions[1]), cargo=$($versions[2]), lock=$($versions[3]), gpui=$($versions[4])"
 }
 
 if ($ExpectedTag -and $ExpectedTag -notin @($versions[0], "v$($versions[0])")) {
