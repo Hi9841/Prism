@@ -1,0 +1,29 @@
+{
+  "settings": {
+    "accent": "azure",
+    "alwaysOnTop": true,
+    "appGroups": [],
+    "pinnedApps": [],
+    "quickAccess": [
+      "home",
+      "desktop",
+      "downloads",
+      "documents",
+      "pictures",
+      "music"
+    ],
+    "quickAccessCollapsed": false,
+    "sectionOrder": [
+      "pinned",
+      "recent",
+      "quick",
+      "apps"
+    ],
+    "shortcut": "Win",
+    "taskbarAlignment": "center",
+    "taskbarScrollVolume": true,
+    "theme": "system",
+    "viewZoom": 100,
+    "width": 640
+  }
+}

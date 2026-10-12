@@ -1,0 +1,53 @@
+file	class	it_or_test	guards
+src/lib/math.test.ts	portable	9	exact arithmetic, rejection, formatNumber, isMathLike
+src/lib/search.test.ts	portable	19	fuzzy score order, rank, limits, alias collapse
+src/lib/types.test.ts	portable	5	pin, picture, and elevation path predicates
+src/lib/query.test.ts	portable	1	phase1 payload must match the typed query
+src/lib/launcherMotion.test.ts	portable	6	open, present, close, and hide invocation
+src/lib/iconLoading.test.ts	portable	3	which icons to fetch and retry delays
+src/features/updater/update-policy.test.ts	portable	2	background and forced update check intervals
+src/features/updater/update-progress.test.ts	portable	2	download percent rounding and clamps
+src/state/app.test.ts	internal-bound	23	sanitizeSettings and sanitizeHistory live in the React module; zoom, reorder, and elevation cases are re-expressed through types.ts
+src/features/palette/sections.test.ts	internal-bound	41	section order and row identity, via lucide icons and bridge closures
+src/features/palette/phase1.test.ts	internal-bound	4	palette items that call the Tauri bridge
+src/features/palette/windowsSettings.test.ts	internal-bound	2	settings URIs through a mocked bridge and lucide icons
+src/features/palette/Palette.test.tsx	internal-bound	6	DOM render of the palette
+src/components/SettingsSheet.test.tsx	internal-bound	4	DOM render of settings
+src/components/PowerMenu.test.tsx	internal-bound	2	DOM render of the power menu
+src/features/updater/UpdateControl.test.tsx	internal-bound	6	DOM updater plus the Tauri updater plugin
+src/state/app.behavior.test.tsx	internal-bound	7	save and quit through a mocked bridge
+src/state/palette.behavior.test.tsx	internal-bound	4	phase1 paint timing inside the React provider
+src/App.motion.test.tsx	internal-bound	7	DOM launcher motion
+src/lib/tokens.motion.test.ts	internal-bound	3	reads tokens.css
+src/lib/transientUi.test.ts	internal-bound	1	in-process listener set
+landing/landing.test.ts	internal-bound	7	reads landing HTML from disk
+src-tauri/shell-hook/src/lib.rs	internal-bound	5	private shell-hook tests
+src-tauri/src/apps.rs	internal-bound	15	private app-index tests
+src-tauri/src/audio.rs	internal-bound	12	private audio tests
+src-tauri/src/audio_hook.rs	internal-bound	6	private audio hook tests
+src-tauri/src/audio_osd.rs	internal-bound	5	private OSD tests
+src-tauri/src/drag.rs	internal-bound	6	private drag tests
+src-tauri/src/files.rs	internal-bound	21	private file helper tests
+src-tauri/src/lib.rs	internal-bound	18	private command and window tests
+src-tauri/src/power.rs	internal-bound	7	private power-plan tests
+src-tauri/src/start_menu.rs	internal-bound	2	private start-menu tests
+src-tauri/src/taskbar_alignment.rs	internal-bound	3	private taskbar alignment tests
+src-tauri/src/taskbar_customization.rs	internal-bound	3	private taskbar customization tests
+src-tauri/src/taskbar_icon_overlay.rs	internal-bound	1	private taskbar icon tests
+src-tauri/src/windows_settings.rs	internal-bound	1	private settings URI tests
+src-tauri/src/win_key.rs	internal-bound	48	private Win-key hook tests
+src-tauri/src/catalog/backend.rs	internal-bound	1	private catalog backend tests
+src-tauri/src/catalog/db.rs	internal-bound	12	private catalog db tests
+src-tauri/src/catalog/mod.rs	internal-bound	7	private catalog tests
+src-tauri/src/catalog/scanner.rs	internal-bound	4	private scanner tests
+src-tauri/src/catalog/search.rs	internal-bound	3	private catalog search tests
+src-tauri/src/catalog/volume.rs	internal-bound	8	private volume tests
+src-tauri/src/catalog/watcher.rs	internal-bound	11	private watcher tests
+src-tauri/src/catalog/ntfs/mod.rs	internal-bound	1	private NTFS tests
+src-tauri/src/catalog/ntfs/path.rs	internal-bound	5	private NTFS path tests
+src-tauri/src/catalog/ntfs/usn.rs	internal-bound	6	private USN tests
+src-tauri/src/query/catalog.rs	internal-bound	5	private query catalog tests
+src-tauri/src/query/jev.rs	internal-bound	7	private query tests
+src-tauri/src/query/mod.rs	internal-bound	7	private query tests
+src-tauri/src/query/open_windows.rs	internal-bound	2	private open-window tests
+src-tauri/src/query/score.rs	internal-bound	3	private score tests

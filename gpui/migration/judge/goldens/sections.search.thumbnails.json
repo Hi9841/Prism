@@ -1,0 +1,220 @@
+{
+  "flatIds": [
+    "app::Microsoft.WindowsCalculator_8wekyb3d8bbwe!App",
+    "app::portal",
+    "file::f::C:\\Users\\You\\Pictures\\cat.jpg",
+    "file::f::C:\\Users\\You\\catalog.txt"
+  ],
+  "sections": [
+    {
+      "collapsed": false,
+      "collapsible": false,
+      "groups": [],
+      "id": "apps",
+      "items": [
+        {
+          "appId": "Microsoft.WindowsCalculator_8wekyb3d8bbwe!App",
+          "historyTitle": "Calculator",
+          "icon": {
+            "kind": "app",
+            "name": "Calculator"
+          },
+          "id": "app::Microsoft.WindowsCalculator_8wekyb3d8bbwe!App",
+          "run": {
+            "calls": [
+              {
+                "args": {
+                  "id": "Microsoft.WindowsCalculator_8wekyb3d8bbwe!App"
+                },
+                "cmd": "launch_app"
+              }
+            ]
+          },
+          "subtitle": "Application",
+          "title": "Calculator"
+        },
+        {
+          "appId": "portal",
+          "dragFile": {
+            "calls": [
+              {
+                "args": {
+                  "paths": [
+                    "https://portal.example.com/"
+                  ]
+                },
+                "cmd": "start_file_drag"
+              }
+            ]
+          },
+          "historyTitle": "Company Portal",
+          "icon": {
+            "kind": "app",
+            "name": "Company Portal"
+          },
+          "id": "app::portal",
+          "openLocation": {
+            "calls": [
+              {
+                "args": {
+                  "path": "https://portal.example.com/"
+                },
+                "cmd": "open_path_location"
+              }
+            ]
+          },
+          "run": {
+            "calls": [
+              {
+                "args": {
+                  "id": "portal"
+                },
+                "cmd": "launch_app"
+              }
+            ]
+          },
+          "shellPath": "https://portal.example.com/",
+          "showProperties": {
+            "calls": [
+              {
+                "args": {
+                  "path": "https://portal.example.com/"
+                },
+                "cmd": "show_path_properties"
+              }
+            ]
+          },
+          "subtitle": "Application",
+          "title": "Company Portal"
+        }
+      ],
+      "label": "Apps"
+    },
+    {
+      "collapsed": false,
+      "collapsible": false,
+      "id": "files",
+      "items": [
+        {
+          "dragFile": {
+            "calls": [
+              {
+                "args": {
+                  "paths": [
+                    "C:\\Users\\You\\Pictures\\cat.jpg"
+                  ]
+                },
+                "cmd": "start_file_drag"
+              }
+            ]
+          },
+          "historyTitle": "cat.jpg",
+          "icon": {
+            "kind": "image",
+            "name": "cat.jpg",
+            "src": "data:image/png;base64,Q0FU"
+          },
+          "id": "file::f::C:\\Users\\You\\Pictures\\cat.jpg",
+          "isPicture": true,
+          "keywords": [
+            "C:\\Users\\You\\Pictures\\cat.jpg",
+            "C:\\Users\\You\\Pictures"
+          ],
+          "openLocation": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You\\Pictures\\cat.jpg"
+                },
+                "cmd": "open_path_location"
+              }
+            ]
+          },
+          "run": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You\\Pictures\\cat.jpg"
+                },
+                "cmd": "open_path"
+              }
+            ]
+          },
+          "shellPath": "C:\\Users\\You\\Pictures\\cat.jpg",
+          "showProperties": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You\\Pictures\\cat.jpg"
+                },
+                "cmd": "show_path_properties"
+              }
+            ]
+          },
+          "subtitle": "C:\\Users\\You\\Pictures",
+          "title": "cat.jpg"
+        },
+        {
+          "dragFile": {
+            "calls": [
+              {
+                "args": {
+                  "paths": [
+                    "C:\\Users\\You\\catalog.txt"
+                  ]
+                },
+                "cmd": "start_file_drag"
+              }
+            ]
+          },
+          "historyTitle": "catalog.txt",
+          "icon": {
+            "kind": "tile",
+            "name": "FileText",
+            "tint": "slate"
+          },
+          "id": "file::f::C:\\Users\\You\\catalog.txt",
+          "isPicture": false,
+          "keywords": [
+            "C:\\Users\\You\\catalog.txt",
+            "C:\\Users\\You"
+          ],
+          "openLocation": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You\\catalog.txt"
+                },
+                "cmd": "open_path_location"
+              }
+            ]
+          },
+          "run": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You\\catalog.txt"
+                },
+                "cmd": "open_path"
+              }
+            ]
+          },
+          "shellPath": "C:\\Users\\You\\catalog.txt",
+          "showProperties": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You\\catalog.txt"
+                },
+                "cmd": "show_path_properties"
+              }
+            ]
+          },
+          "subtitle": "C:\\Users\\You",
+          "title": "catalog.txt"
+        }
+      ],
+      "label": "Files & Folders"
+    }
+  ]
+}

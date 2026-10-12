@@ -1,0 +1,46 @@
+{
+  "flatIds": [
+    "app::unknown-tool"
+  ],
+  "sections": [
+    {
+      "collapsed": false,
+      "collapsible": false,
+      "id": "apps",
+      "items": [
+        {
+          "appId": "unknown-tool",
+          "historyTitle": "Tool Box",
+          "icon": {
+            "kind": "app",
+            "name": "Tool Box"
+          },
+          "id": "app::unknown-tool",
+          "run": {
+            "calls": [
+              {
+                "args": {
+                  "id": "unknown-tool"
+                },
+                "cmd": "launch_app"
+              }
+            ]
+          },
+          "runAsAdmin": {
+            "calls": [
+              {
+                "args": {
+                  "id": "unknown-tool"
+                },
+                "cmd": "launch_app_as_admin"
+              }
+            ]
+          },
+          "subtitle": "Application",
+          "title": "Tool Box"
+        }
+      ],
+      "label": "Apps"
+    }
+  ]
+}

@@ -1,0 +1,577 @@
+{
+  "flatIds": [
+    "file::d::C:\\Users\\You",
+    "file::d::C:\\Users\\You\\Desktop",
+    "file::d::C:\\Users\\You\\Downloads",
+    "file::d::C:\\Users\\You\\Documents",
+    "file::d::C:\\Users\\You\\Pictures",
+    "file::d::C:\\Users\\You\\Music",
+    "app::alpha",
+    "app::angstrom",
+    "app::app-2b",
+    "app::app-3",
+    "app::app-10b",
+    "app::beta",
+    "app::delta",
+    "app::eclair"
+  ],
+  "sections": [
+    {
+      "collapsed": false,
+      "collapsible": true,
+      "id": "quick",
+      "items": [
+        {
+          "dragFile": {
+            "calls": [
+              {
+                "args": {
+                  "paths": [
+                    "C:\\Users\\You"
+                  ]
+                },
+                "cmd": "start_file_drag"
+              }
+            ]
+          },
+          "historyTitle": "Home",
+          "icon": {
+            "kind": "tile",
+            "name": "House",
+            "tint": "iris"
+          },
+          "id": "file::d::C:\\Users\\You",
+          "keywords": [
+            "open",
+            "folder",
+            "files",
+            "home",
+            "C:\\Users\\You"
+          ],
+          "openLocation": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You"
+                },
+                "cmd": "open_path_location"
+              }
+            ]
+          },
+          "quickAccessKind": "home",
+          "run": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You"
+                },
+                "cmd": "open_path"
+              }
+            ]
+          },
+          "shellPath": "C:\\Users\\You",
+          "showProperties": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You"
+                },
+                "cmd": "show_path_properties"
+              }
+            ]
+          },
+          "subtitle": "C:\\Users\\You",
+          "title": "Home"
+        },
+        {
+          "dragFile": {
+            "calls": [
+              {
+                "args": {
+                  "paths": [
+                    "C:\\Users\\You\\Desktop"
+                  ]
+                },
+                "cmd": "start_file_drag"
+              }
+            ]
+          },
+          "historyTitle": "Desktop",
+          "icon": {
+            "kind": "tile",
+            "name": "Monitor",
+            "tint": "azure"
+          },
+          "id": "file::d::C:\\Users\\You\\Desktop",
+          "keywords": [
+            "open",
+            "folder",
+            "files",
+            "desktop",
+            "C:\\Users\\You\\Desktop"
+          ],
+          "openLocation": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You\\Desktop"
+                },
+                "cmd": "open_path_location"
+              }
+            ]
+          },
+          "quickAccessKind": "desktop",
+          "run": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You\\Desktop"
+                },
+                "cmd": "open_path"
+              }
+            ]
+          },
+          "shellPath": "C:\\Users\\You\\Desktop",
+          "showProperties": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You\\Desktop"
+                },
+                "cmd": "show_path_properties"
+              }
+            ]
+          },
+          "subtitle": "C:\\Users\\You\\Desktop",
+          "title": "Desktop"
+        },
+        {
+          "dragFile": {
+            "calls": [
+              {
+                "args": {
+                  "paths": [
+                    "C:\\Users\\You\\Downloads"
+                  ]
+                },
+                "cmd": "start_file_drag"
+              }
+            ]
+          },
+          "historyTitle": "Downloads",
+          "icon": {
+            "kind": "tile",
+            "name": "Download",
+            "tint": "mint"
+          },
+          "id": "file::d::C:\\Users\\You\\Downloads",
+          "keywords": [
+            "open",
+            "folder",
+            "files",
+            "downloads",
+            "C:\\Users\\You\\Downloads"
+          ],
+          "openLocation": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You\\Downloads"
+                },
+                "cmd": "open_path_location"
+              }
+            ]
+          },
+          "quickAccessKind": "downloads",
+          "run": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You\\Downloads"
+                },
+                "cmd": "open_path"
+              }
+            ]
+          },
+          "shellPath": "C:\\Users\\You\\Downloads",
+          "showProperties": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You\\Downloads"
+                },
+                "cmd": "show_path_properties"
+              }
+            ]
+          },
+          "subtitle": "C:\\Users\\You\\Downloads",
+          "title": "Downloads"
+        },
+        {
+          "dragFile": {
+            "calls": [
+              {
+                "args": {
+                  "paths": [
+                    "C:\\Users\\You\\Documents"
+                  ]
+                },
+                "cmd": "start_file_drag"
+              }
+            ]
+          },
+          "historyTitle": "Documents",
+          "icon": {
+            "kind": "tile",
+            "name": "FileText",
+            "tint": "slate"
+          },
+          "id": "file::d::C:\\Users\\You\\Documents",
+          "keywords": [
+            "open",
+            "folder",
+            "files",
+            "documents",
+            "C:\\Users\\You\\Documents"
+          ],
+          "openLocation": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You\\Documents"
+                },
+                "cmd": "open_path_location"
+              }
+            ]
+          },
+          "quickAccessKind": "documents",
+          "run": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You\\Documents"
+                },
+                "cmd": "open_path"
+              }
+            ]
+          },
+          "shellPath": "C:\\Users\\You\\Documents",
+          "showProperties": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You\\Documents"
+                },
+                "cmd": "show_path_properties"
+              }
+            ]
+          },
+          "subtitle": "C:\\Users\\You\\Documents",
+          "title": "Documents"
+        },
+        {
+          "dragFile": {
+            "calls": [
+              {
+                "args": {
+                  "paths": [
+                    "C:\\Users\\You\\Pictures"
+                  ]
+                },
+                "cmd": "start_file_drag"
+              }
+            ]
+          },
+          "historyTitle": "Pictures",
+          "icon": {
+            "kind": "tile",
+            "name": "Images",
+            "tint": "amber"
+          },
+          "id": "file::d::C:\\Users\\You\\Pictures",
+          "keywords": [
+            "open",
+            "folder",
+            "files",
+            "pictures",
+            "C:\\Users\\You\\Pictures"
+          ],
+          "openLocation": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You\\Pictures"
+                },
+                "cmd": "open_path_location"
+              }
+            ]
+          },
+          "quickAccessKind": "pictures",
+          "run": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You\\Pictures"
+                },
+                "cmd": "open_path"
+              }
+            ]
+          },
+          "shellPath": "C:\\Users\\You\\Pictures",
+          "showProperties": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You\\Pictures"
+                },
+                "cmd": "show_path_properties"
+              }
+            ]
+          },
+          "subtitle": "C:\\Users\\You\\Pictures",
+          "title": "Pictures"
+        },
+        {
+          "dragFile": {
+            "calls": [
+              {
+                "args": {
+                  "paths": [
+                    "C:\\Users\\You\\Music"
+                  ]
+                },
+                "cmd": "start_file_drag"
+              }
+            ]
+          },
+          "historyTitle": "Music",
+          "icon": {
+            "kind": "tile",
+            "name": "Music",
+            "tint": "rose"
+          },
+          "id": "file::d::C:\\Users\\You\\Music",
+          "keywords": [
+            "open",
+            "folder",
+            "files",
+            "music",
+            "C:\\Users\\You\\Music"
+          ],
+          "openLocation": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You\\Music"
+                },
+                "cmd": "open_path_location"
+              }
+            ]
+          },
+          "quickAccessKind": "music",
+          "run": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You\\Music"
+                },
+                "cmd": "open_path"
+              }
+            ]
+          },
+          "shellPath": "C:\\Users\\You\\Music",
+          "showProperties": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You\\Music"
+                },
+                "cmd": "show_path_properties"
+              }
+            ]
+          },
+          "subtitle": "C:\\Users\\You\\Music",
+          "title": "Music"
+        }
+      ],
+      "label": "Quick Access"
+    },
+    {
+      "collapsed": false,
+      "collapsible": false,
+      "groups": [],
+      "id": "apps",
+      "items": [
+        {
+          "appId": "alpha",
+          "historyTitle": "Alpha",
+          "icon": {
+            "kind": "app",
+            "name": "Alpha"
+          },
+          "id": "app::alpha",
+          "run": {
+            "calls": [
+              {
+                "args": {
+                  "id": "alpha"
+                },
+                "cmd": "launch_app"
+              }
+            ]
+          },
+          "subtitle": "Application",
+          "title": "Alpha"
+        },
+        {
+          "appId": "angstrom",
+          "historyTitle": "Ångström",
+          "icon": {
+            "kind": "app",
+            "name": "Ångström"
+          },
+          "id": "app::angstrom",
+          "run": {
+            "calls": [
+              {
+                "args": {
+                  "id": "angstrom"
+                },
+                "cmd": "launch_app"
+              }
+            ]
+          },
+          "subtitle": "Application",
+          "title": "Ångström"
+        },
+        {
+          "appId": "app-2b",
+          "historyTitle": "App 2",
+          "icon": {
+            "kind": "app",
+            "name": "App 2"
+          },
+          "id": "app::app-2b",
+          "run": {
+            "calls": [
+              {
+                "args": {
+                  "id": "app-2b"
+                },
+                "cmd": "launch_app"
+              }
+            ]
+          },
+          "subtitle": "Application",
+          "title": "App 2"
+        },
+        {
+          "appId": "app-3",
+          "historyTitle": "app 3",
+          "icon": {
+            "kind": "app",
+            "name": "app 3"
+          },
+          "id": "app::app-3",
+          "run": {
+            "calls": [
+              {
+                "args": {
+                  "id": "app-3"
+                },
+                "cmd": "launch_app"
+              }
+            ]
+          },
+          "subtitle": "Application",
+          "title": "app 3"
+        },
+        {
+          "appId": "app-10b",
+          "historyTitle": "App 10",
+          "icon": {
+            "kind": "app",
+            "name": "App 10"
+          },
+          "id": "app::app-10b",
+          "run": {
+            "calls": [
+              {
+                "args": {
+                  "id": "app-10b"
+                },
+                "cmd": "launch_app"
+              }
+            ]
+          },
+          "subtitle": "Application",
+          "title": "App 10"
+        },
+        {
+          "appId": "beta",
+          "historyTitle": "beta",
+          "icon": {
+            "kind": "app",
+            "name": "beta"
+          },
+          "id": "app::beta",
+          "run": {
+            "calls": [
+              {
+                "args": {
+                  "id": "beta"
+                },
+                "cmd": "launch_app"
+              }
+            ]
+          },
+          "subtitle": "Application",
+          "title": "beta"
+        },
+        {
+          "appId": "delta",
+          "historyTitle": "delta",
+          "icon": {
+            "kind": "app",
+            "name": "delta"
+          },
+          "id": "app::delta",
+          "run": {
+            "calls": [
+              {
+                "args": {
+                  "id": "delta"
+                },
+                "cmd": "launch_app"
+              }
+            ]
+          },
+          "subtitle": "Application",
+          "title": "delta"
+        },
+        {
+          "appId": "eclair",
+          "historyTitle": "Éclair",
+          "icon": {
+            "kind": "app",
+            "name": "Éclair"
+          },
+          "id": "app::eclair",
+          "run": {
+            "calls": [
+              {
+                "args": {
+                  "id": "eclair"
+                },
+                "cmd": "launch_app"
+              }
+            ]
+          },
+          "subtitle": "Application",
+          "title": "Éclair"
+        }
+      ],
+      "label": "Apps"
+    }
+  ]
+}

@@ -1,0 +1,26 @@
+{
+  "settings": {
+    "accent": "iris",
+    "alwaysOnTop": true,
+    "appGroups": [],
+    "pinnedApps": [
+      "chrome"
+    ],
+    "quickAccess": [
+      "downloads"
+    ],
+    "quickAccessCollapsed": false,
+    "sectionOrder": [
+      "apps",
+      "pinned",
+      "recent",
+      "quick"
+    ],
+    "shortcut": "Win",
+    "taskbarAlignment": "center",
+    "taskbarScrollVolume": true,
+    "theme": "system",
+    "viewZoom": 100,
+    "width": 640
+  }
+}

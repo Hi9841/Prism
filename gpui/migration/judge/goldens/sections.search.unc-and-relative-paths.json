@@ -1,0 +1,201 @@
+{
+  "flatIds": [
+    "app::share-tool",
+    "app::build-tools",
+    "app::snipping"
+  ],
+  "sections": [
+    {
+      "collapsed": false,
+      "collapsible": false,
+      "groups": [],
+      "id": "apps",
+      "items": [
+        {
+          "appId": "share-tool",
+          "dragFile": {
+            "calls": [
+              {
+                "args": {
+                  "paths": [
+                    "\\\\server\\share\\tool.exe"
+                  ]
+                },
+                "cmd": "start_file_drag"
+              }
+            ]
+          },
+          "historyTitle": "Share Tool",
+          "icon": {
+            "kind": "app",
+            "name": "Share Tool"
+          },
+          "id": "app::share-tool",
+          "openLocation": {
+            "calls": [
+              {
+                "args": {
+                  "path": "\\\\server\\share\\tool.exe"
+                },
+                "cmd": "open_path_location"
+              }
+            ]
+          },
+          "run": {
+            "calls": [
+              {
+                "args": {
+                  "id": "share-tool"
+                },
+                "cmd": "launch_app"
+              }
+            ]
+          },
+          "runAsAdmin": {
+            "calls": [
+              {
+                "args": {
+                  "id": "share-tool"
+                },
+                "cmd": "launch_app_as_admin"
+              }
+            ]
+          },
+          "shellPath": "\\\\server\\share\\tool.exe",
+          "showProperties": {
+            "calls": [
+              {
+                "args": {
+                  "path": "\\\\server\\share\\tool.exe"
+                },
+                "cmd": "show_path_properties"
+              }
+            ]
+          },
+          "subtitle": "Application",
+          "title": "Share Tool",
+          "toggleTaskbarPin": {
+            "calls": [
+              {
+                "args": {
+                  "path": "\\\\server\\share\\tool.exe"
+                },
+                "cmd": "is_pinned_to_taskbar"
+              },
+              {
+                "args": {
+                  "path": "\\\\server\\share\\tool.exe",
+                  "pinned": true
+                },
+                "cmd": "set_taskbar_pinned"
+              }
+            ]
+          }
+        },
+        {
+          "appId": "build-tools",
+          "dragFile": {
+            "calls": [
+              {
+                "args": {
+                  "paths": [
+                    "C:\\Tools\\build.bat"
+                  ]
+                },
+                "cmd": "start_file_drag"
+              }
+            ]
+          },
+          "historyTitle": "Build Tools",
+          "icon": {
+            "kind": "app",
+            "name": "Build Tools"
+          },
+          "id": "app::build-tools",
+          "openLocation": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Tools\\build.bat"
+                },
+                "cmd": "open_path_location"
+              }
+            ]
+          },
+          "run": {
+            "calls": [
+              {
+                "args": {
+                  "id": "build-tools"
+                },
+                "cmd": "launch_app"
+              }
+            ]
+          },
+          "runAsAdmin": {
+            "calls": [
+              {
+                "args": {
+                  "id": "build-tools"
+                },
+                "cmd": "launch_app_as_admin"
+              }
+            ]
+          },
+          "shellPath": "C:\\Tools\\build.bat",
+          "showProperties": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Tools\\build.bat"
+                },
+                "cmd": "show_path_properties"
+              }
+            ]
+          },
+          "subtitle": "Application",
+          "title": "Build Tools",
+          "toggleTaskbarPin": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Tools\\build.bat"
+                },
+                "cmd": "is_pinned_to_taskbar"
+              },
+              {
+                "args": {
+                  "path": "C:\\Tools\\build.bat",
+                  "pinned": true
+                },
+                "cmd": "set_taskbar_pinned"
+              }
+            ]
+          }
+        },
+        {
+          "appId": "snipping",
+          "historyTitle": "Snipping Tool",
+          "icon": {
+            "kind": "app",
+            "name": "Snipping Tool"
+          },
+          "id": "app::snipping",
+          "run": {
+            "calls": [
+              {
+                "args": {
+                  "id": "snipping"
+                },
+                "cmd": "launch_app"
+              }
+            ]
+          },
+          "subtitle": "Application",
+          "title": "Snipping Tool"
+        }
+      ],
+      "label": "Apps"
+    }
+  ]
+}

@@ -1,0 +1,507 @@
+{
+  "flatIds": [
+    "file::d::C:\\Users\\You\\Pictures",
+    "file::d::C:\\Users\\You",
+    "file::d::C:\\Users\\You\\Desktop",
+    "app::relative-tool",
+    "app::fortnite",
+    "app::Microsoft.WindowsTerminal_8wekyb3d8bbwe!App",
+    "app::intranet",
+    "app::share-tool",
+    "app::discord"
+  ],
+  "sections": [
+    {
+      "collapsed": false,
+      "collapsible": false,
+      "id": "quick",
+      "items": [
+        {
+          "dragFile": {
+            "calls": [
+              {
+                "args": {
+                  "paths": [
+                    "C:\\Users\\You\\Pictures"
+                  ]
+                },
+                "cmd": "start_file_drag"
+              }
+            ]
+          },
+          "historyTitle": "Pictures",
+          "icon": {
+            "kind": "tile",
+            "name": "Images",
+            "tint": "amber"
+          },
+          "id": "file::d::C:\\Users\\You\\Pictures",
+          "keywords": [
+            "open",
+            "folder",
+            "files",
+            "pictures",
+            "C:\\Users\\You\\Pictures"
+          ],
+          "openLocation": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You\\Pictures"
+                },
+                "cmd": "open_path_location"
+              }
+            ]
+          },
+          "quickAccessKind": "pictures",
+          "run": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You\\Pictures"
+                },
+                "cmd": "open_path"
+              }
+            ]
+          },
+          "shellPath": "C:\\Users\\You\\Pictures",
+          "showProperties": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You\\Pictures"
+                },
+                "cmd": "show_path_properties"
+              }
+            ]
+          },
+          "subtitle": "C:\\Users\\You\\Pictures",
+          "title": "Pictures"
+        },
+        {
+          "dragFile": {
+            "calls": [
+              {
+                "args": {
+                  "paths": [
+                    "C:\\Users\\You"
+                  ]
+                },
+                "cmd": "start_file_drag"
+              }
+            ]
+          },
+          "historyTitle": "Home",
+          "icon": {
+            "kind": "tile",
+            "name": "House",
+            "tint": "iris"
+          },
+          "id": "file::d::C:\\Users\\You",
+          "keywords": [
+            "open",
+            "folder",
+            "files",
+            "home",
+            "C:\\Users\\You"
+          ],
+          "openLocation": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You"
+                },
+                "cmd": "open_path_location"
+              }
+            ]
+          },
+          "quickAccessKind": "home",
+          "run": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You"
+                },
+                "cmd": "open_path"
+              }
+            ]
+          },
+          "shellPath": "C:\\Users\\You",
+          "showProperties": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You"
+                },
+                "cmd": "show_path_properties"
+              }
+            ]
+          },
+          "subtitle": "C:\\Users\\You",
+          "title": "Home"
+        },
+        {
+          "dragFile": {
+            "calls": [
+              {
+                "args": {
+                  "paths": [
+                    "C:\\Users\\You\\Desktop"
+                  ]
+                },
+                "cmd": "start_file_drag"
+              }
+            ]
+          },
+          "historyTitle": "Desktop",
+          "icon": {
+            "kind": "tile",
+            "name": "Monitor",
+            "tint": "azure"
+          },
+          "id": "file::d::C:\\Users\\You\\Desktop",
+          "keywords": [
+            "open",
+            "folder",
+            "files",
+            "desktop",
+            "C:\\Users\\You\\Desktop"
+          ],
+          "openLocation": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You\\Desktop"
+                },
+                "cmd": "open_path_location"
+              }
+            ]
+          },
+          "quickAccessKind": "desktop",
+          "run": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You\\Desktop"
+                },
+                "cmd": "open_path"
+              }
+            ]
+          },
+          "shellPath": "C:\\Users\\You\\Desktop",
+          "showProperties": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You\\Desktop"
+                },
+                "cmd": "show_path_properties"
+              }
+            ]
+          },
+          "subtitle": "C:\\Users\\You\\Desktop",
+          "title": "Desktop"
+        }
+      ],
+      "label": "Quick Access"
+    },
+    {
+      "collapsed": false,
+      "collapsible": false,
+      "groups": [],
+      "id": "apps",
+      "items": [
+        {
+          "appId": "relative-tool",
+          "historyTitle": "Relative Tool",
+          "icon": {
+            "kind": "app",
+            "name": "Relative Tool"
+          },
+          "id": "app::relative-tool",
+          "run": {
+            "calls": [
+              {
+                "args": {
+                  "id": "relative-tool"
+                },
+                "cmd": "launch_app"
+              }
+            ]
+          },
+          "runAsAdmin": {
+            "calls": [
+              {
+                "args": {
+                  "id": "relative-tool"
+                },
+                "cmd": "launch_app_as_admin"
+              }
+            ]
+          },
+          "subtitle": "Application",
+          "title": "Relative Tool"
+        },
+        {
+          "appId": "fortnite",
+          "historyTitle": "Fortnite",
+          "icon": {
+            "kind": "app",
+            "name": "Fortnite"
+          },
+          "id": "app::fortnite",
+          "run": {
+            "calls": [
+              {
+                "args": {
+                  "id": "fortnite"
+                },
+                "cmd": "launch_app"
+              }
+            ]
+          },
+          "subtitle": "Application",
+          "title": "Fortnite"
+        },
+        {
+          "appId": "Microsoft.WindowsTerminal_8wekyb3d8bbwe!App",
+          "historyTitle": "Terminal",
+          "icon": {
+            "kind": "app",
+            "name": "Terminal"
+          },
+          "id": "app::Microsoft.WindowsTerminal_8wekyb3d8bbwe!App",
+          "run": {
+            "calls": [
+              {
+                "args": {
+                  "id": "Microsoft.WindowsTerminal_8wekyb3d8bbwe!App"
+                },
+                "cmd": "launch_app"
+              }
+            ]
+          },
+          "subtitle": "Application",
+          "title": "Terminal"
+        },
+        {
+          "appId": "intranet",
+          "dragFile": {
+            "calls": [
+              {
+                "args": {
+                  "paths": [
+                    "C:\\Users\\You\\Desktop\\Intranet.url"
+                  ]
+                },
+                "cmd": "start_file_drag"
+              }
+            ]
+          },
+          "historyTitle": "Intranet",
+          "icon": {
+            "kind": "app",
+            "name": "Intranet"
+          },
+          "id": "app::intranet",
+          "openLocation": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You\\Desktop\\Intranet.url"
+                },
+                "cmd": "open_path_location"
+              }
+            ]
+          },
+          "run": {
+            "calls": [
+              {
+                "args": {
+                  "id": "intranet"
+                },
+                "cmd": "launch_app"
+              }
+            ]
+          },
+          "shellPath": "C:\\Users\\You\\Desktop\\Intranet.url",
+          "showProperties": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You\\Desktop\\Intranet.url"
+                },
+                "cmd": "show_path_properties"
+              }
+            ]
+          },
+          "subtitle": "Application",
+          "title": "Intranet"
+        },
+        {
+          "appId": "share-tool",
+          "dragFile": {
+            "calls": [
+              {
+                "args": {
+                  "paths": [
+                    "\\\\server\\share\\tool.exe"
+                  ]
+                },
+                "cmd": "start_file_drag"
+              }
+            ]
+          },
+          "historyTitle": "Share Tool",
+          "icon": {
+            "kind": "app",
+            "name": "Share Tool"
+          },
+          "id": "app::share-tool",
+          "openLocation": {
+            "calls": [
+              {
+                "args": {
+                  "path": "\\\\server\\share\\tool.exe"
+                },
+                "cmd": "open_path_location"
+              }
+            ]
+          },
+          "run": {
+            "calls": [
+              {
+                "args": {
+                  "id": "share-tool"
+                },
+                "cmd": "launch_app"
+              }
+            ]
+          },
+          "runAsAdmin": {
+            "calls": [
+              {
+                "args": {
+                  "id": "share-tool"
+                },
+                "cmd": "launch_app_as_admin"
+              }
+            ]
+          },
+          "shellPath": "\\\\server\\share\\tool.exe",
+          "showProperties": {
+            "calls": [
+              {
+                "args": {
+                  "path": "\\\\server\\share\\tool.exe"
+                },
+                "cmd": "show_path_properties"
+              }
+            ]
+          },
+          "subtitle": "Application",
+          "title": "Share Tool",
+          "toggleTaskbarPin": {
+            "calls": [
+              {
+                "args": {
+                  "path": "\\\\server\\share\\tool.exe"
+                },
+                "cmd": "is_pinned_to_taskbar"
+              },
+              {
+                "args": {
+                  "path": "\\\\server\\share\\tool.exe",
+                  "pinned": true
+                },
+                "cmd": "set_taskbar_pinned"
+              }
+            ]
+          }
+        },
+        {
+          "appId": "discord",
+          "dragFile": {
+            "calls": [
+              {
+                "args": {
+                  "paths": [
+                    "C:\\Users\\You\\AppData\\Local\\Discord\\Update.exe"
+                  ]
+                },
+                "cmd": "start_file_drag"
+              }
+            ]
+          },
+          "historyTitle": "Discord",
+          "icon": {
+            "kind": "app",
+            "name": "Discord"
+          },
+          "id": "app::discord",
+          "openLocation": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You\\AppData\\Local\\Discord\\Update.exe"
+                },
+                "cmd": "open_path_location"
+              }
+            ]
+          },
+          "run": {
+            "calls": [
+              {
+                "args": {
+                  "id": "discord"
+                },
+                "cmd": "launch_app"
+              }
+            ]
+          },
+          "runAsAdmin": {
+            "calls": [
+              {
+                "args": {
+                  "id": "discord"
+                },
+                "cmd": "launch_app_as_admin"
+              }
+            ]
+          },
+          "shellPath": "C:\\Users\\You\\AppData\\Local\\Discord\\Update.exe",
+          "showProperties": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You\\AppData\\Local\\Discord\\Update.exe"
+                },
+                "cmd": "show_path_properties"
+              }
+            ]
+          },
+          "subtitle": "Application",
+          "title": "Discord",
+          "toggleTaskbarPin": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You\\AppData\\Local\\Discord\\Update.exe"
+                },
+                "cmd": "is_pinned_to_taskbar"
+              },
+              {
+                "args": {
+                  "path": "C:\\Users\\You\\AppData\\Local\\Discord\\Update.exe",
+                  "pinned": true
+                },
+                "cmd": "set_taskbar_pinned"
+              }
+            ]
+          }
+        }
+      ],
+      "label": "Apps"
+    }
+  ]
+}

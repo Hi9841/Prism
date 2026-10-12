@@ -1,0 +1,611 @@
+{
+  "flatIds": [
+    "power-plan::381b4222-f694-41f0-9685-ff5bb260df2e",
+    "power-plan::a1841308-3541-4fab-bc81-f71556f20b4a",
+    "file::d::C:\\Users\\You\\Pictures",
+    "file::d::C:\\Users\\You\\Desktop",
+    "file::d::C:\\Users\\You",
+    "app::paint",
+    "app::photos",
+    "app::app-2",
+    "app::app-10",
+    "app::spotify",
+    "app::snipping"
+  ],
+  "sections": [
+    {
+      "collapsed": false,
+      "collapsible": false,
+      "id": "power-plans",
+      "items": [
+        {
+          "historyTitle": "Balanced",
+          "icon": {
+            "kind": "tile",
+            "name": "Power",
+            "tint": "mint"
+          },
+          "id": "power-plan::381b4222-f694-41f0-9685-ff5bb260df2e",
+          "powerPlanGuid": "381b4222-f694-41f0-9685-ff5bb260df2e",
+          "run": {
+            "calls": [
+              {
+                "args": {
+                  "guid": "381b4222-f694-41f0-9685-ff5bb260df2e"
+                },
+                "cmd": "set_power_plan"
+              }
+            ]
+          },
+          "subtitle": "Power plan · active",
+          "title": "Balanced"
+        },
+        {
+          "historyTitle": "Power saver",
+          "icon": {
+            "kind": "tile",
+            "name": "Power",
+            "tint": "slate"
+          },
+          "id": "power-plan::a1841308-3541-4fab-bc81-f71556f20b4a",
+          "powerPlanGuid": "a1841308-3541-4fab-bc81-f71556f20b4a",
+          "run": {
+            "calls": [
+              {
+                "args": {
+                  "guid": "a1841308-3541-4fab-bc81-f71556f20b4a"
+                },
+                "cmd": "set_power_plan"
+              }
+            ]
+          },
+          "subtitle": "Power plan",
+          "title": "Power saver"
+        }
+      ],
+      "label": "Power plans"
+    },
+    {
+      "collapsed": false,
+      "collapsible": false,
+      "id": "quick",
+      "items": [
+        {
+          "dragFile": {
+            "calls": [
+              {
+                "args": {
+                  "paths": [
+                    "C:\\Users\\You\\Pictures"
+                  ]
+                },
+                "cmd": "start_file_drag"
+              }
+            ]
+          },
+          "historyTitle": "Pictures",
+          "icon": {
+            "kind": "tile",
+            "name": "Images",
+            "tint": "amber"
+          },
+          "id": "file::d::C:\\Users\\You\\Pictures",
+          "keywords": [
+            "open",
+            "folder",
+            "files",
+            "pictures",
+            "C:\\Users\\You\\Pictures"
+          ],
+          "openLocation": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You\\Pictures"
+                },
+                "cmd": "open_path_location"
+              }
+            ]
+          },
+          "quickAccessKind": "pictures",
+          "run": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You\\Pictures"
+                },
+                "cmd": "open_path"
+              }
+            ]
+          },
+          "shellPath": "C:\\Users\\You\\Pictures",
+          "showProperties": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You\\Pictures"
+                },
+                "cmd": "show_path_properties"
+              }
+            ]
+          },
+          "subtitle": "C:\\Users\\You\\Pictures",
+          "title": "Pictures"
+        },
+        {
+          "dragFile": {
+            "calls": [
+              {
+                "args": {
+                  "paths": [
+                    "C:\\Users\\You\\Desktop"
+                  ]
+                },
+                "cmd": "start_file_drag"
+              }
+            ]
+          },
+          "historyTitle": "Desktop",
+          "icon": {
+            "kind": "tile",
+            "name": "Monitor",
+            "tint": "azure"
+          },
+          "id": "file::d::C:\\Users\\You\\Desktop",
+          "keywords": [
+            "open",
+            "folder",
+            "files",
+            "desktop",
+            "C:\\Users\\You\\Desktop"
+          ],
+          "openLocation": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You\\Desktop"
+                },
+                "cmd": "open_path_location"
+              }
+            ]
+          },
+          "quickAccessKind": "desktop",
+          "run": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You\\Desktop"
+                },
+                "cmd": "open_path"
+              }
+            ]
+          },
+          "shellPath": "C:\\Users\\You\\Desktop",
+          "showProperties": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You\\Desktop"
+                },
+                "cmd": "show_path_properties"
+              }
+            ]
+          },
+          "subtitle": "C:\\Users\\You\\Desktop",
+          "title": "Desktop"
+        },
+        {
+          "dragFile": {
+            "calls": [
+              {
+                "args": {
+                  "paths": [
+                    "C:\\Users\\You"
+                  ]
+                },
+                "cmd": "start_file_drag"
+              }
+            ]
+          },
+          "historyTitle": "Home",
+          "icon": {
+            "kind": "tile",
+            "name": "House",
+            "tint": "iris"
+          },
+          "id": "file::d::C:\\Users\\You",
+          "keywords": [
+            "open",
+            "folder",
+            "files",
+            "home",
+            "C:\\Users\\You"
+          ],
+          "openLocation": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You"
+                },
+                "cmd": "open_path_location"
+              }
+            ]
+          },
+          "quickAccessKind": "home",
+          "run": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You"
+                },
+                "cmd": "open_path"
+              }
+            ]
+          },
+          "shellPath": "C:\\Users\\You",
+          "showProperties": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You"
+                },
+                "cmd": "show_path_properties"
+              }
+            ]
+          },
+          "subtitle": "C:\\Users\\You",
+          "title": "Home"
+        }
+      ],
+      "label": "Quick Access"
+    },
+    {
+      "collapsed": false,
+      "collapsible": false,
+      "groups": [],
+      "id": "apps",
+      "items": [
+        {
+          "appId": "paint",
+          "dragFile": {
+            "calls": [
+              {
+                "args": {
+                  "paths": [
+                    "C:\\Windows\\System32\\mspaint.exe"
+                  ]
+                },
+                "cmd": "start_file_drag"
+              }
+            ]
+          },
+          "historyTitle": "Paint",
+          "icon": {
+            "kind": "app",
+            "name": "Paint"
+          },
+          "id": "app::paint",
+          "openLocation": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Windows\\System32\\mspaint.exe"
+                },
+                "cmd": "open_path_location"
+              }
+            ]
+          },
+          "run": {
+            "calls": [
+              {
+                "args": {
+                  "id": "paint"
+                },
+                "cmd": "launch_app"
+              }
+            ]
+          },
+          "runAsAdmin": {
+            "calls": [
+              {
+                "args": {
+                  "id": "paint"
+                },
+                "cmd": "launch_app_as_admin"
+              }
+            ]
+          },
+          "shellPath": "C:\\Windows\\System32\\mspaint.exe",
+          "showProperties": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Windows\\System32\\mspaint.exe"
+                },
+                "cmd": "show_path_properties"
+              }
+            ]
+          },
+          "subtitle": "Application",
+          "title": "Paint",
+          "toggleTaskbarPin": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Windows\\System32\\mspaint.exe"
+                },
+                "cmd": "is_pinned_to_taskbar"
+              },
+              {
+                "args": {
+                  "path": "C:\\Windows\\System32\\mspaint.exe",
+                  "pinned": true
+                },
+                "cmd": "set_taskbar_pinned"
+              }
+            ]
+          }
+        },
+        {
+          "appId": "photos",
+          "historyTitle": "Photos",
+          "icon": {
+            "kind": "app",
+            "name": "Photos"
+          },
+          "id": "app::photos",
+          "run": {
+            "calls": [
+              {
+                "args": {
+                  "id": "photos"
+                },
+                "cmd": "launch_app"
+              }
+            ]
+          },
+          "subtitle": "Application",
+          "title": "Photos"
+        },
+        {
+          "appId": "app-2",
+          "dragFile": {
+            "calls": [
+              {
+                "args": {
+                  "paths": [
+                    "C:\\Apps\\app2.exe"
+                  ]
+                },
+                "cmd": "start_file_drag"
+              }
+            ]
+          },
+          "historyTitle": "App 2",
+          "icon": {
+            "kind": "app",
+            "name": "App 2"
+          },
+          "id": "app::app-2",
+          "openLocation": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Apps\\app2.exe"
+                },
+                "cmd": "open_path_location"
+              }
+            ]
+          },
+          "run": {
+            "calls": [
+              {
+                "args": {
+                  "id": "app-2"
+                },
+                "cmd": "launch_app"
+              }
+            ]
+          },
+          "runAsAdmin": {
+            "calls": [
+              {
+                "args": {
+                  "id": "app-2"
+                },
+                "cmd": "launch_app_as_admin"
+              }
+            ]
+          },
+          "shellPath": "C:\\Apps\\app2.exe",
+          "showProperties": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Apps\\app2.exe"
+                },
+                "cmd": "show_path_properties"
+              }
+            ]
+          },
+          "subtitle": "Application",
+          "title": "App 2",
+          "toggleTaskbarPin": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Apps\\app2.exe"
+                },
+                "cmd": "is_pinned_to_taskbar"
+              },
+              {
+                "args": {
+                  "path": "C:\\Apps\\app2.exe",
+                  "pinned": true
+                },
+                "cmd": "set_taskbar_pinned"
+              }
+            ]
+          }
+        },
+        {
+          "appId": "app-10",
+          "dragFile": {
+            "calls": [
+              {
+                "args": {
+                  "paths": [
+                    "C:\\Apps\\app10.exe"
+                  ]
+                },
+                "cmd": "start_file_drag"
+              }
+            ]
+          },
+          "historyTitle": "App 10",
+          "icon": {
+            "kind": "app",
+            "name": "App 10"
+          },
+          "id": "app::app-10",
+          "openLocation": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Apps\\app10.exe"
+                },
+                "cmd": "open_path_location"
+              }
+            ]
+          },
+          "run": {
+            "calls": [
+              {
+                "args": {
+                  "id": "app-10"
+                },
+                "cmd": "launch_app"
+              }
+            ]
+          },
+          "runAsAdmin": {
+            "calls": [
+              {
+                "args": {
+                  "id": "app-10"
+                },
+                "cmd": "launch_app_as_admin"
+              }
+            ]
+          },
+          "shellPath": "C:\\Apps\\app10.exe",
+          "showProperties": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Apps\\app10.exe"
+                },
+                "cmd": "show_path_properties"
+              }
+            ]
+          },
+          "subtitle": "Application",
+          "title": "App 10",
+          "toggleTaskbarPin": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Apps\\app10.exe"
+                },
+                "cmd": "is_pinned_to_taskbar"
+              },
+              {
+                "args": {
+                  "path": "C:\\Apps\\app10.exe",
+                  "pinned": true
+                },
+                "cmd": "set_taskbar_pinned"
+              }
+            ]
+          }
+        },
+        {
+          "appId": "spotify",
+          "dragFile": {
+            "calls": [
+              {
+                "args": {
+                  "paths": [
+                    "spotify:"
+                  ]
+                },
+                "cmd": "start_file_drag"
+              }
+            ]
+          },
+          "historyTitle": "Spotify",
+          "icon": {
+            "kind": "app",
+            "name": "Spotify"
+          },
+          "id": "app::spotify",
+          "openLocation": {
+            "calls": [
+              {
+                "args": {
+                  "path": "spotify:"
+                },
+                "cmd": "open_path_location"
+              }
+            ]
+          },
+          "run": {
+            "calls": [
+              {
+                "args": {
+                  "id": "spotify"
+                },
+                "cmd": "launch_app"
+              }
+            ]
+          },
+          "shellPath": "spotify:",
+          "showProperties": {
+            "calls": [
+              {
+                "args": {
+                  "path": "spotify:"
+                },
+                "cmd": "show_path_properties"
+              }
+            ]
+          },
+          "subtitle": "Application",
+          "title": "Spotify"
+        },
+        {
+          "appId": "snipping",
+          "historyTitle": "Snipping Tool",
+          "icon": {
+            "kind": "app",
+            "name": "Snipping Tool"
+          },
+          "id": "app::snipping",
+          "run": {
+            "calls": [
+              {
+                "args": {
+                  "id": "snipping"
+                },
+                "cmd": "launch_app"
+              }
+            ]
+          },
+          "subtitle": "Application",
+          "title": "Snipping Tool"
+        }
+      ],
+      "label": "Apps"
+    }
+  ]
+}

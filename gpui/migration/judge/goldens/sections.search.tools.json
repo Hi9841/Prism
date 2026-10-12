@@ -1,0 +1,80 @@
+{
+  "flatIds": [
+    "action::windows.device-manager",
+    "action::windows.control-panel",
+    "action::windows.computer-management"
+  ],
+  "sections": [
+    {
+      "collapsed": false,
+      "collapsible": false,
+      "id": "tools",
+      "items": [
+        {
+          "historyTitle": "Device Manager",
+          "icon": {
+            "icon": "data:image/png;base64,REVW",
+            "kind": "app",
+            "name": "Device Manager"
+          },
+          "id": "action::windows.device-manager",
+          "run": {
+            "calls": [
+              {
+                "args": {
+                  "id": "windows.device-manager"
+                },
+                "cmd": "execute_action"
+              }
+            ]
+          },
+          "subtitle": "Windows tool",
+          "title": "Device Manager"
+        },
+        {
+          "historyTitle": "Control Panel",
+          "icon": {
+            "kind": "tile",
+            "name": "Settings2",
+            "tint": "azure"
+          },
+          "id": "action::windows.control-panel",
+          "run": {
+            "calls": [
+              {
+                "args": {
+                  "id": "windows.control-panel"
+                },
+                "cmd": "execute_action"
+              }
+            ]
+          },
+          "subtitle": "Control Panel",
+          "title": "Control Panel"
+        },
+        {
+          "historyTitle": "Computer Management",
+          "icon": {
+            "kind": "tile",
+            "name": "Wrench",
+            "tint": "slate"
+          },
+          "id": "action::windows.computer-management",
+          "run": {
+            "calls": [
+              {
+                "args": {
+                  "id": "windows.computer-management"
+                },
+                "cmd": "execute_action"
+              }
+            ]
+          },
+          "subtitle": "Windows tool",
+          "title": "Computer Management"
+        }
+      ],
+      "label": "Windows Tools"
+    }
+  ]
+}

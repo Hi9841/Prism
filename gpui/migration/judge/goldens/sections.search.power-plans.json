@@ -1,0 +1,60 @@
+{
+  "flatIds": [
+    "power-plan::381b4222-f694-41f0-9685-ff5bb260df2e",
+    "power-plan::8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c"
+  ],
+  "sections": [
+    {
+      "collapsed": false,
+      "collapsible": false,
+      "id": "power-plans",
+      "items": [
+        {
+          "historyTitle": "Balanced",
+          "icon": {
+            "kind": "tile",
+            "name": "Power",
+            "tint": "mint"
+          },
+          "id": "power-plan::381b4222-f694-41f0-9685-ff5bb260df2e",
+          "powerPlanGuid": "381b4222-f694-41f0-9685-ff5bb260df2e",
+          "run": {
+            "calls": [
+              {
+                "args": {
+                  "guid": "381b4222-f694-41f0-9685-ff5bb260df2e"
+                },
+                "cmd": "set_power_plan"
+              }
+            ]
+          },
+          "subtitle": "Power plan · active",
+          "title": "Balanced"
+        },
+        {
+          "historyTitle": "High performance",
+          "icon": {
+            "kind": "tile",
+            "name": "Power",
+            "tint": "slate"
+          },
+          "id": "power-plan::8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c",
+          "powerPlanGuid": "8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c",
+          "run": {
+            "calls": [
+              {
+                "args": {
+                  "guid": "8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c"
+                },
+                "cmd": "set_power_plan"
+              }
+            ]
+          },
+          "subtitle": "Power plan",
+          "title": "High performance"
+        }
+      ],
+      "label": "Power plans"
+    }
+  ]
+}

@@ -1,0 +1,1024 @@
+{
+  "flatIds": [
+    "app::vscode",
+    "app::chrome",
+    "file::d::C:\\Users\\You",
+    "file::d::C:\\Users\\You\\Desktop",
+    "file::d::C:\\Users\\You\\Downloads",
+    "file::d::C:\\Users\\You\\Documents",
+    "file::d::C:\\Users\\You\\Pictures",
+    "file::d::C:\\Users\\You\\Music",
+    "app::app-2",
+    "app::app-10",
+    "app::build-tools",
+    "app::Microsoft.WindowsCalculator_8wekyb3d8bbwe!App",
+    "app::calendar",
+    "app::clock",
+    "app::portal",
+    "app::discord"
+  ],
+  "sections": [
+    {
+      "collapsed": false,
+      "collapsible": false,
+      "id": "pinned",
+      "items": [
+        {
+          "appId": "vscode",
+          "dragFile": {
+            "calls": [
+              {
+                "args": {
+                  "paths": [
+                    "C:\\Users\\You\\AppData\\Local\\Programs\\Microsoft VS Code\\Code.exe"
+                  ]
+                },
+                "cmd": "start_file_drag"
+              }
+            ]
+          },
+          "historyTitle": "Visual Studio Code",
+          "icon": {
+            "icon": "data:image/png;base64,VlND",
+            "kind": "app",
+            "name": "Visual Studio Code"
+          },
+          "id": "app::vscode",
+          "openLocation": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You\\AppData\\Local\\Programs\\Microsoft VS Code\\Code.exe"
+                },
+                "cmd": "open_path_location"
+              }
+            ]
+          },
+          "run": {
+            "calls": [
+              {
+                "args": {
+                  "id": "vscode"
+                },
+                "cmd": "launch_app"
+              }
+            ]
+          },
+          "runAsAdmin": {
+            "calls": [
+              {
+                "args": {
+                  "id": "vscode"
+                },
+                "cmd": "launch_app_as_admin"
+              }
+            ]
+          },
+          "shellPath": "C:\\Users\\You\\AppData\\Local\\Programs\\Microsoft VS Code\\Code.exe",
+          "showProperties": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You\\AppData\\Local\\Programs\\Microsoft VS Code\\Code.exe"
+                },
+                "cmd": "show_path_properties"
+              }
+            ]
+          },
+          "subtitle": "Application",
+          "title": "Visual Studio Code",
+          "toggleTaskbarPin": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You\\AppData\\Local\\Programs\\Microsoft VS Code\\Code.exe"
+                },
+                "cmd": "is_pinned_to_taskbar"
+              },
+              {
+                "args": {
+                  "path": "C:\\Users\\You\\AppData\\Local\\Programs\\Microsoft VS Code\\Code.exe",
+                  "pinned": true
+                },
+                "cmd": "set_taskbar_pinned"
+              }
+            ]
+          }
+        },
+        {
+          "appId": "chrome",
+          "dragFile": {
+            "calls": [
+              {
+                "args": {
+                  "paths": [
+                    "C:\\Users\\You\\AppData\\Roaming\\Microsoft\\Windows\\Start Menu\\Programs\\Google Chrome.lnk"
+                  ]
+                },
+                "cmd": "start_file_drag"
+              }
+            ]
+          },
+          "historyTitle": "Google Chrome",
+          "icon": {
+            "icon": "data:image/png;base64,Q0hST01F",
+            "kind": "app",
+            "name": "Google Chrome"
+          },
+          "id": "app::chrome",
+          "openLocation": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You\\AppData\\Roaming\\Microsoft\\Windows\\Start Menu\\Programs\\Google Chrome.lnk"
+                },
+                "cmd": "open_path_location"
+              }
+            ]
+          },
+          "run": {
+            "calls": [
+              {
+                "args": {
+                  "id": "chrome"
+                },
+                "cmd": "launch_app"
+              }
+            ]
+          },
+          "runAsAdmin": {
+            "calls": [
+              {
+                "args": {
+                  "id": "chrome"
+                },
+                "cmd": "launch_app_as_admin"
+              }
+            ]
+          },
+          "shellPath": "C:\\Users\\You\\AppData\\Roaming\\Microsoft\\Windows\\Start Menu\\Programs\\Google Chrome.lnk",
+          "showProperties": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You\\AppData\\Roaming\\Microsoft\\Windows\\Start Menu\\Programs\\Google Chrome.lnk"
+                },
+                "cmd": "show_path_properties"
+              }
+            ]
+          },
+          "subtitle": "Application",
+          "title": "Google Chrome",
+          "toggleTaskbarPin": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You\\AppData\\Roaming\\Microsoft\\Windows\\Start Menu\\Programs\\Google Chrome.lnk"
+                },
+                "cmd": "is_pinned_to_taskbar"
+              },
+              {
+                "args": {
+                  "path": "C:\\Users\\You\\AppData\\Roaming\\Microsoft\\Windows\\Start Menu\\Programs\\Google Chrome.lnk",
+                  "pinned": true
+                },
+                "cmd": "set_taskbar_pinned"
+              }
+            ]
+          }
+        }
+      ],
+      "label": "Pinned"
+    },
+    {
+      "collapsed": false,
+      "collapsible": true,
+      "id": "quick",
+      "items": [
+        {
+          "dragFile": {
+            "calls": [
+              {
+                "args": {
+                  "paths": [
+                    "C:\\Users\\You"
+                  ]
+                },
+                "cmd": "start_file_drag"
+              }
+            ]
+          },
+          "historyTitle": "Home",
+          "icon": {
+            "kind": "tile",
+            "name": "House",
+            "tint": "iris"
+          },
+          "id": "file::d::C:\\Users\\You",
+          "keywords": [
+            "open",
+            "folder",
+            "files",
+            "home",
+            "C:\\Users\\You"
+          ],
+          "openLocation": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You"
+                },
+                "cmd": "open_path_location"
+              }
+            ]
+          },
+          "quickAccessKind": "home",
+          "run": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You"
+                },
+                "cmd": "open_path"
+              }
+            ]
+          },
+          "shellPath": "C:\\Users\\You",
+          "showProperties": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You"
+                },
+                "cmd": "show_path_properties"
+              }
+            ]
+          },
+          "subtitle": "C:\\Users\\You",
+          "title": "Home"
+        },
+        {
+          "dragFile": {
+            "calls": [
+              {
+                "args": {
+                  "paths": [
+                    "C:\\Users\\You\\Desktop"
+                  ]
+                },
+                "cmd": "start_file_drag"
+              }
+            ]
+          },
+          "historyTitle": "Desktop",
+          "icon": {
+            "kind": "tile",
+            "name": "Monitor",
+            "tint": "azure"
+          },
+          "id": "file::d::C:\\Users\\You\\Desktop",
+          "keywords": [
+            "open",
+            "folder",
+            "files",
+            "desktop",
+            "C:\\Users\\You\\Desktop"
+          ],
+          "openLocation": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You\\Desktop"
+                },
+                "cmd": "open_path_location"
+              }
+            ]
+          },
+          "quickAccessKind": "desktop",
+          "run": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You\\Desktop"
+                },
+                "cmd": "open_path"
+              }
+            ]
+          },
+          "shellPath": "C:\\Users\\You\\Desktop",
+          "showProperties": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You\\Desktop"
+                },
+                "cmd": "show_path_properties"
+              }
+            ]
+          },
+          "subtitle": "C:\\Users\\You\\Desktop",
+          "title": "Desktop"
+        },
+        {
+          "dragFile": {
+            "calls": [
+              {
+                "args": {
+                  "paths": [
+                    "C:\\Users\\You\\Downloads"
+                  ]
+                },
+                "cmd": "start_file_drag"
+              }
+            ]
+          },
+          "historyTitle": "Downloads",
+          "icon": {
+            "kind": "tile",
+            "name": "Download",
+            "tint": "mint"
+          },
+          "id": "file::d::C:\\Users\\You\\Downloads",
+          "keywords": [
+            "open",
+            "folder",
+            "files",
+            "downloads",
+            "C:\\Users\\You\\Downloads"
+          ],
+          "openLocation": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You\\Downloads"
+                },
+                "cmd": "open_path_location"
+              }
+            ]
+          },
+          "quickAccessKind": "downloads",
+          "run": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You\\Downloads"
+                },
+                "cmd": "open_path"
+              }
+            ]
+          },
+          "shellPath": "C:\\Users\\You\\Downloads",
+          "showProperties": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You\\Downloads"
+                },
+                "cmd": "show_path_properties"
+              }
+            ]
+          },
+          "subtitle": "C:\\Users\\You\\Downloads",
+          "title": "Downloads"
+        },
+        {
+          "dragFile": {
+            "calls": [
+              {
+                "args": {
+                  "paths": [
+                    "C:\\Users\\You\\Documents"
+                  ]
+                },
+                "cmd": "start_file_drag"
+              }
+            ]
+          },
+          "historyTitle": "Documents",
+          "icon": {
+            "kind": "tile",
+            "name": "FileText",
+            "tint": "slate"
+          },
+          "id": "file::d::C:\\Users\\You\\Documents",
+          "keywords": [
+            "open",
+            "folder",
+            "files",
+            "documents",
+            "C:\\Users\\You\\Documents"
+          ],
+          "openLocation": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You\\Documents"
+                },
+                "cmd": "open_path_location"
+              }
+            ]
+          },
+          "quickAccessKind": "documents",
+          "run": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You\\Documents"
+                },
+                "cmd": "open_path"
+              }
+            ]
+          },
+          "shellPath": "C:\\Users\\You\\Documents",
+          "showProperties": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You\\Documents"
+                },
+                "cmd": "show_path_properties"
+              }
+            ]
+          },
+          "subtitle": "C:\\Users\\You\\Documents",
+          "title": "Documents"
+        },
+        {
+          "dragFile": {
+            "calls": [
+              {
+                "args": {
+                  "paths": [
+                    "C:\\Users\\You\\Pictures"
+                  ]
+                },
+                "cmd": "start_file_drag"
+              }
+            ]
+          },
+          "historyTitle": "Pictures",
+          "icon": {
+            "kind": "tile",
+            "name": "Images",
+            "tint": "amber"
+          },
+          "id": "file::d::C:\\Users\\You\\Pictures",
+          "keywords": [
+            "open",
+            "folder",
+            "files",
+            "pictures",
+            "C:\\Users\\You\\Pictures"
+          ],
+          "openLocation": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You\\Pictures"
+                },
+                "cmd": "open_path_location"
+              }
+            ]
+          },
+          "quickAccessKind": "pictures",
+          "run": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You\\Pictures"
+                },
+                "cmd": "open_path"
+              }
+            ]
+          },
+          "shellPath": "C:\\Users\\You\\Pictures",
+          "showProperties": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You\\Pictures"
+                },
+                "cmd": "show_path_properties"
+              }
+            ]
+          },
+          "subtitle": "C:\\Users\\You\\Pictures",
+          "title": "Pictures"
+        },
+        {
+          "dragFile": {
+            "calls": [
+              {
+                "args": {
+                  "paths": [
+                    "C:\\Users\\You\\Music"
+                  ]
+                },
+                "cmd": "start_file_drag"
+              }
+            ]
+          },
+          "historyTitle": "Music",
+          "icon": {
+            "kind": "tile",
+            "name": "Music",
+            "tint": "rose"
+          },
+          "id": "file::d::C:\\Users\\You\\Music",
+          "keywords": [
+            "open",
+            "folder",
+            "files",
+            "music",
+            "C:\\Users\\You\\Music"
+          ],
+          "openLocation": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You\\Music"
+                },
+                "cmd": "open_path_location"
+              }
+            ]
+          },
+          "quickAccessKind": "music",
+          "run": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You\\Music"
+                },
+                "cmd": "open_path"
+              }
+            ]
+          },
+          "shellPath": "C:\\Users\\You\\Music",
+          "showProperties": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You\\Music"
+                },
+                "cmd": "show_path_properties"
+              }
+            ]
+          },
+          "subtitle": "C:\\Users\\You\\Music",
+          "title": "Music"
+        }
+      ],
+      "label": "Quick Access"
+    },
+    {
+      "collapsed": false,
+      "collapsible": false,
+      "groups": [],
+      "id": "apps",
+      "items": [
+        {
+          "appId": "app-2",
+          "dragFile": {
+            "calls": [
+              {
+                "args": {
+                  "paths": [
+                    "C:\\Apps\\app2.exe"
+                  ]
+                },
+                "cmd": "start_file_drag"
+              }
+            ]
+          },
+          "historyTitle": "App 2",
+          "icon": {
+            "kind": "app",
+            "name": "App 2"
+          },
+          "id": "app::app-2",
+          "openLocation": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Apps\\app2.exe"
+                },
+                "cmd": "open_path_location"
+              }
+            ]
+          },
+          "run": {
+            "calls": [
+              {
+                "args": {
+                  "id": "app-2"
+                },
+                "cmd": "launch_app"
+              }
+            ]
+          },
+          "runAsAdmin": {
+            "calls": [
+              {
+                "args": {
+                  "id": "app-2"
+                },
+                "cmd": "launch_app_as_admin"
+              }
+            ]
+          },
+          "shellPath": "C:\\Apps\\app2.exe",
+          "showProperties": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Apps\\app2.exe"
+                },
+                "cmd": "show_path_properties"
+              }
+            ]
+          },
+          "subtitle": "Application",
+          "title": "App 2",
+          "toggleTaskbarPin": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Apps\\app2.exe"
+                },
+                "cmd": "is_pinned_to_taskbar"
+              },
+              {
+                "args": {
+                  "path": "C:\\Apps\\app2.exe",
+                  "pinned": true
+                },
+                "cmd": "set_taskbar_pinned"
+              }
+            ]
+          }
+        },
+        {
+          "appId": "app-10",
+          "dragFile": {
+            "calls": [
+              {
+                "args": {
+                  "paths": [
+                    "C:\\Apps\\app10.exe"
+                  ]
+                },
+                "cmd": "start_file_drag"
+              }
+            ]
+          },
+          "historyTitle": "App 10",
+          "icon": {
+            "kind": "app",
+            "name": "App 10"
+          },
+          "id": "app::app-10",
+          "openLocation": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Apps\\app10.exe"
+                },
+                "cmd": "open_path_location"
+              }
+            ]
+          },
+          "run": {
+            "calls": [
+              {
+                "args": {
+                  "id": "app-10"
+                },
+                "cmd": "launch_app"
+              }
+            ]
+          },
+          "runAsAdmin": {
+            "calls": [
+              {
+                "args": {
+                  "id": "app-10"
+                },
+                "cmd": "launch_app_as_admin"
+              }
+            ]
+          },
+          "shellPath": "C:\\Apps\\app10.exe",
+          "showProperties": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Apps\\app10.exe"
+                },
+                "cmd": "show_path_properties"
+              }
+            ]
+          },
+          "subtitle": "Application",
+          "title": "App 10",
+          "toggleTaskbarPin": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Apps\\app10.exe"
+                },
+                "cmd": "is_pinned_to_taskbar"
+              },
+              {
+                "args": {
+                  "path": "C:\\Apps\\app10.exe",
+                  "pinned": true
+                },
+                "cmd": "set_taskbar_pinned"
+              }
+            ]
+          }
+        },
+        {
+          "appId": "build-tools",
+          "dragFile": {
+            "calls": [
+              {
+                "args": {
+                  "paths": [
+                    "C:\\Tools\\build.bat"
+                  ]
+                },
+                "cmd": "start_file_drag"
+              }
+            ]
+          },
+          "historyTitle": "Build Tools",
+          "icon": {
+            "kind": "app",
+            "name": "Build Tools"
+          },
+          "id": "app::build-tools",
+          "openLocation": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Tools\\build.bat"
+                },
+                "cmd": "open_path_location"
+              }
+            ]
+          },
+          "run": {
+            "calls": [
+              {
+                "args": {
+                  "id": "build-tools"
+                },
+                "cmd": "launch_app"
+              }
+            ]
+          },
+          "runAsAdmin": {
+            "calls": [
+              {
+                "args": {
+                  "id": "build-tools"
+                },
+                "cmd": "launch_app_as_admin"
+              }
+            ]
+          },
+          "shellPath": "C:\\Tools\\build.bat",
+          "showProperties": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Tools\\build.bat"
+                },
+                "cmd": "show_path_properties"
+              }
+            ]
+          },
+          "subtitle": "Application",
+          "title": "Build Tools",
+          "toggleTaskbarPin": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Tools\\build.bat"
+                },
+                "cmd": "is_pinned_to_taskbar"
+              },
+              {
+                "args": {
+                  "path": "C:\\Tools\\build.bat",
+                  "pinned": true
+                },
+                "cmd": "set_taskbar_pinned"
+              }
+            ]
+          }
+        },
+        {
+          "appId": "Microsoft.WindowsCalculator_8wekyb3d8bbwe!App",
+          "historyTitle": "Calculator",
+          "icon": {
+            "kind": "app",
+            "name": "Calculator"
+          },
+          "id": "app::Microsoft.WindowsCalculator_8wekyb3d8bbwe!App",
+          "run": {
+            "calls": [
+              {
+                "args": {
+                  "id": "Microsoft.WindowsCalculator_8wekyb3d8bbwe!App"
+                },
+                "cmd": "launch_app"
+              }
+            ]
+          },
+          "subtitle": "Application",
+          "title": "Calculator"
+        },
+        {
+          "appId": "calendar",
+          "historyTitle": "Calendar",
+          "icon": {
+            "kind": "app",
+            "name": "Calendar"
+          },
+          "id": "app::calendar",
+          "run": {
+            "calls": [
+              {
+                "args": {
+                  "id": "calendar"
+                },
+                "cmd": "launch_app"
+              }
+            ]
+          },
+          "subtitle": "Application",
+          "title": "Calendar"
+        },
+        {
+          "appId": "clock",
+          "historyTitle": "Clock",
+          "icon": {
+            "kind": "app",
+            "name": "Clock"
+          },
+          "id": "app::clock",
+          "run": {
+            "calls": [
+              {
+                "args": {
+                  "id": "clock"
+                },
+                "cmd": "launch_app"
+              }
+            ]
+          },
+          "subtitle": "Application",
+          "title": "Clock"
+        },
+        {
+          "appId": "portal",
+          "dragFile": {
+            "calls": [
+              {
+                "args": {
+                  "paths": [
+                    "https://portal.example.com/"
+                  ]
+                },
+                "cmd": "start_file_drag"
+              }
+            ]
+          },
+          "historyTitle": "Company Portal",
+          "icon": {
+            "kind": "app",
+            "name": "Company Portal"
+          },
+          "id": "app::portal",
+          "openLocation": {
+            "calls": [
+              {
+                "args": {
+                  "path": "https://portal.example.com/"
+                },
+                "cmd": "open_path_location"
+              }
+            ]
+          },
+          "run": {
+            "calls": [
+              {
+                "args": {
+                  "id": "portal"
+                },
+                "cmd": "launch_app"
+              }
+            ]
+          },
+          "shellPath": "https://portal.example.com/",
+          "showProperties": {
+            "calls": [
+              {
+                "args": {
+                  "path": "https://portal.example.com/"
+                },
+                "cmd": "show_path_properties"
+              }
+            ]
+          },
+          "subtitle": "Application",
+          "title": "Company Portal"
+        },
+        {
+          "appId": "discord",
+          "dragFile": {
+            "calls": [
+              {
+                "args": {
+                  "paths": [
+                    "C:\\Users\\You\\AppData\\Local\\Discord\\Update.exe"
+                  ]
+                },
+                "cmd": "start_file_drag"
+              }
+            ]
+          },
+          "historyTitle": "Discord",
+          "icon": {
+            "kind": "app",
+            "name": "Discord"
+          },
+          "id": "app::discord",
+          "openLocation": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You\\AppData\\Local\\Discord\\Update.exe"
+                },
+                "cmd": "open_path_location"
+              }
+            ]
+          },
+          "run": {
+            "calls": [
+              {
+                "args": {
+                  "id": "discord"
+                },
+                "cmd": "launch_app"
+              }
+            ]
+          },
+          "runAsAdmin": {
+            "calls": [
+              {
+                "args": {
+                  "id": "discord"
+                },
+                "cmd": "launch_app_as_admin"
+              }
+            ]
+          },
+          "shellPath": "C:\\Users\\You\\AppData\\Local\\Discord\\Update.exe",
+          "showProperties": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You\\AppData\\Local\\Discord\\Update.exe"
+                },
+                "cmd": "show_path_properties"
+              }
+            ]
+          },
+          "subtitle": "Application",
+          "title": "Discord",
+          "toggleTaskbarPin": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You\\AppData\\Local\\Discord\\Update.exe"
+                },
+                "cmd": "is_pinned_to_taskbar"
+              },
+              {
+                "args": {
+                  "path": "C:\\Users\\You\\AppData\\Local\\Discord\\Update.exe",
+                  "pinned": true
+                },
+                "cmd": "set_taskbar_pinned"
+              }
+            ]
+          }
+        }
+      ],
+      "label": "Apps"
+    }
+  ]
+}

@@ -1,0 +1,3 @@
+# queue_runner.mjs rejects a CRLF manifest header, and core.autocrlf converts on checkout.
+*.tsv text eol=lf
+*.sh text eol=lf
