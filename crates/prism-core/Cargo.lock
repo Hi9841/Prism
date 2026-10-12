@@ -223,6 +223,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "neo_frizbee"
+version = "0.13.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fb0dd0e69b342eaddb657120a21a56f3e887ddc505fac780cf430dbbbb3aed26"
+dependencies = [
+ "serde",
+]
+
+[[package]]
 name = "num-traits"
 version = "0.2.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -262,6 +271,7 @@ version = "0.11.9"
 dependencies = [
  "base64",
  "image",
+ "neo_frizbee",
  "rusqlite",
  "serde",
  "serde_json",

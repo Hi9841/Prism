@@ -18,6 +18,8 @@ use std::cmp::Ordering;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering};
 use std::sync::{Arc, RwLock};
 
+use neo_frizbee::{Config, Matcher, Pattern, PatternConfig, SortStrategy, SIMD_CHUNK_BYTES};
+
 use super::db::Database;
 use super::search::{name_score, path_depth, path_penalty};
 use super::types::{CandidateEntry, NameRow, RowLookup};
@@ -55,6 +57,35 @@ const PENALTY_STEP: i32 = 50;
 const FLAG_DIRECTORY: u16 = 1 << 15;
 const FLAG_DELETED: u16 = 1 << 14;
 const FLAG_PENALTY_MASK: u16 = 0xff;
+
+/// Typo pass (FFF's frizbee matcher), for queries of this many characters. It
+/// runs only when no admitted name is a strong match (see
+/// `STRONG_TOKEN_SCORE`), so a query with a strong match keeps exactly the
+/// results it had.
+const MIN_TYPO_QUERY_CHARS: usize = 3;
+/// `name_score` per token from which a match is strong: every substring,
+/// prefix, or exact tier scores above it (2,520 at least), every scattered
+/// subsequence below it (about 1,000 + 8 per character).
+const STRONG_TOKEN_SCORE: i32 = 2_000;
+/// Chunk pointers per name: 768 bytes. An NTFS name is at most 255 UTF-16
+/// units, so at most 765 UTF-8 bytes.
+const TYPO_MAX_CHUNKS: usize = 48;
+/// A name that starts within this many edits of the query is close. Without a
+/// strong match, close names (typo hits and scattered subsequence matches
+/// alike) rank above the rest like `name_score` does: `CLOSE_TYPO_SCORE` per
+/// token, plus `CLOSE_EDIT_STEP` per edit saved, plus the folder bonus, minus
+/// the name length and the location penalty.
+const CLOSE_TYPO_EDITS: usize = 2;
+const CLOSE_TYPO_SCORE: i32 = 1_500;
+const CLOSE_EDIT_STEP: i32 = 1_000;
+/// Other typo hits rank below every admitted name: this base, plus the
+/// frizbee score in steps larger than any location penalty, minus the
+/// penalty.
+const TYPO_RANK_BASE: i32 = -1_000_000_000;
+const TYPO_SCORE_STEP: i32 = 16_384;
+const TYPO_SCORE_MAX: u16 = 4_095;
+/// Prefix edit distances from this value up count the same.
+const TYPO_FAR: usize = 3;
 
 pub struct NameIndex {
     names: RwLock<Names>,
@@ -107,6 +138,18 @@ pub struct NameQuery<'a> {
 struct Hit {
     score: i32,
     index: u32,
+    /// Found by the typo pass: `score` is its final rank.
+    typo: bool,
+}
+
+/// What the index found for a query.
+#[derive(Default)]
+pub struct IndexCandidates {
+    /// Names the admission rules accept, for the caller's scorer.
+    pub entries: Vec<CandidateEntry>,
+    /// Typo-tolerant fuzzy matches the rules reject, with their final rank
+    /// (below every strong match).
+    pub typos: Vec<(CandidateEntry, i32)>,
 }
 
 impl Default for NameIndex {
@@ -136,6 +179,46 @@ impl<'a> NameQuery<'a> {
                 .collect(),
             probe_tokens: &tokens[..tokens.len().min(PROBE_TOKENS)],
         }
+    }
+
+    fn wants_typos(&self) -> bool {
+        self.full.chars().count() >= MIN_TYPO_QUERY_CHARS
+    }
+
+    /// Typos a token may have: none up to three characters, one up to seven,
+    /// then two.
+    fn token_typos(token: &str) -> u16 {
+        match token.chars().count() {
+            0..=3 => 0,
+            4..=7 => 1,
+            _ => 2,
+        }
+    }
+
+    /// Typos the whole query may have.
+    fn typo_budget(&self) -> u32 {
+        self.tokens
+            .iter()
+            .map(|token| u32::from(Self::token_typos(token)))
+            .sum()
+    }
+
+    /// One frizbee pattern per token, with its `token_typos`.
+    fn typo_matcher(&self) -> Matcher {
+        let patterns = self
+            .tokens
+            .iter()
+            .map(|token| {
+                let typos = Self::token_typos(token);
+                Pattern::new(token, PatternConfig::default().max_typos(Some(typos)))
+            })
+            .collect::<Vec<_>>();
+        // The caller ranks the matches itself.
+        let config = Config {
+            sort: SortStrategy::Unsorted,
+            ..Config::default()
+        };
+        Matcher::from_patterns(&patterns, &config)
     }
 
     /// True when one of the SQL stages (exact, prefix, FTS5 trigram, or
@@ -355,7 +438,7 @@ impl NameIndex {
         query: &NameQuery<'_>,
         limit: usize,
         is_cancelled: &(dyn Fn() -> bool + Sync),
-    ) -> Result<Option<Vec<CandidateEntry>>, String> {
+    ) -> Result<Option<IndexCandidates>, String> {
         if !self.is_loaded() {
             return Ok(None);
         }
@@ -365,28 +448,54 @@ impl NameIndex {
         }
         let wanted = (limit * CANDIDATES_PER_RESULT).max(MIN_CANDIDATES);
 
-        let mut found = Vec::with_capacity(wanted);
+        let mut found = IndexCandidates::default();
         for round in 0..MAX_SELECTION_ROUNDS {
             let (selected, generation) = {
                 let names = self.names.read().unwrap_or_else(|e| e.into_inner());
-                let selected = names
-                    .top_hits(query, wanted, is_cancelled)
+                let mut hits = names.top_hits(query, wanted, is_cancelled);
+                // No strong match: add typo matches, and rank every close name
+                // (typo or scattered subsequence) above the rest.
+                if query.wants_typos() && !names.has_strong_hit(&hits, query) && !is_cancelled() {
+                    let mut closeness = Closeness::new(query);
+                    for hit in &mut hits {
+                        if let Some(rank) = names.close_rank(hit.index as usize, &mut closeness) {
+                            *hit = Hit {
+                                score: rank,
+                                index: hit.index,
+                                typo: true,
+                            };
+                        }
+                    }
+                    let typos = names.typo_hits(query, wanted, &hits, &mut closeness);
+                    hits.extend(typos);
+                    names.keep_best(&mut hits, wanted);
+                    hits.sort_unstable_by(|a, b| names.compare(a, b));
+                }
+                let selected = hits
                     .into_iter()
-                    .map(|hit| (hit.index, i64::from(names.ids[hit.index as usize])))
+                    .map(|hit| {
+                        let typo_rank = hit.typo.then_some(hit.score);
+                        (
+                            hit.index,
+                            i64::from(names.ids[hit.index as usize]),
+                            typo_rank,
+                        )
+                    })
                     .collect::<Vec<_>>();
                 (selected, names.generation)
             };
             if is_cancelled() {
-                return Ok(Some(Vec::new()));
+                return Ok(Some(IndexCandidates::default()));
             }
-            let ids = selected.iter().map(|&(_, id)| id).collect::<Vec<_>>();
+            let ids = selected.iter().map(|&(_, id, _)| id).collect::<Vec<_>>();
             let lookups = db.file_rows_by_id(&ids)?;
             let mut missing = Vec::new();
-            for ((index, _), lookup) in selected.into_iter().zip(lookups) {
-                match lookup {
-                    RowLookup::Found(entry) => found.push(entry),
-                    RowLookup::Missing => missing.push(index),
-                    RowLookup::Excluded => {}
+            for ((index, _, typo_rank), lookup) in selected.into_iter().zip(lookups) {
+                match (lookup, typo_rank) {
+                    (RowLookup::Found(entry), None) => found.entries.push(entry),
+                    (RowLookup::Found(entry), Some(rank)) => found.typos.push((entry, rank)),
+                    (RowLookup::Missing, _) => missing.push(index),
+                    (RowLookup::Excluded, _) => {}
                 }
             }
             if missing.is_empty() {
@@ -397,7 +506,7 @@ impl NameIndex {
             // keeps its live rows: clearing them returned no results at all.
             self.mark_deleted(generation, &missing);
             if round + 1 < MAX_SELECTION_ROUNDS {
-                found.clear();
+                found = IndexCandidates::default();
             }
         }
         Ok(Some(found))
@@ -566,6 +675,7 @@ impl Names {
                 hits.push(Hit {
                     score,
                     index: index as u32,
+                    typo: false,
                 });
                 if hits.len() >= wanted * 8 {
                     self.keep_best(&mut hits, wanted);
@@ -581,6 +691,215 @@ impl Names {
             hits.truncate(wanted);
         }
     }
+
+    /// True when an admitted hit matches every token at least as a substring
+    /// (see `STRONG_TOKEN_SCORE`).
+    fn has_strong_hit(&self, hits: &[Hit], query: &NameQuery<'_>) -> bool {
+        let strong = STRONG_TOKEN_SCORE * query.tokens.len() as i32;
+        hits.iter().any(|hit| {
+            let index = hit.index as usize;
+            let directory = self.flags[index] & FLAG_DIRECTORY != 0;
+            name_score(self.name(index), directory, query.tokens, query.full)
+                .is_some_and(|score| score >= strong)
+        })
+    }
+
+    /// The rank of a close name (see `CLOSE_TYPO_SCORE`), or `None` when the
+    /// name's start is more than `CLOSE_TYPO_EDITS` edits from the query.
+    fn close_rank(&self, index: usize, closeness: &mut Closeness) -> Option<i32> {
+        let name = self.name(index);
+        let distance = closeness.distance(name)?;
+        let flags = self.flags[index];
+        let directory_bonus = if flags & FLAG_DIRECTORY != 0 { 20 } else { 0 };
+        let penalty = i32::from(flags & FLAG_PENALTY_MASK) * PENALTY_STEP;
+        Some(
+            closeness.base + (TYPO_FAR - distance) as i32 * CLOSE_EDIT_STEP + directory_bonus
+                - name.len().min(80) as i32
+                - penalty,
+        )
+    }
+
+    /// Typo-tolerant fuzzy matches (FFF's frizbee matcher, SIMD Smith-Waterman)
+    /// over every live name except the `admitted` hits. Best first; each hit's
+    /// score is its final rank (see `close_rank` and `TYPO_RANK_BASE`).
+    fn typo_hits(
+        &self,
+        query: &NameQuery<'_>,
+        wanted: usize,
+        admitted: &[Hit],
+        closeness: &mut Closeness,
+    ) -> Vec<Hit> {
+        const CHUNK_SPAN: usize = TYPO_MAX_CHUNKS * SIMD_CHUNK_BYTES;
+        let text = self.text.as_bytes();
+        // The matcher reads every name in whole 16-byte chunks, so the last
+        // chunk runs up to 15 bytes past the name. Names in the last
+        // `CHUNK_SPAN` bytes read from a zero-padded copy, never past `text`.
+        let tail_start = text.len().saturating_sub(CHUNK_SPAN);
+        let mut tail = text[tail_start..].to_vec();
+        tail.resize(tail.len() + SIMD_CHUNK_BYTES, 0);
+        // Each character class of the query that a name lacks costs at least
+        // one typo: a mask test rejects most names before frizbee reads them.
+        let budget = query.typo_budget();
+        let resolve = |index: u32, chunks: &mut [*const u8; TYPO_MAX_CHUNKS]| {
+            let index = index as usize;
+            if self.flags[index] & FLAG_DELETED != 0
+                || (query.mask & !self.masks[index]).count_ones() > budget
+            {
+                return None;
+            }
+            let start = if index == 0 {
+                0
+            } else {
+                self.ends[index - 1] as usize
+            };
+            let length = self.ends[index] as usize - start;
+            let count = length.div_ceil(SIMD_CHUNK_BYTES);
+            if count == 0 || count > TYPO_MAX_CHUNKS {
+                return None;
+            }
+            // A name that starts before `tail_start` ends its last chunk at
+            // most `CHUNK_SPAN` bytes later, inside `text`.
+            let base = if start >= tail_start {
+                tail[start - tail_start..].as_ptr()
+            } else {
+                text[start..].as_ptr()
+            };
+            for (chunk, pointer) in chunks.iter_mut().take(count).enumerate() {
+                *pointer = base.wrapping_add(chunk * SIMD_CHUNK_BYTES);
+            }
+            Some((count, length as u16))
+        };
+        let threads = std::thread::available_parallelism()
+            .map(usize::from)
+            .unwrap_or(1)
+            .min(MAX_SCAN_THREADS);
+        let started = std::time::Instant::now();
+        let matches =
+            query
+                .typo_matcher()
+                .match_range_parallel_resolved(self.ids.len(), &resolve, threads);
+        let matched = started.elapsed();
+        let match_count = matches.len();
+
+        // Frizbee also accepts scattered matches without typos ("chrmoe" in
+        // "chip-remove"). A misspelled name usually is the name's start with
+        // a letter wrong: those are close and rank first.
+        let mut admitted = admitted.iter().map(|hit| hit.index).collect::<Vec<_>>();
+        admitted.sort_unstable();
+        let mut hits = Vec::new();
+        for found in matches {
+            if admitted.binary_search(&found.index).is_ok() {
+                continue;
+            }
+            let index = found.index as usize;
+            let score = self.close_rank(index, closeness).unwrap_or_else(|| {
+                let penalty = i32::from(self.flags[index] & FLAG_PENALTY_MASK) * PENALTY_STEP;
+                TYPO_RANK_BASE + i32::from(found.score.min(TYPO_SCORE_MAX)) * TYPO_SCORE_STEP
+                    - penalty
+            });
+            hits.push(Hit {
+                score,
+                index: found.index,
+                typo: true,
+            });
+            if hits.len() >= wanted * 8 {
+                self.keep_best(&mut hits, wanted);
+            }
+        }
+        self.keep_best(&mut hits, wanted);
+        hits.sort_unstable_by(|a, b| self.compare(a, b));
+        if super::catalog_debug_enabled() {
+            eprintln!(
+                "[catalog] typo pass matches={match_count} match_ms={} rank_ms={}",
+                matched.as_millis(),
+                (started.elapsed() - matched).as_millis()
+            );
+        }
+        hits
+    }
+}
+
+/// Measures how close a name's start is to the query, with reused buffers
+/// (it runs for every typo match).
+struct Closeness {
+    query: Vec<char>,
+    /// `CLOSE_TYPO_SCORE` per query token.
+    base: i32,
+    name: Vec<char>,
+    cells: Vec<usize>,
+}
+
+impl Closeness {
+    fn new(query: &NameQuery<'_>) -> Self {
+        Self {
+            query: query.full.chars().collect(),
+            base: CLOSE_TYPO_SCORE * query.tokens.len() as i32,
+            name: Vec::new(),
+            cells: Vec::new(),
+        }
+    }
+
+    /// `prefix_distance` when at most `CLOSE_TYPO_EDITS`. A close name starts
+    /// with the query's first or second character, or has the first one
+    /// second: other names are skipped without the full computation.
+    fn distance(&mut self, name: &str) -> Option<usize> {
+        let mut start = name.chars();
+        let (first, second) = (start.next()?, start.next());
+        let query = &self.query;
+        let plausible = Some(&first) == query.first()
+            || Some(&first) == query.get(1)
+            || second.as_ref() == query.first();
+        if !plausible {
+            return None;
+        }
+        let distance = prefix_distance(query, name, &mut self.name, &mut self.cells);
+        (distance <= CLOSE_TYPO_EDITS).then_some(distance)
+    }
+}
+
+/// Edit distance from `query` to the closest start of `name` (insertions,
+/// deletions, substitutions, and swaps of two neighbours each cost one), up to
+/// `TYPO_FAR`. "chrmoe" is 1 from "chrome.exe", "chip-remove" is 3.
+/// `name_chars` and `cells` are scratch buffers.
+fn prefix_distance(
+    query: &[char],
+    name: &str,
+    name_chars: &mut Vec<char>,
+    cells: &mut Vec<usize>,
+) -> usize {
+    name_chars.clear();
+    name_chars.extend(name.chars().take(query.len() + 1));
+    let name = &name_chars[..];
+    let width = name.len() + 1;
+    // Optimal string alignment over (query + 1) x (name + 1) cells.
+    cells.clear();
+    cells.resize((query.len() + 1) * width, 0);
+    for (column, cell) in cells.iter_mut().take(width).enumerate() {
+        *cell = column;
+    }
+    for row in 1..=query.len() {
+        let wanted = query[row - 1];
+        cells[row * width] = row;
+        for column in 1..width {
+            let cell = row * width + column;
+            let found = name[column - 1];
+            let mut best = (cells[cell - width - 1] + usize::from(wanted != found))
+                .min(cells[cell - width] + 1)
+                .min(cells[cell - 1] + 1);
+            if row > 1 && column > 1 && wanted == name[column - 2] && query[row - 2] == found {
+                best = best.min(cells[cell - 2 * width - 2] + 1);
+            }
+            cells[cell] = best;
+        }
+    }
+    // The name may be one character shorter or longer than the query.
+    let last = query.len() * width;
+    (query.len().saturating_sub(1)..=query.len() + 1)
+        .filter(|&column| column < width)
+        .map(|column| cells[last + column])
+        .min()
+        .unwrap_or(TYPO_FAR)
+        .min(TYPO_FAR)
 }
 
 /// One bit per lowercase letter, one for any digit, `.`, the common word
@@ -602,6 +921,7 @@ fn char_mask(text: &str) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::catalog::search::entry_score;
     use crate::catalog::types::ScannedItem;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -648,6 +968,7 @@ mod tests {
             .candidates(db, &NameQuery::new(text, &tokens), limit, &|| false)
             .unwrap()
             .expect("index answers once loaded")
+            .entries
     }
 
     #[test]
@@ -724,6 +1045,74 @@ mod tests {
     }
 
     #[test]
+    fn typo_matches_appear_only_without_a_strong_match() {
+        let (db, directory) = temp_db();
+        db.insert_batch(
+            "vol",
+            1,
+            &[
+                item(r"C:\Apps\Discord.exe"),
+                item(r"C:\Docs\discount-codes.txt"),
+                item(r"C:\Apps\chrome.exe"),
+                item(r"C:\ui\chip-remove"),
+                item(r"C:\Docs\deep_target.txt"),
+                item(r"C:\Docs\appdata_target.txt"),
+            ],
+        )
+        .unwrap();
+        let index = NameIndex::default();
+        index.load(&db).unwrap();
+        let tokens = ["discrod"];
+        let found = index
+            .candidates(&db, &NameQuery::new("discrod", &tokens), 5, &|| false)
+            .unwrap()
+            .unwrap();
+
+        // A transposition passes no admission rule; frizbee finds it.
+        assert!(found.entries.is_empty());
+        assert_eq!(found.typos[0].0.display_path, r"C:\Apps\Discord.exe");
+
+        // A swapped letter at the name's start outranks a scattered
+        // subsequence match ("c·h·r·m·o·e" in "chip-remove").
+        let tokens = ["chrmoe"];
+        let found = index
+            .candidates(&db, &NameQuery::new("chrmoe", &tokens), 5, &|| false)
+            .unwrap()
+            .unwrap();
+        assert_eq!(names(&found.entries), [r"C:\ui\chip-remove"]);
+        let scattered = entry_score(&found.entries[0], &tokens, "chrmoe").unwrap();
+        let (typo, rank) = &found.typos[0];
+        assert_eq!(typo.display_path, r"C:\Apps\chrome.exe");
+        assert!(*rank > scattered);
+
+        // A strong match: no typo matches at all.
+        let tokens = ["deep_target"];
+        let found = index
+            .candidates(&db, &NameQuery::new("deep_target", &tokens), 5, &|| false)
+            .unwrap()
+            .unwrap();
+        assert_eq!(names(&found.entries), [r"C:\Docs\deep_target.txt"]);
+        assert!(found.typos.is_empty());
+        drop(db);
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn prefix_distance_counts_edits_against_the_name_start() {
+        let distance = |query: &str, name: &str| {
+            let query = query.chars().collect::<Vec<_>>();
+            prefix_distance(&query, name, &mut Vec::new(), &mut Vec::new())
+        };
+        assert_eq!(distance("chrome", "chrome.exe"), 0);
+        assert_eq!(distance("chrmoe", "chrome.exe"), 1);
+        assert_eq!(distance("notpead", "notepad.exe"), 1);
+        assert_eq!(distance("spotfy", "spotify"), 1);
+        assert_eq!(distance("photshop", "photoshop.exe"), 1);
+        assert_eq!(distance("chrmoe", "chip-remove"), TYPO_FAR);
+        assert_eq!(distance("abc", "x"), TYPO_FAR);
+    }
+
+    #[test]
     fn catches_up_inserts_and_drops_deleted_rows() {
         let (db, directory) = temp_db();
         db.insert_batch("vol", 1, &[item(r"C:\a\alpha-report.txt")])
@@ -790,7 +1179,7 @@ mod tests {
         index.load(&db).unwrap();
         assert!(!index.needs_sync());
         let second = index.candidates(&db, &parsed, 10, &|| false).unwrap();
-        assert!(second.is_some_and(|found| !found.is_empty()));
+        assert!(second.is_some_and(|found| !found.entries.is_empty()));
         drop(db);
         let _ = std::fs::remove_dir_all(directory);
     }

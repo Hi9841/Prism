@@ -44,4 +44,6 @@ windows = { version = "0.61", features = [
 ] }
 image = { version = "0.25", default-features = false, features = ["bmp", "gif", "jpeg", "png", "webp"] }
 base64 = "0.22"
+# FFF's typo-tolerant SIMD matcher (the engine inside fff-search).
+neo_frizbee = "0.13.3"
 windows-core = "0.61"
