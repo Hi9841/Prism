@@ -343,8 +343,9 @@ pub fn is_strong_match(
     tokens: &[&str],
     full_query: &str,
 ) -> bool {
-    // 9,500 and up: the exact-name and exact-stem tiers of `name_score`.
-    name_score(lower_name, is_directory, tokens, full_query).is_some_and(|score| score >= 9_500)
+    // The exact-name, exact-stem, and near-exact tiers of `name_score`.
+    name_score(lower_name, is_directory, tokens, full_query)
+        .is_some_and(|score| score >= NEAR_EXACT_SCORE)
         || tokens.iter().any(|token| {
             target_score(token, lower_name).is_some_and(|score| score >= STRONG_TOKEN_SCORE)
         })
@@ -377,6 +378,14 @@ pub fn name_score(
         return Some(9_500 + directory_bonus);
     }
 
+    // The query with one more character (e.g. "agents.md" for "agent.md"):
+    // below the exact tiers, far above every prefix match.
+    if is_one_insertion(lower_name, full_query)
+        && full_query.chars().count() >= MIN_NEAR_EXACT_QUERY_CHARS
+    {
+        return Some(NEAR_EXACT_SCORE + directory_bonus);
+    }
+
     let mut total = directory_bonus;
 
     for token in tokens {
@@ -386,13 +395,48 @@ pub fn name_score(
     Some(total - lower_name.len().min(80) as i32)
 }
 
+/// The `name_score` tier of a name that is the query with one more character.
+const NEAR_EXACT_SCORE: i32 = 9_000;
+/// Shorter queries change too much with one more character ("cat" -> "cart").
+const MIN_NEAR_EXACT_QUERY_CHARS: usize = 4;
+
+/// True when `name` is `query` with one character inserted before the query's
+/// extension: "agents.md" for "agent.md", but not "agent.cmd", which is another
+/// file type. The byte length test rejects almost every name before any
+/// character is compared.
+fn is_one_insertion(name: &str, query: &str) -> bool {
+    let extra = name.len().wrapping_sub(query.len());
+    if !(1..=4).contains(&extra) {
+        return false;
+    }
+    let common = name
+        .bytes()
+        .zip(query.bytes())
+        .take_while(|(a, b)| a == b)
+        .count();
+    // Both prefixes are the same bytes, so a character boundary in `name` is
+    // one in `query` too.
+    let mut start = common;
+    while !name.is_char_boundary(start) {
+        start -= 1;
+    }
+    if query.rfind('.').is_some_and(|dot| start > dot) {
+        return false;
+    }
+    name[start..]
+        .chars()
+        .next()
+        .is_some_and(|inserted| inserted.len_utf8() == extra)
+        && name[start + extra..] == query[start..]
+}
+
 /// High-noise locations and filenames. The catalog is full-coverage - system
 /// directories, dependency trees, and temp folders are all indexed - so these
 /// matches stay findable and merely rank below the same match in a
 /// user-authored location. Penalties are sized to sit well under the gaps
-/// between quality tiers (exact 10_000, stem 9_500, prefix 4_000, substring
-/// 3_000, subsequence 1_000): a great match in Windows still beats a weak
-/// match in Documents, but a same-quality match never does.
+/// between quality tiers (exact 10_000, stem 9_500, near-exact 9_000, prefix
+/// 4_000, substring 3_000, subsequence 1_000): a great match in Windows still
+/// beats a weak match in Documents, but a same-quality match never does.
 const LOCATION_PENALTIES: &[(&str, i32)] = &[
     ("\\$recycle.bin\\", 700),
     ("\\system volume information\\", 700),
