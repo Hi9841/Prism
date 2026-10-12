@@ -278,8 +278,12 @@ fn candidates(
 ) -> Result<IndexCandidates, String> {
     if let Some(names) = names.filter(|names| names.is_loaded()) {
         let ntfs = db.ntfs_candidates_until(query, candidate_limit, cancelled)?;
+        // Only an NTFS entry that is a result (every token matches) and a
+        // strong one turns the typo pass off.
         let typos = !ntfs.iter().any(|entry| {
-            is_strong_match(&entry.lower_name, entry.is_directory, tokens, query_lower)
+            let (name, directory) = (&entry.lower_name, entry.is_directory);
+            name_score(name, directory, tokens, query_lower).is_some()
+                && is_strong_match(name, directory, tokens, query_lower)
         });
         let parsed = NameQuery::new(query_lower, tokens);
         if let Some(mut found) = names.candidates(db, &parsed, limit, typos, cancelled)? {

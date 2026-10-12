@@ -277,17 +277,14 @@ impl NameIndex {
         let spawned = std::thread::Builder::new()
             .name("prism-name-index".into())
             .spawn(move || {
-                let first_load = !index.is_loaded();
                 let result = index.load(&db);
                 index.loader_running.store(false, AtomicOrdering::Release);
                 match result {
-                    // Searches before the first load used the SQL path, which
-                    // has no substring stage: an open palette searches again.
-                    // Catch-ups do not: the watcher already reports changes.
-                    Ok(()) if first_load => {
-                        crate::host::emit("file-index-updated", serde_json::Value::Null)
-                    }
-                    Ok(()) => {}
+                    // Searches during a load from empty used the SQL path,
+                    // which has no substring stage: an open palette searches
+                    // again. Catch-ups do not: the watcher reports changes.
+                    Ok(true) => crate::host::emit("file-index-updated", serde_json::Value::Null),
+                    Ok(false) => {}
                     Err(error) => eprintln!("[Prism Catalog] name index load failed: {error}"),
                 }
             });
@@ -330,9 +327,12 @@ impl NameIndex {
         self.needs_sync()
     }
 
-    /// Synchronous full load (or catch-up), batch by batch.
-    pub fn load(&self, db: &Database) -> Result<(), String> {
-        if self.reload_requested.swap(false, AtomicOrdering::AcqRel) || !self.is_loaded() {
+    /// Synchronous full load (or catch-up), batch by batch. Returns true when
+    /// it loaded from an empty index (the first load or a full reload).
+    pub fn load(&self, db: &Database) -> Result<bool, String> {
+        let from_empty =
+            self.reload_requested.swap(false, AtomicOrdering::AcqRel) || !self.is_loaded();
+        if from_empty {
             if self.is_loaded() {
                 self.reset();
             }
@@ -341,7 +341,7 @@ impl NameIndex {
         while !self.catch_up(db, LOAD_BATCH, usize::MAX)? {}
         self.behind.store(false, AtomicOrdering::Release);
         self.loaded.store(true, AtomicOrdering::Release);
-        Ok(())
+        Ok(from_empty)
     }
 
     /// Applies up to `max_rewrites` rewritten rows and appends up to
@@ -1215,7 +1215,7 @@ mod tests {
         db.insert_batch("vol", 1, &[item(r"C:\docs\annual-report.txt")])
             .unwrap();
         let index = NameIndex::default();
-        index.load(&db).unwrap();
+        assert!(index.load(&db).unwrap(), "the first load starts empty");
         let rows = (0..SEARCH_CATCH_UP * 2)
             .map(|n| item(&format!(r"C:\bulk\file{n}.txt")))
             .collect::<Vec<_>>();
@@ -1232,7 +1232,7 @@ mod tests {
         );
         assert_eq!(index.len(), 1 + SEARCH_CATCH_UP);
         assert!(index.needs_sync(), "the background sync appends the rest");
-        index.load(&db).unwrap();
+        assert!(!index.load(&db).unwrap(), "a catch-up is not a load from empty");
         assert!(!index.needs_sync());
         assert_eq!(index.len(), 1 + SEARCH_CATCH_UP * 2);
         drop(db);
