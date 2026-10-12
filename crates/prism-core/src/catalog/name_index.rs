@@ -73,6 +73,9 @@ const TYPO_MAX_CHUNKS: usize = 48;
 /// minus the name length and the location penalty.
 const CLOSE_TYPO_SCORE: i32 = 1_500;
 const CLOSE_EDIT_STEP: i32 = 1_000;
+/// Typo hits per query: near-identical neighbours ("file-0043" for
+/// "fle-0042") would otherwise fill the list.
+const MAX_TYPO_HITS: usize = 5;
 /// Prefix edit distances from this value up count the same.
 const TYPO_FAR: usize = 3;
 
@@ -461,7 +464,7 @@ impl NameIndex {
                             };
                         }
                     }
-                    let typos = names.typo_hits(query, wanted, &hits, &mut closeness);
+                    let typos = names.typo_hits(query, MAX_TYPO_HITS, &hits, &mut closeness);
                     hits.extend(typos);
                     names.keep_best(&mut hits, wanted);
                     hits.sort_unstable_by(|a, b| names.compare(a, b));
@@ -1095,6 +1098,18 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(names(&found.entries), [r"C:\Docs\deep_target.txt"]);
+        assert!(found.typos.is_empty());
+
+        // One strong token is enough: "annual" is a prefix, "rpt" scattered.
+        db.insert_batch("vol", 1, &[item(r"C:\Docs\annual_report.docx")])
+            .unwrap();
+        let tokens = ["annual", "rpt"];
+        let parsed = NameQuery::new("annual rpt", &tokens);
+        let found = index
+            .candidates(&db, &parsed, 5, true, &|| false)
+            .unwrap()
+            .unwrap();
+        assert_eq!(names(&found.entries), [r"C:\Docs\annual_report.docx"]);
         assert!(found.typos.is_empty());
 
         // A strong match in another source (an NTFS volume) turns typos off.
