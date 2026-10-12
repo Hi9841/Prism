@@ -4,14 +4,14 @@
 // line and kind. Deterministic: sorted walk, fixed patterns, no judgment.
 // Tests are not translated units (RULEBOOK.md section 4), so they are skipped.
 //
-//   bun migration/gap-sweep.mjs [--root ../Prism]
+//   bun migration/gap-sweep.mjs [--root ..]
 // writes migration/gap-sites.tsv and prints the per-kind counts.
 import { readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const here = dirname(fileURLToPath(import.meta.url));
-const rootArg = process.argv.includes("--root") ? process.argv[process.argv.indexOf("--root") + 1] : "../Prism";
+const rootArg = process.argv.includes("--root") ? process.argv[process.argv.indexOf("--root") + 1] : "..";
 const prism = resolve(here, "..", rootArg);
 const out = join(here, "gap-sites.tsv");
 

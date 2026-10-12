@@ -4,7 +4,7 @@
 //   bun migration/parity/run.mjs [--ux] [scenario ...]
 // Default: the UI captures (scenarios.json). --ux: the interaction scenarios
 // (ux-scenarios.json), scored on captures and recorded calls.
-// Needs target/parity/original-dist (vite build of ../Prism) and
+// Needs target/parity/original-dist (vite build of the repo root app) and
 // target/debug/prism.exe (cargo build -p prism-app).
 import { spawnSync } from "node:child_process";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";

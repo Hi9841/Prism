@@ -6,7 +6,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 
-const prism = process.argv[2] ?? path.resolve(import.meta.dirname, "../../Prism");
+const prism = process.argv[2] ?? path.resolve(import.meta.dirname, "../..");
 const iconsDir = path.join(prism, "node_modules/lucide-react/dist/esm/icons");
 const out = path.resolve(import.meta.dirname, "../crates/prism-ui/assets/icons");
 

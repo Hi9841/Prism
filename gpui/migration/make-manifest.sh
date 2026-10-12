@@ -4,7 +4,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 KIT="${MIGRATION_KIT:-C:/Users/hi/Desktop/skills/migration-kit}"
-bun migration/depmap_ts.mjs --root ../Prism --out migration/depmap
+bun migration/depmap_ts.mjs --root .. --out migration/depmap
 grep -v '^#' migration/depmap/order.txt | tr '\t' '\n' | grep -vE '\.test\.(ts|tsx)$' > migration/depmap/order.port.txt
 # MSYS_NO_PATHCONV: Git Bash would rewrite the '/Name=...' arguments as Windows paths.
 MSYS_NO_PATHCONV=1 python "$KIT/scripts/make_manifest.py" \

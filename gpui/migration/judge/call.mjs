@@ -9,7 +9,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
-export const prismRoot = process.env.PRISM_ROOT ?? path.resolve(here, "../../../Prism");
+export const prismRoot = process.env.PRISM_ROOT ?? path.resolve(here, "../../..");
 
 function command() {
   const custom = process.env.PRISM_ADAPTER_CMD;

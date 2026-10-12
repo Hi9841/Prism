@@ -7,7 +7,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
-const prism = path.resolve(here, "../../../Prism");
+const prism = path.resolve(here, "../../..");
 const judge = path.join(here, "judge.mjs");
 const mutations = [
   {
