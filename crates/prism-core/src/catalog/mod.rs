@@ -793,7 +793,7 @@ impl FileIndex {
             }
         }
 
-        // The sweep (and its FTS rebuild) left most of the WAL behind; fold
+        // The sweep left most of the WAL behind; fold
         // it back into the catalog so the next launch does not pay recovery.
         let _ = db.checkpoint();
         self.emit_updated();

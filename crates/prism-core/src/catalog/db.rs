@@ -13,7 +13,7 @@ use super::types::{
 };
 
 #[allow(dead_code)]
-const SCHEMA_VERSION: u32 = 6;
+const SCHEMA_VERSION: u32 = 7;
 
 /// One-time purge patterns for rows created by the 0.9.0 catalog, which indexed
 /// everything including high-noise directories. Historical artifact of the
@@ -61,12 +61,6 @@ pub struct Database {
     db_path: PathBuf,
     writer: Arc<Mutex<Connection>>,
     reader: Arc<Mutex<Connection>>,
-    bulk_load_depth: Mutex<u32>,
-    /// Set by any write that lands while the FTS triggers are dropped. The
-    /// bulk-load teardown only rebuilds the FTS index when this is set, so a
-    /// sweep that changed nothing (the common overflow-reconcile case) does
-    /// not re-tokenize millions of names for nothing.
-    bulk_load_dirty: AtomicBool,
     /// Rows deleted since the process started. The name index reloads once
     /// deletions it has not seen pass a share of its rows (bulk deletes leave
     /// dead rows it would otherwise only find one search at a time).
@@ -186,8 +180,6 @@ impl Database {
             db_path: db_path.to_path_buf(),
             writer: Arc::new(Mutex::new(writer)),
             reader: Arc::new(Mutex::new(reader)),
-            bulk_load_depth: Mutex::new(0),
-            bulk_load_dirty: AtomicBool::new(false),
             rows_deleted: AtomicU64::new(0),
             rewritten_ids: Mutex::new(Vec::new()),
             index_reload_requested: AtomicBool::new(false),
@@ -263,26 +255,6 @@ impl Database {
 
              CREATE INDEX IF NOT EXISTS idx_files_lower_name ON files(lower_name, is_directory);
              CREATE INDEX IF NOT EXISTS idx_files_vol_parent ON files(volume_id, parent);
-
-             CREATE VIRTUAL TABLE IF NOT EXISTS file_fts USING fts5(
-                name,
-                tokenize='trigram',
-                content='files',
-                content_rowid='id'
-             );
-
-             CREATE TRIGGER IF NOT EXISTS files_ai AFTER INSERT ON files BEGIN
-                INSERT INTO file_fts(rowid, name) VALUES (new.id, new.name);
-             END;
-
-             CREATE TRIGGER IF NOT EXISTS files_ad AFTER DELETE ON files BEGIN
-                INSERT INTO file_fts(file_fts, rowid, name) VALUES ('delete', old.id, old.name);
-             END;
-
-             CREATE TRIGGER IF NOT EXISTS files_au AFTER UPDATE OF name ON files BEGIN
-                INSERT INTO file_fts(file_fts, rowid, name) VALUES ('delete', old.id, old.name);
-                INSERT INTO file_fts(rowid, name) VALUES (new.id, new.name);
-             END;
 
              CREATE TABLE IF NOT EXISTS ntfs_nodes (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -375,20 +347,10 @@ impl Database {
             let purged = self.purge_excluded_rows()?;
             eprintln!("[Prism Catalog] Purged {purged} excluded rows");
 
+            // The FTS triggers stay dropped: v7 drops `file_fts` itself.
             let conn = self.writer.lock().map_err(|e| e.to_string())?;
             conn.execute_batch(
-                "CREATE TRIGGER IF NOT EXISTS files_ai AFTER INSERT ON files BEGIN
-                    INSERT INTO file_fts(rowid, name) VALUES (new.id, new.name);
-                 END;
-                 CREATE TRIGGER IF NOT EXISTS files_ad AFTER DELETE ON files BEGIN
-                    INSERT INTO file_fts(file_fts, rowid, name) VALUES ('delete', old.id, old.name);
-                 END;
-                 CREATE TRIGGER IF NOT EXISTS files_au AFTER UPDATE OF name ON files BEGIN
-                    INSERT INTO file_fts(file_fts, rowid, name) VALUES ('delete', old.id, old.name);
-                    INSERT INTO file_fts(rowid, name) VALUES (new.id, new.name);
-                 END;
-                 INSERT INTO file_fts(file_fts) VALUES('rebuild');
-                 UPDATE meta SET value = '4' WHERE key = 'version';
+                "UPDATE meta SET value = '4' WHERE key = 'version';
                  -- Force one sweep so directory rows and offline placeholders
                  -- are reconciled into the persisted catalog.
                  UPDATE volumes SET last_scanned_at = 0;",
@@ -443,12 +405,33 @@ impl Database {
             })?;
         }
 
+        if version < 7 {
+            let conn = self.writer.lock().map_err(|e| e.to_string())?;
+            eprintln!("[Prism Catalog] Migrating catalog schema v{version} -> v7 (drop file_fts)");
+            // The in-memory name index answers every substring query. The
+            // trigram index cost about a tenth of the catalog file, a write
+            // per changed name, and a full rebuild after every sweep. Its
+            // pages go to the free list; `reclaim_space` returns them.
+            conn.execute_batch(
+                "BEGIN IMMEDIATE;
+                 DROP TRIGGER IF EXISTS files_ai;
+                 DROP TRIGGER IF EXISTS files_ad;
+                 DROP TRIGGER IF EXISTS files_au;
+                 DROP TABLE IF EXISTS file_fts;
+                 UPDATE meta SET value = '7' WHERE key = 'version';
+                 COMMIT;",
+            )
+            .map_err(|error| {
+                let _ = conn.execute_batch("ROLLBACK;");
+                error.to_string()
+            })?;
+        }
+
         Ok(())
     }
 
     /// Deletes index rows that the scanner now excludes (see
-    /// `scanner::is_excluded_dir`). Returns the number of rows purged. Callers
-    /// that dropped the FTS triggers must follow with an FTS rebuild.
+    /// `scanner::is_excluded_dir`). Returns the number of rows purged.
     pub fn purge_excluded_rows(&self) -> Result<u64, String> {
         let conn = self.writer.lock().map_err(|e| e.to_string())?;
         let patterns: Vec<&str> = EXCLUDED_PURGE_PATTERNS.to_vec();
@@ -466,62 +449,6 @@ impl Database {
             .execute(params_from_iter(params.iter().copied()))
             .map_err(|e| e.to_string())?;
         Ok(purged as u64)
-    }
-
-    /// Bulk-load mode: the FTS triggers are dropped so mass inserts skip the
-    /// per-row trigram indexing; `end_bulk_load` restores them and rebuilds the
-    /// FTS index in one efficient pass. Reference-counted so parallel volume
-    /// scans can nest safely - the rebuild happens only when the last scan
-    /// finishes. Watcher events are buffered while scans run, so nothing writes
-    /// through the FTS triggers in the meantime.
-    pub fn begin_bulk_load(&self) -> Result<(), String> {
-        let mut depth = self.bulk_load_depth.lock().map_err(|e| e.to_string())?;
-        if *depth == 0 {
-            let conn = self.writer.lock().map_err(|e| e.to_string())?;
-            conn.execute_batch(
-                "DROP TRIGGER IF EXISTS files_ai;
-                 DROP TRIGGER IF EXISTS files_ad;
-                 DROP TRIGGER IF EXISTS files_au;",
-            )
-            .map_err(|e| e.to_string())?;
-            self.bulk_load_dirty.store(false, Ordering::Relaxed);
-        }
-        *depth += 1;
-        Ok(())
-    }
-
-    pub fn end_bulk_load(&self) -> Result<(), String> {
-        let mut depth = self.bulk_load_depth.lock().map_err(|e| e.to_string())?;
-        if *depth == 0 {
-            return Ok(());
-        }
-        *depth -= 1;
-        if *depth == 0 {
-            let rebuild_needed = self.bulk_load_dirty.swap(false, Ordering::Relaxed);
-            let conn = self.writer.lock().map_err(|e| e.to_string())?;
-            conn.execute_batch(
-                "CREATE TRIGGER IF NOT EXISTS files_ai AFTER INSERT ON files BEGIN
-                    INSERT INTO file_fts(rowid, name) VALUES (new.id, new.name);
-                 END;
-                 CREATE TRIGGER IF NOT EXISTS files_ad AFTER DELETE ON files BEGIN
-                    INSERT INTO file_fts(file_fts, rowid, name) VALUES ('delete', old.id, old.name);
-                 END;
-                 CREATE TRIGGER IF NOT EXISTS files_au AFTER UPDATE OF name ON files BEGIN
-                    INSERT INTO file_fts(file_fts, rowid, name) VALUES ('delete', old.id, old.name);
-                    INSERT INTO file_fts(rowid, name) VALUES (new.id, new.name);
-                 END;",
-            )
-            .map_err(|e| e.to_string())?;
-            if rebuild_needed {
-                let started = std::time::Instant::now();
-                conn.execute_batch("INSERT INTO file_fts(file_fts) VALUES('rebuild');")
-                    .map_err(|e| e.to_string())?;
-                if super::catalog_debug_enabled() {
-                    eprintln!("[catalog] fts rebuild ms={}", started.elapsed().as_millis());
-                }
-            }
-        }
-        Ok(())
     }
 
     /// Counts deleted rows for the name index (see `rows_deleted`).
@@ -558,12 +485,6 @@ impl Database {
         self.index_reload_requested.swap(false, Ordering::AcqRel)
     }
 
-    /// Marks the FTS index as out of date: the row was written while the
-    /// maintenance triggers were dropped, so the bulk-load teardown must
-    /// rebuild it. Harmless outside bulk loads (nothing reads the flag then).
-    fn note_bulk_write(&self) {
-        self.bulk_load_dirty.store(true, Ordering::Relaxed);
-    }
 
     /// Drops the indexes that no query reads and returns free pages to the
     /// file system. Earlier catalogs never did either: a long-lived 4.3M-row
@@ -575,12 +496,6 @@ impl Database {
     /// auto-vacuum; later runs only truncate the free pages. Row ids survive:
     /// every rowid table has an explicit `INTEGER PRIMARY KEY`.
     pub fn reclaim_space(&self) -> Result<SpaceReclaim, String> {
-        // Same lock order as begin/end_bulk_load (depth, then writer). Held for
-        // the whole pass so a bulk load cannot drop the FTS triggers mid-VACUUM.
-        let depth = self.bulk_load_depth.lock().map_err(|e| e.to_string())?;
-        if *depth > 0 {
-            return Ok(SpaceReclaim::default());
-        }
         let conn = self.writer.lock().map_err(|e| e.to_string())?;
         // Nothing filters on `parent` alone (the prune query also filters on
         // `volume_id`, served by idx_files_vol_parent) or on
@@ -1224,9 +1139,6 @@ impl Database {
             }
         }
         tx.commit().map_err(|e| e.to_string())?;
-        if changed > 0 {
-            self.note_bulk_write();
-        }
         Ok(changed)
     }
 
@@ -1326,9 +1238,6 @@ impl Database {
             removed += Self::delete_path_rows(&tx, volume_id, path, *is_dir)?;
         }
         tx.commit().map_err(|e| e.to_string())?;
-        if removed != 0 {
-            self.note_bulk_write();
-        }
         self.note_rows_deleted(removed);
         Ok(())
     }
@@ -1494,9 +1403,6 @@ impl Database {
         let removed = Self::delete_path_rows(&tx, volume_id, normalized_path, is_dir)?;
 
         tx.commit().map_err(|e| e.to_string())?;
-        if removed != 0 {
-            self.note_bulk_write();
-        }
         self.note_rows_deleted(removed);
         Ok(removed as i64)
     }
@@ -1623,7 +1529,6 @@ impl Database {
             .map_err(|e| e.to_string())?;
 
         tx.commit().map_err(|e| e.to_string())?;
-        self.note_bulk_write();
         self.note_rows_deleted(removed);
         if !rewritten.is_empty() {
             const MAX_PENDING_REWRITES: usize = 200_000;
@@ -1719,26 +1624,18 @@ impl Database {
     }
 
     /// Drops every indexed row and resets volumes so a rebuild starts clean.
-    /// FTS is repopulated by `end_bulk_load`'s rebuild pass.
     pub fn clear_catalog(&self) -> Result<(), String> {
-        self.begin_bulk_load()?;
-        let result = (|| {
-            let conn = self.writer.lock().map_err(|e| e.to_string())?;
-            conn.execute_batch(
-                "DELETE FROM files;
-                 DELETE FROM ntfs_nodes;
-                 DELETE FROM ntfs_staging;
-                 INSERT INTO ntfs_fts(ntfs_fts) VALUES('rebuild');
-                 UPDATE volumes SET scanned_entries = 0, state = 'error', last_scanned_at = 0,
-                    backend = 'fallback', journal_id = NULL, next_usn = NULL,
-                    index_status = 'needs_rebuild';",
-            )
-            .map_err(|e| e.to_string())?;
-            self.note_bulk_write();
-            Ok(())
-        })();
-        self.end_bulk_load()?;
-        result
+        let conn = self.writer.lock().map_err(|e| e.to_string())?;
+        conn.execute_batch(
+            "DELETE FROM files;
+             DELETE FROM ntfs_nodes;
+             DELETE FROM ntfs_staging;
+             INSERT INTO ntfs_fts(ntfs_fts) VALUES('rebuild');
+             UPDATE volumes SET scanned_entries = 0, state = 'error', last_scanned_at = 0,
+                backend = 'fallback', journal_id = NULL, next_usn = NULL,
+                index_status = 'needs_rebuild';",
+        )
+        .map_err(|e| e.to_string())
     }
 
     #[cfg(test)]
@@ -1891,7 +1788,6 @@ impl Database {
         // penalties can order it to the top.
         let exact_limit = (limit.max(50) * 3) as i64;
         let prefix_limit = (limit.max(10) * 3) as i64;
-        let fts_limit = (limit.max(10) * 3) as i64;
         let per_vol_limit = (exact_limit / 3).max(30);
 
         // 1. Exact match query
@@ -2006,52 +1902,11 @@ impl Database {
             return Ok(Vec::new());
         }
 
-        // 3. 3+ characters: FTS5 Trigram MATCH query
-        if query_len >= 3 {
-            let fts_query = sanitize_fts5_trigram_query(&lower);
-            if !fts_query.is_empty() {
-                let mut stmt = conn
-                    .prepare_cached(
-                        "SELECT id, display_path, lower_name, is_directory, extension
-                         FROM files f
-                         WHERE id IN (
-                            SELECT rowid FROM file_fts WHERE name MATCH ?1 LIMIT ?2
-                         )
-                         AND NOT EXISTS(SELECT 1 FROM volumes v
-                                        WHERE v.volume_id = f.volume_id AND v.backend = 'ntfs')
-                         LIMIT ?2;",
-                    )
-                    .map_err(|e| e.to_string())?;
-
-                let rows = stmt
-                    .query_map(params![fts_query, fts_limit], |row| {
-                        Ok(CandidateEntry {
-                            id: row.get(0)?,
-                            display_path: row.get(1)?,
-                            lower_name: row.get(2)?,
-                            is_directory: row.get::<_, i32>(3)? != 0,
-                            extension: row.get(4)?,
-                        })
-                    })
-                    .map_err(|e| e.to_string())?;
-
-                for row in rows {
-                    let row = row.map_err(|error| error.to_string())?;
-                    if seen_ids.insert(row.id) {
-                        candidates.push(row);
-                    }
-                }
-            }
-        }
-
-        if is_cancelled() {
-            return Ok(Vec::new());
-        }
-
-        // FTS5 trigram matching cannot retrieve noncontiguous fuzzy queries
-        // such as `rpt` -> `report.txt`. Probe a hard-capped slice of the
-        // B-tree range for names beginning with the selected token's first
-        // character, then let the existing scorer validate every token.
+        // Substring and subsequence matches (`port`, `rpt` -> `report.txt`)
+        // come from the in-memory name index. Until it loads, probe a
+        // hard-capped slice of the B-tree range for names beginning with the
+        // selected token's first character, then let the existing scorer
+        // validate every token.
         let probes = subsequence_probes(&lower);
         if !probes.is_empty() {
             let scan_limit = ((limit.max(10) * 20).min(5_000) / probes.len()).max(1) as i64;
@@ -2575,43 +2430,39 @@ mod ntfs_tests {
     }
 
     fn seed_large_fallback_catalog(db: &Database) {
-        db.begin_bulk_load().unwrap();
-        {
-            let conn = db.writer.lock().unwrap();
-            conn.execute_batch(
-                r#"WITH digits(value) AS (
-                       VALUES (0), (1), (2), (3), (4), (5), (6), (7), (8), (9)
-                   ),
-                   high(value) AS (VALUES (0), (1), (2)),
-                   numbers(value) AS (
-                       SELECT ones.value
-                            + tens.value * 10
-                            + hundreds.value * 100
-                            + thousands.value * 1000
-                            + ten_thousands.value * 10000
-                            + high.value * 100000
-                       FROM digits ones
-                       CROSS JOIN digits tens
-                       CROSS JOIN digits hundreds
-                       CROSS JOIN digits thousands
-                       CROSS JOIN digits ten_thousands
-                       CROSS JOIN high
-                   )
-                   INSERT INTO files(
-                       volume_id, normalized_path, display_path, name, lower_name,
-                       parent, is_directory, extension, scan_generation, modified_at, size
-                   )
-                   SELECT 'stable-volume',
-                          printf('c:\bulk\file-%06d.tmp', value),
-                          printf('C:\Bulk\file-%06d.tmp', value),
-                          printf('file-%06d.tmp', value),
-                          printf('file-%06d.tmp', value),
-                          'C:\Bulk', 0, 'tmp', 1, 1, 1
-                   FROM numbers;"#,
-            )
-            .unwrap();
-        }
-        db.end_bulk_load().unwrap();
+        let conn = db.writer.lock().unwrap();
+        conn.execute_batch(
+            r#"WITH digits(value) AS (
+                   VALUES (0), (1), (2), (3), (4), (5), (6), (7), (8), (9)
+               ),
+               high(value) AS (VALUES (0), (1), (2)),
+               numbers(value) AS (
+                   SELECT ones.value
+                        + tens.value * 10
+                        + hundreds.value * 100
+                        + thousands.value * 1000
+                        + ten_thousands.value * 10000
+                        + high.value * 100000
+                   FROM digits ones
+                   CROSS JOIN digits tens
+                   CROSS JOIN digits hundreds
+                   CROSS JOIN digits thousands
+                   CROSS JOIN digits ten_thousands
+                   CROSS JOIN high
+               )
+               INSERT INTO files(
+                   volume_id, normalized_path, display_path, name, lower_name,
+                   parent, is_directory, extension, scan_generation, modified_at, size
+               )
+               SELECT 'stable-volume',
+                      printf('c:\bulk\file-%06d.tmp', value),
+                      printf('C:\Bulk\file-%06d.tmp', value),
+                      printf('file-%06d.tmp', value),
+                      printf('file-%06d.tmp', value),
+                      'C:\Bulk', 0, 'tmp', 1, 1, 1
+               FROM numbers;"#,
+        )
+        .unwrap();
     }
 
     fn node(frn: u64, parent_frn: u64, name: &str, is_directory: bool) -> NtfsNode {
@@ -2802,7 +2653,7 @@ mod ntfs_tests {
     }
 
     #[test]
-    fn migrates_v5_resweeping_only_fallback_volumes() {
+    fn migrates_v5_resweeping_only_fallback_volumes_and_dropping_file_fts() {
         let path = temp_db_path("schema-v5-full-coverage");
         {
             // Build a current-shape catalog, then rewind its version marker to
@@ -2819,6 +2670,16 @@ mod ntfs_tests {
             let conn = db.writer.lock().unwrap();
             conn.execute("UPDATE meta SET value = '5' WHERE key = 'version';", [])
                 .unwrap();
+            // Catalogs before v7 kept a trigram index over `files`.
+            conn.execute_batch(
+                "CREATE VIRTUAL TABLE file_fts USING fts5(
+                    name, tokenize='trigram', content='files', content_rowid='id'
+                 );
+                 CREATE TRIGGER files_ai AFTER INSERT ON files BEGIN
+                    INSERT INTO file_fts(rowid, name) VALUES (new.id, new.name);
+                 END;",
+            )
+            .unwrap();
             conn.execute(
                 "UPDATE volumes SET backend = 'ntfs', journal_id = '7', next_usn = 100,
                     index_status = 'ready', last_scanned_at = CAST(strftime('%s','now') AS INTEGER) - 60
@@ -2835,8 +2696,16 @@ mod ntfs_tests {
                 row.get(0)
             })
             .unwrap();
+        let fts_objects: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE name IN ('file_fts', 'files_ai');",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
         drop(conn);
-        assert_eq!(version, "6");
+        assert_eq!(version, "7");
+        assert_eq!(fts_objects, 0);
         // Full-coverage resweep: fallback volumes lose their freshness so the
         // next startup re-walks them; NTFS generations already cover those
         // directories through the MFT and keep their cursor.
@@ -2900,7 +2769,7 @@ mod ntfs_tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(version, "6");
+        assert_eq!(version, "7");
         assert_eq!(legacy_rows, 1);
         assert_eq!(backend, "fallback");
         drop(conn);

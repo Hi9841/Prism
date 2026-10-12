@@ -745,61 +745,6 @@ mod tests {
     }
 
     #[test]
-    fn bulk_load_rebuilds_fts_when_the_last_scan_finishes() {
-        let (db, temp_dir) = test_db();
-        let mut items = Vec::new();
-        for i in 0..10 {
-            let file_path = temp_dir.join(format!("bulk-file-{i}.txt"));
-            std::fs::write(&file_path, "data").unwrap();
-            items.push(ScannedItem {
-                normalized_path: file_path.to_string_lossy().to_lowercase(),
-                display_path: file_path.to_string_lossy().into_owned(),
-                name: format!("bulk-file-{i}.txt"),
-                lower_name: format!("bulk-file-{i}.txt"),
-                parent: temp_dir.to_string_lossy().into_owned(),
-                is_directory: false,
-                extension: Some("txt".into()),
-                modified_at: 1700000000 + i as u64,
-                size: 4,
-            });
-        }
-
-        // Nested bulk loads: triggers stay dropped until the last end.
-        db.begin_bulk_load().unwrap();
-        db.begin_bulk_load().unwrap();
-        db.insert_batch("vol1", 1, &items).unwrap();
-        db.end_bulk_load().unwrap();
-        db.end_bulk_load().unwrap();
-
-        let gen = AtomicU64::new(0);
-        // Trigram FTS needs 3+ characters; infix match proves the rebuild ran.
-        let res = search("bulk-file-5", Some(5), &db, &gen, &[], 10, false, true);
-        assert_eq!(res.items.len(), 1);
-        assert_eq!(res.items[0].name, "bulk-file-5.txt");
-
-        // Watcher-style single-file writes still update FTS after the restore.
-        let extra_path = temp_dir.join("bulk-after.txt");
-        std::fs::write(&extra_path, "data").unwrap();
-        let extra = ScannedItem {
-            normalized_path: extra_path.to_string_lossy().to_lowercase(),
-            display_path: extra_path.to_string_lossy().into_owned(),
-            name: "bulk-after.txt".into(),
-            lower_name: "bulk-after.txt".into(),
-            parent: temp_dir.to_string_lossy().into_owned(),
-            is_directory: false,
-            extension: Some("txt".into()),
-            modified_at: 1700000000,
-            size: 4,
-        };
-        db.insert_batch("vol1", 0, std::slice::from_ref(&extra))
-            .unwrap();
-        let res = search("bulk-after", Some(5), &db, &gen, &[], 11, false, true);
-        assert_eq!(res.items.len(), 1);
-
-        let _ = std::fs::remove_dir_all(temp_dir);
-    }
-
-    #[test]
     fn excluded_rows_are_purged_from_existing_catalogs() {
         let (db, temp_dir) = test_db();
         // The file tree lives outside the user temp dir: rows under
@@ -846,10 +791,7 @@ mod tests {
         db.insert_batch("vol1", 1, &items).unwrap();
         assert_eq!(db.get_total_indexed_count().unwrap(), 2);
 
-        // The migration path drops the triggers, purges, and rebuilds FTS.
-        db.begin_bulk_load().unwrap();
         let purged = db.purge_excluded_rows().unwrap();
-        db.end_bulk_load().unwrap();
         assert_eq!(purged, 1);
         assert_eq!(db.get_total_indexed_count().unwrap(), 1);
 
