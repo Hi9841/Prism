@@ -437,7 +437,20 @@ fn is_one_insertion(name: &str, query: &str) -> bool {
 /// between quality tiers (exact 10_000, stem 9_500, near-exact 9_000, prefix
 /// 4_000, substring 3_000, subsequence 1_000): a great match in Windows still
 /// beats a weak match in Documents, but a same-quality match never does.
+/// Dependency trees and package caches hold many copies of files nobody edits
+/// (64 `agent.md` in one profile), so their penalty is larger than the 1_000
+/// from exact to near-exact: "agents.md" in a user folder ranks above an
+/// exact `agent.md` copy there, and still far above any prefix match.
 const LOCATION_PENALTIES: &[(&str, i32)] = &[
+    ("\\node_modules\\", 1_200),
+    ("\\.bun\\install\\cache\\", 1_200),
+    ("\\npm-cache\\", 1_200),
+    ("\\pnpm\\store\\", 1_200),
+    ("\\.pnpm-store\\", 1_200),
+    ("\\deno\\npm\\", 1_200),
+    ("\\.cargo\\registry\\", 1_200),
+    ("\\go\\pkg\\mod\\", 1_200),
+    ("\\.nuget\\packages\\", 1_200),
     ("\\$recycle.bin\\", 700),
     ("\\system volume information\\", 700),
     ("\\program files\\windowsapps\\", 600),
@@ -445,7 +458,6 @@ const LOCATION_PENALTIES: &[(&str, i32)] = &[
     ("\\windows.old\\", 500),
     ("\\$windows.~bt\\", 500),
     ("\\$windows.~ws\\", 500),
-    ("\\node_modules\\", 500),
     ("\\.git\\", 400),
     ("\\.svn\\", 400),
     ("\\.hg\\", 400),
