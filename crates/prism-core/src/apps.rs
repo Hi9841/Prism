@@ -2765,7 +2765,10 @@ mod tests {
         assert!(png.len() > 30);
     }
 
+    // It opens a real File Explorer window. From a Low-integrity folder (the
+    // repo) Explorer cannot start and shows a 0xc0000142 error dialog.
     #[test]
+    #[ignore = "opens a File Explorer window on the desktop"]
     fn open_path_location_resolves_valid_file_path() {
         let current = std::env::current_exe().expect("current test executable");
         assert!(open_path_location(&current).is_ok());
