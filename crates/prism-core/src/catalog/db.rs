@@ -57,7 +57,6 @@ const EXCLUDED_PURGE_PATTERNS: &[&str] = &[
 ];
 
 pub struct Database {
-    #[allow(dead_code)]
     db_path: PathBuf,
     writer: Arc<Mutex<Connection>>,
     reader: Arc<Mutex<Connection>>,
@@ -75,7 +74,11 @@ pub struct Database {
 /// `PRAGMA auto_vacuum` value for INCREMENTAL.
 const AUTO_VACUUM_INCREMENTAL: i64 = 2;
 
-/// Catalog file size in bytes before and after `Database::reclaim_space`.
+/// `PRAGMA mmap_size` of both connections: 256 MiB.
+const MMAP_SIZE: i64 = 268_435_456;
+
+/// Catalog size on disk (file and write-ahead log) in bytes before and
+/// after `Database::reclaim_space`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct SpaceReclaim {
     pub before: i64,
@@ -200,14 +203,14 @@ impl Database {
         // The reader and writer connections each cap at 32 MiB of page cache;
         // hot lookups (B-tree roots, FTS postings) fit well below that, while
         // mmap keeps larger scans off the process heap.
-        conn.execute_batch(
+        conn.execute_batch(&format!(
             "PRAGMA journal_mode = WAL;
              PRAGMA synchronous = NORMAL;
              PRAGMA temp_store = MEMORY;
              PRAGMA busy_timeout = 5000;
              PRAGMA cache_size = -32000;
-             PRAGMA mmap_size = 268435456;",
-        )
+             PRAGMA mmap_size = {MMAP_SIZE};"
+        ))
         .map_err(|e| e.to_string())?;
         Ok(())
     }
@@ -510,16 +513,23 @@ impl Database {
             conn.query_row(&format!("PRAGMA {name};"), [], |row| row.get(0))
                 .map_err(|e| e.to_string())
         };
-        let page_size = pragma("page_size")?;
-        let before = pragma("page_count")? * page_size;
+        let len = |path: &Path| std::fs::metadata(path).map(|m| m.len() as i64).unwrap_or(0);
+        // Size on disk: the catalog and its write-ahead log.
+        let file_size = || len(&self.db_path) + len(&self.db_path.with_extension("db-wal"));
+        let before = file_size();
         let free_pages = pragma("freelist_count")?;
-        if free_pages == 0 {
+        // A file longer than its pages: an earlier checkpoint freed them but
+        // could not truncate.
+        let untruncated = len(&self.db_path) > pragma("page_count")? * pragma("page_size")?;
+        if free_pages == 0 && !untruncated {
             return Ok(SpaceReclaim {
                 before,
                 after: before,
             });
         }
-        if pragma("auto_vacuum")? == AUTO_VACUUM_INCREMENTAL {
+        if free_pages == 0 {
+            // Nothing to vacuum; only the truncation below is missing.
+        } else if pragma("auto_vacuum")? == AUTO_VACUUM_INCREMENTAL {
             // The pragma frees one page per step (one result row each);
             // `execute_batch` steps once, so step it to the end.
             let mut stmt = conn.prepare("PRAGMA incremental_vacuum;").map_err(|e| e.to_string())?;
@@ -537,11 +547,21 @@ impl Database {
             let _ = conn.execute_batch("PRAGMA temp_store = MEMORY;");
             result.map_err(|e| e.to_string())?;
         }
-        conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+        // In WAL mode the checkpoint shortens the file. It does not when a
+        // read is in progress (the name index loads at startup, as this
+        // runs), and Windows does not shorten a file that another connection
+        // still maps. Hold the reader and drop its map for the checkpoint.
+        let reader = self.reader.lock().map_err(|e| e.to_string())?;
+        reader
+            .execute_batch("PRAGMA mmap_size = 0;")
             .map_err(|e| e.to_string())?;
+        let checkpoint = conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);");
+        let _ = reader.execute_batch(&format!("PRAGMA mmap_size = {MMAP_SIZE};"));
+        drop(reader);
+        checkpoint.map_err(|e| e.to_string())?;
         Ok(SpaceReclaim {
             before,
-            after: pragma("page_count")? * page_size,
+            after: file_size(),
         })
     }
 
