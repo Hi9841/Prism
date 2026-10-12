@@ -262,9 +262,9 @@ pub fn result_order(
         })
 }
 
-/// Fallback-catalog candidates come from the in-memory name index when it can
-/// answer, else from the SQL stages (no typo matches). NTFS volumes always use
-/// SQL.
+/// Fallback-catalog candidates come from the in-memory name index once it is
+/// loaded, else from the SQL stages (no typo matches). NTFS volumes always use
+/// SQL; a strong NTFS match turns the index's typo pass off.
 #[allow(clippy::too_many_arguments)]
 fn candidates(
     db: &Database,
@@ -276,12 +276,14 @@ fn candidates(
     candidate_limit: usize,
     cancelled: &(dyn Fn() -> bool + Sync),
 ) -> Result<IndexCandidates, String> {
-    if let Some(names) = names {
+    if let Some(names) = names.filter(|names| names.is_loaded()) {
+        let ntfs = db.ntfs_candidates_until(query, candidate_limit, cancelled)?;
+        let typos = !ntfs.iter().any(|entry| {
+            is_strong_match(&entry.lower_name, entry.is_directory, tokens, query_lower)
+        });
         let parsed = NameQuery::new(query_lower, tokens);
-        if let Some(mut found) = names.candidates(db, &parsed, limit, cancelled)? {
-            found
-                .entries
-                .extend(db.ntfs_candidates_until(query, candidate_limit, cancelled)?);
+        if let Some(mut found) = names.candidates(db, &parsed, limit, typos, cancelled)? {
+            found.entries.extend(ntfs);
             return Ok(found);
         }
     }
@@ -319,6 +321,27 @@ pub fn entry_score(entry: &CandidateEntry, tokens: &[&str], full_query: &str) ->
     let penalty = path_penalty(&entry.display_path, &entry.lower_name);
     name_score(&entry.lower_name, entry.is_directory, tokens, full_query)
         .map(|score| score - penalty)
+}
+
+/// `target_score` from which a token matches strongly: the substring tier and
+/// every tier above it score at least 2,800 (3,000 minus 2 per byte of
+/// position up to 100); a scattered subsequence scores about 1,000 plus 8 per
+/// query character.
+pub const STRONG_TOKEN_SCORE: i32 = 2_000;
+
+/// True for a strong match: the whole name or its stem is the query, or
+/// every token is at least a substring of the name (not a scattered match).
+pub fn is_strong_match(
+    lower_name: &str,
+    is_directory: bool,
+    tokens: &[&str],
+    full_query: &str,
+) -> bool {
+    // 9,500 and up: the exact-name and exact-stem tiers of `name_score`.
+    name_score(lower_name, is_directory, tokens, full_query).is_some_and(|score| score >= 9_500)
+        || tokens.iter().all(|token| {
+            target_score(token, lower_name).is_some_and(|score| score >= STRONG_TOKEN_SCORE)
+        })
 }
 
 /// The name-only part of `entry_score`: everything except the location
@@ -748,6 +771,22 @@ mod tests {
 
         assert!(result.is_err());
         let _ = std::fs::remove_file(file);
+    }
+
+    #[test]
+    fn strong_threshold_separates_substrings_from_scattered_matches() {
+        let token = "q".repeat(3);
+        // The weakest substring: deep in a long name, no word boundary.
+        let deep = format!("{}x{token}", "a".repeat(120));
+        assert!(is_strong_match(&deep, false, &[&token], &token));
+        // The strongest scattered match: a long query, no gaps, a folder.
+        let long = "abcdefghijklmnopqrstuvwxyz0123456789abcd";
+        let scattered = long.chars().flat_map(|c| [c, '-']).collect::<String>();
+        assert!(!is_strong_match(&scattered, true, &[long], long));
+        // Two tokens: both must be substrings.
+        let strong = |name| is_strong_match(name, false, &["report", "2024"], "report 2024");
+        assert!(strong("annual report 2024.pdf"));
+        assert!(!strong("r-e-p-o-r-t 2024.pdf"));
     }
 
     #[test]
