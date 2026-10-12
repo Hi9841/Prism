@@ -53,6 +53,27 @@ The port is complete: backend (prism-core), every view, and the app shell (`crat
   `prism.exe --parity` (parked window, never activated; an `info` step prints the focused bounds).
 - Vendored gpui patches: `vendor/gpui/PRISM-PATCHES.md` (7). Deviation log: `migration/RULEBOOK.md`.
 
+## Released 2026-10-12: Prism 1.0.0 (this app)
+
+- The port now lives in the Prism repo, branch `gpui/prism-core`, folder `gpui/` (subtree with the
+  prism-gpui history). prism-core is `crates/prism-core`; the original React/Tauri app (the spec) is the
+  repo root. The old `C:\Users\hi\Desktop\Work\prism-gpui` folder is superseded.
+- Release 1.0.0 is public and marked latest (tag `1.0.0` at `49aff3d`). Every version file says 1.0.0;
+  `scripts/check-version.ps1` also checks `gpui/Cargo.toml`. Publish: `gpui/packaging/build-installer.ps1`,
+  then `scripts/publish-release.ps1 -Tag <v> -ArtifactsDirectory gpui/artifacts` (needs
+  `Prism_<v>_release-notes.md` in that folder).
+- Tested with the published file: real Tauri 0.11.9 install, then the installer run as the Tauri updater
+  runs it (`/P /UPDATE /R /ARGS --autostart`). Exe replaced and relaunched, no WebView left, prism.json
+  byte-identical, catalog kept (schema v7, file_fts removed again), Run key kept, uninstall entry 1.0.0.
+  The public latest.json signature verifies with the Tauri app's key; a tampered copy is rejected.
+- Blind reviews (Opus: catalog diff + update path; Sonnet: scoring) ended with APPROVE after three fix rounds.
+  Open nits: NTFS close names do not get the close rank; a failed index load (u32 ids / 4 GiB) leaves
+  search on SQL without substrings; a file that an earlier checkpoint could not shorten stays long; the
+  updater passes `/ARGS --autostart`, so a user who turned Prism off in Task Manager after sign-in has it
+  stopped after the update; about 51 MB of old WebView2 data stays in `%LOCALAPPDATA%\app.prism.launcher`.
+- Found while testing, same in the Tauri app: with synthetic input (SendInput), after typing a query and
+  Escape, the next Win press does not open the palette (2 of 4 tries, both apps). Check with a real keyboard.
+
 ## Update 2026-10-12 (prism-core `gpui/prism-core` at `66c8b81`, local only)
 
 - FFF decision (owner): keep Prism's full-drive catalog; use FFF's matcher (`neo_frizbee`) for typos.
