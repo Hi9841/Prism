@@ -728,7 +728,7 @@ impl Palette {
                 } else if selected {
                     d.bg(gpui::linear_gradient(
                         90.,
-                        gpui::linear_color_stop(hsla(crate::theme::mix(t.row_selected_wash(), 100.0, t.surface_active)), 0.0),
+                        gpui::linear_color_stop(hsla(crate::theme::over(t.row_selected_wash(), t.surface_active)), 0.0),
                         gpui::linear_color_stop(hsla(t.surface_active), 0.58),
                     ))
                     .border_1()
