@@ -110,6 +110,9 @@ impl Database {
 
         let database = match Self::try_open(db_path) {
             Ok(db) => Ok(db),
+            // A locked, read-only, or unreachable catalog is intact: moving it
+            // aside would force a full rescan of every volume.
+            Err(err) if !is_corruption(&err) => Err(err),
             Err(err) => {
                 let recovery_path = db_path.with_extension(format!(
                     "recovery-{}.db",
@@ -151,6 +154,11 @@ impl Database {
                 | OpenFlags::SQLITE_OPEN_NO_MUTEX,
         )
         .map_err(|e| e.to_string())?;
+        // Wait out a lock (WAL recovery after a killed instance) from the
+        // first statement on, not only after `configure_pragmas`.
+        writer
+            .busy_timeout(Duration::from_secs(5))
+            .map_err(|e| e.to_string())?;
 
         // A new catalog starts with incremental auto-vacuum, so it never
         // needs the one-time full VACUUM. It must come before WAL mode: that
@@ -2443,6 +2451,13 @@ fn escape_like_pattern(value: &str) -> String {
 
 /// Removes `catalog.recovery-*.db{,-wal,-shm}` copies older than a week from
 /// the app data directory. Only files matching that exact prefix are touched.
+/// SQLITE_CORRUPT ("database disk image is malformed") and SQLITE_NOTADB
+/// ("file is not a database"): the only open errors that a fresh catalog
+/// fixes.
+fn is_corruption(error: &str) -> bool {
+    error.contains("malformed") || error.contains("not a database")
+}
+
 fn cleanup_stale_recovery_copies(parent: &Path) {
     const MAX_AGE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
     let Ok(entries) = std::fs::read_dir(parent) else {
