@@ -140,8 +140,13 @@ pub fn install(update: &Update, bytes: &[u8]) -> Result<(), String> {
     std::fs::write(&path, bytes).map_err(|error| error.to_string())?;
     let file: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
     let parameters: Vec<u16> = "/P /R /UPDATE /ARGS".encode_utf16().chain(Some(0)).collect();
-    unsafe {
-        ShellExecuteW(None, w!("open"), PCWSTR(file.as_ptr()), PCWSTR(parameters.as_ptr()), None, SW_SHOW);
+    let started = unsafe {
+        ShellExecuteW(None, w!("open"), PCWSTR(file.as_ptr()), PCWSTR(parameters.as_ptr()), None, SW_SHOW)
+    };
+    // ShellExecuteW reports failure as a value of 32 or less: Prism keeps
+    // running and the update shows the error instead of exiting.
+    if started.0 as isize <= 32 {
+        return Err(format!("could not start the installer (error {})", started.0 as isize));
     }
     std::process::exit(0);
 }
