@@ -18,7 +18,7 @@ The process is the migration kit at `C:/Users/hi/Desktop/skills/migration-kit` (
 `migration/judge` answers "is the port done?". It talks to an implementation only through an adapter
 process (JSON on stdin, JSON on stdout).
 
-- `bun migration/judge/judge.mjs` runs every scenario against the original (`PRISM_ROOT`, default `../Prism`).
+- `bun migration/judge/judge.mjs` runs every scenario against the original (`PRISM_ROOT`, default: the repo root, which holds the original React/Tauri app).
 - `PRISM_ADAPTER_CMD=<path to the port's adapter exe> bun migration/judge/judge.mjs` runs it against the port.
 - `bun migration/judge/capture.mjs` re-records `goldens/` from the original only. Never capture from the port.
 - `bun migration/judge/mutate.mjs` proves the judge catches breakage in copies of the original.

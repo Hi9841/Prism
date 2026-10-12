@@ -2,13 +2,13 @@
 // range and the gap sweep sites inside it, so that one inventory row can cover
 // a whole block. Brace matching skips strings, template literals, and comments.
 //
-//   bun migration/effect-blocks.mjs [--root ../Prism]  -> migration/effect-blocks.tsv
+//   bun migration/effect-blocks.mjs [--root ..]  -> migration/effect-blocks.tsv
 import { readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const here = dirname(fileURLToPath(import.meta.url));
-const rootArg = process.argv.includes("--root") ? process.argv[process.argv.indexOf("--root") + 1] : "../Prism";
+const rootArg = process.argv.includes("--root") ? process.argv[process.argv.indexOf("--root") + 1] : "..";
 const prism = resolve(here, "..", rootArg);
 const BLOCK_RE = /\buse(Effect|LayoutEffect|Callback|Memo)\s*\(/g;
 

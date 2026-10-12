@@ -26,7 +26,7 @@ migration/
 
 ## Run the judge
 
-The judge needs Bun and a checkout of the original app at `../Prism` (or set `PRISM_ROOT`).
+The judge needs Bun and the original app, which is the repo root (or set `PRISM_ROOT`).
 
 ```
 bun migration/judge/judge.mjs        # every scenario against the original
