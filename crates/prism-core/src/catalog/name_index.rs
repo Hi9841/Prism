@@ -1232,7 +1232,7 @@ mod tests {
         );
         assert_eq!(index.len(), 1 + SEARCH_CATCH_UP);
         assert!(index.needs_sync(), "the background sync appends the rest");
-        assert!(!index.load(&db).unwrap(), "a catch-up is not a load from empty");
+        assert!(!index.load(&db).unwrap(), "a catch-up is not from empty");
         assert!(!index.needs_sync());
         assert_eq!(index.len(), 1 + SEARCH_CATCH_UP * 2);
         drop(db);
