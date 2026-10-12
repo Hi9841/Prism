@@ -63,12 +63,8 @@ fn is_cloud_reparse_tag(tag: u32) -> bool {
 /// mtimes, so the whole tree is enumerated every sweep. Cost is contained
 /// three ways:
 /// - rows whose (mtime, size) are unchanged are never written again
-///   (`filter_changed`), so an idle sweep does almost no writes - and a sweep
-///   that changed nothing also skips the FTS rebuild entirely;
-/// - junctions and symlinks stay leaves, so no subtree is walked twice;
-/// - FTS triggers are dropped during the walk and the index is rebuilt once
-///   at the end (`begin_bulk_load` / `end_bulk_load`), but only when rows
-///   actually changed (bulk-load writes bypass the FTS triggers).
+///   (`filter_changed`), so an idle sweep does almost no writes;
+/// - junctions and symlinks stay leaves, so no subtree is walked twice.
 pub fn scan_volume(
     root: &Path,
     volume_id: &str,
@@ -79,8 +75,7 @@ pub fn scan_volume(
     progress_callback: impl Fn(u64),
 ) -> Result<u64, String> {
     let _priority = ScanEfficiencyGuard::new();
-    db.begin_bulk_load()?;
-    let result = scan_volume_inner(
+    scan_volume_inner(
         root,
         volume_id,
         ScanPlan {
@@ -92,14 +87,7 @@ pub fn scan_volume(
         app_data_dir,
         &cancel,
         &progress_callback,
-    );
-    // Always restore the FTS triggers, even on cancel - the reference-counted
-    // bulk load guard makes this safe under parallel scans. The Database
-    // rebuilds the FTS index only if any row was actually written or pruned
-    // while the triggers were down; an unchanged re-walk (the common case for
-    // overflow reconciles) skips re-tokenizing millions of names for nothing.
-    let _ = db.end_bulk_load();
-    result
+    )
 }
 
 /// Reconciles one directory subtree without completing or pruning a

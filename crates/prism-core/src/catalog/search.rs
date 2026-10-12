@@ -674,7 +674,7 @@ mod tests {
         let database_path = directory.join("catalog.db");
         let database = Database::open(&database_path).unwrap();
         let connection = rusqlite::Connection::open(&database_path).unwrap();
-        connection.execute_batch("DROP TABLE file_fts;").unwrap();
+        connection.execute_batch("DROP TABLE files;").unwrap();
         drop(connection);
         let generation = AtomicU64::new(1);
 

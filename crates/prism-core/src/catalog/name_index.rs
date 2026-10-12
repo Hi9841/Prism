@@ -204,8 +204,11 @@ impl NameIndex {
             .spawn(move || {
                 let result = index.load(&db);
                 index.loader_running.store(false, AtomicOrdering::Release);
-                if let Err(error) = result {
-                    eprintln!("[Prism Catalog] name index load failed: {error}");
+                match result {
+                    // Searches made meanwhile used the SQL path, which has no
+                    // substring stage: an open palette searches again.
+                    Ok(()) => crate::host::emit("file-index-updated", serde_json::Value::Null),
+                    Err(error) => eprintln!("[Prism Catalog] name index load failed: {error}"),
                 }
             });
         if spawned.is_err() {
