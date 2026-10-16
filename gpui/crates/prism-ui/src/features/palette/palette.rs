@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use gpui::{
     AnyElement, App, Bounds, Context, DispatchPhase, Entity, FocusHandle, Focusable, KeyDownEvent, MouseButton,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement, Pixels, Point, Render, ScrollHandle,
-    ScrollWheelEvent, Styled, Task, Timer, Window, canvas, div, point, prelude::*, px, relative,
+    ScrollWheelEvent, Styled, Task, Timer, Window, canvas, deferred, div, point, prelude::*, px, relative,
 };
 
 use crate::components::power_menu::PowerMenu;
@@ -1836,7 +1836,9 @@ impl Render for Palette {
             .size_full()
             .child(search)
             .child(results)
-            .children(menu)
+            // Deferred: the menu paints and hit-tests above the footer, which
+            // comes later in the tree.
+            .children(menu.map(deferred))
             .children(previews)
             .child(footer)
             .children(listeners)
