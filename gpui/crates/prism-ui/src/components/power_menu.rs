@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 
 use gpui::{
     App, Context, Entity, FocusHandle, Focusable, KeyDownEvent, ParentElement, Render, Styled, Task, Timer, Window,
-    div, prelude::*, relative,
+    deferred, div, prelude::*, relative,
 };
 
 use crate::components::ui::{IconButtonProps, icon_button, theme, weight};
@@ -29,6 +29,9 @@ pub struct PowerMenu {
     busy: Option<&'static str>,
     focus: FocusHandle,
     focused_index: usize,
+    /// The pointer is over the open menu. The menu sits outside the root's
+    /// bounds, so a press on it must not count as a press outside.
+    menu_hovered: bool,
     close_task: Option<Task<()>>,
     _subscriptions: Vec<gpui::Subscription>,
 }
@@ -55,6 +58,7 @@ impl PowerMenu {
             busy: None,
             focus: cx.focus_handle(),
             focused_index: 0,
+            menu_hovered: false,
             close_task: None,
             _subscriptions: vec![app_sub, hub_sub],
         }
@@ -70,6 +74,7 @@ impl PowerMenu {
         self.open = true;
         self.changed_at = Instant::now();
         self.focused_index = focus_index;
+        self.menu_hovered = false;
         window.focus(&self.focus);
         cx.notify();
     }
@@ -198,9 +203,18 @@ impl Render for PowerMenu {
             .flex()
             .flex_none()
             .when(open, |d| {
-                d.on_mouse_down_out(cx.listener(|this, _, _, cx| this.close_menu(true, cx))).child(
+                d.on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                    if !this.menu_hovered {
+                        this.close_menu(true, cx);
+                    }
+                }))
+                // Deferred: the menu paints above the result list. Occlude: a
+                // press on the menu must not also reach the row below it.
+                .child(deferred(
                     div()
                         .id("power-menu")
+                        .occlude()
+                        .on_hover(cx.listener(|this, hovered: &bool, _, _| this.menu_hovered = *hovered))
                         .track_focus(&self.focus)
                         .on_key_down(cx.listener(Self::on_menu_key_down))
                         .absolute()
@@ -239,7 +253,7 @@ impl Render for PowerMenu {
                                 .child(icon(glyph, 16., if action == "shutdown" { t.danger } else { t.fg_tertiary }))
                                 .child(*label)
                         })),
-                )
+                ))
             })
             .child(trigger.when(expanded, |d| d))
     }
