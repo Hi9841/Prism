@@ -4,19 +4,18 @@ use std::time::{Duration, Instant};
 
 use gpui::{
     App, Context, EventEmitter, FocusHandle, Focusable, KeyDownEvent, MouseButton, ParentElement, Pixels, Point,
-    Render, Styled, Task, Timer, Window, div, prelude::*, px, relative,
+    Render, Styled, Task, Timer, Window, div, prelude::*, px,
 };
 
-use crate::components::ui::{theme, weight};
-use crate::gfx::{icon, motion_ms, r, reduced_motion, zoomed};
+use crate::components::menu::{self, Tone};
+use crate::components::ui::theme;
+use crate::gfx::{motion_ms, r, reduced_motion};
 use crate::lib::bridge;
 use crate::lib::launcher_motion::POPOVER_MOTION_MS;
 use crate::lib::types::PaletteItem;
-use crate::theme::{hsla, motion, shadow_pop};
+use crate::theme::motion;
 
 const MENU_WIDTH: f32 = 196.0;
-const ITEM_HEIGHT: f32 = 36.0;
-const PADDING: f32 = 8.0;
 const VIEWPORT_MARGIN: f32 = 8.0;
 
 /// A menu position in CSS px (window coordinates divided by the zoom).
@@ -34,20 +33,18 @@ pub fn clamp_context_menu_position(x: f32, y: f32, menu_height: f32, viewport: (
     }
 }
 
-/// Rows the menu will render; clamping sizes from it.
-pub fn result_action_count(item: &PaletteItem) -> usize {
+/// The menu height in CSS px; clamping sizes from it. The taskbar pin row
+/// counts before its state resolves, so the menu never grows past the edge.
+pub fn menu_height(item: &PaletteItem) -> f32 {
     // "Open" is always there: every result has a menu.
-    [
-        true,
-        item.open_location.is_some(),
-        item.run_as_admin.is_some(),
-        item.copy_path.is_some(),
-        item.toggle_taskbar_pin.is_some(),
-        item.show_properties.is_some(),
-    ]
-        .into_iter()
-        .filter(|present| *present)
-        .count()
+    let groups = [
+        [true, item.run_as_admin.is_some()],
+        [item.open_location.is_some(), item.copy_path.is_some()],
+        [item.toggle_taskbar_pin.is_some(), item.show_properties.is_some()],
+    ];
+    let rows = groups.iter().flatten().filter(|present| **present).count();
+    let shown = groups.iter().filter(|group| group.iter().any(|present| *present)).count();
+    rows as f32 * menu::ITEM_HEIGHT + shown.saturating_sub(1) as f32 * menu::SEPARATOR_HEIGHT + menu::PADDING
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -59,6 +56,17 @@ pub enum MenuChoice {
     /// The argument is the pin state the label showed.
     ToggleTaskbarPin(bool),
     ShowProperties,
+}
+
+impl MenuChoice {
+    /// Separators split the menu between groups (see `menu_height`).
+    fn group(self) -> u8 {
+        match self {
+            Self::Open | Self::RunAsAdmin => 0,
+            Self::OpenLocation | Self::CopyAsPath => 1,
+            Self::ToggleTaskbarPin(_) | Self::ShowProperties => 2,
+        }
+    }
 }
 
 pub enum MenuEvent {
@@ -117,13 +125,14 @@ impl ResultContextMenu {
         }
     }
 
+    /// Choices in menu order: launch, then location, then shell actions.
     fn choices(&self) -> Vec<MenuChoice> {
         let mut out = vec![MenuChoice::Open];
-        if self.item.open_location.is_some() {
-            out.push(MenuChoice::OpenLocation);
-        }
         if self.item.run_as_admin.is_some() {
             out.push(MenuChoice::RunAsAdmin);
+        }
+        if self.item.open_location.is_some() {
+            out.push(MenuChoice::OpenLocation);
         }
         if self.item.copy_path.is_some() {
             out.push(MenuChoice::CopyAsPath);
@@ -220,7 +229,7 @@ impl Render for ResultContextMenu {
                     .on_mouse_down(MouseButton::Right, cx.listener(|this, _, _, cx| this.close(true, true, cx))),
             )
             .child(
-                div()
+                menu::surface(&t, zoom)
                     .id("result-menu")
                     // A choice must not also press the backdrop or the row below.
                     .occlude()
@@ -230,16 +239,8 @@ impl Render for ResultContextMenu {
                     .left(r(self.position.x))
                     .top(r(self.position.y))
                     .w(r(MENU_WIDTH))
-                    .overflow_hidden()
-                    .rounded(r(8.))
-                    .border_1()
-                    .border_color(hsla(t.line))
-                    // D4: the backdrop blur becomes a near-opaque fill.
-                    .bg(hsla(crate::theme::Rgba { a: 0.97, ..t.bg_raised }))
-                    .p(r(3.))
-                    .shadow(zoomed(shadow_pop(), zoom))
                     .opacity(eased)
-                    .children(choices.into_iter().enumerate().map(|(index, choice)| {
+                    .children(choices.iter().enumerate().flat_map(|(index, &choice)| {
                         let (glyph, label) = match choice {
                             MenuChoice::Open => ("external-link", "Open"),
                             MenuChoice::CopyAsPath => ("clipboard-copy", "Copy as path"),
@@ -249,27 +250,20 @@ impl Render for ResultContextMenu {
                             MenuChoice::ToggleTaskbarPin(false) => ("pin", "Pin to taskbar"),
                             MenuChoice::ShowProperties => ("info", "Properties"),
                         };
-                        let is_focused = focus_visible && index == focused;
-                        div()
-                            .id(("result-menu-item", index))
-                            .flex()
-                            .items_center()
-                            .gap(r(8.))
-                            .h(r(ITEM_HEIGHT))
-                            .w_full()
-                            .px(r(10.))
-                            .rounded(r(4.))
-                            .text_size(r(12.5))
-                            .font_weight(weight(500.))
-                            .line_height(relative(1.45))
-                            .text_color(hsla(t.fg_secondary))
-                            .hover(|s| s.bg(hsla(t.surface_hover)).text_color(hsla(t.fg)))
-                            .when(is_focused, |d| {
-                                d.border_1().border_color(hsla(crate::theme::fade(t.accent, 65.0)))
-                            })
+                        let tone = if choice == MenuChoice::Open { Tone::Primary } else { Tone::Normal };
+                        let highlighted = focus_visible && index == focused;
+                        let separator = (index > 0 && choices[index - 1].group() != choice.group())
+                            .then(|| menu::separator(&t).into_any_element());
+                        let row = menu::item(("result-menu-item", index), glyph, label, tone, highlighted, false, &t)
+                            .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                                if *hovered && this.focused_index != index {
+                                    this.focused_index = index;
+                                    cx.notify();
+                                }
+                            }))
                             .on_click(cx.listener(move |_, _, _, cx| cx.emit(MenuEvent::Chose(choice))))
-                            .child(icon(glyph, 16., t.accent))
-                            .child(label)
+                            .into_any_element();
+                        separator.into_iter().chain([row])
                     })),
             )
     }
@@ -277,8 +271,7 @@ impl Render for ResultContextMenu {
 
 /// The menu position for a pointer at `point` (window px).
 pub fn menu_position_for(point: Point<Pixels>, item: &PaletteItem, zoom: f32, viewport: (f32, f32)) -> ContextMenuPosition {
-    let menu_height = result_action_count(item) as f32 * ITEM_HEIGHT + PADDING;
-    clamp_context_menu_position(f32::from(point.x) / zoom, f32::from(point.y) / zoom, menu_height, viewport)
+    clamp_context_menu_position(f32::from(point.x) / zoom, f32::from(point.y) / zoom, menu_height(item), viewport)
 }
 
 pub fn px_of(value: f32) -> Pixels {
