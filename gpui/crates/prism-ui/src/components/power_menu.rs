@@ -4,15 +4,16 @@ use std::time::{Duration, Instant};
 
 use gpui::{
     App, Context, Entity, FocusHandle, Focusable, KeyDownEvent, ParentElement, Render, Styled, Task, Timer, Window,
-    deferred, div, prelude::*, relative,
+    deferred, div, prelude::*,
 };
 
-use crate::components::ui::{IconButtonProps, icon_button, theme, weight};
-use crate::gfx::{icon, r, reduced_motion, zoomed};
+use crate::components::menu::{self, Tone};
+use crate::components::ui::{IconButtonProps, icon_button, theme};
+use crate::gfx::{r, reduced_motion};
 use crate::lib::bridge::{self, BackendEvent};
 use crate::lib::launcher_motion::POPOVER_MOTION_MS;
 use crate::state::app::{AppEvent, AppState, ToastKind, app_state, error_string};
-use crate::theme::{hsla, motion, shadow_pop};
+use crate::theme::motion;
 
 const ACTIONS: [(&str, &str, &str); 4] = [
     ("lock", "Lock", "lock"),
@@ -211,7 +212,7 @@ impl Render for PowerMenu {
                 // Deferred: the menu paints above the result list. Occlude: a
                 // press on the menu must not also reach the row below it.
                 .child(deferred(
-                    div()
+                    menu::surface(&t, zoom)
                         .id("power-menu")
                         .occlude()
                         .on_hover(cx.listener(|this, hovered: &bool, _, _| this.menu_hovered = *hovered))
@@ -221,37 +222,23 @@ impl Render for PowerMenu {
                         .right_0()
                         .bottom(r(40. - lift))
                         .w(r(160.))
-                        .overflow_hidden()
-                        .rounded(r(8.))
-                        .border_1()
-                        .border_color(hsla(t.line))
-                        // D4: the backdrop blur becomes a near-opaque fill.
-                        .bg(hsla(crate::theme::Rgba { a: 0.97, ..t.bg_raised }))
-                        .p(r(3.))
-                        .shadow(zoomed(shadow_pop(), zoom))
                         .opacity(eased)
-                        .children(ACTIONS.iter().enumerate().map(|(index, (action, label, glyph))| {
+                        .children(ACTIONS.iter().enumerate().flat_map(|(index, (action, label, glyph))| {
                             let action: &'static str = action;
-                            let focused = focus_visible && index == self.focused_index;
-                            div()
-                                .id(("power-action", index))
-                                .flex()
-                                .items_center()
-                                .gap(r(8.))
-                                .min_h(r(44.))
-                                .w_full()
-                                .px(r(10.))
-                                .rounded(r(4.))
-                                .text_size(r(12.5))
-                                .font_weight(weight(500.))
-                                .line_height(relative(1.45))
-                                .text_color(hsla(t.fg_secondary))
-                                .when(busy, |d| d.opacity(0.5))
-                                .when(!busy, |d| d.hover(|s| s.bg(hsla(t.surface_hover)).text_color(hsla(t.fg))))
-                                .when(focused, |d| d.border_1().border_color(hsla(crate::theme::fade(t.accent, 65.0))))
+                            let tone = if action == "shutdown" { Tone::Danger } else { Tone::Normal };
+                            let highlighted = focus_visible && index == self.focused_index;
+                            // Lock stands apart from the actions that end the session.
+                            let separator = (index == 1).then(|| menu::separator(&t).into_any_element());
+                            let row = menu::item(("power-action", index), glyph, label, tone, highlighted, busy, &t)
+                                .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                                    if *hovered && this.focused_index != index {
+                                        this.focused_index = index;
+                                        cx.notify();
+                                    }
+                                }))
                                 .on_click(cx.listener(move |this, _, _, cx| this.run_action(action, cx)))
-                                .child(icon(glyph, 16., if action == "shutdown" { t.danger } else { t.fg_tertiary }))
-                                .child(*label)
+                                .into_any_element();
+                            separator.into_iter().chain([row])
                         })),
                 ))
             })
