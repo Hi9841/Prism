@@ -1,10 +1,12 @@
 //! Power options (`src/components/PowerMenu.tsx`).
 
+use std::cell::Cell;
+use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use gpui::{
-    App, Context, Entity, FocusHandle, Focusable, KeyDownEvent, ParentElement, Render, Styled, Task, Timer, Window,
-    deferred, div, prelude::*,
+    App, Bounds, Context, Entity, FocusHandle, Focusable, KeyDownEvent, MouseDownEvent, ParentElement, Pixels, Render,
+    Styled, Task, Timer, Window, canvas, deferred, div, prelude::*,
 };
 
 use crate::components::menu::{self, Tone};
@@ -30,9 +32,9 @@ pub struct PowerMenu {
     busy: Option<&'static str>,
     focus: FocusHandle,
     focused_index: usize,
-    /// The pointer is over the open menu. The menu sits outside the root's
-    /// bounds, so a press on it must not count as a press outside.
-    menu_hovered: bool,
+    /// Painted bounds of the popup. The popup sits outside the trigger, so a
+    /// press on it is "outside" the trigger and must not close the menu.
+    menu_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
     close_task: Option<Task<()>>,
     _subscriptions: Vec<gpui::Subscription>,
 }
@@ -59,7 +61,7 @@ impl PowerMenu {
             busy: None,
             focus: cx.focus_handle(),
             focused_index: 0,
-            menu_hovered: false,
+            menu_bounds: Rc::default(),
             close_task: None,
             _subscriptions: vec![app_sub, hub_sub],
         }
@@ -75,7 +77,7 @@ impl PowerMenu {
         self.open = true;
         self.changed_at = Instant::now();
         self.focused_index = focus_index;
-        self.menu_hovered = false;
+        self.menu_bounds.set(None);
         window.focus(&self.focus);
         cx.notify();
     }
@@ -204,8 +206,9 @@ impl Render for PowerMenu {
             .flex()
             .flex_none()
             .when(open, |d| {
-                d.on_mouse_down_out(cx.listener(|this, _, _, cx| {
-                    if !this.menu_hovered {
+                d.on_mouse_down_out(cx.listener(|this, event: &MouseDownEvent, _, cx| {
+                    let on_menu = this.menu_bounds.get().is_some_and(|bounds| bounds.contains(&event.position));
+                    if !on_menu {
                         this.close_menu(true, cx);
                     }
                 }))
@@ -215,7 +218,15 @@ impl Render for PowerMenu {
                     menu::surface(&t, zoom)
                         .id("power-menu")
                         .occlude()
-                        .on_hover(cx.listener(|this, hovered: &bool, _, _| this.menu_hovered = *hovered))
+                        .child({
+                            let bounds = self.menu_bounds.clone();
+                            canvas(
+                                move |painted, _, _| bounds.set(Some(painted)),
+                                |_, _, _, _| {},
+                            )
+                            .absolute()
+                            .size_full()
+                        })
                         .track_focus(&self.focus)
                         .on_key_down(cx.listener(Self::on_menu_key_down))
                         .absolute()

@@ -5,20 +5,15 @@ import {
 	Download,
 	FileText,
 	FileVideo,
-	FolderSync,
 	History,
 	Home,
 	Images,
 	Keyboard,
-	Lock,
 	LogOut,
 	Minus,
 	Monitor,
-	Moon,
 	Music,
 	Plus,
-	Power,
-	RefreshCw,
 	RotateCcw,
 	Search,
 	Trash2,
@@ -28,10 +23,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
 	getAppIcons,
 	getAppVersion,
-	performPowerAction,
 	setShortcut,
 	setTaskbarAlignment,
-	type PowerAction,
 } from "../lib/bridge";
 import type {
 	AccentId,
@@ -707,7 +700,6 @@ export function SettingsSheet() {
 		clearHistory,
 		showToast,
 	} = useApp();
-	const palette = usePalette();
 	const panelRef = useRef<HTMLDivElement>(null);
 	const closeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 	const [closing, setClosing] = useState(false);
@@ -930,63 +922,6 @@ export function SettingsSheet() {
 				) : null}
 
 				<div className="scroll-thin flex-1 overflow-y-auto px-5 pb-6">
-					<SectionTitle>Launcher</SectionTitle>
-					<SettingsRow title="Applications" detail="Reload installed apps and Windows tools">
-						<button
-							type="button"
-							disabled={!palette.appsLoaded}
-							onClick={() => palette.refreshApps()}
-							className="focus-ring press flex min-h-11 shrink-0 cursor-default items-center gap-1.5 rounded-[9px] bg-surface px-3 text-[12px] font-semibold text-fg-secondary hover:bg-surface-hover hover:text-fg disabled:cursor-default disabled:opacity-50"
-						>
-							<RefreshCw className="h-3.5 w-3.5" />
-							Refresh
-						</button>
-					</SettingsRow>
-					<SettingsRow title="File index" detail="Rebuild the local file catalog">
-						<button
-							type="button"
-							disabled={palette.fileIndexing}
-							onClick={() => palette.rebuildIndex()}
-							className="focus-ring press flex min-h-11 shrink-0 cursor-default items-center gap-1.5 rounded-[9px] bg-surface px-3 text-[12px] font-semibold text-fg-secondary hover:bg-surface-hover hover:text-fg disabled:cursor-default disabled:opacity-50"
-						>
-							<FolderSync className="h-3.5 w-3.5" />
-							Rebuild
-						</button>
-					</SettingsRow>
-					<SettingsRow title="Power" detail="Lock, sleep, shut down, or restart">
-						<div className="flex flex-wrap justify-end gap-1.5">
-							{(
-								[
-									["lock", "Lock", Lock],
-									["sleep", "Sleep", Moon],
-									["shutdown", "Shut down", Power],
-									["restart", "Restart", RotateCcw],
-								] as const
-							).map(([action, label, Icon]) => (
-								<button
-									key={action}
-									type="button"
-									onClick={() =>
-										void performPowerAction(action as PowerAction)
-											.then(() => {
-												document.dispatchEvent(new CustomEvent("prism:close"));
-											})
-											.catch((error: unknown) => {
-												showToast(
-													`Could not ${action === "shutdown" ? "shut down" : action}`,
-													String(error),
-												);
-											})
-									}
-									className="focus-ring press grid h-11 w-11 cursor-default place-items-center rounded-[9px] bg-surface text-fg-secondary hover:bg-surface-hover hover:text-fg"
-									aria-label={label}
-									title={label}
-								>
-									<Icon className="h-4 w-4" />
-								</button>
-							))}
-						</div>
-					</SettingsRow>
 					<SectionTitle>Appearance</SectionTitle>
 					<SettingsRow
 						title="Appearance"

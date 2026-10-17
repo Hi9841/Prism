@@ -3,8 +3,8 @@
 use std::time::{Duration, Instant};
 
 use gpui::{
-    App, Context, EventEmitter, FocusHandle, Focusable, KeyDownEvent, MouseButton, ParentElement, Pixels, Point,
-    Render, Styled, Task, Timer, Window, div, prelude::*, px,
+    App, Context, DispatchPhase, EventEmitter, FocusHandle, Focusable, KeyDownEvent, MouseButton, MouseDownEvent,
+    ParentElement, Pixels, Point, Render, Styled, Task, Timer, Window, canvas, div, prelude::*, px,
 };
 
 use crate::components::menu::{self, Tone};
@@ -235,6 +235,27 @@ impl Render for ResultContextMenu {
                     .occlude()
                     .track_focus(&self.focus)
                     .on_key_down(cx.listener(Self::on_key_down))
+                    .child({
+                        let weak = cx.entity().downgrade();
+                        canvas(
+                            |_, _, _| (),
+                            move |bounds, _, window, cx| {
+                                let weak = weak.clone();
+                                window.on_mouse_event(move |event: &MouseDownEvent, phase, _, cx| {
+                                    if phase != DispatchPhase::Capture || bounds.contains(&event.position) {
+                                        return;
+                                    }
+                                    let _ = weak.update(cx, |this, cx| {
+                                        if this.closing.is_none() {
+                                            this.close(true, true, cx);
+                                        }
+                                    });
+                                });
+                            },
+                        )
+                        .absolute()
+                        .size_full()
+                    })
                     .absolute()
                     .left(r(self.position.x))
                     .top(r(self.position.y))

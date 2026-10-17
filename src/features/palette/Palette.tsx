@@ -10,6 +10,7 @@ import {
 	X,
 } from "lucide-react";
 import { memo, useCallback, useEffect, useRef, useState } from "react";
+import { PowerMenu } from "../../components/PowerMenu";
 import { displayShortcut } from "../../components/SettingsSheet";
 import { IconButton, Kbd, RowIcon, SectionLabel } from "../../components/ui";
 import type {
@@ -1172,6 +1173,21 @@ export function Palette() {
 					{palette.appsError && palette.query === "" && (
 						<span className="text-[11px] text-danger">apps failed to load</span>
 					)}
+					<IconButton
+						label="Rebuild file index"
+						onClick={palette.rebuildIndex}
+						disabled={palette.fileIndexing}
+					>
+						<FolderSync className="h-3.5 w-3.5" />
+					</IconButton>
+					<IconButton
+						label="Refresh applications and Windows tools"
+						onClick={palette.refreshApps}
+						disabled={!palette.appsLoaded}
+					>
+						<RefreshCw className="h-3.5 w-3.5" />
+					</IconButton>
+					<PowerMenu />
 				</div>
 			</div>
 		</div>
@@ -1796,7 +1812,6 @@ const ResultRow = memo(function ResultRow({
 					</span>
 				) : null}
 			</div>
-			<div role="presentation" />
 		</div>
 	);
 });
