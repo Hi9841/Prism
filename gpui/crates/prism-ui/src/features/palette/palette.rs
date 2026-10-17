@@ -800,7 +800,7 @@ impl Palette {
 
         let title_color = if selected { hsla(t.fg) } else { crate::gfx::alpha(t.fg, 0.9) };
         let text_cell = div()
-            .flex_1()
+            .flex_shrink()
             .min_w_0()
             .child(
                 truncate(item.title.clone())
@@ -820,7 +820,8 @@ impl Palette {
             });
 
         let trailing = self.render_trailing(item, index, selected, hovered, pinned, can_reorder, can_drag_file, removable, dragged, t, window, cx);
-        row.child(icon_cell).child(text_cell).child(trailing).into_any_element()
+        // The highlight stays full width. The pin and grip stay next to the name.
+        row.child(icon_cell).child(text_cell).child(trailing).child(div().flex_1().min_w_0()).into_any_element()
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1021,6 +1022,7 @@ impl Palette {
         let drag_id = id.to_owned();
         let drag_label = label.to_owned();
         let prefix = if kind == CategoryKind::Section { "section-grip" } else { "group-grip" };
+        let dragging = self.category_drag.as_ref().is_some_and(|drag| drag.kind == kind && drag.id == id);
         focus::button(div().id(gpui::ElementId::Name(format!("{prefix}-{id}").into())), true, t)
             .group("category-grip")
             .flex()
@@ -1029,7 +1031,9 @@ impl Palette {
             .justify_center()
             .size(r(28.))
             .rounded(r(7.))
-            .when(margin_right, |d| d.mr(r(14.)))
+            .opacity(if dragging { 1.0 } else { 0.0 })
+            .group_hover("section-head", |s| s.opacity(1.0))
+            .when(margin_right, |d| d.mr(r(4.)))
             .tooltip(title_tooltip(format!("Reorder {label}")))
             .cursor_grab()
             .hover(|s| s.bg(hsla(t.surface_hover)))
@@ -1231,27 +1235,31 @@ impl Palette {
                 );
                 block = block.child(
                     div()
+                        .group("section-head")
                         .flex()
                         .items_center()
                         .gap(r(4.))
                         .px(r(14.))
                         .pb(r(6.))
                         .pt(r(16.))
-                        .child(div().flex_1().min_w_0().child(header))
+                        .child(div().min_w_0().child(header))
                         .when(section_reorderable, |d| {
                             d.child(self.category_grip(CategoryKind::Section, &section.id, &section.label, false, t, cx))
-                        }),
+                        })
+                        .child(div().flex_1()),
                 );
             } else {
                 block = block.child(
                     div()
+                        .group("section-head")
                         .flex()
                         .items_center()
                         .gap(r(4.))
-                        .child(div().flex_1().min_w_0().child(section_label(&section.label, t)))
+                        .child(div().min_w_0().child(section_label(&section.label, t)))
                         .when(section_reorderable, |d| {
                             d.child(self.category_grip(CategoryKind::Section, &section.id, &section.label, true, t, cx))
-                        }),
+                        })
+                        .child(div().flex_1()),
                 );
             }
 
@@ -1305,16 +1313,18 @@ impl Palette {
                     )
                     .child(
                         div()
+                            .group("section-head")
                             .flex()
                             .items_center()
                             .gap(r(4.))
                             .px(r(14.))
                             .pb(r(6.))
                             .pt(r(8.))
-                            .child(div().flex_1().min_w_0().child(header))
+                            .child(div().min_w_0().child(header))
                             .when(section_reorderable, |d| {
                                 d.child(self.category_grip(CategoryKind::Group, &group.group_id, &group.label, false, t, cx))
-                            }),
+                            })
+                            .child(div().flex_1()),
                     );
                 let mut rows = div().flex().flex_col().gap(r(2.));
                 for item in &group.items {
