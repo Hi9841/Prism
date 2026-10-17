@@ -298,11 +298,11 @@ body {
 		color: color-mix(in oklab, var(--accent) 72%, var(--t-fg-secondary));
 	}
 
-	/* Result row */
+	/* Result row. The last column keeps the highlight full width. */
 	.row {
 		position: relative;
 		display: grid;
-		grid-template-columns: 40px minmax(0, 1fr) auto;
+		grid-template-columns: 40px minmax(0, max-content) auto minmax(0, 1fr);
 		align-items: center;
 		gap: 12px;
 		padding: 7px 10px;

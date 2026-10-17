@@ -1796,6 +1796,7 @@ const ResultRow = memo(function ResultRow({
 					</span>
 				) : null}
 			</div>
+			<div role="presentation" />
 		</div>
 	);
 });
