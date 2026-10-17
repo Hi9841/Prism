@@ -422,7 +422,7 @@ pub fn app_palette_item(app: &AppEntry, icons: &HashMap<String, String>) -> Pale
         app.name.clone(),
         RowAction::call("launch_app", json!({ "id": app.app_id })),
     );
-    item.subtitle = Some("Application".into());
+    item.subtitle = None;
     item.app_id = Some(app.app_id.clone());
     item.drag_file = target.map(start_file_drag);
     item.run_as_admin = is_elevatable_path(app.path.as_deref())

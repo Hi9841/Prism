@@ -10,7 +10,6 @@ import {
 	X,
 } from "lucide-react";
 import { memo, useCallback, useEffect, useRef, useState } from "react";
-import { PowerMenu } from "../../components/PowerMenu";
 import { displayShortcut } from "../../components/SettingsSheet";
 import { IconButton, Kbd, RowIcon, SectionLabel } from "../../components/ui";
 import type {
@@ -1173,25 +1172,14 @@ export function Palette() {
 					{palette.appsError && palette.query === "" && (
 						<span className="text-[11px] text-danger">apps failed to load</span>
 					)}
-					<IconButton
-						label="Rebuild file index"
-						onClick={palette.rebuildIndex}
-						disabled={palette.fileIndexing}
-					>
-						<FolderSync className="h-3.5 w-3.5" />
-					</IconButton>
-					<IconButton
-						label="Refresh applications and Windows tools"
-						onClick={palette.refreshApps}
-						disabled={!palette.appsLoaded}
-					>
-						<RefreshCw className="h-3.5 w-3.5" />
-					</IconButton>
-					<PowerMenu />
 				</div>
 			</div>
 		</div>
 	);
+}
+
+function isPathSubtitle(subtitle: string | undefined): subtitle is string {
+	return Boolean(subtitle && (subtitle.includes("\\") || subtitle.includes("/")));
 }
 
 function reorderItemId(item: PaletteItem): string | null {
@@ -1484,6 +1472,10 @@ const ResultRow = memo(function ResultRow({
 	const itemReorderId = reorderItemId(item);
 	const canReorder = reorderable && Boolean(itemReorderId);
 	const canDragFile = Boolean(!canReorder && item.shellPath && item.dragFile);
+	const pathMeta = isPathSubtitle(item.subtitle) ? item.subtitle : undefined;
+	const reveal = selected
+		? "opacity-100"
+		: "opacity-0 group-hover:opacity-100 group-data-[selected=true]:opacity-100 focus:opacity-100";
 
 	return (
 		<div
@@ -1618,7 +1610,7 @@ const ResultRow = memo(function ResultRow({
 				>
 					{item.title}
 				</div>
-				{item.subtitle ? (
+				{item.subtitle && !isPathSubtitle(item.subtitle) ? (
 					<div className="mt-[3px] truncate text-[11.5px] leading-tight text-fg-tertiary">
 						{item.subtitle}
 					</div>
@@ -1627,8 +1619,13 @@ const ResultRow = memo(function ResultRow({
 			<div
 				role="gridcell"
 				tabIndex={-1}
-				className="relative z-10 flex items-center gap-0.5"
+				className="relative z-10 flex items-center gap-1.5"
 			>
+				{pathMeta ? (
+					<span className="max-w-[220px] truncate text-[12px] text-fg-tertiary">
+						{pathMeta}
+					</span>
+				) : null}
 				{canReorder ? (
 					<button
 						type="button"
@@ -1670,10 +1667,10 @@ const ResultRow = memo(function ResultRow({
 							event.stopPropagation();
 							onMoveItem(item, event.key === "ArrowUp" ? -1 : 1);
 						}}
-						className={`focus-ring grid h-8 w-8 touch-none place-items-center rounded-[8px] text-fg-quiet transition-[color,background-color] duration-100 hover:bg-surface-hover hover:text-fg ${
+						className={`focus-ring grid h-8 w-8 touch-none place-items-center rounded-[8px] text-fg-quiet transition-[color,background-color,opacity] duration-100 hover:bg-surface-hover hover:text-fg ${
 							draggedItem === itemReorderId
-								? "cursor-grabbing bg-accent-soft text-accent"
-								: "cursor-grab"
+								? "cursor-grabbing bg-accent-soft text-accent opacity-100"
+								: `cursor-grab ${reveal}`
 						}`}
 					>
 						<GripVertical className="h-4 w-4" />
@@ -1688,7 +1685,7 @@ const ResultRow = memo(function ResultRow({
 							title={`${pinned ? "Unpin" : "Pin"} ${item.title}`}
 							tabIndex={selected ? 0 : -1}
 							onClick={() => onTogglePin(item)}
-							className={`focus-ring press grid h-8 w-8 cursor-default place-items-center rounded-[8px] opacity-0 group-hover:opacity-100 focus:opacity-100 ${
+							className={`focus-ring press grid h-8 w-8 cursor-default place-items-center rounded-[8px] ${reveal} ${
 								pinned
 									? "bg-accent-soft text-accent"
 									: "text-fg-tertiary hover:bg-surface-hover hover:text-fg"
@@ -1721,7 +1718,7 @@ const ResultRow = memo(function ResultRow({
 								title="Remove from Recent"
 								tabIndex={selected ? 0 : -1}
 								onClick={() => onRemoveHistory(item.id)}
-								className="focus-ring press grid h-8 w-8 cursor-default place-items-center rounded-[8px] text-fg-tertiary opacity-60 transition-opacity duration-150 group-hover:opacity-100 focus:opacity-100 hover:bg-danger-soft hover:text-danger"
+								className={`focus-ring press grid h-8 w-8 cursor-default place-items-center rounded-[8px] text-fg-tertiary transition-[color,background-color,opacity] duration-150 hover:bg-danger-soft hover:text-danger ${reveal}`}
 							>
 								<X className="h-4 w-4" />
 							</button>
@@ -1734,7 +1731,7 @@ const ResultRow = memo(function ResultRow({
 						title="Remove from Recent"
 						tabIndex={selected ? 0 : -1}
 						onClick={() => onRemoveHistory(item.id)}
-						className="focus-ring press grid h-8 w-8 cursor-default place-items-center rounded-[8px] text-fg-tertiary opacity-60 transition-opacity duration-150 group-hover:opacity-100 focus:opacity-100 hover:bg-danger-soft hover:text-danger"
+						className={`focus-ring press grid h-8 w-8 cursor-default place-items-center rounded-[8px] text-fg-tertiary transition-[color,background-color,opacity] duration-150 hover:bg-danger-soft hover:text-danger ${reveal}`}
 					>
 						<X className="h-4 w-4" />
 					</button>
@@ -1788,7 +1785,7 @@ const ResultRow = memo(function ResultRow({
 								}
 								onCancelFileDrag(event.pointerId);
 							}}
-							className="focus-ring grid h-8 w-8 touch-none place-items-center rounded-[8px] text-fg-quiet transition-[color,background-color] duration-100 hover:bg-surface-hover hover:text-accent cursor-grab active:cursor-grabbing"
+							className={`focus-ring grid h-8 w-8 touch-none place-items-center rounded-[8px] text-fg-quiet transition-[color,background-color,opacity] duration-100 hover:bg-surface-hover hover:text-accent cursor-grab active:cursor-grabbing ${reveal}`}
 						>
 							<GripVertical className="h-4 w-4" />
 						</button>

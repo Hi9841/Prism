@@ -13,11 +13,10 @@ use gpui::{
     ScrollWheelEvent, Styled, Task, Timer, Window, canvas, deferred, div, point, prelude::*, px, relative,
 };
 
-use crate::components::power_menu::PowerMenu;
 use crate::components::settings_sheet::display_shortcut;
 use crate::components::text_input::{Changed, TextInput};
 use crate::components::focus;
-use crate::components::ui::{IconButtonProps, icon_button, kbd, row_icon, section_label, theme, title_tooltip, truncate, weight};
+use crate::components::ui::{kbd, row_icon, section_label, theme, title_tooltip, truncate, weight};
 use crate::features::palette::palette_search_input::{
     SearchInputProps, SearchKey, input_style, render_search_input, search_key,
 };
@@ -123,7 +122,6 @@ pub struct Palette {
     leave_task: Option<Task<()>>,
     file_drag_task: Option<Task<()>>,
     result_menu: Option<Entity<ResultContextMenu>>,
-    power_menu: Entity<PowerMenu>,
     update_control: Entity<UpdateControl>,
     announce_loading: bool,
     announce_task: Option<Task<()>>,
@@ -176,7 +174,6 @@ impl Palette {
                 menu.update(cx, |menu, cx| menu.close(false, false, cx));
             }
         });
-        let power_menu = cx.new(PowerMenu::new);
         let update_control = cx.new(UpdateControl::new);
         Self {
             palette,
@@ -198,7 +195,6 @@ impl Palette {
             leave_task: None,
             file_drag_task: None,
             result_menu: None,
-            power_menu,
             update_control,
             announce_loading: false,
             announce_task: None,
@@ -813,7 +809,7 @@ impl Palette {
                     .font_weight(weight(500.))
                     .text_color(title_color),
             )
-            .when_some(item.subtitle.clone(), |d, subtitle| {
+            .when_some(item.subtitle.clone().filter(|s| !is_path_subtitle(s)), |d, subtitle| {
                 d.child(
                     truncate(subtitle)
                         .mt(r(3.))
@@ -843,7 +839,17 @@ impl Palette {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let mut trailing = div().relative().flex().flex_none().items_center().gap(r(2.));
+        let mut trailing = div().relative().flex().flex_none().items_center().gap(r(6.));
+        let show_affordance = row_hovered || selected;
+        if let Some(path) = item.subtitle.as_ref().filter(|s| is_path_subtitle(s)) {
+            trailing = trailing.child(
+                truncate(path.clone())
+                    .max_w(r(220.))
+                    .text_size(r(12.))
+                    .line_height(relative(1.45))
+                    .text_color(hsla(t.fg_tertiary)),
+            );
+        }
         let square = |id: (&'static str, usize)| {
             div().id(id).flex().flex_none().items_center().justify_center().size(r(32.)).rounded(r(8.))
         };
@@ -872,7 +878,7 @@ impl Palette {
                         cx.stop_propagation();
                         this.move_item(&key_item, direction, cx);
                     }))
-                    .map(|d| if grabbing { d.bg(hsla(t.accent_soft)).cursor_grabbing() } else { d.cursor_grab().hover(|s| s.bg(hsla(t.surface_hover))) })
+                    .map(|d| if grabbing { d.bg(hsla(t.accent_soft)).cursor_grabbing().opacity(1.0) } else { d.cursor_grab().opacity(if show_affordance { 1.0 } else { 0.0 }).hover(|s| s.bg(hsla(t.surface_hover))) })
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(move |this, event: &MouseDownEvent, window, cx| {
@@ -895,7 +901,7 @@ impl Palette {
             focus::button(square(("remove-recent", index)), selected, t)
                 .group("remove")
                 .tooltip(title_tooltip("Remove from Recent"))
-                .opacity(if row_hovered { 1.0 } else { 0.6 })
+                .opacity(if show_affordance { 1.0 } else { 0.0 })
                 .hover(|s| s.bg(hsla(t.danger_soft)))
                 .on_click(cx.listener(move |_, _, _, cx| {
                     cx.stop_propagation();
@@ -926,7 +932,7 @@ impl Palette {
                 focus::button(square(("pin-toggle", index)), selected, t)
                     .group("pin")
                     .tooltip(title_tooltip(format!("{} {}", if pinned { "Unpin" } else { "Pin" }, item.title)))
-                    .opacity(if row_hovered { 1.0 } else { 0.0 })
+                    .opacity(if show_affordance { 1.0 } else { 0.0 })
                     .map(|d| if pinned { d.bg(hsla(t.accent_soft)) } else { d.hover(|s| s.bg(hsla(t.surface_hover))) })
                     .on_click(cx.listener(move |this, _, window, cx| {
                         cx.stop_propagation();
@@ -975,6 +981,7 @@ impl Palette {
                         focus::button(square(("file-grip", index)), selected, t)
                             .group("file-grip")
                             .tooltip(title_tooltip(format!("Drag {} into another app (Discord, Explorer, etc.)", item.title)))
+                            .opacity(if show_affordance { 1.0 } else { 0.0 })
                             .cursor_grab()
                             .hover(|s| s.bg(hsla(t.surface_hover)))
                             .on_mouse_down(
@@ -1673,8 +1680,6 @@ impl Palette {
                 .child(spinning_icon("refresh-cw", 12., t.fg_quiet))
                 .child(truncate(label))
         };
-        let palette_entity = self.palette.clone();
-        let palette_entity2 = self.palette.clone();
         div()
             .relative()
             .flex()
@@ -1733,26 +1738,14 @@ impl Palette {
                                 .child("apps failed to load"),
                         )
                     })
-                    .child(icon_button(
-                        "rebuild-index",
-                        IconButtonProps { label: "Rebuild file index", active: false, disabled: file_indexing, focus: None },
-                        t,
-                        "folder-sync",
-                        14.,
-                        move |_, cx| palette_entity.update(cx, |p, cx| p.rebuild_index(cx)),
-                    ))
-                    .child(icon_button(
-                        "refresh-apps",
-                        IconButtonProps { label: "Refresh applications and Windows tools", active: false, disabled: !apps_loaded, focus: None },
-                        t,
-                        "refresh-cw",
-                        14.,
-                        move |_, cx| palette_entity2.update(cx, |p, cx| p.refresh_apps(cx)),
-                    ))
-                    .child(self.power_menu.clone()),
+
             )
             .into_any_element()
     }
+}
+
+fn is_path_subtitle(subtitle: &str) -> bool {
+    subtitle.contains('\\') || subtitle.contains('/')
 }
 
 /// `animate-spin`: one turn per second, linear.
