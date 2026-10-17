@@ -16,7 +16,8 @@ use gpui::{
 use crate::components::settings_sheet::display_shortcut;
 use crate::components::text_input::{Changed, TextInput};
 use crate::components::focus;
-use crate::components::ui::{kbd, row_icon, section_label, theme, title_tooltip, truncate, weight};
+use crate::components::power_menu::PowerMenu;
+use crate::components::ui::{IconButtonProps, icon_button, kbd, row_icon, section_label, theme, title_tooltip, truncate, weight};
 use crate::features::palette::palette_search_input::{
     SearchInputProps, SearchKey, input_style, render_search_input, search_key,
 };
@@ -122,6 +123,7 @@ pub struct Palette {
     leave_task: Option<Task<()>>,
     file_drag_task: Option<Task<()>>,
     result_menu: Option<Entity<ResultContextMenu>>,
+    power_menu: Entity<PowerMenu>,
     update_control: Entity<UpdateControl>,
     announce_loading: bool,
     announce_task: Option<Task<()>>,
@@ -174,6 +176,7 @@ impl Palette {
                 menu.update(cx, |menu, cx| menu.close(false, false, cx));
             }
         });
+        let power_menu = cx.new(PowerMenu::new);
         let update_control = cx.new(UpdateControl::new);
         Self {
             palette,
@@ -195,6 +198,7 @@ impl Palette {
             leave_task: None,
             file_drag_task: None,
             result_menu: None,
+            power_menu,
             update_control,
             announce_loading: false,
             announce_task: None,
@@ -800,7 +804,7 @@ impl Palette {
 
         let title_color = if selected { hsla(t.fg) } else { crate::gfx::alpha(t.fg, 0.9) };
         let text_cell = div()
-            .flex_shrink()
+            .flex_1()
             .min_w_0()
             .child(
                 truncate(item.title.clone())
@@ -820,8 +824,7 @@ impl Palette {
             });
 
         let trailing = self.render_trailing(item, index, selected, hovered, pinned, can_reorder, can_drag_file, removable, dragged, t, window, cx);
-        // The highlight stays full width. The pin and grip stay next to the name.
-        row.child(icon_cell).child(text_cell).child(trailing).child(div().flex_1().min_w_0()).into_any_element()
+        row.child(icon_cell).child(text_cell).child(trailing).into_any_element()
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1022,7 +1025,6 @@ impl Palette {
         let drag_id = id.to_owned();
         let drag_label = label.to_owned();
         let prefix = if kind == CategoryKind::Section { "section-grip" } else { "group-grip" };
-        let dragging = self.category_drag.as_ref().is_some_and(|drag| drag.kind == kind && drag.id == id);
         focus::button(div().id(gpui::ElementId::Name(format!("{prefix}-{id}").into())), true, t)
             .group("category-grip")
             .flex()
@@ -1031,9 +1033,7 @@ impl Palette {
             .justify_center()
             .size(r(28.))
             .rounded(r(7.))
-            .opacity(if dragging { 1.0 } else { 0.0 })
-            .group_hover("section-head", |s| s.opacity(1.0))
-            .when(margin_right, |d| d.mr(r(4.)))
+            .when(margin_right, |d| d.mr(r(14.)))
             .tooltip(title_tooltip(format!("Reorder {label}")))
             .cursor_grab()
             .hover(|s| s.bg(hsla(t.surface_hover)))
@@ -1235,31 +1235,27 @@ impl Palette {
                 );
                 block = block.child(
                     div()
-                        .group("section-head")
                         .flex()
                         .items_center()
                         .gap(r(4.))
                         .px(r(14.))
                         .pb(r(6.))
                         .pt(r(16.))
-                        .child(div().min_w_0().child(header))
+                        .child(div().flex_1().min_w_0().child(header))
                         .when(section_reorderable, |d| {
                             d.child(self.category_grip(CategoryKind::Section, &section.id, &section.label, false, t, cx))
-                        })
-                        .child(div().flex_1()),
+                        }),
                 );
             } else {
                 block = block.child(
                     div()
-                        .group("section-head")
                         .flex()
                         .items_center()
                         .gap(r(4.))
-                        .child(div().min_w_0().child(section_label(&section.label, t)))
+                        .child(div().flex_1().min_w_0().child(section_label(&section.label, t)))
                         .when(section_reorderable, |d| {
                             d.child(self.category_grip(CategoryKind::Section, &section.id, &section.label, true, t, cx))
-                        })
-                        .child(div().flex_1()),
+                        }),
                 );
             }
 
@@ -1313,18 +1309,16 @@ impl Palette {
                     )
                     .child(
                         div()
-                            .group("section-head")
                             .flex()
                             .items_center()
                             .gap(r(4.))
                             .px(r(14.))
                             .pb(r(6.))
                             .pt(r(8.))
-                            .child(div().min_w_0().child(header))
+                            .child(div().flex_1().min_w_0().child(header))
                             .when(section_reorderable, |d| {
                                 d.child(self.category_grip(CategoryKind::Group, &group.group_id, &group.label, false, t, cx))
-                            })
-                            .child(div().flex_1()),
+                            }),
                     );
                 let mut rows = div().flex().flex_col().gap(r(2.));
                 for item in &group.items {
@@ -1678,6 +1672,8 @@ impl Palette {
             div().px(r(4.)).child(label.to_owned())
         };
         let dot = || div().text_color(hsla(t.divider)).child("\u{00B7}");
+        let palette_entity = self.palette.clone();
+        let palette_entity2 = self.palette.clone();
         let spinner = |label: &'static str| {
             div()
                 .flex()
@@ -1748,7 +1744,23 @@ impl Palette {
                                 .child("apps failed to load"),
                         )
                     })
-
+                    .child(icon_button(
+                        "rebuild-index",
+                        IconButtonProps { label: "Rebuild file index", active: false, disabled: file_indexing, focus: None },
+                        t,
+                        "folder-sync",
+                        14.,
+                        move |_, cx| palette_entity.update(cx, |p, cx| p.rebuild_index(cx)),
+                    ))
+                    .child(icon_button(
+                        "refresh-apps",
+                        IconButtonProps { label: "Refresh applications and Windows tools", active: false, disabled: !apps_loaded, focus: None },
+                        t,
+                        "refresh-cw",
+                        14.,
+                        move |_, cx| palette_entity2.update(cx, |p, cx| p.refresh_apps(cx)),
+                    ))
+                    .child(self.power_menu.clone())
             )
             .into_any_element()
     }

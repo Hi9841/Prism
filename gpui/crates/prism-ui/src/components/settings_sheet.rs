@@ -1464,67 +1464,7 @@ impl Render for SettingsSheet {
                     // Chromium's wheel line (gfx::CHROMIUM_LINE_PX); the content resets it.
                     .line_height(px(crate::gfx::CHROMIUM_LINE_PX))
                     .child(div().line_height(relative(1.45)).px(r(20.)).pb(r(24.))
-                    .child(section_title("Launcher", true, &t))
-                    .child(settings_row("Applications", Some("Reload installed apps and Windows tools"), {
-                        let palette = self.palette.clone();
-                        let apps_loaded = self.palette.read(cx).apps_loaded;
-                        focus::button(div().id("refresh-apps"), true, &t)
-                            .flex().items_center().gap(r(6.)).rounded(r(9.)).px(r(12.)).min_h(r(44.))
-                            .bg(hsla(t.surface)).text_size(r(12.)).font_weight(weight(600.)).text_color(hsla(t.fg_secondary))
-                            .when(!apps_loaded, |d| d.opacity(0.5))
-                            .hover(|s| s.bg(hsla(t.surface_hover)).text_color(hsla(t.fg)))
-                            .on_click(move |_, _, cx| {
-                                if apps_loaded {
-                                    palette.update(cx, |p, cx| p.refresh_apps(cx));
-                                }
-                            })
-                            .child(icon("refresh-cw", 14., t.fg_secondary))
-                            .child("Refresh")
-                    }, &t))
-                    .child(settings_row("File index", Some("Rebuild the local file catalog"), {
-                        let palette = self.palette.clone();
-                        let indexing = self.palette.read(cx).file_indexing;
-                        focus::button(div().id("rebuild-index"), true, &t)
-                            .flex().items_center().gap(r(6.)).rounded(r(9.)).px(r(12.)).min_h(r(44.))
-                            .bg(hsla(t.surface)).text_size(r(12.)).font_weight(weight(600.)).text_color(hsla(t.fg_secondary))
-                            .when(indexing, |d| d.opacity(0.5))
-                            .hover(|s| s.bg(hsla(t.surface_hover)).text_color(hsla(t.fg)))
-                            .on_click(move |_, _, cx| {
-                                if !indexing {
-                                    palette.update(cx, |p, cx| p.rebuild_index(cx));
-                                }
-                            })
-                            .child(icon("folder-sync", 14., t.fg_secondary))
-                            .child("Rebuild")
-                    }, &t))
-                    .child(settings_row("Power", Some("Lock, sleep, shut down, or restart"), {
-                        let app = self.app.clone();
-                        div().flex().gap(r(6.)).children([("lock", "Lock", "lock"), ("sleep", "Sleep", "moon"), ("shutdown", "Shut down", "power"), ("restart", "Restart", "rotate-ccw")].into_iter().enumerate().map(|(index, (action, label, glyph))| {
-                            let app = app.clone();
-                            focus::button(div().id(("power", index)), true, &t)
-                                .flex().items_center().justify_center().size(r(44.)).rounded(r(9.))
-                                .bg(hsla(t.surface)).tooltip(title_tooltip(label))
-                                .hover(|s| s.bg(hsla(t.surface_hover)))
-                                .on_click(move |_, _, cx| {
-                                    let app = app.clone();
-                                    cx.spawn(async move |cx| {
-                                        let result = bridge::perform_power_action(action).await;
-                                        if let Err(error) = result {
-                                            let _ = app.update(cx, |app, cx| {
-                                                app.show_toast(
-                                                    format!("Could not {}", if action == "shutdown" { "shut down" } else { action }),
-                                                    Some(error_string(&error)),
-                                                    ToastKind::Error,
-                                                    cx,
-                                                );
-                                            });
-                                        }
-                                    }).detach();
-                                })
-                                .child(icon(glyph, 16., t.fg_secondary))
-                        }))
-                    }, &t))
-                    .child(section_title("Appearance", false, &t))
+                    .child(section_title("Appearance", true, &t))
                     .child(settings_row("Appearance", Some("Follows Windows light/dark mode"), appearance, &t))
                     .child(settings_row("Accent color", Some("Colors highlights, focus, and the volume pill"), accents, &t))
                     .child(settings_row("Window width", None, width, &t))
