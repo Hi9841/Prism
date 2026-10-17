@@ -461,7 +461,6 @@ function appPaletteItem(
 	return {
 		id: `app::${app.appId}`,
 		title: app.name,
-		subtitle: "Application",
 		icon: { kind: "app", name: app.name, icon: icons[app.appId] ?? app.icon },
 		historyTitle: app.name,
 		appId: app.appId,

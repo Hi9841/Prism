@@ -1,6 +1,6 @@
 [package]
 name = "prism-core"
-version = "1.0.3"
+version = "1.0.4"
 description = "Prism backend shared by the Tauri app and the GPUI app"
 edition = "2021"
 publish = false
