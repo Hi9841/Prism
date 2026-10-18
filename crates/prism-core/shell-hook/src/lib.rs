@@ -3,7 +3,7 @@
 use std::ffi::c_void;
 use std::io::Write;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 type Hhook = *mut c_void;
@@ -114,6 +114,10 @@ const CONTROL_FOREGROUND_WINDOW: usize = 23;
 const EVENT_FOREGROUND_RESULT: usize = 24;
 const EVENT_SHELL_START_COMMAND: usize = 25;
 const EVENT_SHELL_SEARCH_COMMAND: usize = 26;
+const EVENT_TASKBAR_POINTER: usize = 27;
+/// The pointer report is a hint to re-read the Start rect; a few per second
+/// keep the rect current without loading Explorer's input thread.
+const TASKBAR_POINTER_INTERVAL_MS: u32 = 200;
 const MOD_ALT: u32 = 0x0001;
 const MOD_CONTROL: u32 = 0x0002;
 const MOD_SHIFT: u32 = 0x0004;
@@ -153,6 +157,7 @@ static SEARCH_RECT_RIGHT: AtomicI32 = AtomicI32::new(0);
 static SEARCH_RECT_BOTTOM: AtomicI32 = AtomicI32::new(0);
 static SEARCH_RECT_READY: AtomicBool = AtomicBool::new(false);
 static START_PRESS_CAPTURED: AtomicBool = AtomicBool::new(false);
+static LAST_TASKBAR_POINTER_MS: AtomicU32 = AtomicU32::new(0);
 /// Prism released Explorer's bare-Win and Ctrl+Esc hotkeys. If Explorer
 /// registers them again, their first WM_HOTKEY goes to Prism and they are
 /// released again on the thread that owns them.
@@ -252,6 +257,7 @@ extern "system" {
 #[link(name = "kernel32")]
 extern "system" {
     fn GetModuleHandleW(module_name: *const u16) -> *mut c_void;
+    fn GetTickCount() -> u32;
     fn Sleep(milliseconds: u32);
 }
 
@@ -957,6 +963,25 @@ unsafe fn notify_start_click(message: u32, point: &Point) -> bool {
         ) != 0
 }
 
+/// A centered taskbar moves the Start button each time a taskbar button comes
+/// or goes. Prism re-reads the rect when the pointer is over the taskbar, so
+/// the rect is current before the click lands.
+fn taskbar_pointer_report_due(now_ms: u32, last_ms: u32) -> bool {
+    now_ms.wrapping_sub(last_ms) >= TASKBAR_POINTER_INTERVAL_MS
+}
+
+unsafe fn report_taskbar_pointer(message: u32) {
+    let now = GetTickCount();
+    let last = LAST_TASKBAR_POINTER_MS.load(Ordering::Relaxed);
+    if taskbar_pointer_report_due(now, last)
+        && LAST_TASKBAR_POINTER_MS
+            .compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
+    {
+        let _ = notify_observer(message, EVENT_TASKBAR_POINTER, 0);
+    }
+}
+
 /// Explorer invokes this callback in the thread that owns its Start command.
 /// It touches only queued messages and never receives or synthesizes keyboard input.
 #[no_mangle]
@@ -985,7 +1010,6 @@ pub unsafe extern "system" fn PrismShellGetMessageHook(
                 }
                 CONTROL_START_RECT_LEFT => {
                     START_RECT_READY.store(false, Ordering::Release);
-                    START_PRESS_CAPTURED.store(false, Ordering::Release);
                     if let Ok(mut background) = ICON_BACKGROUND.lock() {
                         *background = None;
                     }
@@ -1031,7 +1055,6 @@ pub unsafe extern "system" fn PrismShellGetMessageHook(
                 }
                 CONTROL_SEARCH_RECT_LEFT => {
                     SEARCH_RECT_READY.store(false, Ordering::Release);
-                    START_PRESS_CAPTURED.store(false, Ordering::Release);
                     SEARCH_RECT_LEFT.store(message.lparam as i32, Ordering::Relaxed);
                     message.message = WM_NULL;
                 }
@@ -1216,6 +1239,14 @@ mod tests {
     }
 
     #[test]
+    fn taskbar_pointer_reports_are_throttled_across_tick_wrap() {
+        assert!(!taskbar_pointer_report_due(1_100, 1_000));
+        assert!(taskbar_pointer_report_due(1_200, 1_000));
+        assert!(taskbar_pointer_report_due(50, u32::MAX - 200));
+        assert!(!taskbar_pointer_report_due(50, u32::MAX - 100));
+    }
+
+    #[test]
     fn search_hotkey_is_nulled_only_after_successful_notify() {
         let mut message = hotkey(MOD_WIN, VK_Q);
         assert!(intercept_search_hotkey(&mut message, true));
@@ -1246,9 +1277,11 @@ pub unsafe extern "system" fn PrismShellMouseHook(
             if in_target {
                 let _ = notify_start_click(bridge_message_id(), &mouse.point);
             }
-            // The matching down was consumed, so always consume its up as well.
+            // The matching down was consumed, so always consume its up as well,
+            // also when a rect update arrived between the two.
             return 1;
         }
+        report_taskbar_pointer(bridge_message_id());
     }
 
     CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam)

@@ -92,6 +92,7 @@ const SHELL_CONTROL_FOREGROUND_WINDOW: usize = 23;
 const SHELL_EVENT_FOREGROUND_RESULT: usize = 24;
 const SHELL_EVENT_SHELL_START_COMMAND: usize = 25;
 const SHELL_EVENT_SHELL_SEARCH_COMMAND: usize = 26;
+const SHELL_EVENT_TASKBAR_POINTER: usize = 27;
 /// A shell Start command toggles immediately. The normal case is already
 /// de-duplicated: a raw Win-down sets `LAST_RAW_TOGGLE_MS` ~100 ms before the
 /// Win-up shell command, and a late raw toggle is dropped by the debounce.
@@ -1239,6 +1240,10 @@ impl ShellBridge {
             if !same_rect(rect, self.start_rect)
                 && post_start_button_rect(self.taskbar_thread, message, rect).is_ok()
             {
+                debug_trace(&format!(
+                    "start-rect {},{},{},{} requested={requested}",
+                    rect.left, rect.top, rect.right, rect.bottom
+                ));
                 self.start_rect = rect;
             }
         }
@@ -2104,6 +2109,9 @@ unsafe extern "system" fn raw_input_window_proc(
             }
             SHELL_EVENT_SHELL_SEARCH_COMMAND => {
                 note_shell_search_command();
+            }
+            SHELL_EVENT_TASKBAR_POINTER => {
+                request_start_rect_refresh();
             }
             SHELL_EVENT_TASKBAR_START_CLICK_X => {
                 SHELL_START_CLICK_X.store(lparam.0 as i32, Ordering::Release);
