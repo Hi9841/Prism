@@ -1,6 +1,6 @@
 //! The search field (`src/features/palette/PaletteSearchInput.tsx`).
 
-use gpui::{AnyElement, App, Entity, Focusable, KeyDownEvent, ParentElement, Styled, Window, div, prelude::*, relative};
+use gpui::{AnyElement, App, Entity, KeyDownEvent, ParentElement, Styled, Window, div, prelude::*, relative};
 
 use crate::components::text_input::{InputStyle, TextInput};
 use crate::components::ui::{IconButtonProps, icon_button, kbd, weight};
@@ -59,7 +59,7 @@ pub fn render_search_input(
     cx: &mut App,
     on_toggle_settings: impl Fn(&mut Window, &mut App) + 'static,
 ) -> AnyElement {
-    let focused = props.input.read(cx).focus_handle(cx).is_focused(window);
+    let focused = props.input.read(cx).shows_focus(window);
     props.input.update(cx, |input, _| input.style = input_style(t));
     let field_shadow = if focused { zoomed(vec![shadow(0., 4., 16., 0., fade(t.accent, 5.0))], zoom) } else { vec![] };
     div().px(r(20.)).pb(r(4.)).pt(r(20.)).child(

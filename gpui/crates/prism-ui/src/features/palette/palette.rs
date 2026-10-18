@@ -210,8 +210,10 @@ impl Palette {
 
     /// Focuses the search field with the caret at the end.
     pub fn focus_search(&self, window: &mut Window, cx: &mut App) {
-        self.input.read(cx).focus(window);
-        self.input.update(cx, |input, cx| input.move_to_end(cx));
+        self.input.update(cx, |input, cx| {
+            input.focus_quietly(window, cx);
+            input.move_to_end(cx);
+        });
     }
 
     /// EmptyState: the loading copy appears only after 200 ms.

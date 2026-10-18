@@ -101,6 +101,9 @@ pub struct TextInput {
     is_selecting: bool,
     caret_visible: bool,
     blink: Option<Task<()>>,
+    /// Focused, but drawn at rest (no ring, no caret) until the first input
+    /// or click. The palette opens this way: typing still lands here.
+    quiet_focus: bool,
     pub style: InputStyle,
 }
 
@@ -125,6 +128,7 @@ impl TextInput {
             is_selecting: false,
             caret_visible: true,
             blink: None,
+            quiet_focus: false,
             style,
         }
     }
@@ -159,6 +163,23 @@ impl TextInput {
 
     pub fn focus(&self, window: &mut Window) {
         window.focus(&self.focus_handle);
+    }
+
+    /// Takes the keyboard focus but keeps the field drawn at rest.
+    pub fn focus_quietly(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        window.focus(&self.focus_handle);
+        self.quiet_focus = true;
+        cx.notify();
+    }
+
+    /// Draw the field as focused: it holds the focus, the window holds the
+    /// keyboard, and the user has typed or clicked since a quiet focus.
+    pub fn shows_focus(&self, window: &Window) -> bool {
+        self.focus_handle.is_focused(window) && window.is_window_active() && !self.quiet_focus
+    }
+
+    fn wake(&mut self) {
+        self.quiet_focus = false;
     }
 
     /// Caret to the end (`setSelectionRange(len, len)`).
@@ -290,6 +311,7 @@ impl TextInput {
 
     fn on_mouse_down(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         window.focus(&self.focus_handle);
+        self.wake();
         self.is_selecting = true;
         let index = self.index_for_mouse_position(event.position);
         if event.click_count >= 3 {
@@ -515,6 +537,7 @@ impl EntityInputHandler for TextInput {
             .or(self.marked_range.clone())
             .unwrap_or(self.selected_range.clone());
         let new_text = self.clamp_to_max(&range, new_text);
+        self.wake();
         let next: SharedString =
             (self.content[0..range.start].to_owned() + &new_text + &self.content[range.end..]).into();
         let changed = next != self.content;
@@ -542,6 +565,7 @@ impl EntityInputHandler for TextInput {
             .map(|range_utf16| self.range_from_utf16(range_utf16))
             .or(self.marked_range.clone())
             .unwrap_or(self.selected_range.clone());
+        self.wake();
         self.content = (self.content[0..range.start].to_owned() + new_text + &self.content[range.end..]).into();
         self.marked_range = if new_text.is_empty() { None } else { Some(range.start..range.start + new_text.len()) };
         self.selected_range = new_selected_range_utf16
@@ -728,9 +752,9 @@ impl Element for TextElement {
         window: &mut Window,
         cx: &mut App,
     ) {
-        let (focus_handle, caret_visible) = {
+        let (focus_handle, caret_visible, shows_focus) = {
             let input = self.input.read(cx);
-            (input.focus_handle.clone(), input.caret_visible)
+            (input.focus_handle.clone(), input.caret_visible, input.shows_focus(window))
         };
         window.handle_input(&focus_handle, ElementInputHandler::new(bounds, self.input.clone()), cx);
         let scroll_x = prepaint.scroll_x;
@@ -741,7 +765,7 @@ impl Element for TextElement {
             }
             let origin = point(bounds.left() - scroll_x, bounds.top());
             let _ = line.paint(origin, bounds.size.height, window, cx);
-            if focus_handle.is_focused(window)
+            if shows_focus
                 && caret_visible
                 && crate::gfx::parity().is_none()
                 && let Some(cursor) = prepaint.cursor.take()
@@ -761,7 +785,7 @@ impl Render for TextInput {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // Blink only while the caret can be seen: a hidden or unfocused input
         // would otherwise wake the app twice a second forever.
-        let blinking = self.focus_handle.is_focused(window) && window.is_window_active();
+        let blinking = self.shows_focus(window);
         if blinking && self.blink.is_none() {
             self.restart_blink(cx);
         } else if !blinking && self.blink.is_some() {
