@@ -719,7 +719,8 @@ fn taskbar_osd_title(target: &TaskbarTarget) -> String {
     }
 }
 
-/// Checks if an HWND belongs to a taskbar window.
+/// Uses the root window, so a hit on a child of the taskbar (the XAML host)
+/// counts too, on the primary and the secondary-monitor taskbars.
 pub fn is_taskbar_window(hwnd: HWND) -> bool {
     if hwnd.0.is_null() {
         return false;
