@@ -828,7 +828,7 @@ export function Palette() {
 																!settings.quickAccessCollapsed,
 														})
 													}
-													className="focus-ring group/section flex w-full min-w-0 cursor-default items-center gap-1 rounded-[6px] text-left text-[11px] font-semibold text-fg-quiet uppercase hover:text-fg-secondary"
+													className="focus-ring group/section flex w-full min-w-0 cursor-default items-center gap-1 rounded-xs text-left text-2xs font-semibold text-fg-quiet uppercase hover:text-fg-secondary"
 												>
 													<ChevronDown
 														className={`h-3.5 w-3.5 transition-transform duration-150 ${
@@ -844,7 +844,7 @@ export function Palette() {
 														type="button"
 														aria-label={`Reorder ${section.label} section`}
 														title={`Reorder ${section.label}`}
-														className="focus-ring grid h-7 w-7 shrink-0 touch-none cursor-grab place-items-center rounded-[7px] text-fg-quiet hover:bg-surface-hover hover:text-fg active:cursor-grabbing"
+														className="focus-ring grid h-7 w-7 shrink-0 touch-none cursor-grab place-items-center rounded-ui-7 text-fg-quiet hover:bg-surface-hover hover:text-fg active:cursor-grabbing"
 														{...categoryDragHandlers(
 															"section",
 															section.id,
@@ -875,7 +875,7 @@ export function Palette() {
 														type="button"
 														aria-label={`Reorder ${section.label} section`}
 														title={`Reorder ${section.label}`}
-														className="focus-ring mr-3.5 grid h-7 w-7 shrink-0 touch-none cursor-grab place-items-center rounded-[7px] text-fg-quiet hover:bg-surface-hover hover:text-fg active:cursor-grabbing"
+														className="focus-ring mr-3.5 grid h-7 w-7 shrink-0 touch-none cursor-grab place-items-center rounded-ui-7 text-fg-quiet hover:bg-surface-hover hover:text-fg active:cursor-grabbing"
 														{...categoryDragHandlers(
 															"section",
 															section.id,
@@ -929,7 +929,7 @@ export function Palette() {
 														aria-expanded={!group.collapsed}
 														aria-controls={`prism-section-${group.id}`}
 														onClick={() => toggleAppGroup(group.groupId)}
-														className="focus-ring group/section flex w-full min-w-0 cursor-default items-center gap-1 rounded-[6px] text-left text-[11px] font-semibold text-fg-secondary hover:text-fg"
+														className="focus-ring group/section flex w-full min-w-0 cursor-default items-center gap-1 rounded-xs text-left text-2xs font-semibold text-fg-secondary hover:text-fg"
 													>
 														<ChevronDown
 															className={`h-3.5 w-3.5 transition-transform duration-150 ${
@@ -945,7 +945,7 @@ export function Palette() {
 															type="button"
 															aria-label={`Reorder ${group.label} group`}
 															title={`Reorder ${group.label}`}
-															className="focus-ring grid h-7 w-7 shrink-0 touch-none cursor-grab place-items-center rounded-[7px] text-fg-quiet hover:bg-surface-hover hover:text-fg active:cursor-grabbing"
+															className="focus-ring grid h-7 w-7 shrink-0 touch-none cursor-grab place-items-center rounded-ui-7 text-fg-quiet hover:bg-surface-hover hover:text-fg active:cursor-grabbing"
 															{...categoryDragHandlers(
 																"group",
 																group.groupId,
@@ -961,7 +961,7 @@ export function Palette() {
 												id={`prism-section-${group.id}`}
 												role="rowgroup"
 												aria-label={group.label}
-												className="m-0 flex list-none flex-col gap-[2px] p-0"
+												className="m-0 flex list-none flex-col gap-0.5 p-0"
 											>
 												{group.items.map((item) => {
 													const index = flat++;
@@ -973,7 +973,7 @@ export function Palette() {
 									{section.groups &&
 									section.groups.length > 0 &&
 									section.items.length > 0 ? (
-										<div className="mt-2 flex items-center gap-2 px-3.5 pb-1 pt-2 text-[10px] font-semibold text-fg-quiet uppercase">
+										<div className="mt-2 flex items-center gap-2 px-3.5 pb-1 pt-2 text-ui-100 font-semibold text-fg-quiet uppercase">
 											<span
 												className="h-px flex-1 bg-line"
 												aria-hidden="true"
@@ -991,7 +991,7 @@ export function Palette() {
 										aria-label={
 											section.groups?.length ? "Other apps" : section.label
 										}
-										className="m-0 flex list-none flex-col gap-[2px] p-0"
+										className="m-0 flex list-none flex-col gap-0.5 p-0"
 									>
 										{section.items.map((item) => {
 											const index = flat++;
@@ -1133,7 +1133,7 @@ export function Palette() {
           out of the footer and would be clipped away. Height is fixed by h-12
           + shrink-0 + flex-nowrap, so nothing needs to be hidden. */}
 			<div className="footer-bar flex h-12 shrink-0 flex-nowrap items-center justify-between gap-x-3 px-5">
-				<div className="flex shrink-0 items-center gap-1.5 text-[11px] text-fg-quiet">
+				<div className="flex shrink-0 items-center gap-1.5 text-2xs text-fg-quiet">
 					<Kbd>↑</Kbd>
 					<Kbd>↓</Kbd>
 					<span className="px-1">navigate</span>
@@ -1147,14 +1147,14 @@ export function Palette() {
 				<div className="ms-auto flex min-w-0 flex-nowrap items-center justify-end gap-1.5">
 					<UpdateControl />
 					{!palette.appsLoaded && palette.query === "" && (
-						<span className="flex min-w-0 items-center gap-1.5 text-[11px] text-fg-quiet">
+						<span className="flex min-w-0 items-center gap-1.5 text-2xs text-fg-quiet">
 							<RefreshCw className="h-3 w-3 shrink-0 animate-spin" />
 							<span className="truncate">indexing apps</span>
 						</span>
 					)}
 					{palette.fileIndexing && palette.appsLoaded && (
 						<span
-							className="flex min-w-0 items-center gap-1.5 text-[11px] text-fg-quiet"
+							className="flex min-w-0 items-center gap-1.5 text-2xs text-fg-quiet"
 							title={
 								palette.volumes.length > 0
 									? palette.volumes
@@ -1171,7 +1171,7 @@ export function Palette() {
 						</span>
 					)}
 					{palette.appsError && palette.query === "" && (
-						<span className="text-[11px] text-danger">apps failed to load</span>
+						<span className="text-2xs text-danger">apps failed to load</span>
 					)}
 					<IconButton
 						label="Rebuild file index"
@@ -1195,7 +1195,9 @@ export function Palette() {
 }
 
 function isPathSubtitle(subtitle: string | undefined): subtitle is string {
-	return Boolean(subtitle && (subtitle.includes("\\") || subtitle.includes("/")));
+	return Boolean(
+		subtitle && (subtitle.includes("\\") || subtitle.includes("/")),
+	);
 }
 
 function reorderItemId(item: PaletteItem): string | null {
@@ -1233,10 +1235,10 @@ function ReorderDragPreview({
 			>
 				<RowIcon icon={drag.item.icon} />
 				<div className="min-w-0">
-					<div className="truncate text-[13.5px] leading-tight font-semibold text-fg">
+					<div className="truncate text-ui-135 leading-tight font-semibold text-fg">
 						{drag.item.title}
 					</div>
-					<div className="mt-[3px] truncate text-[11.5px] leading-tight text-fg-tertiary">
+					<div className="mt-0.75 truncate text-ui-115 leading-tight text-fg-tertiary">
 						{drag.item.subtitle ?? "Application"}
 					</div>
 				</div>
@@ -1265,14 +1267,14 @@ function CategoryDragPreview({ drag }: { drag: CategoryDragState }) {
 			style={{ transform: `translate3d(${x}px, ${y}px, 0)` }}
 		>
 			<div className="category-drag-preview">
-				<span className="grid h-8 w-8 shrink-0 place-items-center rounded-[8px] bg-accent-soft text-accent">
+				<span className="grid h-8 w-8 shrink-0 place-items-center rounded-ui-8 bg-accent-soft text-accent">
 					<GripVertical className="h-4 w-4" />
 				</span>
 				<span className="min-w-0">
-					<span className="block truncate text-[12px] font-semibold text-fg">
+					<span className="block truncate text-ui-120 font-semibold text-fg">
 						{drag.label}
 					</span>
-					<span className="mt-0.5 block text-[10.5px] text-fg-tertiary">
+					<span className="mt-0.5 block text-ui-105 text-fg-tertiary">
 						{drag.kind === "section" ? "Section" : "App collection"}
 					</span>
 				</span>
@@ -1318,19 +1320,19 @@ function EmptyState({
 				tabIndex={-1}
 				className="flex h-full flex-col items-center justify-center gap-2.5 text-center"
 			>
-				<div className="grid h-14 w-14 place-items-center rounded-[20px] bg-surface">
+				<div className="grid h-14 w-14 place-items-center rounded-ui-20 bg-surface">
 					<Search className="h-6 w-6 text-fg-quiet" strokeWidth={1.75} />
 				</div>
 				{error ? (
 					<>
-						<div className="text-balance text-[13.5px] font-medium text-fg-secondary">
+						<div className="text-balance text-ui-135 font-medium text-fg-secondary">
 							{error.kind === "directoryAccess"
 								? "This folder cannot be read"
 								: error.kind === "indexQuery"
 									? "File search is unavailable"
 									: "Apps couldn't be loaded"}
 						</div>
-						<div className="max-w-[260px] text-[12px] leading-relaxed text-fg-tertiary">
+						<div className="max-w-65 text-ui-120 leading-relaxed text-fg-tertiary">
 							{error.kind === "directoryAccess"
 								? "Check that the folder still exists and that Prism has permission to open it."
 								: error.kind === "indexQuery"
@@ -1346,7 +1348,7 @@ function EmptyState({
 										? onRebuildIndex
 										: onRetryApps
 							}
-							className="focus-ring press mt-1 flex min-h-11 cursor-default items-center gap-1.5 rounded-[10px] bg-surface px-3 text-[12px] font-medium text-fg-secondary hover:bg-surface-hover hover:text-fg"
+							className="focus-ring press mt-1 flex min-h-11 cursor-default items-center gap-1.5 rounded-sm bg-surface px-3 text-ui-120 font-medium text-fg-secondary hover:bg-surface-hover hover:text-fg"
 						>
 							{error.kind === "indexQuery" ? (
 								<FolderSync className="h-3.5 w-3.5" />
@@ -1358,7 +1360,7 @@ function EmptyState({
 					</>
 				) : (
 					<>
-						<div className="text-balance text-[13.5px] font-medium text-fg-secondary">
+						<div className="text-balance text-ui-135 font-medium text-fg-secondary">
 							{showLoading
 								? query
 									? "Searching local files…"
@@ -1367,7 +1369,7 @@ function EmptyState({
 									? "No matching items"
 									: "Start typing to search"}
 						</div>
-						<div className="max-w-[260px] text-[12px] leading-relaxed text-fg-tertiary">
+						<div className="max-w-65 text-ui-120 leading-relaxed text-fg-tertiary">
 							{showLoading
 								? query
 									? "The first file index finishes in the background"
@@ -1398,9 +1400,9 @@ function FileSearchErrorNotice({
 			<div role="gridcell" tabIndex={-1}>
 				<div
 					role="alert"
-					className="mx-2.5 mt-2 flex min-h-11 items-center justify-between gap-3 rounded-[10px] bg-danger-soft px-3 text-danger"
+					className="mx-2.5 mt-2 flex min-h-11 items-center justify-between gap-3 rounded-sm bg-danger-soft px-3 text-danger"
 				>
-					<span className="min-w-0 truncate text-[11.5px]">
+					<span className="min-w-0 truncate text-ui-115">
 						{indexFailed
 							? "File index search failed."
 							: "Prism cannot read this folder."}
@@ -1408,7 +1410,7 @@ function FileSearchErrorNotice({
 					<button
 						type="button"
 						onClick={indexFailed ? onRebuild : onRetry}
-						className="focus-ring press min-h-11 shrink-0 cursor-default px-2 text-[11.5px] font-semibold"
+						className="focus-ring press min-h-11 shrink-0 cursor-default px-2 text-ui-115 font-semibold"
 					>
 						{indexFailed ? "Rebuild index" : "Retry"}
 					</button>
@@ -1528,7 +1530,7 @@ const ResultRow = memo(function ResultRow({
 					tabIndex={-1}
 					aria-label={`Open ${item.title}`}
 					onClick={() => onRun(item)}
-					className="focus-ring pointer-events-auto absolute inset-0 z-0 cursor-default rounded-[14px]"
+					className="focus-ring pointer-events-auto absolute inset-0 z-0 cursor-default rounded-md"
 				/>
 				<div
 					onPointerDown={(event) => {
@@ -1620,14 +1622,14 @@ const ResultRow = memo(function ResultRow({
 				className="pointer-events-none relative z-[1] min-w-0"
 			>
 				<div
-					className={`truncate text-[13.5px] leading-tight font-medium transition-colors duration-150 ${
+					className={`truncate text-ui-135 leading-tight font-medium transition-colors duration-150 ${
 						selected ? "text-fg" : "text-fg/90"
 					}`}
 				>
 					{item.title}
 				</div>
 				{item.subtitle && !isPathSubtitle(item.subtitle) ? (
-					<div className="mt-[3px] truncate text-[11.5px] leading-tight text-fg-tertiary">
+					<div className="mt-0.75 truncate text-ui-115 leading-tight text-fg-tertiary">
 						{item.subtitle}
 					</div>
 				) : null}
@@ -1638,7 +1640,7 @@ const ResultRow = memo(function ResultRow({
 				className="relative z-10 flex items-center gap-1.5"
 			>
 				{pathMeta ? (
-					<span className="max-w-[220px] truncate text-[12px] text-fg-tertiary">
+					<span className="max-w-55 truncate text-ui-120 text-fg-tertiary">
 						{pathMeta}
 					</span>
 				) : null}
@@ -1683,7 +1685,7 @@ const ResultRow = memo(function ResultRow({
 							event.stopPropagation();
 							onMoveItem(item, event.key === "ArrowUp" ? -1 : 1);
 						}}
-						className={`focus-ring grid h-8 w-8 touch-none place-items-center rounded-[8px] text-fg-quiet transition-[color,background-color,opacity] duration-100 hover:bg-surface-hover hover:text-fg ${
+						className={`focus-ring grid h-8 w-8 touch-none place-items-center rounded-ui-8 text-fg-quiet transition-[color,background-color,opacity] duration-100 hover:bg-surface-hover hover:text-fg ${
 							draggedItem === itemReorderId
 								? "cursor-grabbing bg-accent-soft text-accent opacity-100"
 								: `cursor-grab ${reveal}`
@@ -1701,7 +1703,7 @@ const ResultRow = memo(function ResultRow({
 							title={`${pinned ? "Unpin" : "Pin"} ${item.title}`}
 							tabIndex={selected ? 0 : -1}
 							onClick={() => onTogglePin(item)}
-							className={`focus-ring press grid h-8 w-8 cursor-default place-items-center rounded-[8px] ${reveal} ${
+							className={`focus-ring press grid h-8 w-8 cursor-default place-items-center rounded-ui-8 ${reveal} ${
 								pinned
 									? "bg-accent-soft text-accent"
 									: "text-fg-tertiary hover:bg-surface-hover hover:text-fg"
@@ -1734,7 +1736,7 @@ const ResultRow = memo(function ResultRow({
 								title="Remove from Recent"
 								tabIndex={selected ? 0 : -1}
 								onClick={() => onRemoveHistory(item.id)}
-								className={`focus-ring press grid h-8 w-8 cursor-default place-items-center rounded-[8px] text-fg-tertiary transition-[color,background-color,opacity] duration-150 hover:bg-danger-soft hover:text-danger ${reveal}`}
+								className={`focus-ring press grid h-8 w-8 cursor-default place-items-center rounded-ui-8 text-fg-tertiary transition-[color,background-color,opacity] duration-150 hover:bg-danger-soft hover:text-danger ${reveal}`}
 							>
 								<X className="h-4 w-4" />
 							</button>
@@ -1747,18 +1749,18 @@ const ResultRow = memo(function ResultRow({
 						title="Remove from Recent"
 						tabIndex={selected ? 0 : -1}
 						onClick={() => onRemoveHistory(item.id)}
-						className={`focus-ring press grid h-8 w-8 cursor-default place-items-center rounded-[8px] text-fg-tertiary transition-[color,background-color,opacity] duration-150 hover:bg-danger-soft hover:text-danger ${reveal}`}
+						className={`focus-ring press grid h-8 w-8 cursor-default place-items-center rounded-ui-8 text-fg-tertiary transition-[color,background-color,opacity] duration-150 hover:bg-danger-soft hover:text-danger ${reveal}`}
 					>
 						<X className="h-4 w-4" />
 					</button>
 				) : isClipboardKind(item.id) && selected ? (
-					<span className="text-[12px] font-semibold text-accent tabular-nums">
+					<span className="text-ui-120 font-semibold text-accent tabular-nums">
 						Enter to copy
 					</span>
 				) : canDragFile ? (
 					<div className="flex items-center gap-1.5">
 						{selected ? (
-							<span className="text-[11px] font-medium text-fg-tertiary">
+							<span className="text-2xs font-medium text-fg-tertiary">
 								Drag to copy
 							</span>
 						) : null}
@@ -1801,13 +1803,13 @@ const ResultRow = memo(function ResultRow({
 								}
 								onCancelFileDrag(event.pointerId);
 							}}
-							className={`focus-ring grid h-8 w-8 touch-none place-items-center rounded-[8px] text-fg-quiet transition-[color,background-color,opacity] duration-100 hover:bg-surface-hover hover:text-accent cursor-grab active:cursor-grabbing ${reveal}`}
+							className={`focus-ring grid h-8 w-8 touch-none place-items-center rounded-ui-8 text-fg-quiet transition-[color,background-color,opacity] duration-100 hover:bg-surface-hover hover:text-accent cursor-grab active:cursor-grabbing ${reveal}`}
 						>
 							<GripVertical className="h-4 w-4" />
 						</button>
 					</div>
 				) : selected && item.id.startsWith("file::") ? (
-					<span className="text-[11.5px] font-medium text-fg-tertiary">
+					<span className="text-ui-115 font-medium text-fg-tertiary">
 						Enter to open
 					</span>
 				) : null}

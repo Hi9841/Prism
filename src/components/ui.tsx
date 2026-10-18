@@ -16,9 +16,9 @@ export function SettingsRow({
 	return (
 		<div className="flex flex-wrap items-center justify-between gap-x-6 gap-y-2 py-3">
 			<div className="min-w-0 flex-1 basis-40">
-				<div className="text-[13px] font-medium text-fg">{title}</div>
+				<div className="text-ui-130 font-medium text-fg">{title}</div>
 				{detail ? (
-					<div className="mt-0.5 text-[11.5px] text-fg-tertiary">{detail}</div>
+					<div className="mt-0.5 text-ui-115 text-fg-tertiary">{detail}</div>
 				) : null}
 			</div>
 			<div className="min-w-0 max-w-full shrink-0">{children}</div>
@@ -57,13 +57,13 @@ export function RowIcon({
 					className="grid shrink-0 place-items-center"
 					style={{ width: size, height: size }}
 				>
-					<span className="text-[22px] leading-none">{icon.char}</span>
+					<span className="text-ui-220 leading-none">{icon.char}</span>
 				</div>
 			);
 		case "image":
 			return (
 				<div
-					className="grid shrink-0 place-items-center overflow-hidden rounded-[10px] bg-surface"
+					className="grid shrink-0 place-items-center overflow-hidden rounded-sm bg-surface"
 					style={style}
 					role="img"
 					aria-label={icon.name}
@@ -98,7 +98,7 @@ function AppLogo({
 }) {
 	return (
 		<div
-			className="grid shrink-0 place-items-center rounded-[10px] bg-surface"
+			className="grid shrink-0 place-items-center rounded-sm bg-surface"
 			style={{ width: size, height: size }}
 			role="img"
 			aria-label={name}
@@ -143,7 +143,7 @@ function Monogram({ name, size = 40 }: { name: string; size?: number }) {
 
 export function SectionLabel({ children }: { children: ReactNode }) {
 	return (
-		<div className="px-3.5 pb-1.5 pt-4 text-[11px] font-semibold text-fg-quiet uppercase">
+		<div className="px-3.5 pb-1.5 pt-4 text-2xs font-semibold text-fg-quiet uppercase">
 			{children}
 		</div>
 	);
@@ -170,11 +170,11 @@ export function Toggle({
 			aria-label={label}
 			disabled={disabled}
 			onClick={() => onChange(!checked)}
-			className="focus-ring relative h-[24px] w-[40px] cursor-default rounded-full transition-colors duration-200 after:absolute after:-inset-2.5 after:content-[''] disabled:cursor-default disabled:opacity-45"
+			className="focus-ring relative h-6 w-10 cursor-default rounded-full transition-colors duration-200 after:absolute after:-inset-2.5 after:content-[''] disabled:cursor-default disabled:opacity-45"
 			style={{ background: checked ? "var(--accent)" : "var(--t-track)" }}
 		>
 			<span
-				className="absolute top-[3px] left-[3px] block h-[18px] w-[18px] rounded-full bg-white shadow-sm transition-transform duration-150 [transition-timing-function:var(--ease-out-soft)]"
+				className="absolute top-0.75 left-0.75 block h-4.5 w-4.5 rounded-full bg-white shadow-sm transition-transform duration-150 [transition-timing-function:var(--ease-out-soft)]"
 				style={{ transform: checked ? "translateX(16px)" : "translateX(0)" }}
 			/>
 		</button>
@@ -224,14 +224,14 @@ export function Segmented<T extends string | number>({
 			ref={fieldsetRef}
 			aria-label={label}
 			onKeyDown={selectWithKeyboard}
-			className="relative inline-grid rounded-[10px] bg-surface p-[3px] shadow-[inset_0_1px_0_rgb(255_255_255/0.04)]"
+			className="relative inline-grid rounded-sm bg-surface p-0.75 shadow-[inset_0_1px_0_rgb(255_255_255/0.04)]"
 			style={{
 				gridTemplateColumns: `repeat(${options.length}, minmax(0, 1fr))`,
 			}}
 		>
 			<span
 				aria-hidden="true"
-				className="pointer-events-none absolute top-[3px] bottom-[3px] left-[3px] rounded-[7px] bg-seg-active shadow-[0_1px_3px_rgb(0_0_0/0.25),inset_0_1px_0_rgb(255_255_255/0.08)] transition-transform duration-200 [transition-timing-function:var(--ease-out-soft)]"
+				className="pointer-events-none absolute top-0.75 bottom-0.75 left-0.75 rounded-ui-7 bg-seg-active shadow-[0_1px_3px_rgb(0_0_0/0.25),inset_0_1px_0_rgb(255_255_255/0.08)] transition-transform duration-200 [transition-timing-function:var(--ease-out-soft)]"
 				style={{
 					width: `calc((100% - 6px) / ${options.length})`,
 					transform: `translateX(${activeIndex * 100}%)`,
@@ -247,7 +247,7 @@ export function Segmented<T extends string | number>({
 						data-segment-option
 						tabIndex={active ? 0 : -1}
 						onClick={() => onChange(o.value)}
-						className={`focus-ring relative z-10 min-w-8 cursor-default rounded-[7px] px-3 py-[5px] text-[12px] font-medium transition-colors duration-150 ${
+						className={`focus-ring relative z-10 min-w-8 cursor-default rounded-ui-7 px-3 py-1.25 text-ui-120 font-medium transition-colors duration-150 ${
 							active ? "text-fg" : "text-fg-tertiary hover:text-fg-secondary"
 						}`}
 					>
@@ -294,7 +294,7 @@ export function IconButton({
 			data-settings-trigger={settingsTrigger || undefined}
 			onClick={onClick}
 			disabled={disabled}
-			className={`focus-ring press relative grid h-8 w-8 cursor-default place-items-center rounded-[10px] after:absolute after:-inset-1.5 after:content-[''] ${
+			className={`focus-ring press relative grid h-8 w-8 cursor-default place-items-center rounded-sm after:absolute after:-inset-1.5 after:content-[''] ${
 				disabled
 					? "cursor-default opacity-40"
 					: active

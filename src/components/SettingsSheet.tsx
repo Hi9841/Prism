@@ -86,7 +86,7 @@ function KeybindPicker() {
 	return (
 		<div className="flex w-full min-w-0 flex-col items-end gap-2">
 			<div className="flex items-center gap-2">
-				<span className="text-[12px] font-medium text-fg">
+				<span className="text-ui-120 font-medium text-fg">
 					{displayShortcut(settings.shortcut)}
 				</span>
 				<Keyboard className="h-3.5 w-3.5 text-fg-tertiary" />
@@ -101,7 +101,7 @@ function KeybindPicker() {
 							aria-pressed={active}
 							disabled={busy}
 							onClick={() => applyShortcut(o.value)}
-							className={`focus-ring press cursor-default rounded-[9px] px-2 py-[4px] text-[11px] font-medium ${
+							className={`focus-ring press cursor-default rounded-ui-9 px-2 py-1 text-2xs font-medium ${
 								active
 									? "bg-accent-soft text-fg"
 									: "bg-surface text-fg-tertiary hover:bg-surface-hover hover:text-fg-secondary"
@@ -113,7 +113,7 @@ function KeybindPicker() {
 				})}
 			</div>
 			{settings.shortcut === "Win" && (
-				<p className="max-w-[250px] text-right text-[11px] leading-relaxed text-fg-tertiary">
+				<p className="max-w-62.5 text-right text-2xs leading-relaxed text-fg-tertiary">
 					Standalone Win opens only Prism, including with replacement Start
 					menus. Win + key shortcuts keep working.
 				</p>
@@ -157,7 +157,7 @@ function TaskbarAlignmentPicker() {
 					{ value: "right", label: "Right" },
 				]}
 			/>
-			<p className="mt-1.5 max-w-[250px] text-right text-[11px] leading-relaxed text-fg-tertiary">
+			<p className="mt-1.5 max-w-62.5 text-right text-2xs leading-relaxed text-fg-tertiary">
 				Right alignment requires the StartAllBack classic taskbar.
 			</p>
 		</fieldset>
@@ -177,7 +177,7 @@ function ViewZoomControl() {
 	return (
 		<fieldset
 			aria-label="View zoom"
-			className="m-0 flex items-center gap-1 rounded-[10px] border-0 bg-surface p-[3px]"
+			className="m-0 flex items-center gap-1 rounded-sm border-0 bg-surface p-0.75"
 		>
 			<button
 				type="button"
@@ -185,13 +185,13 @@ function ViewZoomControl() {
 				title="Zoom out"
 				disabled={atMinimum}
 				onClick={() => adjust(-1)}
-				className="focus-ring press grid h-7 w-7 cursor-default place-items-center rounded-[7px] text-fg-tertiary hover:bg-surface-hover hover:text-fg disabled:cursor-default disabled:opacity-35"
+				className="focus-ring press grid h-7 w-7 cursor-default place-items-center rounded-ui-7 text-fg-tertiary hover:bg-surface-hover hover:text-fg disabled:cursor-default disabled:opacity-35"
 			>
 				<Minus className="h-3.5 w-3.5" />
 			</button>
 			<output
 				aria-live="polite"
-				className="w-11 text-center text-[12px] font-medium text-fg tabular-nums"
+				className="w-11 text-center text-ui-120 font-medium text-fg tabular-nums"
 			>
 				{settings.viewZoom}%
 			</output>
@@ -201,7 +201,7 @@ function ViewZoomControl() {
 				title="Zoom in"
 				disabled={atMaximum}
 				onClick={() => adjust(1)}
-				className="focus-ring press grid h-7 w-7 cursor-default place-items-center rounded-[7px] text-fg-tertiary hover:bg-surface-hover hover:text-fg disabled:cursor-default disabled:opacity-35"
+				className="focus-ring press grid h-7 w-7 cursor-default place-items-center rounded-ui-7 text-fg-tertiary hover:bg-surface-hover hover:text-fg disabled:cursor-default disabled:opacity-35"
 			>
 				<Plus className="h-3.5 w-3.5" />
 			</button>
@@ -211,7 +211,7 @@ function ViewZoomControl() {
 				title="Reset zoom"
 				disabled={settings.viewZoom === DEFAULT_SETTINGS.viewZoom}
 				onClick={() => updateSettings({ viewZoom: DEFAULT_SETTINGS.viewZoom })}
-				className="focus-ring press grid h-7 w-7 cursor-default place-items-center rounded-[7px] text-fg-tertiary hover:bg-surface-hover hover:text-fg disabled:cursor-default disabled:opacity-35"
+				className="focus-ring press grid h-7 w-7 cursor-default place-items-center rounded-ui-7 text-fg-tertiary hover:bg-surface-hover hover:text-fg disabled:cursor-default disabled:opacity-35"
 			>
 				<RotateCcw className="h-3.5 w-3.5" />
 			</button>
@@ -247,7 +247,7 @@ function QuickAccessPicker() {
 	return (
 		<fieldset
 			aria-label="Pinned Quick Access folders"
-			className="grid w-[198px] grid-cols-2 gap-1.5 border-0 p-0"
+			className="grid w-49.5 grid-cols-2 gap-1.5 border-0 p-0"
 		>
 			{QUICK_ACCESS_OPTIONS.map(({ kind, label, icon: FolderIcon }) => {
 				const active = settings.quickAccess.includes(kind);
@@ -260,7 +260,7 @@ function QuickAccessPicker() {
 						aria-pressed={active}
 						disabled={disabled}
 						onClick={() => toggle(kind)}
-						className={`focus-ring press flex h-8 min-w-0 cursor-default items-center gap-1.5 rounded-[8px] px-2 text-[11px] font-medium disabled:cursor-default disabled:opacity-35 ${
+						className={`focus-ring press flex h-8 min-w-0 cursor-default items-center gap-1.5 rounded-ui-8 px-2 text-2xs font-medium disabled:cursor-default disabled:opacity-35 ${
 							active
 								? "bg-accent-soft text-fg"
 								: "bg-surface text-fg-tertiary hover:bg-surface-hover hover:text-fg-secondary"
@@ -419,7 +419,7 @@ function AppGroupsPicker() {
 	};
 
 	return (
-		<div className="w-[258px] min-w-0 space-y-2">
+		<div className="w-64.5 min-w-0 space-y-2">
 			<div className="flex gap-1.5">
 				<input
 					value={newName}
@@ -431,14 +431,14 @@ function AppGroupsPicker() {
 					maxLength={64}
 					placeholder="New collection"
 					aria-label="New app collection name"
-					className="focus-ring min-w-0 flex-1 rounded-[8px] bg-surface px-2.5 py-1.5 text-[12px] text-fg outline-none placeholder:text-fg-quiet"
+					className="focus-ring min-w-0 flex-1 rounded-ui-8 bg-surface px-2.5 py-1.5 text-ui-120 text-fg placeholder:text-fg-quiet"
 				/>
 				<button
 					type="button"
 					aria-label="Create app collection"
 					title="Create app collection"
 					onClick={createGroup}
-					className="focus-ring press grid h-8 w-8 shrink-0 cursor-default place-items-center rounded-[8px] bg-accent-soft text-accent hover:bg-surface-hover"
+					className="focus-ring press grid h-8 w-8 shrink-0 cursor-default place-items-center rounded-ui-8 bg-accent-soft text-accent hover:bg-surface-hover"
 				>
 					<Plus className="h-4 w-4" />
 				</button>
@@ -458,7 +458,7 @@ function AppGroupsPicker() {
 								onChange={(event) =>
 									updateGroup(group.id, { name: event.target.value })
 								}
-								className="focus-ring min-w-0 flex-1 bg-transparent text-[12px] font-semibold text-fg outline-none"
+								className="focus-ring min-w-0 flex-1 bg-transparent text-ui-120 font-semibold text-fg"
 							/>
 							<div className="flex shrink-0 items-center gap-0.5">
 								<button
@@ -467,7 +467,7 @@ function AppGroupsPicker() {
 									title="Move up"
 									disabled={settings.appGroups[0]?.id === group.id}
 									onClick={() => moveGroup(group.id, -1)}
-									className="focus-ring press grid h-7 w-7 cursor-default place-items-center rounded-[7px] text-fg-quiet hover:bg-surface-hover hover:text-fg disabled:cursor-default disabled:opacity-25"
+									className="focus-ring press grid h-7 w-7 cursor-default place-items-center rounded-ui-7 text-fg-quiet hover:bg-surface-hover hover:text-fg disabled:cursor-default disabled:opacity-25"
 								>
 									<ChevronUp className="h-3.5 w-3.5" />
 								</button>
@@ -480,7 +480,7 @@ function AppGroupsPicker() {
 										group.id
 									}
 									onClick={() => moveGroup(group.id, 1)}
-									className="focus-ring press grid h-7 w-7 cursor-default place-items-center rounded-[7px] text-fg-quiet hover:bg-surface-hover hover:text-fg disabled:cursor-default disabled:opacity-25"
+									className="focus-ring press grid h-7 w-7 cursor-default place-items-center rounded-ui-7 text-fg-quiet hover:bg-surface-hover hover:text-fg disabled:cursor-default disabled:opacity-25"
 								>
 									<ChevronDown className="h-3.5 w-3.5" />
 								</button>
@@ -489,7 +489,7 @@ function AppGroupsPicker() {
 									aria-label={`Delete ${group.name} collection`}
 									title="Delete collection"
 									onClick={() => removeGroup(group.id)}
-									className="focus-ring press grid h-7 w-7 cursor-default place-items-center rounded-[7px] text-fg-quiet hover:bg-danger-soft hover:text-danger"
+									className="focus-ring press grid h-7 w-7 cursor-default place-items-center rounded-ui-7 text-fg-quiet hover:bg-danger-soft hover:text-danger"
 								>
 									<Trash2 className="h-3.5 w-3.5" />
 								</button>
@@ -506,7 +506,7 @@ function AppGroupsPicker() {
 								aria-expanded={openGroupId === group.id}
 								aria-controls={`app-picker-${group.id}`}
 								onClick={() => toggleAppPicker(group.id)}
-								className={`focus-ring flex h-9 w-full cursor-default items-center gap-2 rounded-[8px] px-2.5 text-left text-[11.5px] font-medium transition-colors duration-150 ${
+								className={`focus-ring flex h-9 w-full cursor-default items-center gap-2 rounded-ui-8 px-2.5 text-left text-ui-115 font-medium transition-colors duration-150 ${
 									openGroupId === group.id
 										? "bg-surface-active text-fg shadow-[inset_0_0_0_1px_var(--accent-ring)]"
 										: "bg-surface text-fg-secondary hover:bg-surface-hover hover:text-fg"
@@ -517,7 +517,7 @@ function AppGroupsPicker() {
 									{openGroupId === group.id ? "Choose apps" : "Add apps"}
 								</span>
 								{group.appIds.length > 0 ? (
-									<span className="shrink-0 text-[10.5px] font-semibold text-fg-tertiary tabular-nums">
+									<span className="shrink-0 text-ui-105 font-semibold text-fg-tertiary tabular-nums">
 										{group.appIds.length}
 									</span>
 								) : null}
@@ -530,9 +530,9 @@ function AppGroupsPicker() {
 							{openGroupId === group.id ? (
 								<div
 									id={`app-picker-${group.id}`}
-									className="mt-1.5 overflow-hidden rounded-[9px] bg-surface shadow-[inset_0_0_0_1px_var(--t-line)]"
+									className="mt-1.5 overflow-hidden rounded-ui-9 bg-surface shadow-[inset_0_0_0_1px_var(--t-line)]"
 								>
-									<div className="m-1.5 flex h-8 items-center gap-2 rounded-[7px] bg-[var(--t-field-bg)] px-2.5 shadow-[inset_0_0_0_1px_var(--t-field-line)] focus-within:shadow-[inset_0_0_0_1px_var(--accent-ring)]">
+									<div className="m-1.5 flex h-8 items-center gap-2 rounded-ui-7 bg-[var(--t-field-bg)] px-2.5 shadow-[inset_0_0_0_1px_var(--t-field-line)] focus-within:shadow-[inset_0_0_0_1px_var(--accent-ring)]">
 										<Search className="h-3.5 w-3.5 shrink-0 text-fg-quiet" />
 										<input
 											ref={appSearchRef}
@@ -548,7 +548,8 @@ function AppGroupsPicker() {
 											}}
 											placeholder="Filter apps"
 											aria-label={`Filter apps for ${group.name}`}
-											className="min-w-0 flex-1 bg-transparent text-[11.5px] text-fg outline-none placeholder:text-fg-quiet"
+											// fixmyslop-ignore[a11y/focus-removed]: the wrapper draws the accent ring with focus-within.
+											className="min-w-0 flex-1 bg-transparent text-ui-115 text-fg outline-none placeholder:text-fg-quiet"
 										/>
 										{appQuery ? (
 											<button
@@ -559,7 +560,7 @@ function AppGroupsPicker() {
 													setAppQuery("");
 													appSearchRef.current?.focus();
 												}}
-												className="focus-ring grid h-6 w-6 shrink-0 cursor-default place-items-center rounded-[6px] text-fg-quiet hover:bg-surface-hover hover:text-fg"
+												className="focus-ring grid h-6 w-6 shrink-0 cursor-default place-items-center rounded-xs text-fg-quiet hover:bg-surface-hover hover:text-fg"
 											>
 												<X className="h-3.5 w-3.5" />
 											</button>
@@ -572,11 +573,11 @@ function AppGroupsPicker() {
 										className="scroll-thin max-h-56 overflow-y-auto px-1.5 pb-1.5"
 									>
 										{!appsLoaded ? (
-											<div className="px-2 py-5 text-center text-[11px] text-fg-quiet">
+											<div className="px-2 py-5 text-center text-2xs text-fg-quiet">
 												Loading installed apps...
 											</div>
 										) : filteredApps.length === 0 ? (
-											<div className="px-2 py-5 text-center text-[11px] text-fg-quiet">
+											<div className="px-2 py-5 text-center text-2xs text-fg-quiet">
 												No matching apps
 											</div>
 										) : (
@@ -603,7 +604,7 @@ function AppGroupsPicker() {
 																? removeApp(group.id, entry.appId)
 																: assignApp(group.id, entry.appId)
 														}
-														className={`focus-ring flex min-h-10 w-full cursor-default items-center gap-2 rounded-[7px] px-2 py-1 text-left transition-colors duration-100 disabled:cursor-default disabled:opacity-35 ${
+														className={`focus-ring flex min-h-10 w-full cursor-default items-center gap-2 rounded-ui-7 px-2 py-1 text-left transition-colors duration-100 disabled:cursor-default disabled:opacity-35 ${
 															selected
 																? "bg-accent-soft text-fg"
 																: "text-fg-secondary hover:bg-surface-hover hover:text-fg"
@@ -618,17 +619,17 @@ function AppGroupsPicker() {
 															size={26}
 														/>
 														<span className="min-w-0 flex-1">
-															<span className="block truncate text-[11.5px] font-medium">
+															<span className="block truncate text-ui-115 font-medium">
 																{entry.name}
 															</span>
 															{owner && !selected ? (
-																<span className="mt-0.5 block truncate text-[10px] text-fg-quiet">
+																<span className="mt-0.5 block truncate text-ui-100 text-fg-quiet">
 																	In {owner.name}
 																</span>
 															) : null}
 														</span>
 														<span
-															className={`grid h-5 w-5 shrink-0 place-items-center rounded-[6px] ${
+															className={`grid h-5 w-5 shrink-0 place-items-center rounded-xs ${
 																selected
 																	? "bg-accent text-accent-fg"
 																	: "bg-surface text-transparent"
@@ -646,13 +647,13 @@ function AppGroupsPicker() {
 										)}
 									</div>
 									<div className="flex items-center justify-between border-t border-line px-2.5 py-2">
-										<span className="text-[10.5px] text-fg-quiet tabular-nums">
+										<span className="text-ui-105 text-fg-quiet tabular-nums">
 											{group.appIds.length} of {APP_GROUP_APP_LIMIT} selected
 										</span>
 										<button
 											type="button"
 											onClick={() => setOpenGroupId(null)}
-											className="focus-ring press cursor-default rounded-[7px] bg-accent-soft px-2.5 py-1 text-[11px] font-semibold text-fg hover:bg-surface-hover"
+											className="focus-ring press cursor-default rounded-ui-7 bg-accent-soft px-2.5 py-1 text-2xs font-semibold text-fg hover:bg-surface-hover"
 										>
 											Done
 										</button>
@@ -669,7 +670,7 @@ function AppGroupsPicker() {
 										aria-label={`Remove ${entry.name} from ${group.name}`}
 										title={`Remove ${entry.name}`}
 										onClick={() => removeApp(group.id, entry.appId)}
-										className="focus-ring press flex max-w-full cursor-default items-center gap-1 rounded-[6px] bg-accent-soft px-2 py-1 text-[10.5px] font-medium text-fg hover:bg-surface-hover"
+										className="focus-ring press flex max-w-full cursor-default items-center gap-1 rounded-xs bg-accent-soft px-2 py-1 text-ui-105 font-medium text-fg hover:bg-surface-hover"
 									>
 										<span className="truncate">{entry.name}</span>
 										<X
@@ -714,7 +715,9 @@ export function SettingsSheet() {
 	useEffect(() => {
 		void getAppVersion()
 			.then(setVersion)
-			.catch(() => {});
+			.catch((error) =>
+				console.error("Prism could not read its version", error),
+			);
 	}, []);
 
 	// Deliberate closes (X, backdrop) animate the sheet out first; Esc snaps.
@@ -841,13 +844,13 @@ export function SettingsSheet() {
 				aria-modal="true"
 				aria-labelledby={titleId}
 				onKeyDown={onPanelKeyDown}
-				className={`settings-panel ${closing ? "settings-panel-exit" : ""} relative ml-auto flex w-[min(340px,88%)] flex-col overflow-hidden rounded-tr-[24px] rounded-br-[8px] border-l border-line bg-bg-raised backdrop-blur-2xl`}
+				className={`settings-panel ${closing ? "settings-panel-exit" : ""} relative ml-auto flex w-[min(340px,88%)] flex-col overflow-hidden rounded-tr-ui-24 rounded-br-ui-8 border-l border-line bg-bg-raised backdrop-blur-2xl`}
 				style={{ boxShadow: "-24px 0 64px rgb(0 0 0 / 0.35)" }}
 			>
 				<div className="flex items-center justify-between px-5 pb-2 pt-5">
 					<h2
 						id={titleId}
-						className="text-balance text-[15px] font-semibold text-fg"
+						className="text-balance text-ui-150 font-semibold text-fg"
 					>
 						Settings
 					</h2>
@@ -855,7 +858,7 @@ export function SettingsSheet() {
 						type="button"
 						aria-label="Close settings"
 						onClick={() => requestClose()}
-						className="focus-ring press relative grid cursor-default place-items-center rounded-[6px] text-fg-tertiary hover:bg-surface-hover hover:text-fg-secondary"
+						className="focus-ring press relative grid cursor-default place-items-center rounded-xs text-fg-tertiary hover:bg-surface-hover hover:text-fg-secondary"
 						style={{ width: 44, height: 44 }}
 					>
 						<X className="h-4 w-4" />
@@ -865,10 +868,10 @@ export function SettingsSheet() {
 				<div className="mx-5 mb-1 border-b border-line pb-3">
 					<div className="flex items-center justify-between gap-3">
 						<div className="min-w-0">
-							<div className="text-[13px] font-semibold text-fg">
+							<div className="text-ui-130 font-semibold text-fg">
 								Reset all settings
 							</div>
-							<div className="mt-0.5 text-[11.5px] leading-relaxed text-fg-tertiary">
+							<div className="mt-0.5 text-ui-115 leading-relaxed text-fg-tertiary">
 								Restore Prism&apos;s appearance, behavior, pins, and
 								collections.
 							</div>
@@ -877,7 +880,7 @@ export function SettingsSheet() {
 							type="button"
 							disabled={resetBusy}
 							onClick={() => void confirmReset()}
-							className={`focus-ring press flex shrink-0 cursor-default items-center gap-1.5 rounded-[9px] px-3 py-2 text-[12px] font-semibold disabled:cursor-default disabled:opacity-50 ${
+							className={`focus-ring press flex shrink-0 cursor-default items-center gap-1.5 rounded-ui-9 px-3 py-2 text-ui-120 font-semibold disabled:cursor-default disabled:opacity-50 ${
 								resetConfirming
 									? "bg-danger text-white hover:opacity-90"
 									: "bg-danger-soft text-danger hover:bg-danger hover:text-white"
@@ -888,12 +891,12 @@ export function SettingsSheet() {
 						</button>
 					</div>
 					{resetConfirming ? (
-						<div className="mt-2 flex items-center justify-between gap-2 rounded-[8px] bg-danger-soft px-2.5 py-2 text-[11px] text-danger">
+						<div className="mt-2 flex items-center justify-between gap-2 rounded-ui-8 bg-danger-soft px-2.5 py-2 text-2xs text-danger">
 							<span>This cannot be undone.</span>
 							<button
 								type="button"
 								onClick={() => setResetConfirming(false)}
-								className="focus-ring press shrink-0 rounded-[6px] px-2 py-1 font-semibold hover:bg-surface-hover"
+								className="focus-ring press shrink-0 rounded-xs px-2 py-1 font-semibold hover:bg-surface-hover"
 							>
 								Cancel
 							</button>
@@ -904,9 +907,9 @@ export function SettingsSheet() {
 				{persistenceError ? (
 					<div
 						role="alert"
-						className="mx-5 mb-3 flex items-center justify-between gap-3 rounded-[10px] bg-danger-soft px-3 py-2.5 text-danger"
+						className="mx-5 mb-3 flex items-center justify-between gap-3 rounded-sm bg-danger-soft px-3 py-2.5 text-danger"
 					>
-						<span className="min-w-0 text-[11.5px] leading-relaxed">
+						<span className="min-w-0 text-ui-115 leading-relaxed">
 							{persistenceError}
 						</span>
 						<button
@@ -914,7 +917,7 @@ export function SettingsSheet() {
 							disabled={retrySaveBusy}
 							aria-busy={retrySaveBusy}
 							onClick={() => void retrySave()}
-							className="focus-ring press min-h-11 shrink-0 cursor-default rounded-[8px] bg-surface px-3 text-[11.5px] font-semibold hover:bg-surface-hover disabled:cursor-default disabled:opacity-50"
+							className="focus-ring press min-h-11 shrink-0 cursor-default rounded-ui-8 bg-surface px-3 text-ui-115 font-semibold hover:bg-surface-hover disabled:cursor-default disabled:opacity-50"
 						>
 							{retrySaveBusy ? "Saving..." : "Retry save"}
 						</button>
@@ -1033,7 +1036,7 @@ export function SettingsSheet() {
 						<button
 							type="button"
 							onClick={() => clearHistory()}
-							className="focus-ring press flex cursor-default items-center gap-1.5 rounded-[10px] bg-surface px-3 py-1.5 text-[12px] font-medium text-fg-secondary hover:bg-surface-hover hover:text-fg"
+							className="focus-ring press flex cursor-default items-center gap-1.5 rounded-sm bg-surface px-3 py-1.5 text-ui-120 font-medium text-fg-secondary hover:bg-surface-hover hover:text-fg"
 						>
 							<History className="h-3.5 w-3.5" />
 							Clear
@@ -1043,15 +1046,15 @@ export function SettingsSheet() {
 					<SectionTitle>About</SectionTitle>
 					<div className="flex items-center justify-between py-3">
 						<div>
-							<div className="text-[13px] font-medium text-fg">Prism</div>
-							<div className="mt-0.5 text-[11.5px] text-fg-tertiary">
+							<div className="text-ui-130 font-medium text-fg">Prism</div>
+							<div className="mt-0.5 text-ui-115 text-fg-tertiary">
 								{version ? `Version ${version}` : "Version"}
 							</div>
 						</div>
 						<button
 							type="button"
 							onClick={() => void quit()}
-							className="focus-ring press flex min-h-11 cursor-default items-center gap-1.5 rounded-[10px] bg-danger-soft px-3 text-[12px] font-medium text-danger hover:opacity-90"
+							className="focus-ring press flex min-h-11 cursor-default items-center gap-1.5 rounded-sm bg-danger-soft px-3 text-ui-120 font-medium text-danger hover:opacity-90"
 						>
 							<LogOut className="h-3.5 w-3.5" />
 							Quit
@@ -1065,7 +1068,7 @@ export function SettingsSheet() {
 
 function SectionTitle({ children }: { children: React.ReactNode }) {
 	return (
-		<div className="border-t border-line pb-1 pt-4 text-[11px] font-semibold text-fg-quiet uppercase first:border-t-0 first:pt-0">
+		<div className="border-t border-line pb-1 pt-4 text-2xs font-semibold text-fg-quiet uppercase first:border-t-0 first:pt-0">
 			{children}
 		</div>
 	);

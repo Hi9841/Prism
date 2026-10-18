@@ -195,7 +195,9 @@ export function PaletteProvider({ children }: { children: ReactNode }) {
 			.then((items) => {
 				if (active) setQuickAccess(items);
 			})
-			.catch(() => {});
+			.catch((error) =>
+				console.error("Prism could not load Quick Access folders", error),
+			);
 		return () => {
 			active = false;
 		};
@@ -240,7 +242,9 @@ export function PaletteProvider({ children }: { children: ReactNode }) {
 					setExistingHistoryPaths(new Set(existing));
 				}
 			})
-			.catch(() => {});
+			.catch((error) =>
+				console.error("Prism could not check recent file paths", error),
+			);
 	}, [app.history]);
 
 	useEffect(() => {
@@ -412,7 +416,9 @@ export function PaletteProvider({ children }: { children: ReactNode }) {
 							: (response.totalIndexed ?? 0),
 					);
 				})
-				.catch(() => {});
+				.catch((error) =>
+					console.error("Prism could not read the file index status", error),
+				);
 			return;
 		}
 
@@ -787,7 +793,10 @@ export function PaletteProvider({ children }: { children: ReactNode }) {
 
 	const rebuildIndex = useCallback(() => {
 		setFileIndexing(true);
-		rebuildFileIndex().catch(() => {});
+		rebuildFileIndex().catch((error) => {
+			console.error("Prism could not rebuild the file index", error);
+			setFileIndexing(false);
+		});
 	}, []);
 
 	const retryFileSearch = useCallback(() => {

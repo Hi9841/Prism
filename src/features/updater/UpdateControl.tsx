@@ -15,6 +15,11 @@ const CHECK_INTERVAL_MS = 60 * 60 * 1000;
 const NETWORK_TIMEOUT_MS = 10 * 1000;
 const DOWNLOAD_TIMEOUT_MS = 10 * 60 * 1000;
 
+// Closing releases the native update handle; a failure leaks only that handle.
+function logCloseFailure(error: unknown) {
+	console.error("Prism could not release an update handle", error);
+}
+
 type UpdateViewState =
 	| { phase: "hidden" }
 	| { phase: "available"; version: string }
@@ -69,21 +74,22 @@ export function UpdateControl() {
 					generation !== installGenerationRef.current
 				) {
 					if (availableUpdate !== updateRef.current)
-						await availableUpdate?.close().catch(() => {});
+						await availableUpdate?.close().catch(logCloseFailure);
 					return;
 				}
 				if (!availableUpdate) {
 					const previousUpdate = updateRef.current;
 					updateRef.current = null;
 					setViewState({ phase: "hidden" });
-					if (previousUpdate) void previousUpdate.close().catch(() => {});
+					if (previousUpdate)
+						void previousUpdate.close().catch(logCloseFailure);
 					return;
 				}
 				const previousUpdate = updateRef.current;
 				updateRef.current = availableUpdate;
 				setViewState({ phase: "available", version: availableUpdate.version });
 				if (previousUpdate && previousUpdate !== availableUpdate)
-					void previousUpdate.close().catch(() => {});
+					void previousUpdate.close().catch(logCloseFailure);
 			})
 			.catch((error) => {
 				if (
@@ -123,7 +129,7 @@ export function UpdateControl() {
 			const update = updateRef.current;
 			if (!installInFlightRef.current) {
 				updateRef.current = null;
-				update?.close().catch(() => {});
+				update?.close().catch(logCloseFailure);
 			}
 		};
 	}, [checkForUpdate]);
@@ -208,7 +214,7 @@ export function UpdateControl() {
 			installInFlightRef.current = false;
 			if (disposedRef.current) {
 				if (updateRef.current === update) updateRef.current = null;
-				await update.close().catch(() => {});
+				await update.close().catch(logCloseFailure);
 			}
 		}
 	}, [checkForUpdate, showToast, flushPersistence, viewState.phase]);
@@ -220,7 +226,7 @@ export function UpdateControl() {
 				title="Check for updates"
 				aria-label="Check for updates"
 				onClick={() => checkForUpdate(true)}
-				className="focus-ring press grid h-8 w-8 place-items-center rounded-[7px] text-fg-quiet hover:bg-surface-hover hover:text-fg"
+				className="focus-ring press grid h-8 w-8 place-items-center rounded-ui-7 text-fg-quiet hover:bg-surface-hover hover:text-fg"
 			>
 				<RefreshCw className="h-3.5 w-3.5" />
 			</button>
@@ -263,7 +269,7 @@ export function UpdateControl() {
 			aria-busy={busy}
 			disabled={busy}
 			onClick={installUpdate}
-			className={`focus-ring press inline-flex h-8 w-28 min-w-0 items-center justify-center gap-1.5 rounded-[7px] px-2.5 text-[11px] font-semibold ${
+			className={`focus-ring press inline-flex h-8 w-28 min-w-0 items-center justify-center gap-1.5 rounded-ui-7 px-2.5 text-2xs font-semibold ${
 				viewState.phase === "failed"
 					? "bg-danger-soft text-danger hover:opacity-90"
 					: busy

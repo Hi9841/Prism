@@ -97,7 +97,7 @@ export function PaletteSearchInput({
 		<div className="px-5 pb-1 pt-5">
 			<div className="search-field flex items-center gap-3 px-4 py-3">
 				<Search
-					className="h-[18px] w-[18px] shrink-0 text-fg-tertiary"
+					className="h-4.5 w-4.5 shrink-0 text-fg-tertiary"
 					strokeWidth={2}
 				/>
 				<input
@@ -118,7 +118,8 @@ export function PaletteSearchInput({
 					placeholder="Search files, folders, and apps…"
 					spellCheck={false}
 					autoComplete="off"
-					className="min-w-0 flex-1 bg-transparent text-[15px] font-medium text-fg outline-none placeholder:text-fg-quiet"
+					// fixmyslop-ignore[a11y/focus-removed]: .search-field:has(input:focus) draws the accent ring on the field.
+					className="min-w-0 flex-1 bg-transparent text-ui-150 font-medium text-fg outline-none placeholder:text-fg-quiet"
 				/>
 				<Kbd>{shortcut}</Kbd>
 				<IconButton

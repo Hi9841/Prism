@@ -210,7 +210,7 @@ function StartIconControl({
 			title="Start button icon"
 			detail="Recommended: 96 x 96 PNG with a transparent background"
 		>
-			<div className="flex max-w-[260px] flex-wrap justify-end gap-1.5">
+			<div className="flex max-w-65 flex-wrap justify-end gap-1.5">
 				<fieldset
 					disabled={busy}
 					className="contents border-0 p-0 disabled:opacity-55"
@@ -226,7 +226,7 @@ function StartIconControl({
 							onClick={() =>
 								void apply(() => setTaskbarStartIcon(option.value))
 							}
-							className={`focus-ring press grid h-12 min-w-[46px] cursor-default place-items-center gap-0.5 rounded-[8px] border px-2 py-1 text-[10px] font-medium ${
+							className={`focus-ring press grid h-12 min-w-11.5 cursor-default place-items-center gap-0.5 rounded-ui-8 border px-2 py-1 text-ui-100 font-medium ${
 								settings.startIcon === option.value
 									? "border-accent/70 bg-accent/12 text-fg"
 									: "border-transparent bg-surface text-fg-tertiary hover:bg-surface-hover hover:text-fg"
@@ -246,7 +246,7 @@ function StartIconControl({
 						title="Add custom PNG"
 						aria-label="Add custom Start button PNG"
 						onClick={() => inputRef.current?.click()}
-						className="focus-ring press grid h-12 min-w-[46px] cursor-default place-items-center gap-0.5 rounded-[8px] border border-transparent bg-surface px-2 py-1 text-[10px] font-medium text-fg-tertiary hover:bg-surface-hover hover:text-fg"
+						className="focus-ring press grid h-12 min-w-11.5 cursor-default place-items-center gap-0.5 rounded-ui-8 border border-transparent bg-surface px-2 py-1 text-ui-100 font-medium text-fg-tertiary hover:bg-surface-hover hover:text-fg"
 					>
 						<span
 							className="grid h-6 w-6 place-items-center"
@@ -261,7 +261,7 @@ function StartIconControl({
 							settings.startIcon === "custom" &&
 							settings.selectedCustomIcon === custom.id;
 						return (
-							<div key={custom.id} className="relative h-12 min-w-[46px]">
+							<div key={custom.id} className="relative h-12 min-w-11.5">
 								<button
 									type="button"
 									title={`Custom icon ${index + 1}`}
@@ -270,7 +270,7 @@ function StartIconControl({
 									onClick={() =>
 										void apply(() => selectCustomStartIcon(custom.id))
 									}
-									className={`focus-ring press grid h-12 min-w-[46px] cursor-default place-items-center gap-0.5 rounded-[8px] border px-2 py-1 text-[10px] font-medium ${
+									className={`focus-ring press grid h-12 min-w-11.5 cursor-default place-items-center gap-0.5 rounded-ui-8 border px-2 py-1 text-ui-100 font-medium ${
 										selected
 											? "border-accent/70 bg-accent/12 text-fg"
 											: "border-transparent bg-surface text-fg-tertiary hover:bg-surface-hover hover:text-fg"
@@ -320,7 +320,7 @@ function StartIconControl({
 
 function WindowsGlyph() {
 	return (
-		<span className="grid h-4 w-4 grid-cols-2 gap-[1.5px]" aria-hidden="true">
+		<span className="grid h-4 w-4 grid-cols-2 gap-hairline" aria-hidden="true">
 			<span className="bg-fg-tertiary" />
 			<span className="bg-fg-tertiary" />
 			<span className="bg-fg-tertiary" />

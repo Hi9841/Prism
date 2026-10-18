@@ -149,7 +149,7 @@ export function PowerMenu() {
 					role="menu"
 					aria-label="Power options"
 					onKeyDown={onMenuKeyDown}
-					className={`power-menu${closing ? " power-menu-exit" : ""} absolute right-0 bottom-10 z-30 w-40 overflow-hidden rounded-[8px] border border-line bg-bg-raised p-1 shadow-pop backdrop-blur-xl`}
+					className={`power-menu${closing ? " power-menu-exit" : ""} absolute right-0 bottom-10 z-30 w-40 overflow-hidden rounded-ui-8 border border-line bg-bg-raised p-1 shadow-pop backdrop-blur-xl`}
 				>
 					{ACTIONS.map(({ action, label, icon: ActionIcon }) => (
 						<button
@@ -158,7 +158,7 @@ export function PowerMenu() {
 							role="menuitem"
 							disabled={busy !== null}
 							onClick={() => void runAction(action)}
-							className="focus-ring press flex min-h-11 w-full cursor-default items-center gap-2 rounded-[4px] px-2.5 text-left text-[12.5px] font-medium text-fg-secondary hover:bg-surface-hover hover:text-fg disabled:cursor-default disabled:opacity-50"
+							className="focus-ring press flex min-h-11 w-full cursor-default items-center gap-2 rounded-ui-4 px-2.5 text-left text-ui-125 font-medium text-fg-secondary hover:bg-surface-hover hover:text-fg disabled:cursor-default disabled:opacity-50"
 							style={{ minHeight: 44 }}
 						>
 							<ActionIcon

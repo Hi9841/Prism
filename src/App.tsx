@@ -74,7 +74,9 @@ function Launcher() {
 		if (!inTauri) return;
 		getAppVersion()
 			.then(refreshStaleBundle)
-			.catch(() => {});
+			.catch((error) =>
+				console.error("Prism could not check for a stale bundle", error),
+			);
 	}, []);
 
 	phaseRef.current = phase;
@@ -96,8 +98,10 @@ function Launcher() {
 			clearCloseTimer();
 			setPhase(next);
 			const invocation = hidePaletteInvocation(origin, next);
-			if (invocation === "instant") hidePaletteWindow(false).catch(() => {});
-			if (invocation === "deferred") hidePaletteWindow(true).catch(() => {});
+			if (invocation !== "none")
+				hidePaletteWindow(invocation === "deferred").catch((error) =>
+					console.error("Prism could not hide the palette window", error),
+				);
 			if (next === "closing") {
 				closeTimer.current = window.setTimeout(() => {
 					closeTimer.current = null;
@@ -174,7 +178,12 @@ function Launcher() {
 							hide("native");
 						}
 					})
-					.catch(() => {});
+					.catch((error) =>
+						console.error(
+							"Prism could not read the window state on blur",
+							error,
+						),
+					);
 			}, 60);
 		});
 		document.addEventListener("prism:close", hideFromWeb);
@@ -189,7 +198,9 @@ function Launcher() {
 				if (isVisible && !visibleRef.current)
 					setPhase(inTauri ? "preparing" : "visible");
 			})
-			.catch(() => {});
+			.catch((error) =>
+				console.error("Prism could not read the window state at start", error),
+			);
 		return () => {
 			offToggle();
 			offBlur();

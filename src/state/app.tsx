@@ -167,7 +167,9 @@ export function AppProvider({ children }: { children: ReactNode }) {
 			.then((t) => {
 				setSystemTheme(t);
 			})
-			.catch(() => {});
+			.catch((error) =>
+				console.error("Prism could not read the Windows theme", error),
+			);
 		const off = onSystemThemeChange((t) => {
 			setSystemTheme(t);
 		});
@@ -211,7 +213,10 @@ export function AppProvider({ children }: { children: ReactNode }) {
 		persistRevision.current += 1;
 		if (persistTimer.current) clearTimeout(persistTimer.current);
 		persistTimer.current = setTimeout(() => {
-			void flushPersistence().catch(() => {});
+			// flushPersistence also shows the failure in settings (persistenceError).
+			void flushPersistence().catch((error) =>
+				console.error("Prism could not save settings", error),
+			);
 		}, 350);
 	}, [flushPersistence]);
 
@@ -490,7 +495,9 @@ export function AppProvider({ children }: { children: ReactNode }) {
 		if (!ready) return;
 		document.documentElement.dataset.accent = settings.accent;
 		document.documentElement.dataset.theme = effectiveTheme;
-		setOsdAccent(settings.accent).catch(() => {});
+		setOsdAccent(settings.accent).catch((error) =>
+			console.error("Prism could not set the volume overlay accent", error),
+		);
 	}, [ready, settings.accent, effectiveTheme]);
 
 	useEffect(() => {

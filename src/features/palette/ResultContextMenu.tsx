@@ -180,7 +180,7 @@ export function ResultContextMenu({
 				role="menu"
 				aria-label={`${item.title} actions`}
 				onKeyDown={handleKeyDown}
-				className={`context-menu-enter${closing ? " context-menu-exit" : ""} fixed z-50 w-[196px] overflow-hidden rounded-[8px] border border-line bg-bg-raised p-1 shadow-pop backdrop-blur-xl`}
+				className={`context-menu-enter${closing ? " context-menu-exit" : ""} fixed z-50 w-49 overflow-hidden rounded-ui-8 border border-line bg-bg-raised p-1 shadow-pop backdrop-blur-xl`}
 				style={{ left: position.x, top: position.y }}
 			>
 				{hasOpenLocation && (
@@ -188,7 +188,7 @@ export function ResultContextMenu({
 						type="button"
 						role="menuitem"
 						onClick={onOpenLocation}
-						className="focus-ring press flex h-9 w-full cursor-default items-center gap-2 rounded-[4px] px-2.5 text-left text-[12.5px] font-medium text-fg-secondary hover:bg-surface-hover hover:text-fg"
+						className="focus-ring press flex h-9 w-full cursor-default items-center gap-2 rounded-ui-4 px-2.5 text-left text-ui-125 font-medium text-fg-secondary hover:bg-surface-hover hover:text-fg"
 					>
 						<FolderOpen className="h-4 w-4 text-accent" aria-hidden="true" />
 						<span>Open location</span>
@@ -199,7 +199,7 @@ export function ResultContextMenu({
 						type="button"
 						role="menuitem"
 						onClick={onRunAsAdmin}
-						className="focus-ring press flex h-9 w-full cursor-default items-center gap-2 rounded-[4px] px-2.5 text-left text-[12.5px] font-medium text-fg-secondary hover:bg-surface-hover hover:text-fg"
+						className="focus-ring press flex h-9 w-full cursor-default items-center gap-2 rounded-ui-4 px-2.5 text-left text-ui-125 font-medium text-fg-secondary hover:bg-surface-hover hover:text-fg"
 					>
 						<ShieldCheck className="h-4 w-4 text-accent" aria-hidden="true" />
 						<span>Run as administrator</span>
@@ -210,7 +210,7 @@ export function ResultContextMenu({
 						type="button"
 						role="menuitem"
 						onClick={() => onToggleTaskbarPin?.(pinnedToTaskbar)}
-						className="focus-ring press flex h-9 w-full cursor-default items-center gap-2 rounded-[4px] px-2.5 text-left text-[12.5px] font-medium text-fg-secondary hover:bg-surface-hover hover:text-fg"
+						className="focus-ring press flex h-9 w-full cursor-default items-center gap-2 rounded-ui-4 px-2.5 text-left text-ui-125 font-medium text-fg-secondary hover:bg-surface-hover hover:text-fg"
 					>
 						{pinnedToTaskbar ? (
 							<PinOff className="h-4 w-4 text-accent" aria-hidden="true" />
@@ -227,7 +227,7 @@ export function ResultContextMenu({
 						type="button"
 						role="menuitem"
 						onClick={onShowProperties}
-						className="focus-ring press flex h-9 w-full cursor-default items-center gap-2 rounded-[4px] px-2.5 text-left text-[12.5px] font-medium text-fg-secondary hover:bg-surface-hover hover:text-fg"
+						className="focus-ring press flex h-9 w-full cursor-default items-center gap-2 rounded-ui-4 px-2.5 text-left text-ui-125 font-medium text-fg-secondary hover:bg-surface-hover hover:text-fg"
 					>
 						<Info className="h-4 w-4 text-accent" aria-hidden="true" />
 						<span>Properties</span>
