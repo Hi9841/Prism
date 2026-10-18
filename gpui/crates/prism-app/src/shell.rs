@@ -277,10 +277,21 @@ impl GpuiShell {
             // Windows can report the palette as unfocused once while it is still
             // acquiring foreground from an elevated window.
             ACTIVATION_FOCUS_PENDING.store(true, Ordering::Release);
-            let task = cx.spawn(async move |_cx: &mut AsyncApp| {
+            let task = cx.spawn(async move |cx: &mut AsyncApp| {
                 Timer::after(ACTIVATION_FOCUS_GRACE).await;
-                if PALETTE_TRANSITION.load(Ordering::Acquire) == transition {
-                    ACTIVATION_FOCUS_PENDING.store(false, Ordering::Release);
+                if PALETTE_TRANSITION.load(Ordering::Acquire) != transition {
+                    return;
+                }
+                ACTIVATION_FOCUS_PENDING.store(false, Ordering::Release);
+                // The grace can swallow a real click on another window, and
+                // Windows sends no second blur. A palette that held the
+                // foreground and lost it during the grace was clicked away.
+                if PALETTE_TOOK_FOREGROUND.load(Ordering::Acquire) {
+                    let _ = cx.update(|cx| {
+                        if let Some(shell) = instance() {
+                            shell.dismiss_on_blur("palette-hide-blur-after-grace", cx);
+                        }
+                    });
                 }
             });
             self.keep(task);
@@ -507,19 +518,26 @@ impl bridge::Shell for GpuiShell {
             ACTIVATION_FOCUS_PENDING.store(false, Ordering::Release);
             return;
         }
-        // Clicking away dismisses the launcher; the window stays up for the hide
-        // delay so the view plays the same exit as a Win-key close.
         if !self.visible() || drag::is_dragging() || is_prism_foreground() {
             return;
         }
         if ACTIVATION_FOCUS_PENDING.swap(false, Ordering::AcqRel) {
+            win_key::debug_trace("palette-blur-in-grace");
             return;
         }
-        if !PALETTE_OPEN.load(Ordering::Acquire) {
+        self.dismiss_on_blur("palette-hide-blur", cx);
+    }
+}
+
+impl GpuiShell {
+    /// Clicking away dismisses the launcher; the window stays up for the hide
+    /// delay so the view plays the same exit as a Win-key close.
+    fn dismiss_on_blur(&self, trace: &str, cx: &mut App) {
+        if !self.visible() || drag::is_dragging() || is_prism_foreground() || !PALETTE_OPEN.load(Ordering::Acquire) {
             return;
         }
         let transition = begin_palette_close();
-        win_key::debug_trace("palette-hide-blur");
+        win_key::debug_trace(trace);
         bridge::emit_event(BackendEvent::Toggle { open: false }, cx);
         self.schedule_palette_hide(transition, cx);
     }
