@@ -1,6 +1,6 @@
 # Prism
 
-Prism is a fast, keyboard-first command palette and Windows taskbar companion. Search local applications, files, and folders; keep frequent locations close; and customize the Windows 11 taskbar.
+Prism is a fast, keyboard-first command palette and Windows taskbar companion. Use Prism to find local applications, files, and folders. Prism keeps your frequent locations near. You can also change the Windows 11 taskbar.
 
 [Demo attachment](https://github.com/user-attachments/assets/ec4ac19a-8868-4a01-b9f4-10008c297b6c)
 
@@ -22,7 +22,7 @@ Download the latest `Prism_*_x64-setup.exe` from [GitHub Releases](https://githu
 
 Prism supports Windows 10 and Windows 11 on x64. It installs for the current user and does not require administrator access. If WebView2 is missing, the installer downloads the Microsoft bootstrapper automatically.
 
-The installer is not currently Windows Authenticode-signed, so SmartScreen may display a warning. In-app updates are verified separately with Prism's committed Tauri updater public key.
+The installer does not have a Windows Authenticode signature, so SmartScreen can show a warning. Prism verifies in-app updates separately with Prism's committed Tauri updater public key.
 
 ## Using Prism
 
@@ -30,7 +30,7 @@ The installer is not currently Windows Authenticode-signed, so SmartScreen may d
 2. Type an application name, file name, folder path, Windows tool, or calculation. Try `device manager`, `performance options`, or `power plan`.
 3. Use the arrow keys to select a result and press Enter to open it.
 
-The launcher starts hidden when you sign in to Windows so the global shortcut is ready immediately. Startup behavior can be managed from **Task Manager > Startup apps**.
+The launcher starts hidden when you sign in to Windows so the global shortcut is ready immediately. To change the startup behavior, open **Task Manager > Startup apps**.
 
 ### Run as administrator
 
@@ -55,7 +55,7 @@ Prism applies taskbar changes directly through Windows. StartAllBack is not requ
 - Select the System, Gem, or Diamond Start button icon.
 - Add, reuse, and remove your own Start button PNGs.
 
-For custom Start icons, use a `96 x 96` PNG with a transparent background. Windows 11 controls the taskbar surface height; Prism's density setting changes the icon scale rather than forcing an unsupported taskbar height.
+For custom Start icons, use a `96 x 96` PNG with a transparent background. Windows 11 controls the height of the taskbar surface. The Prism density setting changes the icon scale. It does not force an unsupported taskbar height.
 
 ## Updates
 
@@ -126,7 +126,7 @@ git push origin $version
 .\scripts\publish-release.ps1 -Tag $version
 ```
 
-The publisher creates or repairs the GitHub Release, uploads all updater assets, uses the Markdown file as the release body, and verifies the public updater endpoint and installer size.
+The publisher creates or repairs the GitHub Release and uploads all updater assets. It uses the Markdown file as the release body. Then it verifies the public updater endpoint and the installer size.
 
 Keep `%USERPROFILE%\.prism\signing\updater.key` and its password backed up securely. Existing Prism installations reject updates signed by a replacement key. Only the public key belongs in the repository.
 
