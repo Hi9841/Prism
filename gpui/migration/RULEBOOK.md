@@ -1,4 +1,4 @@
-# Design document and rulebook — Prism UI: React/Tauri WebView → GPUI (Rust)
+# Design document and rulebook - Prism UI: React/Tauri WebView → GPUI (Rust)
 
 > The meta-rule: if two agents could answer a question differently, the answer goes in this file.
 > Read-only inside any loop. Amendments are queued for the owner and applied between batches.
@@ -55,7 +55,7 @@ backend (shared with the Tauri app; see DECISION D1)
   `update-policy`, `update-progress`, `sections`, `phase1`, `emoji`, and the sanitizers in `state/app.tsx`
   are ported as plain Rust modules with no GPUI types, so the judge adapter can call them.
 
-## 2. Constructs with no direct equivalent — one canonical mapping each
+## 2. Constructs with no direct equivalent - one canonical mapping each
 
 | Source construct | Canonical target | Notes |
 |---|---|---|
@@ -129,22 +129,22 @@ Do not invent a mapping (A1).
 
 ## 6. DECISIONS for the owner
 
-- **D1 — Backend sharing. DECIDED 2026-10-09: extract `prism-core`.** Was recommended: extract a Tauri-free `prism-core` crate inside the Prism repo.
+- **D1 - Backend sharing. DECIDED 2026-10-09: extract `prism-core`.** Was recommended: extract a Tauri-free `prism-core` crate inside the Prism repo.
   The Tauri coupling is small outside `lib.rs`: about 64 sites in 10 modules
   (taskbar_customization 17, catalog/mod 16, win_key 5, start_menu 5, taskbar_icon_overlay 5,
   apps 4, windows_tools 4, audio_hook 4, audio 2, theme 2). They are mostly
   `AppHandle::emit` and window lookups and go behind a small `Host` trait.
   Both apps then share one backend.
   Alternatives: a path dependency on `src-tauri` (pulls Tauri into the GPUI binary), or a fork (two backends drift).
-- **D2 — GPUI pin. DECIDED 2026-10-09: crates.io `gpui = "0.2.2"`.** Was recommended: crates.io `gpui = "0.2.2"` (latest published). Alternative: a Zed git
+- **D2 - GPUI pin. DECIDED 2026-10-09: crates.io `gpui = "0.2.2"`.** Was recommended: crates.io `gpui = "0.2.2"` (latest published). Alternative: a Zed git
   commit (newer Windows fixes, less reproducible). The Step 2 spike decides if 0.2.2 is enough.
-- **D3 — Shipping. OPEN.** Recommended: the GPUI build ships as a separate preview channel until Step 6 passes,
+- **D3 - Shipping. OPEN.** Recommended: the GPUI build ships as a separate preview channel until Step 6 passes,
   then replaces the Tauri build under the same app id and updater key.
-- **D4 — Backdrop blur. DECIDED 2026-10-09: option (a), near-opaque fill.** Options: (a) raise those four surfaces to an opaque or near-opaque fill that
+- **D4 - Backdrop blur. DECIDED 2026-10-09: option (a), near-opaque fill.** Options: (a) raise those four surfaces to an opaque or near-opaque fill that
   matches the blurred average (closest 1:1 without a blur pass); (b) write a custom blur
   shader for GPUI (large); (c) accept the difference. Recommended: (a), marked `BUG(port):`
   in the visual parity ledger.
-- **D5 — Collation. DECIDED 2026-10-09: `icu_collator` with the user's locale.** Was recommended: `icu_collator` with the user's locale (the WebView uses
+- **D5 - Collation. DECIDED 2026-10-09: `icu_collator` with the user's locale.** Was recommended: `icu_collator` with the user's locale (the WebView uses
   `navigator.language`). Alternative: a simple case-insensitive numeric comparator that matches
   en-US for ASCII only.
 

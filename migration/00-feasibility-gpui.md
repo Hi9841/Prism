@@ -19,13 +19,13 @@ Status: read-only survey. No migration step has started.
 - **IPC boundary.** The UI calls 45 Tauri commands (`src-tauri/src/lib.rs` `generate_handler!`) through `src/lib/bridge.ts` (511 lines).
   Each keystroke crosses IPC at least twice (`query_phase1` and `search_files`) and serializes JSON both ways.
 - **Two type universes.** `src/lib/types.ts` (329 lines) copies the Rust serde structs by hand. Drift between them is not checked by a compiler.
-- **Search speed is not a reason to leave.** File search was the slow path. It is now fixed in Rust: 1.4–7 ms per query on 4.3 M files
+- **Search speed is not a reason to leave.** File search was the slow path. It is now fixed in Rust: 1.4-7 ms per query on 4.3 M files
   (`src-tauri/src/catalog/name_index.rs`, `live_catalog_benchmark`). The UI framework did not cause that latency.
 - **Not measured:** palette show latency and keystroke-to-paint latency. `PRISM_PERF_LOG` was not set for the running app. See the verdict.
 
 ## Three calls
 
-### 1. Structure-preserving or redesign? — Redesign.
+### 1. Structure-preserving or redesign? - Redesign.
 
 React hooks, JSX, Tailwind classes, and CSS motion have no one-to-one equivalent in GPUI.
 GPUI uses retained entities, `Render` implementations, and style builder methods in Rust.
@@ -56,9 +56,9 @@ and an incremental UI-crate build takes tens of seconds. Scaling assumption: the
 that changes. Put the UI in its own crate (`prism-ui`), so that a UI edit does not recompile the 27.7 k-line backend.
 The typecheck referee (`cargo check` on the UI crate) is cheaper than a full build. Decide at the Step 3 gate if Step 4 dissolves into Step 3.
 
-**Committed:** verification gets about 5–20 times slower per UI edit (assumption), forced by `src-tauri/Cargo.toml` (one 27.7 k-line crate today) and the `gpui` dependency.
+**Committed:** verification gets about 5-20 times slower per UI edit (assumption), forced by `src-tauri/Cargo.toml` (one 27.7 k-line crate today) and the `gpui` dependency.
 
-### 3. Do the tests survive? — Too few. Build the judge first.
+### 3. Do the tests survive? - Too few. Build the judge first.
 
 - Frontend: 155 test cases in 20 files (3,422 lines). None of them can run against a Rust UI.
   - 7 files render React through Testing Library and die. Examples: `src/features/palette/Palette.test.tsx`, `src/components/SettingsSheet.test.tsx`, `src/App.motion.test.tsx`.
@@ -93,9 +93,9 @@ Parity scenario seed for 00b:
 Drivers: 10 units × 4 agent passes per unit (implementer, two reviewers, fixer) × a moderate referee price (Rust compile).
 Plus the judge, the design document, the inventory, and survey-build rounds.
 
-- Tokens: **tens of millions** (band 10 M–100 M). A precise number is not given.
+- Tokens: **tens of millions** (band 10 M - 100 M). A precise number is not given.
 - Wall clock: weeks, not days.
-- Your attention: about 1–3 hours at each of about 8 gates, plus the visual parity review, which only you can sign off.
+- Your attention: about 1-3 hours at each of about 8 gates, plus the visual parity review, which only you can sign off.
 
 ## Model plan (your decision)
 
@@ -106,9 +106,9 @@ Plus the judge, the design document, the inventory, and survey-build rounds.
 | Implementers | Mid | Two reviewers and the compiler stand behind them |
 | Fixers | Mid | The compiler is the real referee |
 
-## Verdict: later — not now
+## Verdict: later - not now
 
-The goal is a faster Prism. The measured bottleneck was file search, and that is now fixed in Rust (2–7 ms instead of 5–250 ms).
+The goal is a faster Prism. The measured bottleneck was file search, and that is now fixed in Rust (2-7 ms instead of 5-250 ms).
 A GPUI port removes about 240 MB of private WebView2 memory and the IPC hops. But it is a full UI redesign,
 it needs a judge that does not exist, and 1:1 parity with CSS blur, Tailwind tokens, and CSS motion is not guaranteed in GPUI.
 

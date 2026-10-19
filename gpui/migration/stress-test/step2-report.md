@@ -5,9 +5,9 @@ Posture: redesign (RULEBOOK §0). The bakeoff does not apply. This step replaces
 an adversarial review of the design document and a throwaway spike (README, "If you're redesigning").
 
 Gate status: **Step 2 gate passed (2026-10-09).** On the owner's instruction ("do everything"), the agent did
-the gate acts: A1, A2, A4–A11 applied (A3 superseded by A11), the inventory proposals applied, R11 and R12
-decided, M2–M4 run headless, `.claude/settings.json` installed, and the work committed. See section 7.
-Sections 1–6 are the report as written at the gate; section 7 has the later results.
+the gate acts: A1, A2, A4 - A11 applied (A3 superseded by A11), the inventory proposals applied, R11 and R12
+decided, M2 - M4 run headless, `.claude/settings.json` installed, and the work committed. See section 7.
+Sections 1-6 are the report as written at the gate; section 7 has the later results.
 
 ## 1. Burndown
 
@@ -18,8 +18,8 @@ Sections 1–6 are the report as written at the gate; section 7 has the later re
 | Settled except one manual check | 2 (row 9: wheel px per line; row 12: Chromium mapping) |
 | Not run: needs the real mouse button | 1 (row 112, OLE drag) |
 | Rulebook review findings | 12 (4 high, 5 medium, 3 low) |
-| Amendments queued | 8 (A4–A11); A1–A3 still wait for the owner |
-| Manual checks for the owner | 4 (M1–M4, section 5) |
+| Amendments queued | 8 (A4 - A11); A1 - A3 still wait for the owner |
+| Manual checks for the owner | 4 (M1 - M4, section 5) |
 
 ## 2. Incident: synthetic input while the owner played a game
 
@@ -27,7 +27,7 @@ The first two spike runs used `SendInput` and opened a topmost window for about 
 The foreground app was Fortnite. Windows blocked the injected input (the cursor did not move), and
 the spike window did not get the foreground. After I found this, the spike changed method:
 it posts messages to its own HWND only, it sets only its own thread's key state, and it never
-activates its window. Runs 3–10 used this method. No global input was sent after run 2.
+activates its window. Runs 3-10 used this method. No global input was sent after run 2.
 
 ## 3. Spike results, row by row
 
@@ -64,7 +64,7 @@ GPUI reads modifiers with `GetKeyState` (events.rs:1459), so the spike sets this
 
 ### Row 12: reduced motion. Settled for the GPUI side; the Chromium mapping needs M2.
 
-- `SystemParametersInfoW(SPI_GETCLIENTAREAANIMATION)` costs 22–44 µs. Read it at each use (in render
+- `SystemParametersInfoW(SPI_GETCLIENTAREAANIMATION)` costs 22-44 µs. Read it at each use (in render
   and before the width animation). No cache and no WM_SETTINGCHANGE hook are necessary. This is also how the
   original behaves: app.tsx:510 calls `matchMedia` at the time of use, and CSS media rules apply live.
 - Current value on this machine: animations on (`reduced_motion = false`).
@@ -160,23 +160,23 @@ Process items for the gate:
 - `.claude/settings.json` is **not installed**. Prompts 03 and 04 require it before any fan-out.
   Installing it is the owner's act; agents never install it.
 - D3 (shipping) is still open. It decides the app id and updater key that prism-app uses.
-- A1–A3 still wait for the owner.
+- A1 - A3 still wait for the owner.
 
 ## 5. Manual checks for the owner (when the machine is free)
 
 Run from `C:\Users\hi\Desktop\Work\prism-gpui\spike\step2`. Set TMP and TEMP to `tmp` first.
 
-- **M1 — OLE drag (row 112).** Run `target\debug\gpui-spike.exe`. Drag a FILES row out of the window and
+- **M1 - OLE drag (row 112).** Run `target\debug\gpui-spike.exe`. Drag a FILES row out of the window and
   release it over Notepad: Notepad must open `drag-me.txt`. Drag again and press Esc. Drag again and release over
   the spike window. After each drag, click a row: a `click` event must appear in the panel. Read the
   `ole-done` lines (result, frames during the drag). Optional: run with `--ole-inline` to see the anti-pattern.
   In the original Prism, drag a file result and release it over the palette: record whether the palette hides.
-- **M2 — reduced motion (row 12).** Run `target\debug\gpui-spike.exe chrome-probe` and `target\debug\gpui-spike.exe`
+- **M2 - reduced motion (row 12).** Run `target\debug\gpui-spike.exe chrome-probe` and `target\debug\gpui-spike.exe`
   side by side. Turn Settings > Accessibility > Visual effects > Animation effects off, then on.
   Both reduced-motion lines must change together.
-- **M3 — wheel pixels (row 9).** In the chrome-probe window, hold Ctrl and turn the wheel one notch.
+- **M3 - wheel pixels (row 9).** In the chrome-probe window, hold Ctrl and turn the wheel one notch.
   Expected `deltaY` = ±100 and `deltaMode` = 0 with 3 lines per notch. This confirms 100/3 px per line.
-- **M4 — key values.** In the chrome-probe window, press the chords listed on the page. Compare `key` with
+- **M4 - key values.** In the chrome-probe window, press the chords listed on the page. Compare `key` with
   section 3 (row 9).
 
 Result: M2, M3, and M4 ran headless (section 7). M1 moved to the Step 5 smoke list (RULEBOOK §7).
@@ -188,8 +188,8 @@ Translation fan-out (Step 3) cannot start yet: A4 adds work units (lib.rs, prism
 `.claude/settings.json` is missing. Estimate after A4: 30 UI units + about 6 backend units (prism-core
 extraction, lib.rs command bodies, window/focus Host, tray, shortcut, updater) = about 36 units.
 Per-unit timings do not exist yet (no pilot ran), so a wall-clock estimate is not given.
-Active attention for the owner: about 30 min to apply A1–A11 and the inventory proposals, install
-settings.json, and run M1–M4.
+Active attention for the owner: about 30 min to apply A1 - A11 and the inventory proposals, install
+settings.json, and run M1 - M4.
 
 ## 7. Gate acts and headless results (after the gate)
 
@@ -214,7 +214,7 @@ stopped at its first command. Fix: `make-manifest.sh` writes LF, and `.gitattrib
 
 ### Gate acts
 
-- Rulebook: DRAFT 3. A1, A2, A4–A11 applied; A3 superseded by A11. Statuses in `rulebook-amendments.tsv`.
+- Rulebook: DRAFT 3. A1, A2, A4 - A11 applied; A3 superseded by A11. Statuses in `rulebook-amendments.tsv`.
 - R11: the §7 items (Win-key latency, IME, fonts, 60 fps list, gradient match) and the OLE drag (row 112)
   are Step 5 smoke tests. They need a visible window and real input.
 - R12: collation locale = the Windows UI language.
