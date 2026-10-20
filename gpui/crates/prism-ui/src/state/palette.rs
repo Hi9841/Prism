@@ -780,7 +780,6 @@ impl PaletteState {
         let clipboard_item = is_clipboard_kind(&item.id);
         let app = self.app.clone();
         cx.spawn(async move |this, cx| {
-            let _ticket = ticket;
             let toast = |title: &str, detail: String, cx: &mut gpui::AsyncApp| {
                 let title = title.to_owned();
                 let _ = app.update(cx, |app, cx| app.show_toast(title, Some(detail), ToastKind::Success, cx));
@@ -835,6 +834,8 @@ impl PaletteState {
                 Ok(())
             }
             .await;
+            // The launch and hide are done: history and intent writes need no gate.
+            drop(ticket);
             match result {
                 Ok(()) => {
                     let _ = app.update(cx, |app, cx| {

@@ -340,8 +340,11 @@ impl NameIndex {
             // Size the buffers once. Growing them batch by batch copied the
             // name text (over 100 MB on a large catalog) about 30 times, with
             // the old and new copies alive together at each step.
+            // A retry after a failed load keeps the rows it already has.
             if let Ok((rows, bytes)) = db.file_name_totals() {
-                self.names.write().unwrap_or_else(|e| e.into_inner()).reserve(rows, bytes);
+                let mut names = self.names.write().unwrap_or_else(|e| e.into_inner());
+                let (held_rows, held_bytes) = (names.ids.len(), names.text.len());
+                names.reserve(rows.saturating_sub(held_rows), bytes.saturating_sub(held_bytes));
             }
         }
         while !self.catch_up(db, LOAD_BATCH, usize::MAX)? {}
