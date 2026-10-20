@@ -167,6 +167,9 @@ impl crate::lib::types::Invoke for CoreInvoker {
         let text = |key: &str| args.get(key).and_then(Value::as_str).unwrap_or_default().to_owned();
         fixture::record(cmd, args.clone());
         if let Some(fixture) = fixture::get() {
+            if matches!(cmd, "launch_app" | "launch_app_as_admin" | "open_path" | "run_path_as_admin") {
+                std::thread::sleep(std::time::Duration::from_millis(fixture.launch_delay_ms));
+            }
             return Ok(match cmd {
                 "is_pinned_to_taskbar" => Value::Bool(fixture.pinned_to_taskbar.contains(&text("path"))),
                 _ => Value::Null,

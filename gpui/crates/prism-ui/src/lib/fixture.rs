@@ -25,6 +25,9 @@ pub struct Fixture {
     pub power_plans: HashMap<String, Value>,
     pub taskbar: Value,
     pub pinned_to_taskbar: Vec<String>,
+    /// How long a launch or open call takes, as `ShellExecuteW` can on a slow
+    /// or busy machine. Benchmarks only; 0 answers at once.
+    pub launch_delay_ms: u64,
 }
 
 static FIXTURE: OnceLock<Fixture> = OnceLock::new();
