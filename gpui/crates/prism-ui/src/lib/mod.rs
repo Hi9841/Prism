@@ -4,6 +4,7 @@ pub mod emoji;
 #[cfg(feature = "gpui")]
 pub mod fixture;
 pub mod icon_loading;
+pub mod launch_gate;
 pub mod launcher_motion;
 pub mod math;
 pub mod query;

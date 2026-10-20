@@ -13,6 +13,7 @@ use crate::features::palette::sections::{
 use crate::js;
 use crate::lib::bridge::{self, BackendEvent};
 use crate::lib::icon_loading::{AppIconRequestState, app_icon_retry_delay, select_app_icon_request_ids};
+use crate::lib::launch_gate::LaunchGate;
 use crate::lib::query::{Phase1Response, PowerPlanHit, RecentCommand};
 use crate::lib::search::dedupe_apps;
 use crate::lib::types::{
@@ -138,6 +139,8 @@ pub struct PaletteState {
     power_task: Option<Task<()>>,
     file_task: Option<Task<()>>,
     history_paths_task: Option<Task<()>>,
+    /// One launch at a time: repeat presses during a slow launch are ignored.
+    launch_gate: LaunchGate,
     _subscriptions: Vec<gpui::Subscription>,
 }
 
@@ -259,6 +262,7 @@ impl PaletteState {
             power_task: None,
             file_task: None,
             history_paths_task: None,
+            launch_gate: LaunchGate::default(),
             _subscriptions: vec![app_sub, event_sub],
         };
         this.load_initial(cx);
@@ -770,11 +774,13 @@ impl PaletteState {
     }
 
     pub fn run_item(&mut self, item: PaletteItem, cx: &mut Context<Self>) {
+        let Some(ticket) = self.launch_gate.try_begin() else { return };
         let submitted_query = js::trim(&self.query).to_owned();
         let query = self.query.clone();
         let clipboard_item = is_clipboard_kind(&item.id);
         let app = self.app.clone();
         cx.spawn(async move |this, cx| {
+            let _ticket = ticket;
             let toast = |title: &str, detail: String, cx: &mut gpui::AsyncApp| {
                 let title = title.to_owned();
                 let _ = app.update(cx, |app, cx| app.show_toast(title, Some(detail), ToastKind::Success, cx));
@@ -850,8 +856,10 @@ impl PaletteState {
 
     pub fn run_item_as_admin(&mut self, item: PaletteItem, cx: &mut Context<Self>) {
         let Some(action) = item.run_as_admin.clone() else { return };
+        let Some(ticket) = self.launch_gate.try_begin() else { return };
         let app = self.app.clone();
         cx.spawn(async move |_, cx| {
+            let _ticket = ticket;
             // Same ordering as run_item: elevate while foreground, then hide.
             let result: Result<(), String> = async {
                 let run = cx.update(|cx| run_action(action, cx)).map_err(|e| e.to_string())?;
@@ -914,6 +922,8 @@ impl PaletteState {
     }
 
     pub fn reset(&mut self, cx: &mut Context<Self>) {
+        // A fresh open may launch again, even if an older launch never returned.
+        self.launch_gate.reset();
         self.set_query("", cx);
         self.selected = 0;
         cx.emit(PaletteEvent::SelectionChanged);
