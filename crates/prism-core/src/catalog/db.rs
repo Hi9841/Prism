@@ -80,6 +80,9 @@ const DROP_FILE_FTS: &str = "DROP TRIGGER IF EXISTS files_ai;
 /// `PRAGMA auto_vacuum` value for INCREMENTAL.
 const AUTO_VACUUM_INCREMENTAL: i64 = 2;
 
+/// `PRAGMA cache_size` of the reader connection: 8 MiB (negative means KiB).
+const READER_CACHE_KIB: i64 = -8000;
+
 /// `PRAGMA mmap_size` of both connections: 256 MiB.
 const MMAP_SIZE: i64 = 268_435_456;
 
@@ -181,6 +184,11 @@ impl Database {
         )
         .map_err(|e| e.to_string())?;
         Self::configure_pragmas(&reader)?;
+        // Searches read a few pages per query; the 32 MiB cap only kept pages
+        // from full-table scans alive on the heap.
+        reader
+            .execute_batch(&format!("PRAGMA cache_size = {READER_CACHE_KIB};"))
+            .map_err(|e| e.to_string())?;
         if super::catalog_debug_enabled() {
             reader.profile(Some(Self::slow_statement));
         }
@@ -206,7 +214,7 @@ impl Database {
     }
 
     fn configure_pragmas(conn: &Connection) -> Result<(), String> {
-        // The reader and writer connections each cap at 32 MiB of page cache;
+        // Up to 32 MiB of page cache (the reader lowers it in `try_open`);
         // hot lookups (B-tree roots, FTS postings) fit well below that, while
         // mmap keeps larger scans off the process heap.
         conn.execute_batch(&format!(
