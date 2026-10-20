@@ -337,6 +337,12 @@ impl NameIndex {
                 self.reset();
             }
             self.seen_deleted.store(db.rows_deleted(), AtomicOrdering::Release);
+            // Size the buffers once. Growing them batch by batch copied the
+            // name text (over 100 MB on a large catalog) about 30 times, with
+            // the old and new copies alive together at each step.
+            if let Ok((rows, bytes)) = db.file_name_totals() {
+                self.names.write().unwrap_or_else(|e| e.into_inner()).reserve(rows, bytes);
+            }
         }
         while !self.catch_up(db, LOAD_BATCH, usize::MAX)? {}
         self.behind.store(false, AtomicOrdering::Release);
@@ -1026,6 +1032,28 @@ mod tests {
                 "{text:?} -> {name:?}"
             );
         }
+    }
+
+    #[test]
+    fn a_full_load_sizes_the_buffers_once() {
+        let (db, directory) = temp_db();
+        // Three batches, the last with one row: growth per batch would leave
+        // spare capacity (and copy the buffers on the way).
+        let rows = (0..LOAD_BATCH * 2 + 1)
+            .map(|n| item(&format!(r"C:\data\f{n}.txt")))
+            .collect::<Vec<_>>();
+        db.insert_batch("vol", 1, &rows).unwrap();
+
+        let index = NameIndex::default();
+        index.load(&db).unwrap();
+
+        let names = index.names.read().unwrap();
+        assert_eq!(names.ids.len(), rows.len());
+        assert_eq!(names.ids.capacity(), names.ids.len());
+        assert_eq!(names.text.capacity(), names.text.len());
+        drop(names);
+        drop(db);
+        let _ = std::fs::remove_dir_all(directory);
     }
 
     #[test]

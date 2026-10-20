@@ -1692,6 +1692,18 @@ impl Database {
         self.search_candidates_until(query, limit, || false)
     }
 
+    /// Row count and total `lower_name` bytes of `files`, read from the
+    /// covering name index rather than the table.
+    pub fn file_name_totals(&self) -> Result<(usize, usize), String> {
+        let conn = self.reader.lock().map_err(|e| e.to_string())?;
+        conn.query_row(
+            "SELECT COUNT(*), COALESCE(SUM(LENGTH(CAST(lower_name AS BLOB))), 0) FROM files;",
+            [],
+            |row| Ok((row.get::<_, i64>(0)? as usize, row.get::<_, i64>(1)? as usize)),
+        )
+        .map_err(|e| e.to_string())
+    }
+
     /// Fallback-catalog rows with an id above `after_id`, in id order. Feeds
     /// the in-memory name index: ids only grow, so this is both the full load
     /// (`after_id = 0`, in batches) and the incremental catch-up.
