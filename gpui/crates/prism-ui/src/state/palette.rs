@@ -789,6 +789,8 @@ impl PaletteState {
                     Ok(task) => task.await,
                     Err(error) => Err(error.to_string()),
                 };
+                // The plan is set: the list refresh below needs no gate.
+                drop(ticket);
                 if let Err(error) = result {
                     toast("Power plan not changed", error_string(&error), cx);
                     return;

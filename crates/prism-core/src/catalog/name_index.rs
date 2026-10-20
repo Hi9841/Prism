@@ -1052,8 +1052,9 @@ mod tests {
 
         let names = index.names.read().unwrap();
         assert_eq!(names.ids.len(), rows.len());
-        assert_eq!(names.ids.capacity(), names.ids.len());
-        assert_eq!(names.text.capacity(), names.text.len());
+        // `reserve_exact` may round up a little; per-batch growth left 1/8 spare.
+        assert!(names.ids.capacity() < names.ids.len() + names.ids.len() / 16);
+        assert!(names.text.capacity() < names.text.len() + names.text.len() / 16);
         drop(names);
         drop(db);
         let _ = std::fs::remove_dir_all(directory);
