@@ -16,6 +16,7 @@ pub mod perf;
 pub mod power;
 pub mod query;
 pub mod runtime;
+pub mod settings_index;
 pub mod start_menu;
 pub mod taskbar;
 pub mod taskbar_alignment;

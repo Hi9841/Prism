@@ -1146,7 +1146,7 @@ fn normalize_cpl_target(name: &str, value: Option<&str>) -> Option<String> {
     Some(parameter)
 }
 
-fn is_windows_system_path(path: &Path) -> bool {
+pub(crate) fn is_windows_system_path(path: &Path) -> bool {
     let root = std::env::var_os("SystemRoot")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("C:\\Windows"))
@@ -1272,9 +1272,10 @@ fn indirect_cpl_target(localized: &str) -> Option<(String, u32)> {
 }
 
 /// Resolves an `@file,-id` string resource without running the file's code.
-fn load_indirect_string(source: &str) -> Option<String> {
+pub(crate) fn load_indirect_string(source: &str) -> Option<String> {
     let source = wide(source);
-    let mut output = [0u16; 256];
+    // Settings search keyword lists are longer than 256 characters.
+    let mut output = [0u16; 1024];
     unsafe { SHLoadIndirectString(PCWSTR(source.as_ptr()), &mut output, None) }.ok()?;
     let end = output
         .iter()
@@ -1354,19 +1355,36 @@ fn friendly_cpl_name(path: &str) -> String {
     format!("{name}{suffix}")
 }
 
-fn expand_environment(value: &str) -> String {
+pub(crate) fn expand_environment(value: &str) -> String {
     let root = std::env::var_os("SystemRoot")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("C:\\Windows"));
     let root = root.to_string_lossy();
-    value
-        .replace("%SystemRoot%", root.as_ref())
-        .replace("%systemroot%", root.as_ref())
-        .replace("%windir%", root.as_ref())
-        .replace("%Windir%", root.as_ref())
+    // Environment variable names are case-insensitive (`%WINDIR%`, `%windir%`).
+    let mut output = String::with_capacity(value.len());
+    let mut rest = value;
+    while let Some(start) = rest.find('%') {
+        output.push_str(&rest[..start]);
+        let after = &rest[start + 1..];
+        match after.find('%') {
+            Some(end)
+                if after[..end].eq_ignore_ascii_case("SystemRoot")
+                    || after[..end].eq_ignore_ascii_case("windir") =>
+            {
+                output.push_str(&root);
+                rest = &after[end + 1..];
+            }
+            _ => {
+                output.push('%');
+                rest = after;
+            }
+        }
+    }
+    output.push_str(rest);
+    output
 }
 
-fn slug(value: &str) -> String {
+pub(crate) fn slug(value: &str) -> String {
     let mut output = String::new();
     for character in value.chars() {
         if character.is_ascii_alphanumeric() {
@@ -1527,7 +1545,7 @@ fn shell_execute_pidl(pidl: &[u8]) -> Result<(), String> {
         .map_err(|error| format!("Windows could not open shell item ({error})"))
 }
 
-fn shell_execute(target: &str, parameters: Option<&str>) -> Result<(), String> {
+pub(crate) fn shell_execute(target: &str, parameters: Option<&str>) -> Result<(), String> {
     let operation = wide("open");
     let target_text = target;
     let target = wide(target_text);
@@ -1555,23 +1573,23 @@ fn shell_execute(target: &str, parameters: Option<&str>) -> Result<(), String> {
     }
 }
 
-fn system32_path(file: &str) -> PathBuf {
+pub(crate) fn system32_path(file: &str) -> PathBuf {
     let root = std::env::var_os("SystemRoot").unwrap_or_else(|| "C:\\Windows".into());
     PathBuf::from(root).join("System32").join(file)
 }
 
-fn wide(value: &str) -> Vec<u16> {
+pub(crate) fn wide(value: &str) -> Vec<u16> {
     value.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
-unsafe fn open_registry_key(root: HKEY, path: &str) -> Option<HKEY> {
+pub(crate) unsafe fn open_registry_key(root: HKEY, path: &str) -> Option<HKEY> {
     let wide_path = wide(path);
     let mut key = HKEY(std::ptr::null_mut());
     let result = RegOpenKeyExW(root, PCWSTR(wide_path.as_ptr()), None, KEY_READ, &mut key);
     (result.0 == 0 && !key.0.is_null()).then_some(key)
 }
 
-unsafe fn read_registry_string(key: HKEY, name: &str) -> Option<String> {
+pub(crate) unsafe fn read_registry_string(key: HKEY, name: &str) -> Option<String> {
     let wide_name = wide(name);
     let mut value_type = REG_VALUE_TYPE(0);
     let mut length = 0u32;

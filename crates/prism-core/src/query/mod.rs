@@ -20,6 +20,10 @@ const RECENT_LIMIT: usize = 5;
 const WINDOW_LIMIT: usize = 8;
 const APP_LIMIT: usize = 6;
 const ACTION_LIMIT: usize = 16;
+/// Windows writes broad synonym lists for its settings ("screen saver" is a
+/// keyword of an energy page). A keyword hit stays below any title that
+/// contains the query (800 and up).
+const SETTING_KEYWORD_CAP: i32 = 799;
 
 #[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -122,6 +126,9 @@ pub fn execute(action_id: &str) -> Result<(), String> {
     if let Some(action) = catalog::get(action_id) {
         return catalog::execute(action);
     }
+    if let Some(result) = crate::settings_index::execute(action_id) {
+        return result;
+    }
     crate::windows_tools::execute(action_id)
 }
 
@@ -151,12 +158,31 @@ fn search_actions(query: &str, intent_id: Option<&str>) -> Vec<Phase1Hit> {
             }
         }
     }
+    if let Some(settings) = crate::settings_index::cached() {
+        for setting in settings.iter() {
+            let keyword_refs = setting
+                .keywords
+                .iter()
+                .map(|keyword| keyword.as_str())
+                .collect::<Vec<_>>();
+            let title = score::score_text(query, &setting.title);
+            let keyword = score::score_with_keywords(query, "", &keyword_refs)
+                .map(|score| score.min(SETTING_KEYWORD_CAP));
+            if let Some(score) = title.max(keyword) {
+                hits.push(setting_hit(setting, score));
+            }
+        }
+    }
     hits.sort_by(|left, right| {
         right
             .score
             .cmp(&left.score)
             .then_with(|| left.title.cmp(&right.title))
     });
+    // The settings index repeats some curated actions and tools ("Night
+    // light", "Device Manager"); show each title once, best score first.
+    let mut titles = std::collections::HashSet::new();
+    hits.retain(|hit| titles.insert(hit.title.to_lowercase()));
     hits.truncate(ACTION_LIMIT);
 
     if let Some(intent_id) = intent_id {
@@ -242,6 +268,27 @@ fn tool_hit(tool: &crate::windows_tools::WindowsTool, score: i32) -> Phase1Hit {
         icon_key: Some(tool.icon_key.to_string()),
         icon: tool.icon.clone(),
         source: Some("windows-tool".to_string()),
+    }
+}
+
+fn setting_hit(setting: &crate::settings_index::SettingEntry, score: i32) -> Phase1Hit {
+    // Control Panel tasks list with the Windows tools; pages carry a URI and
+    // list under Settings.
+    let task = setting.kind == crate::settings_index::SettingKind::Task;
+    Phase1Hit {
+        id: format!("action::{}", setting.id),
+        kind: Phase1Kind::Action,
+        title: setting.title.clone(),
+        subtitle: setting.subtitle.to_string(),
+        score,
+        app_id: None,
+        path: None,
+        hwnd: None,
+        action_id: Some(setting.id.clone()),
+        uri: setting.uri().map(str::to_string),
+        icon_key: Some(setting.icon_key.to_string()),
+        icon: None,
+        source: task.then(|| "windows-tool".to_string()),
     }
 }
 
@@ -407,5 +454,30 @@ mod tests {
     #[test]
     fn execute_rejects_unknown_ids() {
         assert!(execute("not.real").is_err());
+    }
+
+    #[test]
+    fn uac_finds_the_user_account_control_task() {
+        crate::settings_index::warm();
+        if crate::settings_index::cached().is_none_or(|settings| settings.is_empty()) {
+            return;
+        }
+        let store = IntentStore::new();
+        let response = phase1("uac", &[], &[], &[], &store);
+        let hit = response.actions.first().expect("an action for 'uac'");
+        assert!(
+            hit.action_id
+                .as_deref()
+                .is_some_and(|id| id.starts_with("settings-index::")),
+            "{hit:?}"
+        );
+        assert_eq!(hit.source.as_deref(), Some("windows-tool"));
+        let titles = response
+            .actions
+            .iter()
+            .map(|hit| hit.title.to_lowercase())
+            .collect::<Vec<_>>();
+        let unique = titles.iter().collect::<std::collections::HashSet<_>>();
+        assert_eq!(unique.len(), titles.len(), "titles are unique");
     }
 }

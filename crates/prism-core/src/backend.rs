@@ -137,6 +137,7 @@ impl Backend {
         self.intent.set_path(app_data_dir.join("intent-cache.db"));
         files::warm(self.file_index.clone(), app_data_dir);
         crate::runtime::spawn_blocking(windows_tools::warm);
+        crate::runtime::spawn_blocking(crate::settings_index::warm);
         self.warm_apps();
     }
 
