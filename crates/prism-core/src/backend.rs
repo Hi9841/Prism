@@ -173,17 +173,17 @@ impl Backend {
         apps
     }
 
-    /// On palette open, rescan when a shortcut or install folder changed after
-    /// the in-memory index was built. The check is off the Win-key path; the
-    /// UI hears `apps-updated` once the new list is published.
+    /// On palette open, rescan when a shortcut or install folder changed, or
+    /// an indexed app was updated in place, after the in-memory index was
+    /// built. The check is off the Win-key path; the UI hears `apps-updated`
+    /// once the new list is published.
     pub fn schedule_installed_apps_refresh(&'static self) {
         crate::runtime::spawn(async move {
             let since = self.apps_indexed_at.lock().ok().and_then(|guard| *guard);
             let Some(since) = since else {
                 return;
             };
-            let changed =
-                crate::runtime::spawn_blocking(move || apps::installs_changed_since(since)).await;
+            let changed = self.apps_changed_since(since).await;
             let Ok(true) = changed else {
                 return;
             };
@@ -192,8 +192,7 @@ impl Backend {
             let Some(since) = since else {
                 return;
             };
-            let changed =
-                crate::runtime::spawn_blocking(move || apps::installs_changed_since(since)).await;
+            let changed = self.apps_changed_since(since).await;
             let Ok(true) = changed else {
                 return;
             };
@@ -206,6 +205,22 @@ impl Backend {
             self.publish_app_index(index);
             crate::host::emit("apps-updated", serde_json::Value::Null);
         });
+    }
+
+    async fn apps_changed_since(
+        &self,
+        since: SystemTime,
+    ) -> Result<bool, tokio::task::JoinError> {
+        let files = self
+            .apps_cache
+            .lock()
+            .ok()
+            .and_then(|cache| cache.as_deref().map(apps::watched_files))
+            .unwrap_or_default();
+        crate::runtime::spawn_blocking(move || {
+            apps::installs_changed_since(since) || apps::apps_updated_since(&files, since)
+        })
+        .await
     }
 
     pub async fn get_apps(&self) -> Result<Vec<apps::AppEntry>, String> {
