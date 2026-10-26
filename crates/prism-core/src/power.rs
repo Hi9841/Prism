@@ -514,6 +514,22 @@ mod tests {
     }
 
     #[test]
+    fn localized_and_custom_names_remain_searchable() {
+        for (query, guid) in [
+            ("économie", UNICODE),
+            ("省電力", UNICODE),
+            ("office", CUSTOM),
+        ] {
+            let hits = rank(query, &catalog());
+            assert!(
+                hits.iter().any(|hit| hit.guid == guid),
+                "{query} should find {guid}"
+            );
+            assert!(hits.iter().all(|hit| !hit.picker_intent), "{query}");
+        }
+    }
+
+    #[test]
     fn selection_is_limited_to_the_catalog() {
         let plans = catalog();
         assert_eq!(
