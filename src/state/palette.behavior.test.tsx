@@ -3,6 +3,7 @@
 import { act, cleanup, render } from "@testing-library/react";
 import { Power } from "lucide-react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { powerPlanPaletteItem } from "../features/palette/phase1";
 import * as bridge from "../lib/bridge";
 import {
 	DEFAULT_SETTINGS,
@@ -304,27 +305,27 @@ describe("two-phase query paint", () => {
 		expect(
 			palette.sections.find((section) => section.id === "power-plans")?.items[0]
 				.subtitle,
-		).toBe("Power plan · active");
+		).toBe("Power plan · Active now");
 
-		const item: PaletteItem = {
-			id: "power-plan::22222222-2222-2222-2222-222222222222",
-			title: "High performance",
-			subtitle: "Power plan",
-			icon: { kind: "tile", icon: Power, tint: "slate" },
-			historyTitle: "High performance",
-			powerPlanGuid: "22222222-2222-2222-2222-222222222222",
-			run: vi.fn().mockResolvedValue(undefined),
-		};
+		const item = powerPlanPaletteItem({
+			guid: "22222222-2222-2222-2222-222222222222",
+			name: "High performance",
+			active: false,
+			score: 700,
+		});
 		await act(async () => {
 			await palette.runItem(item);
 		});
 
-		expect(item.run).toHaveBeenCalledOnce();
+		expect(bridge.setPowerPlan).toHaveBeenCalledWith(
+			"22222222-2222-2222-2222-222222222222",
+		);
 		expect(bridge.queryPowerPlans).toHaveBeenCalledTimes(2);
-		expect(
-			palette.sections.find((section) => section.id === "power-plans")?.items[1]
-				.subtitle,
-		).toBe("Power plan · active");
+		const items = palette.sections.find(
+			(section) => section.id === "power-plans",
+		)?.items;
+		expect(items?.[0].subtitle).toBe("Power plan");
+		expect(items?.[1].subtitle).toBe("Power plan · Active now");
 		expect(palette.flatItems[palette.selected]?.id).toBe(item.id);
 	});
 });
