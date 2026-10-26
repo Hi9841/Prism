@@ -74,7 +74,7 @@ export function powerPlanPaletteItem(hit: PowerPlanHit): PaletteItem {
 	return {
 		id: `power-plan::${hit.guid}`,
 		title: hit.name,
-		subtitle: hit.active ? "Power plan · active" : "Power plan",
+		subtitle: hit.active ? "Power plan · Active now" : "Power plan",
 		icon: { kind: "tile", icon: Power, tint: hit.active ? "mint" : "slate" },
 		historyTitle: hit.name,
 		powerPlanGuid: hit.guid,

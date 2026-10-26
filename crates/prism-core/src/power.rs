@@ -206,7 +206,7 @@ pub fn list_power_plans() -> Result<Vec<PowerPlan>, String> {
 }
 
 pub fn set_active_power_plan(guid: &str) -> Result<(), String> {
-    let normalized = normalize_guid(guid).ok_or_else(|| "invalid power plan GUID".to_string())?;
+    let normalized = ensure_in_catalog(guid, &list_power_plans()?)?;
     let executable = powercfg_executable()?;
     let status = Command::new(executable)
         .arg("/setactive")
@@ -220,6 +220,15 @@ pub fn set_active_power_plan(guid: &str) -> Result<(), String> {
         Err(format!(
             "Windows rejected the power plan change (exit status {status})"
         ))
+    }
+}
+
+fn ensure_in_catalog(guid: &str, plans: &[PowerPlan]) -> Result<String, String> {
+    let normalized = normalize_guid(guid).ok_or_else(|| "invalid power plan GUID".to_string())?;
+    if plans.iter().any(|plan| plan.guid == normalized) {
+        Ok(normalized)
+    } else {
+        Err("power plan is not installed".to_string())
     }
 }
 
@@ -446,6 +455,76 @@ mod tests {
         assert_eq!(plans.len(), 1);
         assert_eq!(plans[0].name, "Office");
         assert_eq!(plans[0].guid, "abcdef01-2345-6789-abcd-ef0123456789");
+    }
+
+    const BALANCED: &str = "381b4222-f694-41f0-9685-ff5bb260df2e";
+    const CUSTOM: &str = "abcdef01-2345-6789-abcd-ef0123456789";
+    const UNICODE: &str = "11111111-2222-3333-4444-555555555555";
+
+    fn plan(guid: &str, name: &str, active: bool) -> PowerPlan {
+        PowerPlan {
+            guid: guid.to_string(),
+            name: name.to_string(),
+            active,
+        }
+    }
+
+    fn catalog() -> Vec<PowerPlan> {
+        vec![
+            plan(BALANCED, "Balanced", false),
+            plan(CUSTOM, "Office", true),
+            plan(UNICODE, "Économie 省電力", false),
+        ]
+    }
+
+    #[test]
+    fn parses_localized_label_custom_and_non_ascii_names() {
+        let output = format!(
+            "Modes de gestion de l'alimentation existants :\nGUID du modèle de gestion : {BALANCED}  (Équilibré)\nGUID du modèle de gestion : {}  (Office) *\nGUID du modèle de gestion : {UNICODE}  (Économie 省電力)\n",
+            CUSTOM.to_ascii_uppercase()
+        );
+        let plans = parse_power_plans(output.as_bytes());
+        assert_eq!(plans.len(), 3);
+        assert_eq!(plans[0].name, "Équilibré");
+        assert_eq!(plans[1].guid, CUSTOM);
+        assert!(plans[1].active);
+        assert_eq!(plans[2].name, "Économie 省電力");
+        assert!(!plans[2].active);
+    }
+
+    #[test]
+    fn catalog_queries_return_every_plan_with_active_first() {
+        for query in ["power plan", "powerplan", "choose a power plan"] {
+            let hits = rank(query, &catalog());
+            assert_eq!(hits.len(), 3, "{query}");
+            assert!(hits.iter().all(|hit| hit.picker_intent), "{query}");
+            let active_score = hits[0].score;
+            assert!(hits[0].active, "{query}");
+            assert!(hits.iter().all(|hit| hit.score <= active_score));
+        }
+    }
+
+    #[test]
+    fn name_queries_return_only_matching_plans() {
+        let hits = rank("balanced", &catalog());
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].guid, BALANCED);
+        assert!(!hits[0].picker_intent);
+        assert!(!is_power_plan_query("balanced"));
+    }
+
+    #[test]
+    fn selection_is_limited_to_the_catalog() {
+        let plans = catalog();
+        assert_eq!(
+            ensure_in_catalog(&BALANCED.to_ascii_uppercase(), &plans).as_deref(),
+            Ok(BALANCED)
+        );
+        assert_eq!(
+            ensure_in_catalog("99999999-9999-9999-9999-999999999999", &plans),
+            Err("power plan is not installed".to_string())
+        );
+        assert!(ensure_in_catalog("not-a-plan", &plans).is_err());
     }
 
     #[test]

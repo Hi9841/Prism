@@ -84,6 +84,22 @@ describe("phase1 mappers", () => {
 		expect(setPowerPlan).toHaveBeenCalledWith(plan.guid);
 	});
 
+	it("marks the active power plan explicitly", () => {
+		const base = {
+			guid: "22222222-2222-2222-2222-222222222222",
+			name: "Balanced",
+			score: 800,
+		};
+		expect(powerPlanPaletteItem({ ...base, active: true })).toMatchObject({
+			id: `power-plan::${base.guid}`,
+			subtitle: "Power plan · Active now",
+			powerPlanGuid: base.guid,
+		});
+		expect(powerPlanPaletteItem({ ...base, active: false }).subtitle).toBe(
+			"Power plan",
+		);
+	});
+
 	it("focuses an open window by hwnd", async () => {
 		const item = windowPaletteItem(
 			hit({
