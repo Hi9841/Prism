@@ -198,7 +198,8 @@ let caught = 0;
 for (const mutation of mutations) {
   copyTree(root);
   const target = path.join(root, mutation.file);
-  const source = fs.readFileSync(target, "utf8");
+  // core.autocrlf checks out CRLF; the multi-line patterns are written with LF.
+  const source = fs.readFileSync(target, "utf8").replaceAll("\r\n", "\n");
   if (!source.includes(mutation.from)) {
     process.stdout.write(`MISS\t${mutation.id}\tpattern not in copy\n`);
     continue;

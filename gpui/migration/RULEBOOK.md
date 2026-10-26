@@ -162,6 +162,32 @@ another app, Esc cancels, a click works after the drag, and a release over the p
 
 ## Deviation log
 
+- 2026-10-27: Parity audit after release 1.0.10. (1) The original changed in 1.0.4 (app rows drop the
+  "Application" subtitle), so 33 goldens failed against the original and the port alike. The port output
+  was identical to the original on all 33. Goldens were captured again from the original: judge 277/277
+  on both. (2) `mutate.mjs` normalizes CRLF in the copy (`core.autocrlf` checks out CRLF), so the two
+  multi-line mutations apply again: 26/26 caught. (3) The manifest pointed at the old `../Prism-core`
+  worktree; it now points at `crates/prism-core`. `src/lib/transientUi.ts` maps to
+  `BackendEvent::DismissTransientUi` in `lib/bridge.rs`, and the Tauri host maps to `src-tauri/src/lib.rs`.
+  (4) Port-only changes after 1.0.0, made on purpose and not in the original: shared popover menu look,
+  32 px rows, neutral icons, red Shut down highlight, semibold Open (`eb6b035`); the search field draws no
+  ring or caret until the first input (`98b30e0`); a click away within 600 ms of open closes the palette
+  (`5615f88`); one launch at a time, gate released after the hide and after a power plan switch
+  (`ea6b75f`, `3d0e136`, `18252d0`); menus occlude and paint above the footer (`6f91552`); the updater stays
+  running when the installer cannot start (`32e24d7`).
+  (5) Owner decision: `gpui/` is self-contained. `prism-core` moved from the repo root `crates/` into
+  `gpui/crates/` as a workspace member (D1 still holds: one backend, and `src-tauri` uses it from here).
+  Its own `Cargo.lock` was removed; `gpui/Cargo.lock` covers it. Installer signing uses the Tauri CLI
+  from `gpui/package.json` instead of the root `node_modules`.
+  (6) Spec commit `159dc17`: a failed index rebuild clears `file_indexing`, and the errors that the
+  original now logs are logged with `eprintln!` at the same port sites.
+  (7) Functional audit, fixed: Ctrl+Shift+K and Ctrl+Shift+W do nothing, as in the original (`event.key`
+  is upper case with Shift). Escape in the power menu returns focus to the trigger button (the port
+  blurred the window).
+  (8) Platform limit, open: gpui 0.2.2 has no UI Automation provider. Screen readers get no names, roles,
+  or states (`aria-label`, `role="menu"`, `aria-expanded`, `aria-activedescendant`). The visible
+  tooltips are drawn (2026-10-10 entry, item 6). Closing this gap needs a UIA (or AccessKit) layer in gpui.
+
 - 2026-10-11: Owner request: every result has a right-click menu. "Open" is the first entry, and
   "Copy as path" copies the quoted path (file, folder, app exe or shortcut, `shell:AppsFolder\{AUMID}`,
   settings URI). UX scenario `ux-context-keys` now differs from the original on purpose: Down+Enter

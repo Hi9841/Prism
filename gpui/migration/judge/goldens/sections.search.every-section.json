@@ -305,7 +305,6 @@
               }
             ]
           },
-          "subtitle": "Application",
           "title": "Steam",
           "toggleTaskbarPin": {
             "calls": [
@@ -343,7 +342,6 @@
               }
             ]
           },
-          "subtitle": "Application",
           "title": "Snipping Tool"
         }
       ],

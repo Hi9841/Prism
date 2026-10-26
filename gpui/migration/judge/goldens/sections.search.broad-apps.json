@@ -260,7 +260,6 @@
               }
             ]
           },
-          "subtitle": "Application",
           "title": "Terminal"
         },
         {
@@ -324,7 +323,6 @@
               }
             ]
           },
-          "subtitle": "Application",
           "title": "Steam",
           "toggleTaskbarPin": {
             "calls": [
@@ -372,7 +370,6 @@
               }
             ]
           },
-          "subtitle": "Application",
           "title": "Relative Tool"
         },
         {
@@ -436,7 +433,6 @@
               }
             ]
           },
-          "subtitle": "Application",
           "title": "Notepad",
           "toggleTaskbarPin": {
             "calls": [
@@ -474,7 +470,6 @@
               }
             ]
           },
-          "subtitle": "Application",
           "title": "Calendar"
         },
         {
@@ -538,7 +533,6 @@
               }
             ]
           },
-          "subtitle": "Application",
           "title": "Share Tool",
           "toggleTaskbarPin": {
             "calls": [

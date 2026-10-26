@@ -239,7 +239,6 @@
               }
             ]
           },
-          "subtitle": "Application",
           "title": "Relative Tool"
         },
         {
@@ -260,7 +259,6 @@
               }
             ]
           },
-          "subtitle": "Application",
           "title": "Fortnite"
         },
         {
@@ -281,7 +279,6 @@
               }
             ]
           },
-          "subtitle": "Application",
           "title": "Terminal"
         },
         {
@@ -335,7 +332,6 @@
               }
             ]
           },
-          "subtitle": "Application",
           "title": "Intranet"
         },
         {
@@ -399,7 +395,6 @@
               }
             ]
           },
-          "subtitle": "Application",
           "title": "Share Tool",
           "toggleTaskbarPin": {
             "calls": [
@@ -480,7 +475,6 @@
               }
             ]
           },
-          "subtitle": "Application",
           "title": "Discord",
           "toggleTaskbarPin": {
             "calls": [

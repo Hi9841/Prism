@@ -71,7 +71,6 @@
               }
             ]
           },
-          "subtitle": "Application",
           "title": "Visual Studio Code",
           "toggleTaskbarPin": {
             "calls": [

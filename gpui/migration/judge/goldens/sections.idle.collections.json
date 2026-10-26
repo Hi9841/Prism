@@ -99,7 +99,6 @@
               }
             ]
           },
-          "subtitle": "Application",
           "title": "Visual Studio Code",
           "toggleTaskbarPin": {
             "calls": [
@@ -181,7 +180,6 @@
               }
             ]
           },
-          "subtitle": "Application",
           "title": "Google Chrome",
           "toggleTaskbarPin": {
             "calls": [
@@ -329,7 +327,6 @@
               }
             ]
           },
-          "subtitle": "Application",
           "title": "Notepad",
           "toggleTaskbarPin": {
             "calls": [
@@ -528,7 +525,6 @@
               }
             ]
           },
-          "subtitle": "Application",
           "title": "Steam",
           "toggleTaskbarPin": {
             "calls": [
@@ -1002,7 +998,6 @@
                   }
                 ]
               },
-              "subtitle": "Application",
               "title": "Notepad",
               "toggleTaskbarPin": {
                 "calls": [
@@ -1083,7 +1078,6 @@
                   }
                 ]
               },
-              "subtitle": "Application",
               "title": "Build Tools",
               "toggleTaskbarPin": {
                 "calls": [
@@ -1164,7 +1158,6 @@
                   }
                 ]
               },
-              "subtitle": "Application",
               "title": "Task Manager",
               "toggleTaskbarPin": {
                 "calls": [
@@ -1245,7 +1238,6 @@
                   }
                 ]
               },
-              "subtitle": "Application",
               "title": "obsidian",
               "toggleTaskbarPin": {
                 "calls": [
@@ -1326,7 +1318,6 @@
                   }
                 ]
               },
-              "subtitle": "Application",
               "title": "App 10",
               "toggleTaskbarPin": {
                 "calls": [
@@ -1407,7 +1398,6 @@
                   }
                 ]
               },
-              "subtitle": "Application",
               "title": "App 2",
               "toggleTaskbarPin": {
                 "calls": [
@@ -1488,7 +1478,6 @@
                   }
                 ]
               },
-              "subtitle": "Application",
               "title": "Paint",
               "toggleTaskbarPin": {
                 "calls": [
@@ -1569,7 +1558,6 @@
                   }
                 ]
               },
-              "subtitle": "Application",
               "title": "Discord",
               "toggleTaskbarPin": {
                 "calls": [
@@ -1616,7 +1604,6 @@
                   }
                 ]
               },
-              "subtitle": "Application",
               "title": "Snipping Tool"
             }
           ],
@@ -1651,7 +1638,6 @@
               }
             ]
           },
-          "subtitle": "Application",
           "title": "Calculator"
         },
         {
@@ -1672,7 +1658,6 @@
               }
             ]
           },
-          "subtitle": "Application",
           "title": "Calendar"
         },
         {
@@ -1693,7 +1678,6 @@
               }
             ]
           },
-          "subtitle": "Application",
           "title": "Clock"
         },
         {
@@ -1747,7 +1731,6 @@
               }
             ]
           },
-          "subtitle": "Application",
           "title": "Company Portal"
         },
         {
@@ -1801,7 +1784,6 @@
               }
             ]
           },
-          "subtitle": "Application",
           "title": "Intranet"
         },
         {
@@ -1822,7 +1804,6 @@
               }
             ]
           },
-          "subtitle": "Application",
           "title": "Photos"
         },
         {
@@ -1853,7 +1834,6 @@
               }
             ]
           },
-          "subtitle": "Application",
           "title": "Relative Tool"
         },
         {
@@ -1917,7 +1897,6 @@
               }
             ]
           },
-          "subtitle": "Application",
           "title": "Share Tool",
           "toggleTaskbarPin": {
             "calls": [

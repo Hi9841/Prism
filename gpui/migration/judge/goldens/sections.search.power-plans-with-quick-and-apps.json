@@ -326,7 +326,6 @@
               }
             ]
           },
-          "subtitle": "Application",
           "title": "Paint",
           "toggleTaskbarPin": {
             "calls": [
@@ -364,7 +363,6 @@
               }
             ]
           },
-          "subtitle": "Application",
           "title": "Photos"
         },
         {
@@ -428,7 +426,6 @@
               }
             ]
           },
-          "subtitle": "Application",
           "title": "App 2",
           "toggleTaskbarPin": {
             "calls": [
@@ -509,7 +506,6 @@
               }
             ]
           },
-          "subtitle": "Application",
           "title": "App 10",
           "toggleTaskbarPin": {
             "calls": [
@@ -580,7 +576,6 @@
               }
             ]
           },
-          "subtitle": "Application",
           "title": "Spotify"
         },
         {
@@ -601,7 +596,6 @@
               }
             ]
           },
-          "subtitle": "Application",
           "title": "Snipping Tool"
         }
       ],

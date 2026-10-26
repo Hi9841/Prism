@@ -84,7 +84,6 @@
               }
             ]
           },
-          "subtitle": "Application",
           "title": "Visual Studio Code",
           "toggleTaskbarPin": {
             "calls": [
@@ -166,7 +165,6 @@
               }
             ]
           },
-          "subtitle": "Application",
           "title": "Google Chrome",
           "toggleTaskbarPin": {
             "calls": [
@@ -314,7 +312,6 @@
               }
             ]
           },
-          "subtitle": "Application",
           "title": "Notepad",
           "toggleTaskbarPin": {
             "calls": [
@@ -513,7 +510,6 @@
               }
             ]
           },
-          "subtitle": "Application",
           "title": "Steam",
           "toggleTaskbarPin": {
             "calls": [
@@ -610,7 +606,6 @@
               }
             ]
           },
-          "subtitle": "Application",
           "title": "App 2",
           "toggleTaskbarPin": {
             "calls": [
@@ -691,7 +686,6 @@
               }
             ]
           },
-          "subtitle": "Application",
           "title": "App 10",
           "toggleTaskbarPin": {
             "calls": [
@@ -772,7 +766,6 @@
               }
             ]
           },
-          "subtitle": "Application",
           "title": "Build Tools",
           "toggleTaskbarPin": {
             "calls": [
@@ -810,7 +803,6 @@
               }
             ]
           },
-          "subtitle": "Application",
           "title": "Calculator"
         },
         {
@@ -831,7 +823,6 @@
               }
             ]
           },
-          "subtitle": "Application",
           "title": "Calendar"
         },
         {
@@ -852,7 +843,6 @@
               }
             ]
           },
-          "subtitle": "Application",
           "title": "Clock"
         },
         {
@@ -906,7 +896,6 @@
               }
             ]
           },
-          "subtitle": "Application",
           "title": "Company Portal"
         },
         {
@@ -970,7 +959,6 @@
               }
             ]
           },
-          "subtitle": "Application",
           "title": "Discord",
           "toggleTaskbarPin": {
             "calls": [

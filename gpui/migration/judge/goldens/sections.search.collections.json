@@ -275,7 +275,6 @@
                   }
                 ]
               },
-              "subtitle": "Application",
               "title": "Notepad",
               "toggleTaskbarPin": {
                 "calls": [
@@ -356,7 +355,6 @@
                   }
                 ]
               },
-              "subtitle": "Application",
               "title": "obsidian",
               "toggleTaskbarPin": {
                 "calls": [
@@ -408,7 +406,6 @@
               }
             ]
           },
-          "subtitle": "Application",
           "title": "Clock"
         },
         {
@@ -429,7 +426,6 @@
               }
             ]
           },
-          "subtitle": "Application",
           "title": "Photos"
         },
         {
@@ -494,7 +490,6 @@
               }
             ]
           },
-          "subtitle": "Application",
           "title": "Google Chrome",
           "toggleTaskbarPin": {
             "calls": [

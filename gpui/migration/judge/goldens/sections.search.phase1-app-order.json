@@ -272,7 +272,6 @@
               }
             ]
           },
-          "subtitle": "Application",
           "title": "Task Manager",
           "toggleTaskbarPin": {
             "calls": [
@@ -353,7 +352,6 @@
               }
             ]
           },
-          "subtitle": "Application",
           "title": "Steam",
           "toggleTaskbarPin": {
             "calls": [
@@ -391,7 +389,6 @@
               }
             ]
           },
-          "subtitle": "Application",
           "title": "Terminal"
         },
         {
@@ -412,7 +409,6 @@
               }
             ]
           },
-          "subtitle": "Application",
           "title": "Snipping Tool"
         },
         {
@@ -476,7 +472,6 @@
               }
             ]
           },
-          "subtitle": "Application",
           "title": "Notepad",
           "toggleTaskbarPin": {
             "calls": [
@@ -557,7 +552,6 @@
               }
             ]
           },
-          "subtitle": "Application",
           "title": "Build Tools",
           "toggleTaskbarPin": {
             "calls": [

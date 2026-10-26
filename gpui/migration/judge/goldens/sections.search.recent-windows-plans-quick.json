@@ -421,7 +421,6 @@
               }
             ]
           },
-          "subtitle": "Application",
           "title": "Discord",
           "toggleTaskbarPin": {
             "calls": [
@@ -502,7 +501,6 @@
               }
             ]
           },
-          "subtitle": "Application",
           "title": "Build Tools",
           "toggleTaskbarPin": {
             "calls": [
@@ -584,7 +582,6 @@
               }
             ]
           },
-          "subtitle": "Application",
           "title": "Visual Studio Code",
           "toggleTaskbarPin": {
             "calls": [

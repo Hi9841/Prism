@@ -71,7 +71,6 @@
               }
             ]
           },
-          "subtitle": "Application",
           "title": "Google Chrome",
           "toggleTaskbarPin": {
             "calls": [

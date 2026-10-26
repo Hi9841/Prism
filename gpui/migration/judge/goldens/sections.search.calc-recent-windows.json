@@ -101,7 +101,6 @@
               }
             ]
           },
-          "subtitle": "Application",
           "title": "Notepad",
           "toggleTaskbarPin": {
             "calls": [

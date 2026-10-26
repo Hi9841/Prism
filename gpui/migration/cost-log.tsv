@@ -8,3 +8,4 @@ step	timestamp	wall_clock_min	tokens	subagents	model
 2-gate	2026-10-09T13:05Z	unknown	unknown	0	claude-opus-5-5
 3-subsystems-1-2	2026-10-10T00:20Z	unknown	unknown	0	claude-opus-5-5
 3-subsystems-0-3-6-parity	2026-10-10T18:00Z	unknown	unknown	0	claude-opus-5-5
+6-recheck-separate	2026-10-27T00:30Z	unknown	unknown	2	claude-opus-5-5 + claude-sonnet-5-5 (effort high)
