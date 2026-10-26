@@ -1,0 +1,8 @@
+{
+  "name": "prism-gpui-tools",
+  "private": true,
+  "description": "Build tools for the GPUI app. The Tauri CLI signs the installer (packaging/build-installer.ps1).",
+  "devDependencies": {
+    "@tauri-apps/cli": "2.11.4"
+  }
+}

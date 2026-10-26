@@ -1,17 +1,19 @@
-@C:/Users/hi/Desktop/skills/migration-kit/CLAUDE.md
+@C:/Users/hi/Desktop/skills/code-migration/CLAUDE.md
 
 # prism-gpui
 
 Port of the Prism launcher UI from React/Tauri WebView to pure GPUI (Rust).
-The process is the migration kit at `C:/Users/hi/Desktop/skills/migration-kit` (skill `code-migration`).
+The process is the migration kit at `C:/Users/hi/Desktop/skills/code-migration` (skill `code-migration`).
 
 ## Decisions (signed off 2026-10-09)
 
 - Posture: redesign of the UI host. The rulebook is a design document; the bakeoff does not apply.
 - UI stack: upstream GPUI (`gpui` crate), not GPUI Kit. Use the `build-gpui-apps` skill's direct-upstream path.
 - Model plan: Opus for the design document, amendments, and adversarial reviewers. Sonnet for implementers and fixers.
-- Old code (the executable spec): `C:/Users/hi/Desktop/Work/Prism`. Keep it runnable until Step 6 is done.
-- The Rust backend in `Prism/src-tauri` stays the backend. Do not fork it file by file.
+- Old code (the executable spec): the repo root (`src/`, `src-tauri/`). Keep it runnable; the judge runs against it.
+- The backend is `crates/prism-core` in this folder. The Tauri host in `../src-tauri` also uses it. Do not fork it.
+- This folder is self-contained (decided 2026-10-27): nothing here may depend on a path outside `gpui/`,
+  except `migration/judge`, `migration/parity`, and `scripts/extract-icons.mjs`, which read the original app on purpose.
 
 ## The judge
 

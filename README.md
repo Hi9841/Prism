@@ -132,8 +132,10 @@ Keep `%USERPROFILE%\.prism\signing\updater.key` and its password backed up secur
 
 ## Repository layout
 
-- `src/` - React interface, state, and frontend tests
-- `src-tauri/src/` - native Windows integration, indexing, and launcher behavior
+- `gpui/` - the GPUI app that ships, with its own Cargo workspace (see `gpui/README.md`)
+- `gpui/crates/prism-core/` - the backend: native Windows integration, indexing, and launcher behavior
+- `src/` - React interface, state, and frontend tests (the original app, which is the parity spec)
+- `src-tauri/src/` - the Tauri host for the original app, over `gpui/crates/prism-core`
 - `src-tauri/icons/` - application and Windows bundle icons
 - `src-tauri/nsis/` - installer artwork and lifecycle hooks
 - `scripts/` - version checks, asset generation, release publishing, and cleanup

@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/prism-app", "crates/prism-ui", "crates/prism-judge"]
+members = ["crates/prism-app", "crates/prism-core", "crates/prism-ui", "crates/prism-judge"]
 
 [workspace.package]
 edition = "2024"

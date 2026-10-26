@@ -15,7 +15,7 @@ gpui = ["dep:gpui", "dep:prism-core", "dep:futures", "dep:base64", "dep:unicode-
 
 [dependencies]
 gpui = { workspace = true, optional = true }
-prism-core = { path = "../../../crates/prism-core", optional = true }
+prism-core = { path = "../prism-core", optional = true }
 futures = { version = "0.3", optional = true }
 base64 = { version = "0.22", optional = true }
 unicode-segmentation = { version = "1", optional = true }
