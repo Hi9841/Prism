@@ -335,10 +335,12 @@ pub struct WheelScroll {
 const WHEEL_SCROLL_MS: f32 = 160.0;
 
 /* Chromium's thin Fluent scrollbar (`.scroll-thin`: `scrollbar-width: thin`,
- * measured on the Tauri app): an 11px gutter that is reserved only while the
- * content overflows, 12px arrow buttons at both ends, and a 6px rounded thumb
- * 2px from the right edge. The size follows the device scale, not CSS zoom. */
-const SCROLLBAR_GUTTER: f32 = 11.0;
+ * measured on the Tauri app): a 10px gutter that is reserved only while the
+ * content overflows (WebView2 155: `offsetWidth - clientWidth` is 10 at scale
+ * 1.0, `oploop/bench/webview_probe.py`), 12px arrow buttons at both ends, and a
+ * 6px rounded thumb 2px from the right edge. The size follows the device scale,
+ * not CSS zoom. */
+const SCROLLBAR_GUTTER: f32 = 10.0;
 const SCROLLBAR_BUTTON: f32 = 12.0;
 const SCROLLBAR_THUMB: f32 = 6.0;
 const SCROLLBAR_RIGHT_INSET: f32 = 2.0;

@@ -327,3 +327,7 @@ left of the original's (568 vs 570, centroid -1.9 px).
   port reserves 11 (`gfx.rs` `SCROLLBAR_GUTTER`, from an earlier WebView2 measurement).
 - Hypothesis: a 10 px gutter puts right-aligned content and divider ends where both engines put them;
   the thumb stays at 2 px from the right edge (now 2 px on both sides, as Chromium centers it).
+- Result: mean 9.835 -> 9.861 (excl. menus 9.845 -> 9.870), min 9.58. settings-scroll-2 +0.18, light-search
+  +0.12, search-files +0.11, keyboard-deep +0.10, idle-scrolled +0.07 (the right-aligned file paths: the
+  last 1 px of the I-001 path offset was this gutter); zoom-120 -0.01.
+- Decision: KEEP (`gfx.rs` `SCROLLBAR_GUTTER` 10; the real WebView2 value, not a harness value).
