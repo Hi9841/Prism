@@ -605,6 +605,24 @@ impl Style {
                     (false, false) => Bounds::from_corners(min, max),
                 };
 
+                // PRISM PATCH 30: a single-line ellipsis (`nowrap` + `text_overflow`, Tailwind's
+                // `truncate`) needs only the horizontal clip. With a tight line height the glyphs
+                // reach past the box (13.5 px text at leading 1.25: a 16.875 px box under 18 px of
+                // ascent + descent), and at some fractional row positions the clip cut the last
+                // pixel row of a descender. One line height of room above and below covers the ink;
+                // the parent's clip still applies.
+                let single_line_ellipsis = self.text.text_overflow.is_some()
+                    && self.text.white_space == Some(WhiteSpace::Nowrap);
+                let bounds = if single_line_ellipsis {
+                    let room = bounds.size.height;
+                    Bounds::from_corners(
+                        point(bounds.origin.x, bounds.origin.y - room),
+                        point(bounds.bottom_right().x, bounds.bottom_right().y + room),
+                    )
+                } else {
+                    bounds
+                };
+
                 Some(ContentMask { bounds })
             }
         }

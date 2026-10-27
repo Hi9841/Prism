@@ -165,3 +165,10 @@
     Parity mean 9.877 -> 9.902, 31 of 33 captures up (settings-scroll-1/2 +0.07), none down.
 28. (Reverted.) `D3D11_CREATE_DEVICE_PREVENT_INTERNAL_THREADING_OPTIMIZATIONS`: UI threads 116 -> 49 and
     -10 MiB, but the warm first frame of an open went from 12 to 17 ms in the E2E run (p 0.007).
+30. `src/style.rs` `Style::overflow_mask`: a single-line ellipsis element (`nowrap` with
+    `text_overflow`, Tailwind's `truncate`) clips only horizontally; vertically it keeps one line
+    height of room above and below (the parent's clip still applies). With a tight line height the
+    glyphs reach past the box (13.5 px text at leading 1.25: a 16.875 px box under 18 px of ascent +
+    descent), and since the glyph row rounds (patch 24) the clip cut the last pixel row of a "g" or
+    "y" when a row's top fell at a fractional y of 0.5-0.625 (the owner saw "grilling" cut). CSS
+    clips both axes, so Chromium can cut the same rows; this is a deliberate difference.

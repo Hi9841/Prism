@@ -496,3 +496,13 @@ Profile (temporary timers, removed): index load 6.98 s = SQL fetch with owned st
   4.38 s (-0.93 s, -17%), every B below every A; index 144.4 MiB both; the live reference checks passed in
   every run. prism-core 262 passed.
 - Decision: KEEP.
+
+### Defect 2026-10-27: descenders cut in result titles (patch 30)
+
+- Owner's report: in folder results the last pixel row of each "g" is missing ("grill-with-docs-ui",
+  "grilling"). The title is `truncate` (overflow hidden) at 13.5 px with leading 1.25: a 16.875 px box under
+  18 px of ascent + descent, baseline at top + 14. With the clip edge and the glyph row both rounded
+  (patches 11 and 24), a row top at a fractional y of 0.5-0.625 cuts the descender's last row; the owner's
+  screenshot fits only that range. Reproduced in parity mode at view zoom 80 ("grilling": the original
+  keeps row 241, the port lost row 242).
+- Fix: patch 30 (single-line ellipsis clips only horizontally). The zoom-80 capture now keeps the row.
