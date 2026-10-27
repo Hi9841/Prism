@@ -107,7 +107,7 @@ unsafe extern "system" fn collect_window(hwnd: HWND, detail: LPARAM) -> BOOL {
 
 fn describe(hwnd: HWND) -> Option<OpenWindow> {
     unsafe {
-        if hwnd.0.is_null() || !IsWindowVisible(hwnd).as_bool() {
+        if hwnd.0.is_null() || !IsWindowVisible(hwnd).as_bool() || crate::taskbar::cloaked(hwnd) {
             return None;
         }
         if !is_switch_target(hwnd) {
@@ -239,5 +239,19 @@ mod tests {
             process_name: "Discord".into(),
         }];
         assert!(search("", &windows, 4).is_empty());
+    }
+
+    /// A suspended Settings app keeps visible, cloaked windows. Alt+Tab skips
+    /// them, so Phase 1 must too. Proves nothing on a machine with none.
+    #[test]
+    fn cloaked_windows_are_not_listed() {
+        for window in list() {
+            let hwnd = HWND(window.hwnd as *mut std::ffi::c_void);
+            assert!(
+                !crate::taskbar::cloaked(hwnd),
+                "cloaked window listed: {}",
+                window.title
+            );
+        }
     }
 }

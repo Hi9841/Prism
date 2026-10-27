@@ -24,8 +24,9 @@ pub fn score_with_keywords(query: &str, title: &str, keywords: &[&str]) -> Optio
         let Some(score) = score_text(query, keyword) else {
             continue;
         };
-        let keyword_score = (score - 50).max(0);
-        if best.is_none_or(|current| keyword_score > current) {
+        // A weak fuzzy keyword hit that the penalty takes to zero is no match.
+        let keyword_score = score - 50;
+        if keyword_score > 0 && best.is_none_or(|current| keyword_score > current) {
             best = Some(keyword_score);
         }
     }
@@ -106,6 +107,16 @@ mod tests {
         let keyword = score_with_keywords("blue light", "Night Light", &["blue light"]).unwrap();
         assert!(title >= 800);
         assert!(keyword > 0);
+    }
+
+    #[test]
+    fn weak_fuzzy_keyword_hit_is_no_match() {
+        // A real Windows keyword of "Magnifier voice speed": "chrome" is a
+        // scattered subsequence of it (score 20).
+        let keyword = "change rate of magnifier's speech";
+        assert!(score_text("chrome", keyword).is_some_and(|score| score <= 50));
+        assert_eq!(score_with_keywords("chrome", "", &[keyword]), None);
+        assert_eq!(score_with_keywords("magnifier", "", &[keyword]), Some(759));
     }
 
     #[test]

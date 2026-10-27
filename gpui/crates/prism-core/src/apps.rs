@@ -2137,7 +2137,15 @@ unsafe fn known_folder(id: &GUID) -> Option<PathBuf> {
     }
 }
 
+/// The icon cache sits next to `apps.json`, in the host's data folder.
 fn icon_cache_dir() -> PathBuf {
+    icon_cache_dir_in(crate::host::app_data_dir().ok())
+}
+
+fn icon_cache_dir_in(app_data_dir: Option<PathBuf>) -> PathBuf {
+    if let Some(dir) = app_data_dir {
+        return dir.join("icons");
+    }
     unsafe {
         if let Some(appdata) = known_folder(&FOLDERID_RoamingAppData) {
             return appdata.join("app.prism.launcher").join("icons");
@@ -2761,6 +2769,13 @@ fn explorer_arg(arg: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn icon_cache_follows_the_host_data_folder() {
+        let data = PathBuf::from(r"D:\isolated\app.prism.launcher");
+        assert_eq!(icon_cache_dir_in(Some(data.clone())), data.join("icons"));
+        assert!(icon_cache_dir_in(None).ends_with(r"app.prism.launcher\icons"));
+    }
 
     #[test]
     fn elevated_targets_are_limited_to_apps_and_supported_scripts() {

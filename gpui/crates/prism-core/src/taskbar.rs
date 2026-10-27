@@ -344,7 +344,9 @@ fn has_area(hwnd: HWND) -> bool {
     }
 }
 
-fn cloaked(hwnd: HWND) -> bool {
+/// True when DWM hides the window: a suspended UWP app, or a window on another
+/// virtual desktop. `IsWindowVisible` still reports these windows as visible.
+pub(crate) fn cloaked(hwnd: HWND) -> bool {
     let mut value = 0u32;
     unsafe {
         DwmGetWindowAttribute(
