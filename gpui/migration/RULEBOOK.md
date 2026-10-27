@@ -162,6 +162,13 @@ another app, Esc cancels, a click works after the drag, and a release over the p
 
 ## Deviation log
 
+- 2026-10-27 (after release 1.0.11): the owner removed the original React/Tauri app from the repo. The
+  executable spec is now the judge's goldens (captured from the original, 277 scenarios) and this
+  rulebook. Removed with it: the parity harness (`migration/parity`), the judge's original-side tools
+  (`adapter.mjs`, `capture.mjs`, `mutate.mjs`), the migration's process files (depmap, inventory,
+  manifest, fragments, gap sweep, stress-test spike), `scripts/extract-icons.mjs`, and the Tauri paths of
+  the E2E bench. The judge runs against the port by default. Single-line ellipsis text now clips only
+  horizontally (vendored patch 30): Chromium clips descenders at some row positions; the port keeps them.
 - 2026-10-27 (OpLoop, second pass): text and layout as Blink does them, found with
   `oploop/parity/line_shift.py` (best offset per text line) and probes in Chromium and the real WebView2.
   (1) The half-leading floors to a whole pixel, not to 1/64 px (patch 24 corrects item (4) of 2026-10-10;

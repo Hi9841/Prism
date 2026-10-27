@@ -4,7 +4,7 @@
 # ///
 """Functional test of the real Prism build on this machine (host integration).
 
-It drives the owner's GPUI test build (%LOCALAPPDATA%\\PrismGpuiE2E\\gpui\\prism.exe)
+It drives the owner's Prism (the bench's owner launcher, see apps.py)
 with messages to its own window only (keys, characters, clicks; no global
 input), captures the window, and checks real effects: saved settings, window
 geometry, the registry, processes, files.
@@ -38,7 +38,8 @@ from PIL import Image
 import apps
 import winapi
 
-EXE = apps.E2E_DIR / "gpui" / "prism.exe"
+# The owner's Prism (the installed Prism, or a build the owner runs from E2E_DIR\gpui).
+EXE = apps.owner_launcher()
 DATA = apps.ROAMING / "app.prism.launcher"
 OUT_ROOT = apps.E2E_DIR / "functest"
 PINNED = apps.ROAMING / "Microsoft" / "Internet Explorer" / "Quick Launch" / "User Pinned" / "TaskBar"

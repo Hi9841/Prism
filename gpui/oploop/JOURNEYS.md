@@ -1,5 +1,9 @@
 # Journeys: Prism GPUI against the original (React/Tauri)
 
+> After release 1.0.11 the original React/Tauri app left the repo. The journeys stay the same; the bench now
+> compares GPUI builds (`bench.py --build NAME=EXE`, `compare.py`). The Tauri rows in `results/` are the last
+> measurements of the original. J5 (search rows against the original) has no reference any more.
+
 These journeys measure the real Prism launcher on this Windows machine.
 Each journey runs on two release builds of the same source tree:
 

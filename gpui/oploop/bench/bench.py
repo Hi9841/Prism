@@ -2,16 +2,17 @@
 # requires-python = ">=3.12"
 # dependencies = ["numpy", "pillow", "psutil"]
 # ///
-"""End-to-end bench for the real Prism: GPUI build against the Tauri build.
+"""End-to-end bench for the real Prism: one GPUI build, or an A/B of several.
 
     uv run gpui/oploop/bench/bench.py run [--j2-runs 20] [--j3-reps 20] [--blocks 2]
     uv run gpui/oploop/bench/bench.py j4 [--runs 3]
     uv run gpui/oploop/bench/bench.py restore
 
-`run` measures J2 (open) and J3 (type) in interleaved blocks
-(gpui, tauri, gpui, tauri, ...) and keeps the settled J3 frames for J5.
-`j4` measures resources. Raw data goes to gpui/oploop/results/raw/<stamp>/.
-`report.py` turns raw data into the results table. See JOURNEYS.md.
+`run` measures J2 (open) and J3 (type) in interleaved blocks (for example
+gpui-base, gpui, gpui-base, gpui with `--build gpui-base=<exe>`) and keeps the
+settled J3 frames. `j4` measures resources. Raw data goes to
+gpui/oploop/results/raw/<stamp>/. `compare.py` turns raw data into tables.
+See JOURNEYS.md.
 """
 
 from __future__ import annotations
@@ -311,17 +312,17 @@ def cmd_restore(_args) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest="cmd", required=True)
-    run = sub.add_parser("run", help="J2 + J3 (+ J5 frames), interleaved blocks")
+    run = sub.add_parser("run", help="J2 + J3, interleaved blocks")
     run.add_argument("--j2-runs", type=int, default=20, help="open runs per app (split over blocks)")
     run.add_argument("--j3-reps", type=int, default=20, help="reps per query per app (split over blocks)")
     run.add_argument("--blocks", type=int, default=2)
-    run.add_argument("--apps", nargs="+", default=["gpui", "tauri"])
+    run.add_argument("--apps", nargs="+", default=["gpui"])
     run.set_defaults(func=cmd_run)
     j4 = sub.add_parser("j4", help="resources: idle after start, then after open/type/close cycles")
     j4.add_argument("--runs", type=int, default=3)
     j4.add_argument("--idle", type=float, default=60)
     j4.add_argument("--cycles", type=int, default=20)
-    j4.add_argument("--apps", nargs="+", default=["gpui", "tauri"])
+    j4.add_argument("--apps", nargs="+", default=["gpui"])
     j4.set_defaults(func=cmd_j4)
     for command in (run, j4):
         command.add_argument("--build", action="append", default=[], metavar="NAME=EXE",

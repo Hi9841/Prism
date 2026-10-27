@@ -9,9 +9,10 @@ $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
 
 $repoRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
-$tauriConfigPath = Join-Path $repoRoot "src-tauri\tauri.conf.json"
-$tauri = Get-Content -LiteralPath $tauriConfigPath -Raw | ConvertFrom-Json
-$version = [string]$tauri.version
+$version = [regex]::Match(
+  (Get-Content -LiteralPath (Join-Path $repoRoot "Cargo.toml") -Raw),
+  '(?ms)^\[workspace\.package\].*?^version\s*=\s*"([^"]+)"'
+).Groups[1].Value
 
 if (-not $Tag) {
   $Tag = $version

@@ -1,10 +1,9 @@
 """Start, find, drive, and stop one Prism build, and guard the owner's setup.
 
-Only one Prism runs at a time: the installed Prism, the GPUI test build, or
-the Tauri test build. `Session` stops the installed Prism, runs one test
-build, and in every case (also after an error or Ctrl+C) stops the test
-build, starts the installed Prism again, and checks that prism.json did not
-change.
+Only one Prism runs at a time: the owner's Prism or one test build.
+`Session` stops the owner's Prism, runs one test build, and in every case
+(also after an error or Ctrl+C) stops the test build, starts the owner's
+Prism again, and checks that prism.json did not change.
 """
 
 from __future__ import annotations
@@ -35,14 +34,9 @@ HELPER_ARGS = ("--prism-start-restore-watchdog", "--prism-restore-start-menu", "
 REPO = Path(__file__).resolve().parents[3]
 BUILDS = {
     "gpui": REPO / "gpui" / "target" / "agent-e2e" / "release" / "prism.exe",
-    "tauri": REPO / "gpui" / "target" / "agent-e2e-tauri" / "release" / "prism.exe",
 }
-# Tauri's single-instance plugin: second launches send WM_COPYDATA with this
-# tag to the hidden "<identifier>-siw" window (tauri-plugin-single-instance 2.4).
-TAURI_SI_TITLE = "app.prism.launcher-siw"
-TAURI_SI_TAG = 1542
 GPUI_ACTIVATE_EVENT = "Local\\PrismGpuiActivate"
-PALETTE_CLASS = {"gpui": "Zed::Window", "tauri": "Tauri Window"}
+PALETTE_CLASS = "Zed::Window"
 
 
 def log(message: str) -> None:
@@ -223,11 +217,6 @@ def check_prism_json() -> bool:
     return False
 
 
-def family(kind: str) -> str:
-    """`gpui` or `tauri`: a build name such as `gpui-base` keeps its family's window rules."""
-    return "tauri" if kind.startswith("tauri") else "gpui"
-
-
 def register_build(name: str, path: Path) -> None:
     """An extra build to measure (`bench.py --build gpui-base=<exe>`). It deploys to its own folder."""
     if name == "gpui":
@@ -284,7 +273,7 @@ class TestApp:
     def find_palette(self, timeout: float = 20.0) -> int:
         deadline = time.time() + timeout
         while time.time() < deadline:
-            wins = [w for w in winapi.top_windows({self.pid}) if w.cls == PALETTE_CLASS[family(self.kind)]]
+            wins = [w for w in winapi.top_windows({self.pid}) if w.cls == PALETTE_CLASS]
             if wins:
                 self.palette = wins[0].hwnd
                 return self.palette
@@ -292,32 +281,14 @@ class TestApp:
         raise RuntimeError(f"{self.kind}: no palette window")
 
     def find_type_target(self) -> int:
-        """GPUI reads keys on the palette window. WebView2 reads them on the
-        Chromium render widget, a child window of another process."""
-        if family(self.kind) == "gpui":
-            self.type_target = self.palette
-            return self.type_target
-        for _ in range(100):
-            for child in winapi.child_windows(self.palette):
-                if child.cls == "Chrome_RenderWidgetHostHWND":
-                    self.type_target = child.hwnd
-                    return self.type_target
-            time.sleep(0.1)
-        raise RuntimeError("tauri: no Chrome_RenderWidgetHostHWND")
+        """GPUI reads keys on the palette window itself."""
+        self.type_target = self.palette
+        return self.type_target
 
     def activate(self) -> None:
         """The second-instance signal, sent the way a second launch sends it."""
-        if family(self.kind) == "gpui":
-            if not winapi.set_named_event(GPUI_ACTIVATE_EVENT):
-                raise RuntimeError("SetEvent(PrismGpuiActivate) failed")
-            return
-        si = [w for w in winapi.top_windows({self.pid}) if w.title == TAURI_SI_TITLE]
-        if not si:
-            raise RuntimeError("tauri: no single-instance window")
-        exe = str(self.exe)
-        payload = f"{self.exe.parent}|{exe}\0".encode()
-        if not winapi.send_copydata(si[0].hwnd, TAURI_SI_TAG, payload):
-            raise RuntimeError("tauri: WM_COPYDATA failed")
+        if not winapi.set_named_event(GPUI_ACTIVATE_EVENT):
+            raise RuntimeError("SetEvent(PrismGpuiActivate) failed")
 
     def escape(self) -> None:
         winapi.post_key(self.type_target, winapi.VK_ESCAPE)

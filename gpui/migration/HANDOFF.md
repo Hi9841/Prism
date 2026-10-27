@@ -2,6 +2,11 @@
 
 Paste this into a new session. Write in Simplified Technical English.
 
+> Update after release 1.0.11 (2026-10-27): the original React/Tauri app (`src/`, `src-tauri/`), the
+> parity harness, and the root `scripts/` left the repo. The release scripts are now
+> `gpui/packaging/check-version.ps1` and `gpui/packaging/publish-release.ps1` (the version comes from
+> `gpui/Cargo.toml`); the procedure is in the root `README.md`. Paths below to the original app are history.
+
 ## Owner rules (binding)
 
 - **No subagents.** Usage is limited. Do all work inline in one session.

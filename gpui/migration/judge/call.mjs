@@ -1,27 +1,25 @@
 // One adapter call: JSON on stdin, JSON on stdout. The judge never imports
-// either implementation.
+// the implementation.
 //
-// PRISM_ADAPTER_CMD selects the implementation under test (for example the
-// GPUI port's `prism-judge-adapter.exe`). Unset, the original TypeScript
-// adapter runs against PRISM_ROOT.
+// The implementation under test is the GPUI port's adapter
+// (`cargo build -p prism-judge`, then `target/debug/prism-judge.exe`).
+// PRISM_ADAPTER_CMD selects another adapter. The goldens were captured from
+// the original React/Tauri app, which left the repo after release 1.0.11.
 import { spawn } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
-export const prismRoot = process.env.PRISM_ROOT ?? path.resolve(here, "../../..");
+const defaultAdapter = path.resolve(here, "../../target/debug/prism-judge.exe");
 
 function command() {
-  const custom = process.env.PRISM_ADAPTER_CMD;
-  if (custom) return { file: custom, args: [] };
-  return { file: "bun", args: [path.join(here, "adapter.mjs")] };
+  return { file: process.env.PRISM_ADAPTER_CMD || defaultAdapter, args: [] };
 }
 
 export function runCall(call) {
   const { file, args } = command();
   return new Promise((resolve) => {
     const child = spawn(file, args, {
-      env: { ...process.env, PRISM_ROOT: prismRoot },
       stdio: ["pipe", "pipe", "pipe"],
     });
     let stdout = "";

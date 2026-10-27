@@ -20,9 +20,9 @@ Prism is a fast, keyboard-first command palette and Windows taskbar companion. U
 
 Download the latest `Prism_*_x64-setup.exe` from [GitHub Releases](https://github.com/Hi9841/Prism/releases/latest).
 
-Prism supports Windows 10 and Windows 11 on x64. It installs for the current user and does not require administrator access. If WebView2 is missing, the installer downloads the Microsoft bootstrapper automatically.
+Prism supports Windows 10 and Windows 11 on x64. It installs for the current user and does not require administrator access. It does not need WebView2.
 
-The installer does not have a Windows Authenticode signature, so SmartScreen can show a warning. Prism verifies in-app updates separately with Prism's committed Tauri updater public key.
+The installer does not have a Windows Authenticode signature, so SmartScreen can show a warning. Prism verifies in-app updates separately with Prism's committed updater public key (minisign).
 
 ## Using Prism
 
@@ -71,77 +71,76 @@ People installing Prism manually only need the `.exe`. The signature and manifes
 
 ## Development
 
+Prism is a native Rust app with a [GPUI](https://www.gpui.rs/) interface. All code is in `gpui/`, one Cargo workspace.
+
 Requirements:
 
 - Windows 10 or Windows 11 on x64
-- [Bun](https://bun.sh/) 1.3.14
 - Rust stable with the MSVC toolchain, Clippy, and rustfmt
 - Visual Studio Build Tools with the **Desktop development with C++** workload
+- [Bun](https://bun.sh/) 1.3.14 for the behavior judge and the installer signing tool
 
-Install dependencies and start the Tauri app:
+Build and run:
 
 ```powershell
-bun install --frozen-lockfile
-bun run tauri dev
+cd gpui
+cargo build -p prism-app        # target\debug\prism.exe
 ```
 
-In development the webview loads from `http://localhost:1420`, so the
-production CSP's `'self'` source covers the Vite dev server and its HMR
-websocket as well. Production builds never allow the localhost dev endpoints.
-
-Run the complete local validation suite:
+Run the checks:
 
 ```powershell
-bun run lint
-bun run test
-bun run build
-.\scripts\check-version.ps1
-cargo fmt --manifest-path src-tauri\Cargo.toml --all -- --check
-cargo clippy --manifest-path src-tauri\Cargo.toml --all-targets -- -D warnings
-cargo test --manifest-path src-tauri\Cargo.toml
+cd gpui
+cargo check --workspace --all-targets
+cargo test -p prism-core
+cargo build -p prism-judge
+bun migration/judge/judge.mjs   # 277 behavior scenarios against the port
 ```
 
 ## Build the installer
 
-Generate the installer artwork, load the updater signing key, and build the NSIS bundle:
-
 ```powershell
-.\scripts\generate-installer-assets.ps1
-$env:TAURI_SIGNING_PRIVATE_KEY = "$env:USERPROFILE\.prism\signing\updater.key"
-$env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = Get-Content -Raw "$env:USERPROFILE\.prism\signing\updater.key.password"
-bun run tauri build
+cd gpui
+bun install                     # the Tauri CLI, used only to sign the installer
+.\packaging\build-installer.ps1
 ```
 
-The installer and updater signature are written to `src-tauri\target\release\bundle\nsis\`.
+The script builds the release exe, the NSIS installer (`packaging\nsis`), and its updater signature with
+`%USERPROFILE%\.prism\signing\updater.key`. It writes them to `gpui\artifacts\`.
 
 ## Publish a release
 
-Keep the version identical in `package.json`, `src-tauri\Cargo.toml`, `src-tauri\tauri.conf.json`, and the Prism package entry in `src-tauri\Cargo.lock`. Add the signed installer, signature, and `Prism_<version>_release-notes.md` to `artifacts`, then publish from a matching tag:
+Keep the version identical in `gpui\Cargo.toml` (`[workspace.package]`), `gpui\crates\prism-core\Cargo.toml`,
+and `gpui\Cargo.lock` (`cargo update --workspace`). Add `Prism_<version>_release-notes.md` to `gpui\artifacts`,
+build the installer, then publish from a matching tag:
 
 ```powershell
-$version = (Get-Content -Raw src-tauri\tauri.conf.json | ConvertFrom-Json).version
-.\scripts\check-version.ps1 -ExpectedTag $version
-git tag $version
-git push origin $version
-.\scripts\publish-release.ps1 -Tag $version
+cd gpui
+.\packaging\check-version.ps1 -ExpectedTag <version>
+git tag -a <version> -m "Prism <version>"
+git push origin main <version>
+.\packaging\publish-release.ps1 -Tag <version>
 ```
 
-The publisher creates or repairs the GitHub Release and uploads all updater assets. It uses the Markdown file as the release body. Then it verifies the public updater endpoint and the installer size.
+The publisher creates or repairs the GitHub Release, uploads the installer, its signature, and `latest.json`, and
+uses the Markdown file as the release body. Then it verifies the public updater manifest and the installer.
 
-Keep `%USERPROFILE%\.prism\signing\updater.key` and its password backed up securely. Existing Prism installations reject updates signed by a replacement key. Only the public key belongs in the repository.
+Keep `%USERPROFILE%\.prism\signing\updater.key` and its password backed up securely. Existing Prism installations
+reject updates signed by a replacement key. Only the public key belongs in the repository.
 
 ## Repository layout
 
-- `gpui/` - the GPUI app that ships, with its own Cargo workspace (see `gpui/README.md`)
+- `gpui/crates/prism-app/` - the `prism.exe` shell: window, hotkey, tray, updater host
+- `gpui/crates/prism-ui/` - views and state
 - `gpui/crates/prism-core/` - the backend: native Windows integration, indexing, and launcher behavior
-- `src/` - React interface, state, and frontend tests (the original app, which is the parity spec)
-- `src-tauri/src/` - the Tauri host for the original app, over `gpui/crates/prism-core`
-- `src-tauri/icons/` - application and Windows bundle icons
-- `src-tauri/nsis/` - installer artwork and lifecycle hooks
-- `scripts/` - version checks, asset generation, release publishing, and cleanup
-- `artifacts/` - local installers, signatures, manifests, and release notes
+- `gpui/crates/prism-judge/` - the adapter that the behavior judge drives
+- `gpui/vendor/gpui/` - GPUI 0.2.2 with Prism's patches (`PRISM-PATCHES.md`)
+- `gpui/packaging/` - the installer script, the version check, and the release publisher
+- `gpui/migration/` - the behavior judge and the migration records (design rulebook, handoff)
+- `gpui/oploop/` - the performance ledger, benchmarks, and the functional test of the real app
 
-Generated directories such as `dist/`, `src-tauri/gen/`, and `src-tauri/target/` are disposable. Remove them with `bun run clean`.
+Prism 1.0.0 to 1.0.11 replaced the original React/Tauri app, which was the behavior spec of the port. That app
+left the repository after release 1.0.11; its history stays in git.
 
 ## License
 

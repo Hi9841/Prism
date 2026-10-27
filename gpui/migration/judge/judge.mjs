@@ -1,7 +1,7 @@
 // Parity judge. Talks only to an adapter process. Does not import Prism.
 // Literal scenarios (scenarios.mjs) carry their expected values; golden
-// scenarios (golden-scenarios.mjs) compare against goldens/ captured from the
-// original app by capture.mjs.
+// scenarios (golden-scenarios.mjs) compare against goldens/, captured from the
+// original React/Tauri app (removed after release 1.0.11; the goldens stay).
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";

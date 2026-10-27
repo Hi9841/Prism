@@ -1,6 +1,6 @@
 # /// script
 # requires-python = ">=3.12"
-# dependencies = ["numpy", "pillow", "psutil"]
+# dependencies = []
 # ///
 """Compares any builds of one bench run (`bench.py run --apps a b c`).
 
@@ -9,17 +9,67 @@
 For each pair (the first app against each other app) it prints J2 (warm and
 first open) and J3 (query echo, rows done, settled; per query and over all
 queries) with median, p95, n and a rank-sum p value, and, with `--j4`, the
-resource samples. `report.py` stays the two-app report with the J5 compare.
+resource samples.
 """
 
 from __future__ import annotations
 
 import json
+import math
 import statistics
 import sys
 from pathlib import Path
 
-from report import rank_sum_p, rows_done
+
+
+def rank_sum_p(a: list[float], b: list[float]) -> float:
+    """Two-sided Mann-Whitney U p-value (normal approximation, tie-corrected)."""
+    a = [x for x in a if x is not None]
+    b = [x for x in b if x is not None]
+    if len(a) < 3 or len(b) < 3:
+        return float("nan")
+    data = sorted([(x, 0) for x in a] + [(x, 1) for x in b])
+    ranks = [0.0] * len(data)
+    i = 0
+    ties = 0.0
+    while i < len(data):
+        j = i
+        while j + 1 < len(data) and data[j + 1][0] == data[i][0]:
+            j += 1
+        for k in range(i, j + 1):
+            ranks[k] = (i + j) / 2 + 1
+        t = j - i + 1
+        ties += t**3 - t
+        i = j + 1
+    n1, n2 = len(a), len(b)
+    r1 = sum(r for r, (_, g) in zip(ranks, data) if g == 0)
+    u = r1 - n1 * (n1 + 1) / 2
+    mean = n1 * n2 / 2
+    n = n1 + n2
+    sd = math.sqrt(n1 * n2 / 12 * ((n + 1) - ties / (n * (n - 1))))
+    if sd == 0:
+        return 1.0
+    z = (abs(u - mean) - 0.5) / sd
+    return math.erfc(z / math.sqrt(2))
+
+
+QUIET_GAP_MS = 300
+
+
+def rows_done(row: dict) -> float | None:
+    """The last change before the first quiet gap of QUIET_GAP_MS.
+
+    A late change after a gap (for example a thumbnail that paints again
+    seconds later) moves `settled_ms`, but not this time.
+    """
+    done = row.get("first_ms")
+    if done is None:
+        return None
+    for t, *_ in row.get("changes", []):
+        if t - done > QUIET_GAP_MS:
+            break
+        done = t
+    return done
 
 
 def summary(values: list[float]) -> str:

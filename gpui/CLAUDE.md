@@ -2,28 +2,28 @@
 
 # prism-gpui
 
-Port of the Prism launcher UI from React/Tauri WebView to pure GPUI (Rust).
-The process is the migration kit at `C:/Users/hi/Desktop/skills/code-migration` (skill `code-migration`).
+The Prism launcher: a native Rust app with a GPUI interface. It replaced the original React/Tauri app
+(releases 1.0.0 to 1.0.11). The port followed the migration kit at
+`C:/Users/hi/Desktop/skills/code-migration` (skill `code-migration`).
 
-## Decisions (signed off 2026-10-09)
+## Decisions
 
-- Posture: redesign of the UI host. The rulebook is a design document; the bakeoff does not apply.
-- UI stack: upstream GPUI (`gpui` crate), not GPUI Kit. Use the `build-gpui-apps` skill's direct-upstream path.
-- Model plan: Opus for the design document, amendments, and adversarial reviewers. Sonnet for implementers and fixers.
-- Old code (the executable spec): the repo root (`src/`, `src-tauri/`). Keep it runnable; the judge runs against it.
-- The backend is `crates/prism-core` in this folder. The Tauri host in `../src-tauri` also uses it. Do not fork it.
-- This folder is self-contained (decided 2026-10-27): nothing here may depend on a path outside `gpui/`,
-  except `migration/judge`, `migration/parity`, and `scripts/extract-icons.mjs`, which read the original app on purpose.
+- UI stack: upstream GPUI (`gpui` crate, vendored in `vendor/gpui` with `PRISM-PATCHES.md`), not GPUI Kit.
+  Use the `build-gpui-apps` skill's direct-upstream path.
+- The original React/Tauri app (the port's behavior spec) left the repo after release 1.0.11 (decided
+  2026-10-27). Its behavior lives on in the judge's goldens (`migration/judge/goldens`) and in the design
+  rulebook (`migration/RULEBOOK.md`, with its deviation log). Git history keeps the app.
+- This folder holds the whole product: nothing here may depend on a path outside `gpui/`.
 
 ## The judge
 
-`migration/judge` answers "is the port done?". It talks to an implementation only through an adapter
-process (JSON on stdin, JSON on stdout).
+`migration/judge` checks the port's behavior against goldens captured from the original. It talks to the
+implementation only through an adapter process (JSON on stdin, JSON on stdout).
 
-- `bun migration/judge/judge.mjs` runs every scenario against the original (`PRISM_ROOT`, default: the repo root, which holds the original React/Tauri app).
-- `PRISM_ADAPTER_CMD=<path to the port's adapter exe> bun migration/judge/judge.mjs` runs it against the port.
-- `bun migration/judge/capture.mjs` re-records `goldens/` from the original only. Never capture from the port.
-- `bun migration/judge/mutate.mjs` proves the judge catches breakage in copies of the original.
+- `cargo build -p prism-judge`, then `bun migration/judge/judge.mjs` runs every scenario against the port
+  (`target/debug/prism-judge.exe`; `PRISM_ADAPTER_CMD` selects another adapter).
+- The goldens cannot be captured again: the original is gone. A behavior change on purpose updates the
+  golden by hand and gets a line in the RULEBOOK deviation log.
 
 ## Environment
 
