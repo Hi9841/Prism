@@ -483,3 +483,16 @@ Profile (temporary timers, removed): index load 6.98 s = SQL fetch with owned st
   top 10 equals the exhaustive reference for all 12 queries in every run. prism-core 262 passed (7 new
   tests; a cut-off mutation fails one).
 - Decision: KEEP.
+
+### P-005 The index load reads each path in place (no copy)
+
+- Profile (temporary timers on HEAD after P-004): load 5.65 s = SQL fetch 3.37 s (60%) + push 1.38 s +
+  totals query 0.42 s. The fetch copied every row's `display_path` into a new `String` (644 MB of path text
+  on the owner's catalog), only for three numbers: the location penalty, the depth and the length.
+- Hypothesis: `NameRow` carries the three numbers, computed from the borrowed SQLite text in the row
+  callback (also outside the index's write lock); one allocation and about 640 MB of copying go away. The
+  load should drop by about 0.5-1 s, with the same index.
+- Result (interleaved test binaries): load A 4.83/5.36/5.31/5.29 s, B 4.15/4.39/4.41/4.36 s: median 5.30 ->
+  4.38 s (-0.93 s, -17%), every B below every A; index 144.4 MiB both; the live reference checks passed in
+  every run. prism-core 262 passed.
+- Decision: KEEP.

@@ -1721,12 +1721,21 @@ impl Database {
             .map_err(|e| e.to_string())?;
         let rows = stmt
             .query_map(params![after_id, limit as i64], |row| {
-                Ok(NameRow {
-                    id: row.get(0)?,
-                    lower_name: row.get(1)?,
-                    display_path: row.get(2)?,
-                    is_directory: row.get::<_, i32>(3)? != 0,
-                })
+                // The path is read in place (no copy): the index keeps only
+                // numbers computed from it.
+                let display_path = row.get_ref(2)?.as_str().map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        2,
+                        rusqlite::types::Type::Text,
+                        Box::new(error),
+                    )
+                })?;
+                Ok(NameRow::new(
+                    row.get(0)?,
+                    row.get(1)?,
+                    display_path,
+                    row.get::<_, i32>(3)? != 0,
+                ))
             })
             .map_err(|e| e.to_string())?;
         rows.collect::<Result<Vec<_>, _>>()

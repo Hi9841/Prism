@@ -135,13 +135,34 @@ pub struct CandidateEntry {
     pub extension: Option<String>,
 }
 
-/// One fallback-catalog row as the in-memory name index loads it.
+/// One fallback-catalog row as the in-memory name index loads it. The index
+/// needs three numbers from the row's path, not the path, so `NameRow::new`
+/// computes them while SQLite still holds the text: the paths of a large
+/// catalog (over 600 MB for 5.8 M rows) are never copied.
 #[derive(Clone, Debug)]
 pub struct NameRow {
     pub id: i64,
     pub lower_name: String,
-    pub display_path: String,
+    /// `search::path_penalty` of the row's path and name.
+    pub penalty: i32,
+    /// `search::path_depth` of the row's path.
+    pub depth: usize,
+    /// Byte length of the row's path.
+    pub path_len: usize,
     pub is_directory: bool,
+}
+
+impl NameRow {
+    pub fn new(id: i64, lower_name: String, display_path: &str, is_directory: bool) -> Self {
+        Self {
+            id,
+            penalty: super::search::path_penalty(display_path, &lower_name),
+            depth: super::search::path_depth(display_path),
+            path_len: display_path.len(),
+            lower_name,
+            is_directory,
+        }
+    }
 }
 
 /// Current state of a fallback row that the name index selected.

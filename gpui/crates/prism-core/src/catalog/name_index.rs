@@ -674,7 +674,7 @@ impl Names {
             .ok()
             .filter(|&entry| entry != NO_ENTRY)
             .ok_or_else(|| "name index exceeds u32 rows".to_string())?;
-        let penalty = path_penalty(&row.display_path, &row.lower_name);
+        let penalty = row.penalty;
         debug_assert_eq!(
             penalty % PENALTY_STEP,
             0,
@@ -684,8 +684,8 @@ impl Names {
         if row.is_directory {
             flags |= FLAG_DIRECTORY;
         }
-        let depth = path_depth(&row.display_path).min(0xffff) as u32;
-        let length = row.display_path.len().min(0xffff) as u32;
+        let depth = row.depth.min(0xffff) as u32;
+        let length = row.path_len.min(0xffff) as u32;
         let name = self.intern(&row.lower_name, hash)? as usize;
         self.ids.push(id);
         self.flags.push(flags);
@@ -1665,11 +1665,13 @@ mod tests {
         let mut names = Names::default();
         let distinct = MIN_TABLE_SLOTS * 3;
         let rows = (0..distinct * 3)
-            .map(|n| NameRow {
-                id: n as i64 + 1,
-                lower_name: format!("file-{}.txt", n % distinct),
-                display_path: format!(r"C:\d{}\file-{}.txt", n / distinct, n % distinct),
-                is_directory: false,
+            .map(|n| {
+                NameRow::new(
+                    n as i64 + 1,
+                    format!("file-{}.txt", n % distinct),
+                    &format!(r"C:\d{}\file-{}.txt", n / distinct, n % distinct),
+                    false,
+                )
             })
             .collect::<Vec<_>>();
         // Two calls: a name of the first call repeats in the second.
@@ -1715,12 +1717,8 @@ mod tests {
                 } else {
                     word.to_string()
                 };
-                NameRow {
-                    id: n as i64 + 1,
-                    display_path: format!(r"{}\{}\{name}", folders[n % folders.len()], n % 11),
-                    lower_name: name,
-                    is_directory: n % 9 == 0,
-                }
+                let path = format!(r"{}\{}\{name}", folders[n % folders.len()], n % 11);
+                NameRow::new(n as i64 + 1, name, &path, n % 9 == 0)
             })
             .collect::<Vec<_>>();
         names.push_rows(&rows).unwrap();
