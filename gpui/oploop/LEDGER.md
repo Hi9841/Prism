@@ -17,7 +17,7 @@
 | Judge vs port | `PRISM_ADAPTER_CMD=target/debug/prism-judge.exe bun migration/judge/judge.mjs` | 244/277 (same 33, identical output) | 277/277 |
 | Judge sensitivity | `bun migration/judge/mutate.mjs` | 24/26 (2 patterns did not match CRLF) | 26/26 |
 | Typecheck | `cargo check --workspace --all-targets` | pass | pass |
-| Backend tests | `cargo test -p prism-core` | 246 tests (HANDOFF) | 246 passed, 0 failed, 7 ignored |
+| Backend tests | removed 2026-10-27 (owner: no unit tests) | 246 tests (HANDOFF) | n/a |
 | Lint (JS) | `bunx oxlint <changed files>` | n/a | 0 problems |
 
 ## Journeys

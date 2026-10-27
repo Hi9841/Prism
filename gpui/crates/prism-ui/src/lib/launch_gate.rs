@@ -51,31 +51,3 @@ impl Drop for LaunchTicket {
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn admits_one_launch_until_it_ends() {
-        let gate = LaunchGate::default();
-        let first = gate.try_begin().expect("first launch admitted");
-        for _ in 0..29 {
-            assert!(gate.try_begin().is_none(), "a repeat press while the launch runs is ignored");
-        }
-        drop(first);
-        assert!(gate.try_begin().is_some(), "the next launch is admitted after the first ends");
-    }
-
-    #[test]
-    fn reset_admits_again_and_a_stale_ticket_keeps_the_new_launch() {
-        let gate = LaunchGate::default();
-        let stale = gate.try_begin().expect("first launch admitted");
-        gate.reset();
-        let fresh = gate.try_begin().expect("a reopen admits a new launch");
-        drop(stale);
-        assert!(gate.try_begin().is_none(), "the stale ticket did not release the new launch");
-        drop(fresh);
-        assert!(gate.try_begin().is_some());
-    }
-}

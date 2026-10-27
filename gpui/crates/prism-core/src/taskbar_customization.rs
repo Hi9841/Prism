@@ -557,36 +557,3 @@ impl Drop for RegistryKey {
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn taskbar_preference_codes_have_stable_fallbacks() {
-        assert_eq!(thickness_name(0, 1), "compact");
-        assert_eq!(thickness_name(1, 0), "compact");
-        assert_eq!(thickness_name(1, 1), "default");
-        assert_eq!(thickness_name(1, 2), "adaptive");
-        assert_eq!(combine_name(0), "always");
-        assert_eq!(combine_name(1), "whenFull");
-        assert_eq!(combine_name(2), "never");
-        assert_eq!(combine_name(99), "always");
-    }
-
-    #[test]
-    fn online_presets_are_valid_transparent_pngs() {
-        for bytes in [GEM_ICON, DIAMOND_ICON] {
-            let icon = decode_png(bytes).unwrap();
-            assert_eq!(icon.dimensions(), (96, 96));
-            assert!(icon.pixels().any(|pixel| pixel[3] == 0));
-            assert!(icon.pixels().any(|pixel| pixel[3] > 0));
-        }
-    }
-
-    #[test]
-    fn icon_input_rejects_empty_and_non_png_data() {
-        assert!(prepare_icon(&[]).is_err());
-        assert!(prepare_icon(b"not-png").is_err());
-    }
-}

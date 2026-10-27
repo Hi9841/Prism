@@ -92,7 +92,6 @@ Run the checks:
 ```powershell
 cd gpui
 cargo check --workspace --all-targets
-cargo test -p prism-core
 cargo build -p prism-judge
 bun migration/judge/judge.mjs   # 277 behavior scenarios against the port
 ```

@@ -59,13 +59,3 @@ fn icon_path() -> Result<PathBuf, String> {
         .map(|path| path.join(ICON_FILE_NAME))
         .map_err(|error| error.to_string())
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn icon_file_header_is_stable() {
-        assert_eq!(ICON_MAGIC, b"PRISICON1");
-    }
-}

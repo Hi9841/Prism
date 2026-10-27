@@ -89,38 +89,3 @@ fn fuzzy_subsequence(q: &str, t: &str) -> Option<i32> {
 fn is_word_separator(ch: char) -> bool {
     matches!(ch, ' ' | '\t' | '-' | '_' | '.' | '/' | '\\')
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn exact_title_outranks_prefix() {
-        let exact = score_text("display", "Display").unwrap();
-        let prefix = score_text("dis", "Display").unwrap();
-        assert!(exact > prefix);
-    }
-
-    #[test]
-    fn keyword_match_is_weaker_than_title() {
-        let title = score_with_keywords("night", "Night Light", &["blue light"]).unwrap();
-        let keyword = score_with_keywords("blue light", "Night Light", &["blue light"]).unwrap();
-        assert!(title >= 800);
-        assert!(keyword > 0);
-    }
-
-    #[test]
-    fn weak_fuzzy_keyword_hit_is_no_match() {
-        // A real Windows keyword of "Magnifier voice speed": "chrome" is a
-        // scattered subsequence of it (score 20).
-        let keyword = "change rate of magnifier's speech";
-        assert!(score_text("chrome", keyword).is_some_and(|score| score <= 50));
-        assert_eq!(score_with_keywords("chrome", "", &[keyword]), None);
-        assert_eq!(score_with_keywords("magnifier", "", &[keyword]), Some(759));
-    }
-
-    #[test]
-    fn rejects_unrelated_strings() {
-        assert_eq!(score_text("zzzz", "Night Light"), None);
-    }
-}

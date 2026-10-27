@@ -192,23 +192,3 @@ impl NtfsBackend {
         })
     }
 }
-
-#[cfg(test)]
-mod integration_tests {
-    use super::*;
-
-    #[test]
-    #[ignore = "requires direct access to a local fixed NTFS volume"]
-    fn queries_native_ntfs_journal() {
-        let volume = crate::catalog::volume::discover_volumes()
-            .into_iter()
-            .find(|volume| {
-                crate::catalog::backend::select_backend(volume, true)
-                    == crate::catalog::backend::BackendKind::Ntfs
-            })
-            .expect("local fixed NTFS volume");
-        let native = NtfsVolume::open(&volume).expect("open raw NTFS volume");
-        let journal = native.query_journal().expect("query USN journal");
-        assert!(journal.next_usn >= journal.first_usn);
-    }
-}
