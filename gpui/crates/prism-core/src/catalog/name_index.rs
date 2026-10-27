@@ -3,10 +3,15 @@
 //! The SQL candidate stages each stop at a `LIMIT` before ranking. On a
 //! multi-million-row catalog that costs tens of milliseconds per keystroke
 //! (about 200 ms for a common exact name such as `package.json`), and the best
-//! match can fall outside the truncated pool. This index keeps every lowercase
-//! name in one contiguous buffer, applies the same admission rules as the SQL
-//! stages and the same scorer, scans all rows in parallel, and asks SQLite only
-//! for the `display_path` of the top rows.
+//! match can fall outside the truncated pool. This index keeps every distinct
+//! lowercase name once in one contiguous buffer, applies the same admission
+//! rules as the SQL stages and the same scorer, scans all names in parallel,
+//! expands each match to its rows, and asks SQLite only for the
+//! `display_path` of the top rows.
+//!
+//! Most names repeat (`index.js`, `readme.md`, `.gitignore`): on a large
+//! catalog only about one row in five has a name no other row has. One copy
+//! per name makes the index smaller and the scan shorter by that factor.
 //!
 //! Sync invariant: a row's `lower_name` never changes for a given id (upserts
 //! conflict on the same `normalized_path`; renames delete and insert), and new
@@ -57,6 +62,14 @@ const PENALTY_STEP: i32 = 50;
 const FLAG_DIRECTORY: u16 = 1 << 15;
 const FLAG_DELETED: u16 = 1 << 14;
 const FLAG_PENALTY_MASK: u16 = 0xff;
+/// End of a row chain (see `Names::heads`).
+const NO_ENTRY: u32 = u32::MAX;
+/// The name table grows when more than this share of its slots is in use.
+/// Linear probing stays short below it, and the table stays at four bytes a
+/// slot.
+const TABLE_LOAD_NUMERATOR: usize = 5;
+const TABLE_LOAD_DENOMINATOR: usize = 8;
+const MIN_TABLE_SLOTS: usize = 1 << 10;
 
 /// Typo pass (FFF's frizbee matcher), for queries with this many letters or
 /// digits. It runs only when no name is a strong match (see
@@ -90,20 +103,34 @@ pub struct NameIndex {
     seen_deleted: AtomicU64,
 }
 
+/// Two levels: distinct names (indexed by a name number) and rows (indexed by
+/// an entry number, in id order). A `Hit` carries both numbers, so no
+/// per-row name number is stored.
 #[derive(Default)]
 struct Names {
-    /// All lowercase names, back to back.
+    /// Each distinct lowercase name once, back to back.
     text: String,
-    /// End offset of each name in `text`.
+    /// End offset of each distinct name in `text`.
     ends: Vec<u32>,
-    ids: Vec<u32>,
-    /// Characters present in each name (see `char_mask`).
+    /// Characters present in each distinct name (see `char_mask`).
     masks: Vec<u32>,
+    /// Newest row of each distinct name. The older rows with that name
+    /// follow `next`: a push links a row in front, so appends after the load
+    /// cost no more than rows of the load.
+    heads: Vec<u32>,
+    /// Open-addressing hash table over the distinct names: name number + 1,
+    /// or 0 for a free slot. Its length is a power of two. Probes compare the
+    /// name text, so no hash is stored.
+    table: Vec<u32>,
+    /// Row id of each entry.
+    ids: Vec<u32>,
     /// Directory flag, deleted flag, and location penalty / `PENALTY_STEP`.
     flags: Vec<u16>,
     /// Path depth (high 16 bits) and `display_path` byte length (low 16
     /// bits): the final sort's tie breaks after the name.
     places: Vec<u32>,
+    /// Next older entry with the same name, or `NO_ENTRY`.
+    next: Vec<u32>,
     max_id: i64,
     deleted: usize,
     /// Bumped by every reset. A search that read indexes or `max_id` from an
@@ -129,7 +156,10 @@ pub struct NameQuery<'a> {
 #[derive(Clone, Copy)]
 struct Hit {
     score: i32,
+    /// Entry number.
     index: u32,
+    /// Name number.
+    name: u32,
     /// Found by the typo pass: `score` is its final rank.
     typo: bool,
 }
@@ -339,7 +369,9 @@ impl NameIndex {
             self.seen_deleted.store(db.rows_deleted(), AtomicOrdering::Release);
             // Size the buffers once. Growing them batch by batch copied the
             // name text (over 100 MB on a large catalog) about 30 times, with
-            // the old and new copies alive together at each step.
+            // the old and new copies alive together at each step. The text
+            // total counts repeated names too, so `shrink_names` gives the
+            // surplus back when the load ends.
             // A retry after a failed load keeps the rows it already has.
             if let Ok((rows, bytes)) = db.file_name_totals() {
                 let mut names = self.names.write().unwrap_or_else(|e| e.into_inner());
@@ -348,6 +380,12 @@ impl NameIndex {
             }
         }
         while !self.catch_up(db, LOAD_BATCH, usize::MAX)? {}
+        if from_empty {
+            self.names
+                .write()
+                .unwrap_or_else(|e| e.into_inner())
+                .shrink_names();
+        }
         self.behind.store(false, AtomicOrdering::Release);
         self.loaded.store(true, AtomicOrdering::Release);
         Ok(from_empty)
@@ -379,9 +417,7 @@ impl NameIndex {
                 rows.len(),
                 rows.iter().map(|row| row.lower_name.len()).sum(),
             );
-            for row in rows {
-                names.push(row)?;
-            }
+            names.push_rows(rows)?;
         }
         Ok(caught_up)
     }
@@ -470,11 +506,12 @@ impl NameIndex {
                 {
                     let mut closeness = Closeness::new(query);
                     for hit in &mut hits {
-                        if let Some(rank) = names.close_rank(hit.index as usize, &mut closeness) {
+                        if let Some(rank) = names.close_name_rank(hit.name as usize, &mut closeness)
+                        {
                             *hit = Hit {
-                                score: rank,
-                                index: hit.index,
+                                score: names.close_entry_rank(rank, hit.index as usize),
                                 typo: true,
+                                ..*hit
                             };
                         }
                     }
@@ -550,8 +587,9 @@ impl NameIndex {
 
 impl Names {
     /// Grows every buffer with 1/8 headroom instead of doubling: the name
-    /// buffer is over 100 MB on a large catalog, so doubling would leave up to
-    /// half of it as dead capacity.
+    /// buffer is tens of MB on a large catalog, so doubling would leave up to
+    /// half of it as dead capacity. `rows` and `bytes` are upper bounds: a
+    /// row whose name is already present adds no name.
     fn reserve(&mut self, rows: usize, bytes: usize) {
         fn grow<T>(buffer: &mut Vec<T>, extra: usize) {
             if buffer.capacity() - buffer.len() < extra {
@@ -562,16 +600,80 @@ impl Names {
             self.text.reserve_exact(bytes.max(self.text.len() / 8));
         }
         grow(&mut self.ends, rows);
-        grow(&mut self.ids, rows);
         grow(&mut self.masks, rows);
+        grow(&mut self.heads, rows);
+        grow(&mut self.ids, rows);
         grow(&mut self.flags, rows);
         grow(&mut self.places, rows);
+        grow(&mut self.next, rows);
     }
 
-    fn push(&mut self, row: &NameRow) -> Result<(), String> {
+    /// Gives back the name capacity that `reserve` took for repeated names.
+    /// A full load reserves the text of every row; the distinct names need
+    /// about a third of it.
+    fn shrink_names(&mut self) {
+        self.text.shrink_to_fit();
+        self.ends.shrink_to_fit();
+        self.masks.shrink_to_fit();
+        self.heads.shrink_to_fit();
+    }
+
+    /// Pushes `rows` in order. Most rows repeat a name whose table slot, end
+    /// offset, row chain head, and text are cold in the cache: each is
+    /// prefetched some rows ahead, so the cache misses of several rows
+    /// overlap. The prefetches read the first slot only; `intern` decides.
+    fn push_rows(&mut self, rows: &[NameRow]) -> Result<(), String> {
+        const AHEAD: usize = 16;
+        let hashes = rows
+            .iter()
+            .map(|row| name_hash(&row.lower_name))
+            .collect::<Vec<_>>();
+        for (index, row) in rows.iter().enumerate() {
+            if let Some(&hash) = hashes.get(index + AHEAD) {
+                if let Some(slot) = self
+                    .table
+                    .get(slot_of(hash, self.table.len().wrapping_sub(1)))
+                {
+                    prefetch(slot);
+                }
+            }
+            if let Some(&hash) = hashes.get(index + AHEAD / 2) {
+                if let Some(name) = self.first_candidate(hash) {
+                    prefetch(&self.ends[name.saturating_sub(1)]);
+                    prefetch(&self.heads[name]);
+                }
+            }
+            if let Some(&hash) = hashes.get(index + AHEAD / 4) {
+                if let Some(name) = self.first_candidate(hash) {
+                    let start = if name == 0 {
+                        0
+                    } else {
+                        self.ends[name - 1] as usize
+                    };
+                    if let Some(byte) = self.text.as_bytes().get(start) {
+                        prefetch(byte);
+                    }
+                }
+            }
+            self.push(row, hashes[index])?;
+        }
+        Ok(())
+    }
+
+    /// The name in the first slot for `hash`, if any.
+    fn first_candidate(&self, hash: u64) -> Option<usize> {
+        let stored = *self
+            .table
+            .get(slot_of(hash, self.table.len().wrapping_sub(1)))?;
+        (stored != 0).then(|| stored as usize - 1)
+    }
+
+    fn push(&mut self, row: &NameRow, hash: u64) -> Result<(), String> {
         let id = u32::try_from(row.id).map_err(|_| format!("row id {} exceeds u32", row.id))?;
-        let end = u32::try_from(self.text.len() + row.lower_name.len())
-            .map_err(|_| "name index exceeds 4 GiB".to_string())?;
+        let entry = u32::try_from(self.ids.len())
+            .ok()
+            .filter(|&entry| entry != NO_ENTRY)
+            .ok_or_else(|| "name index exceeds u32 rows".to_string())?;
         let penalty = path_penalty(&row.display_path, &row.lower_name);
         debug_assert_eq!(
             penalty % PENALTY_STEP,
@@ -584,34 +686,79 @@ impl Names {
         }
         let depth = path_depth(&row.display_path).min(0xffff) as u32;
         let length = row.display_path.len().min(0xffff) as u32;
-        self.masks.push(char_mask(&row.lower_name));
-        self.text.push_str(&row.lower_name);
-        self.ends.push(end);
+        let name = self.intern(&row.lower_name, hash)? as usize;
         self.ids.push(id);
         self.flags.push(flags);
         self.places.push(depth << 16 | length);
+        self.next.push(self.heads[name]);
+        self.heads[name] = entry;
         self.max_id = row.id;
         Ok(())
     }
 
-    fn name(&self, index: usize) -> &str {
-        let start = if index == 0 {
-            0
-        } else {
-            self.ends[index - 1] as usize
-        };
-        &self.text[start..self.ends[index] as usize]
+    /// The name number of `name` (whose `name_hash` is `hash`), added when
+    /// it is new.
+    fn intern(&mut self, name: &str, hash: u64) -> Result<u32, String> {
+        if (self.ends.len() + 1) * TABLE_LOAD_DENOMINATOR > self.table.len() * TABLE_LOAD_NUMERATOR
+        {
+            self.grow_table();
+        }
+        let mask = self.table.len() - 1;
+        let mut slot = slot_of(hash, mask);
+        loop {
+            match self.table[slot] {
+                0 => break,
+                stored if self.name(stored as usize - 1) == name => return Ok(stored - 1),
+                _ => slot = (slot + 1) & mask,
+            }
+        }
+        let end = u32::try_from(self.text.len() + name.len())
+            .map_err(|_| "name index exceeds 4 GiB".to_string())?;
+        let number = self.ends.len() as u32;
+        self.text.push_str(name);
+        self.ends.push(end);
+        self.masks.push(char_mask(name));
+        self.heads.push(NO_ENTRY);
+        self.table[slot] = number + 1;
+        Ok(number)
     }
 
-    fn score(&self, index: usize, query: &NameQuery<'_>) -> Option<i32> {
-        let name = self.name(index);
-        if !query.admits(name) {
-            return None;
+    /// Doubles the name table and places every name again. The text holds
+    /// the names, so the hashes are computed again instead of stored.
+    fn grow_table(&mut self) {
+        let slots = (self.table.len() * 2).max(MIN_TABLE_SLOTS);
+        let mut table = vec![0u32; slots];
+        let mask = slots - 1;
+        for number in 0..self.ends.len() {
+            let mut slot = slot_of(name_hash(self.name(number)), mask);
+            while table[slot] != 0 {
+                slot = (slot + 1) & mask;
+            }
+            table[slot] = number as u32 + 1;
         }
-        let flags = self.flags[index];
-        let penalty = i32::from(flags & FLAG_PENALTY_MASK) * PENALTY_STEP;
-        name_score(name, flags & FLAG_DIRECTORY != 0, query.tokens, query.full)
-            .map(|score| score - penalty)
+        self.table = table;
+    }
+
+    /// The text of name number `name`.
+    fn name(&self, name: usize) -> &str {
+        let start = if name == 0 {
+            0
+        } else {
+            self.ends[name - 1] as usize
+        };
+        &self.text[start..self.ends[name] as usize]
+    }
+
+    /// The entries of name number `name`, newest first.
+    fn entries(&self, name: usize) -> impl Iterator<Item = usize> + '_ {
+        let mut entry = self.heads[name];
+        std::iter::from_fn(move || {
+            (entry != NO_ENTRY).then(|| {
+                let current = entry as usize;
+                entry = self.next[current];
+                current
+            })
+        })
     }
 
     /// The final sort in `search::search_with_generation` (score, name
@@ -622,8 +769,17 @@ impl Names {
         right
             .score
             .cmp(&left.score)
-            .then_with(|| self.name(a).len().cmp(&self.name(b).len()))
-            .then_with(|| self.name(a).cmp(self.name(b)))
+            .then_with(|| {
+                // One number per distinct name: equal numbers, equal names.
+                if left.name == right.name {
+                    return Ordering::Equal;
+                }
+                let (left, right) = (
+                    self.name(left.name as usize),
+                    self.name(right.name as usize),
+                );
+                left.len().cmp(&right.len()).then_with(|| left.cmp(right))
+            })
             .then_with(|| self.places[a].cmp(&self.places[b]))
             .then_with(|| self.ids[a].cmp(&self.ids[b]))
     }
@@ -634,7 +790,7 @@ impl Names {
         wanted: usize,
         is_cancelled: &(dyn Fn() -> bool + Sync),
     ) -> Vec<Hit> {
-        let total = self.ids.len();
+        let total = self.ends.len();
         let threads = std::thread::available_parallelism()
             .map(usize::from)
             .unwrap_or(1)
@@ -664,6 +820,8 @@ impl Names {
         hits
     }
 
+    /// Scans the names in `range` (name numbers) and expands each admitted
+    /// name to its live entries.
     fn scan(
         &self,
         range: std::ops::Range<usize>,
@@ -672,25 +830,48 @@ impl Names {
         is_cancelled: &(dyn Fn() -> bool + Sync),
     ) -> Vec<Hit> {
         let mut hits = Vec::new();
-        for index in range {
-            if index % CANCEL_CHECK_INTERVAL == 0 && is_cancelled() {
+        // The score of the worst hit that `keep_best` kept. `wanted` hits
+        // beat it, so an entry with a lower score cannot reach the top.
+        let mut floor = i32::MIN;
+        for name in range {
+            if name % CANCEL_CHECK_INTERVAL == 0 && is_cancelled() {
                 return Vec::new();
             }
             // Every admission rule and scorer tier needs every query
             // character in the name, so the mask test is a necessary
-            // condition that rejects most rows in one instruction.
-            if self.masks[index] & query.mask != query.mask || self.flags[index] & FLAG_DELETED != 0
-            {
+            // condition that rejects most names in one instruction.
+            if self.masks[name] & query.mask != query.mask {
                 continue;
             }
-            if let Some(score) = self.score(index, query) {
+            let text = self.name(name);
+            if !query.admits(text) {
+                continue;
+            }
+            // `name_score` per kind (file, directory), computed when the
+            // first live entry of that kind comes up.
+            let mut scores: [Option<Option<i32>>; 2] = [None, None];
+            for entry in self.entries(name) {
+                let flags = self.flags[entry];
+                if flags & FLAG_DELETED != 0 {
+                    continue;
+                }
+                let directory = flags & FLAG_DIRECTORY != 0;
+                let score = *scores[usize::from(directory)]
+                    .get_or_insert_with(|| name_score(text, directory, query.tokens, query.full));
+                let Some(score) = score else { continue };
+                let score = score - i32::from(flags & FLAG_PENALTY_MASK) * PENALTY_STEP;
+                if score < floor {
+                    continue;
+                }
                 hits.push(Hit {
                     score,
-                    index: index as u32,
+                    index: entry as u32,
+                    name: name as u32,
                     typo: false,
                 });
                 if hits.len() >= wanted * 8 {
                     self.keep_best(&mut hits, wanted);
+                    floor = hits.iter().map(|hit| hit.score).min().unwrap_or(i32::MIN);
                 }
             }
         }
@@ -708,30 +889,41 @@ impl Names {
     /// `search::is_strong_match`).
     fn has_strong_hit(&self, hits: &[Hit], query: &NameQuery<'_>) -> bool {
         hits.iter().any(|hit| {
-            let index = hit.index as usize;
-            let directory = self.flags[index] & FLAG_DIRECTORY != 0;
-            is_strong_match(self.name(index), directory, query.tokens, query.full)
+            let directory = self.flags[hit.index as usize] & FLAG_DIRECTORY != 0;
+            is_strong_match(
+                self.name(hit.name as usize),
+                directory,
+                query.tokens,
+                query.full,
+            )
         })
     }
 
-    /// The rank of a close name (see `CLOSE_TYPO_SCORE`), or `None` when the
-    /// name is not close.
-    fn close_rank(&self, index: usize, closeness: &mut Closeness) -> Option<i32> {
-        let name = self.name(index);
-        let distance = closeness.distance(name)?;
-        let flags = self.flags[index];
-        let directory_bonus = if flags & FLAG_DIRECTORY != 0 { 20 } else { 0 };
-        let penalty = i32::from(flags & FLAG_PENALTY_MASK) * PENALTY_STEP;
+    /// The rank of a close name (see `CLOSE_TYPO_SCORE`) before the entry's
+    /// folder bonus and location penalty (see `close_entry_rank`), or `None`
+    /// when the name is not close.
+    fn close_name_rank(&self, name: usize, closeness: &mut Closeness) -> Option<i32> {
+        let text = self.name(name);
+        let distance = closeness.distance(text)?;
         Some(
-            closeness.base + (TYPO_FAR - distance) as i32 * CLOSE_EDIT_STEP + directory_bonus
-                - name.len().min(80) as i32
-                - penalty,
+            closeness.base + (TYPO_FAR - distance) as i32 * CLOSE_EDIT_STEP
+                - text.len().min(80) as i32,
         )
     }
 
+    /// `close_name_rank` plus the entry's folder bonus, minus its location
+    /// penalty.
+    fn close_entry_rank(&self, name_rank: i32, entry: usize) -> i32 {
+        let flags = self.flags[entry];
+        let directory_bonus = if flags & FLAG_DIRECTORY != 0 { 20 } else { 0 };
+        let penalty = i32::from(flags & FLAG_PENALTY_MASK) * PENALTY_STEP;
+        name_rank + directory_bonus - penalty
+    }
+
     /// Close typo-tolerant matches (FFF's frizbee matcher, SIMD Smith-Waterman)
-    /// over every live name except the `admitted` hits. Best first; each hit's
-    /// score is its final rank (see `close_rank`).
+    /// over every distinct name, expanded to every live entry except the
+    /// `admitted` hits. Best first; each hit's score is its final rank (see
+    /// `close_name_rank`).
     fn typo_hits(
         &self,
         query: &NameQuery<'_>,
@@ -749,20 +941,20 @@ impl Names {
         tail.resize(tail.len() + SIMD_CHUNK_BYTES, 0);
         // Each character class of the query that a name lacks costs at least
         // one typo: a mask test rejects most names before frizbee reads them.
+        // A name whose entries are all deleted can match; it expands to no
+        // hit.
         let budget = query.typo_budget();
-        let resolve = |index: u32, chunks: &mut [*const u8; TYPO_MAX_CHUNKS]| {
-            let index = index as usize;
-            if self.flags[index] & FLAG_DELETED != 0
-                || (query.mask & !self.masks[index]).count_ones() > budget
-            {
+        let resolve = |name: u32, chunks: &mut [*const u8; TYPO_MAX_CHUNKS]| {
+            let name = name as usize;
+            if (query.mask & !self.masks[name]).count_ones() > budget {
                 return None;
             }
-            let start = if index == 0 {
+            let start = if name == 0 {
                 0
             } else {
-                self.ends[index - 1] as usize
+                self.ends[name - 1] as usize
             };
-            let length = self.ends[index] as usize - start;
+            let length = self.ends[name] as usize - start;
             let count = length.div_ceil(SIMD_CHUNK_BYTES);
             if count == 0 || count > TYPO_MAX_CHUNKS {
                 return None;
@@ -787,7 +979,7 @@ impl Names {
         let matches =
             query
                 .typo_matcher()
-                .match_range_parallel_resolved(self.ids.len(), &resolve, threads);
+                .match_range_parallel_resolved(self.ends.len(), &resolve, threads);
         let matched = started.elapsed();
         let match_count = matches.len();
 
@@ -798,19 +990,25 @@ impl Names {
         admitted.sort_unstable();
         let mut hits = Vec::new();
         for found in matches {
-            if admitted.binary_search(&found.index).is_ok() {
-                continue;
-            }
-            let Some(score) = self.close_rank(found.index as usize, closeness) else {
+            let name = found.index as usize;
+            let Some(name_rank) = self.close_name_rank(name, closeness) else {
                 continue;
             };
-            hits.push(Hit {
-                score,
-                index: found.index,
-                typo: true,
-            });
-            if hits.len() >= wanted * 8 {
-                self.keep_best(&mut hits, wanted);
+            for entry in self.entries(name) {
+                if self.flags[entry] & FLAG_DELETED != 0
+                    || admitted.binary_search(&(entry as u32)).is_ok()
+                {
+                    continue;
+                }
+                hits.push(Hit {
+                    score: self.close_entry_rank(name_rank, entry),
+                    index: entry as u32,
+                    name: found.index,
+                    typo: true,
+                });
+                if hits.len() >= wanted * 8 {
+                    self.keep_best(&mut hits, wanted);
+                }
             }
         }
         self.keep_best(&mut hits, wanted);
@@ -824,6 +1022,42 @@ impl Names {
         }
         hits
     }
+}
+
+/// A multiplicative hash over eight bytes at a time, for the name table.
+fn name_hash(name: &str) -> u64 {
+    const MULTIPLIER: u64 = 0x9e37_79b9_7f4a_7c15;
+    let mut hash = name.len() as u64;
+    let (words, rest) = name.as_bytes().as_chunks::<8>();
+    for &word in words {
+        hash = (hash.rotate_left(26) ^ u64::from_le_bytes(word)).wrapping_mul(MULTIPLIER);
+    }
+    if !rest.is_empty() {
+        let mut word = [0u8; 8];
+        word[..rest.len()].copy_from_slice(rest);
+        hash = (hash.rotate_left(26) ^ u64::from_le_bytes(word)).wrapping_mul(MULTIPLIER);
+    }
+    (hash ^ (hash >> 29)).wrapping_mul(MULTIPLIER)
+}
+
+/// The first slot to probe for a `name_hash` in a table of `mask + 1` slots.
+/// It comes from the high bits, which every input bit reaches.
+fn slot_of(hash: u64, mask: usize) -> usize {
+    (hash >> 32) as usize & mask
+}
+
+/// Asks the CPU to load the cache line of `item` while other work runs.
+#[inline(always)]
+fn prefetch<T>(item: &T) {
+    #[cfg(target_arch = "x86_64")]
+    // SAFETY: a prefetch is a hint: it reads no value, cannot fault, and
+    // `item` is a valid reference.
+    unsafe {
+        use std::arch::x86_64::{_mm_prefetch, _MM_HINT_T0};
+        _mm_prefetch::<_MM_HINT_T0>((item as *const T).cast());
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    let _ = item;
 }
 
 /// Measures how close a name's start is to the query, with reused buffers
@@ -1271,6 +1505,272 @@ mod tests {
         let _ = std::fs::remove_dir_all(directory);
     }
 
+    fn name_count(index: &NameIndex) -> usize {
+        index.names.read().unwrap().ends.len()
+    }
+
+    #[test]
+    fn duplicate_names_are_stored_once() {
+        let (db, directory) = temp_db();
+        db.insert_batch(
+            "vol",
+            1,
+            &[
+                item(r"C:\a\readme.md"),
+                item(r"C:\b\c\readme.md"),
+                item(r"C:\d\notes.txt"),
+                item(r"C:\e\readme.md"),
+            ],
+        )
+        .unwrap();
+        let index = NameIndex::default();
+        index.load(&db).unwrap();
+        {
+            let names = index.names.read().unwrap();
+            assert_eq!(names.ids.len(), 4);
+            assert_eq!(names.text, "readme.mdnotes.txt");
+            assert_eq!(names.entries(0).count(), 3);
+        }
+        // Shallower paths first, then shorter ones; every row is a hit.
+        assert_eq!(
+            names(&query(&index, &db, "readme.md", 10)),
+            [r"C:\a\readme.md", r"C:\e\readme.md", r"C:\b\c\readme.md"]
+        );
+        drop(db);
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn appends_after_the_load_reuse_known_names() {
+        let (db, directory) = temp_db();
+        db.insert_batch("vol", 1, &[item(r"C:\a\readme.md")])
+            .unwrap();
+        let index = NameIndex::default();
+        index.load(&db).unwrap();
+
+        db.insert_batch(
+            "vol",
+            1,
+            &[item(r"C:\b\readme.md"), item(r"C:\b\readme-old.md")],
+        )
+        .unwrap();
+        assert_eq!(
+            names(&query(&index, &db, "readme", 10)),
+            [r"C:\a\readme.md", r"C:\b\readme.md", r"C:\b\readme-old.md"]
+        );
+        assert_eq!(index.len(), 3);
+        assert_eq!(name_count(&index), 2, "the second readme.md adds no name");
+        drop(db);
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn a_deleted_row_leaves_the_other_rows_of_its_name() {
+        let (db, directory) = temp_db();
+        db.insert_batch(
+            "vol",
+            1,
+            &[item(r"C:\a\discord.exe"), item(r"C:\b\discord.exe")],
+        )
+        .unwrap();
+        let index = NameIndex::default();
+        index.load(&db).unwrap();
+        db.remove_file("vol", r"c:\a\discord.exe", false).unwrap();
+
+        assert_eq!(
+            names(&query(&index, &db, "discord", 10)),
+            [r"C:\b\discord.exe"]
+        );
+        // The typo pass expands the name to its live row only.
+        let tokens = ["discrod"];
+        let found = index
+            .candidates(&db, &NameQuery::new("discrod", &tokens), 5, true, &|| false)
+            .unwrap()
+            .unwrap();
+        let typos = found
+            .typos
+            .iter()
+            .map(|(entry, _)| entry.display_path.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(typos, [r"C:\b\discord.exe"]);
+        drop(db);
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn a_rewritten_row_keeps_its_name_and_gets_its_new_rank() {
+        let (db, directory) = temp_db();
+        let mut folder = item(r"C:\x");
+        folder.is_directory = true;
+        db.insert_batch(
+            "vol",
+            1,
+            &[
+                folder,
+                item(r"C:\x\setup.exe"),
+                item(r"C:\deep\er\setup.exe"),
+            ],
+        )
+        .unwrap();
+        let index = NameIndex::default();
+        index.load(&db).unwrap();
+        assert_eq!(
+            names(&query(&index, &db, "setup.exe", 10)),
+            [r"C:\x\setup.exe", r"C:\deep\er\setup.exe"]
+        );
+
+        // The folder moves under a penalized location: its child keeps its id
+        // and name, and drops below the other row.
+        let mut moved = item(r"C:\Windows\x");
+        moved.is_directory = true;
+        db.rename_file("vol", r"c:\x", &moved).unwrap();
+        assert_eq!(
+            names(&query(&index, &db, "setup.exe", 10)),
+            [r"C:\deep\er\setup.exe", r"C:\Windows\x\setup.exe"]
+        );
+        assert_eq!(index.len(), 4, "the renamed folder is a new row");
+        assert_eq!(name_count(&index), 2, "x and setup.exe");
+        drop(db);
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn reset_drops_every_name_and_the_table() {
+        let (db, directory) = temp_db();
+        db.insert_batch(
+            "vol",
+            1,
+            &[item(r"C:\a\notes.txt"), item(r"C:\b\notes.txt")],
+        )
+        .unwrap();
+        let index = NameIndex::default();
+        index.load(&db).unwrap();
+        let generation = index.names.read().unwrap().generation;
+
+        index.reset();
+        {
+            let names = index.names.read().unwrap();
+            assert!(names.text.is_empty() && names.table.is_empty() && names.heads.is_empty());
+            assert_eq!(names.generation, generation + 1);
+        }
+        assert!(index.load(&db).unwrap(), "a reload starts empty");
+        assert_eq!(name_count(&index), 1);
+        assert_eq!(query(&index, &db, "notes", 10).len(), 2);
+        drop(db);
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn the_name_table_finds_every_name_after_it_grows() {
+        let mut names = Names::default();
+        let distinct = MIN_TABLE_SLOTS * 3;
+        let rows = (0..distinct * 3)
+            .map(|n| NameRow {
+                id: n as i64 + 1,
+                lower_name: format!("file-{}.txt", n % distinct),
+                display_path: format!(r"C:\d{}\file-{}.txt", n / distinct, n % distinct),
+                is_directory: false,
+            })
+            .collect::<Vec<_>>();
+        // Two calls: a name of the first call repeats in the second.
+        names.push_rows(&rows[..distinct * 2]).unwrap();
+        names.push_rows(&rows[distinct * 2..]).unwrap();
+
+        assert_eq!(names.ends.len(), distinct);
+        assert!(names.table.len().is_power_of_two());
+        assert!(
+            names.ends.len() * TABLE_LOAD_DENOMINATOR <= names.table.len() * TABLE_LOAD_NUMERATOR
+        );
+        for name in 0..distinct {
+            assert_eq!(names.name(name), format!("file-{name}.txt"));
+            let ids = names
+                .entries(name)
+                .map(|entry| names.ids[entry] as usize)
+                .collect::<Vec<_>>();
+            // Newest first.
+            assert_eq!(
+                ids,
+                [name + 2 * distinct + 1, name + distinct + 1, name + 1]
+            );
+        }
+    }
+
+    /// The name scan with its early cut-off returns exactly the best rows of
+    /// a per-row scoring, in the same order.
+    #[test]
+    fn the_name_scan_equals_a_per_row_ranking() {
+        let mut names = Names::default();
+        let words = ["report", "readme.md", "rapport", "r-p-t", "prism", "repo"];
+        let folders = [
+            r"C:\Users\me",
+            r"C:\Windows",
+            r"C:\a\node_modules",
+            r"C:\x\y\z",
+        ];
+        let rows = (0..3_000usize)
+            .map(|n| {
+                let word = words[n * 7 % words.len()];
+                let name = if n % 5 == 0 {
+                    format!("{word}{}", n % 13)
+                } else {
+                    word.to_string()
+                };
+                NameRow {
+                    id: n as i64 + 1,
+                    display_path: format!(r"{}\{}\{name}", folders[n % folders.len()], n % 11),
+                    lower_name: name,
+                    is_directory: n % 9 == 0,
+                }
+            })
+            .collect::<Vec<_>>();
+        names.push_rows(&rows).unwrap();
+        for entry in (0..rows.len()).step_by(17) {
+            names.flags[entry] |= FLAG_DELETED;
+        }
+        let mut owner = vec![usize::MAX; rows.len()];
+        for name in 0..names.ends.len() {
+            for entry in names.entries(name) {
+                owner[entry] = name;
+            }
+        }
+        for text in ["report", "rpt", "readme.md", "re", "prism", "r"] {
+            let tokens = text.split_whitespace().collect::<Vec<_>>();
+            let query = NameQuery::new(text, &tokens);
+            let mut reference = (0..rows.len())
+                .filter(|&entry| names.flags[entry] & FLAG_DELETED == 0)
+                .filter_map(|entry| {
+                    let name = owner[entry];
+                    let text = names.name(name);
+                    let flags = names.flags[entry];
+                    if !query.admits(text) {
+                        return None;
+                    }
+                    let penalty = i32::from(flags & FLAG_PENALTY_MASK) * PENALTY_STEP;
+                    let score =
+                        name_score(text, flags & FLAG_DIRECTORY != 0, query.tokens, query.full)?;
+                    Some(Hit {
+                        score: score - penalty,
+                        index: entry as u32,
+                        name: name as u32,
+                        typo: false,
+                    })
+                })
+                .collect::<Vec<_>>();
+            reference.sort_by(|a, b| names.compare(a, b));
+            for wanted in [1, 3, 40] {
+                let found = names.top_hits(&query, wanted, &|| false);
+                let expected = reference.iter().take(wanted);
+                assert!(
+                    found
+                        .iter()
+                        .map(|hit| (hit.index, hit.score))
+                        .eq(expected.map(|hit| (hit.index, hit.score))),
+                    "{text:?} wanted {wanted}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn char_mask_is_a_necessary_condition_for_a_match() {
         for (name, text) in [
@@ -1308,13 +1808,17 @@ mod tests {
             let names = index.names.read().unwrap();
             let bytes = names.text.capacity()
                 + names.ends.capacity() * 4
-                + names.ids.capacity() * 4
                 + names.masks.capacity() * 4
+                + names.heads.capacity() * 4
+                + names.table.capacity() * 4
+                + names.ids.capacity() * 4
                 + names.flags.capacity() * 2
-                + names.places.capacity() * 4;
+                + names.places.capacity() * 4
+                + names.next.capacity() * 4;
             eprintln!(
-                "load: {} rows in {:.2}s, {:.0} MiB",
+                "load: {} rows ({} names) in {:.2}s, {:.1} MiB",
                 names.ids.len(),
+                names.ends.len(),
                 started.elapsed().as_secs_f64(),
                 bytes as f64 / 1_048_576.0
             );
@@ -1399,12 +1903,13 @@ mod tests {
 
         let ids = {
             let names = index.names.read().unwrap();
-            (0..names.ids.len())
-                .filter(|&i| {
-                    names.flags[i] & FLAG_DELETED == 0
-                        && query.admits(names.name(i))
-                        && name_score(names.name(i), false, query.tokens, query.full).is_some()
+            (0..names.ends.len())
+                .filter(|&n| {
+                    query.admits(names.name(n))
+                        && name_score(names.name(n), false, query.tokens, query.full).is_some()
                 })
+                .flat_map(|n| names.entries(n))
+                .filter(|&i| names.flags[i] & FLAG_DELETED == 0)
                 .map(|i| i64::from(names.ids[i]))
                 .collect::<Vec<_>>()
         };

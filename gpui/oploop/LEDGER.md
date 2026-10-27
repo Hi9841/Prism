@@ -461,3 +461,20 @@ Profile (temporary timers, removed): index load 6.98 s = SQL fetch with owned st
 - Result: private 133.0-137.6 MiB against 135.7-136.4 MiB (ranges overlap), working set -1 MiB. The dropped
   device's memory is released; no gain beyond noise.
 - Decision: REVERT.
+
+### P-004 Each distinct file name stored once (interned name index)
+
+- Profile: the name index holds 217 MiB of the app's about 385 MiB (both apps carry it). On the owner's
+  catalog only 1,253,313 of 5,842,337 names are distinct (21%): the name text is 117.2 MiB, the distinct text
+  44.0 MiB. The search scans every row's name.
+- Hypothesis: one copy per distinct name (with a u32 hash table, and per-name chains of rows for the posting
+  lists) should cut about 50 MiB and make the scan up to about 4.7x shorter, with identical results.
+- Change (a subagent, reviewed): `catalog/name_index.rs`. Distinct names in `text`/`ends`/`masks`/`heads`;
+  rows in `ids`/`flags`/`places`/`next`; an open-addressing table of name numbers. A `Hit` carries the name
+  number. Appends link a row in front of its name's chain.
+- Result (interleaved test binaries, 11 runs each): index 217 -> 144.4 MiB (-72.6 MiB, -33%); every query
+  faster (report 7.2 -> 4.3 ms, invoice 2024 15.0 -> 6.0, rpt 8.3 -> 4.4; the slowest B run below the
+  fastest A run for each query); load 4.48 -> 4.68 s (+4.5%, inside the 10% limit set before the run). The
+  top 10 equals the exhaustive reference for all 12 queries in every run. prism-core 262 passed (7 new
+  tests; a cut-off mutation fails one).
+- Decision: KEEP.
