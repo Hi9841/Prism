@@ -56,7 +56,7 @@ export function runCall(call) {
 }
 
 // JSON.parse turns `-0.0` into -0 and `1e999` into Infinity; JSON has no NaN.
-// The adapter contract (adapter.mjs header) carries all three as {"$num"}, so a
+// The adapter contract (crates/prism-judge) carries all three as {"$num"}, so a
 // raw one here means the adapter hid a value the comparison could not see.
 function numberContractViolation(value, at = "$") {
   if (typeof value === "number") {

@@ -1,6 +1,7 @@
 // Real-world scenarios whose expected output is the original app's own output
-// (the old code is the executable spec). `capture.mjs` records the goldens from
-// the original; `judge.mjs` diffs any implementation against them.
+// (the old code was the executable spec). The goldens were recorded from the
+// original, which left the repo after 1.0.11; `judge.mjs` diffs the port
+// against them.
 //
 // Inputs are plain JSON so a non-TypeScript adapter can answer the same calls.
 // Palette inputs use the shapes the real provider holds: raw persisted settings
