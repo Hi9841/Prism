@@ -7,10 +7,10 @@
 These journeys measure the real Prism launcher on this Windows machine.
 Each journey runs on two release builds of the same source tree:
 
-- **GPUI**: `gpui/crates/prism-app` (`prism.exe`, native GPUI user interface).
+- **GPUI**: `crates/prism-app` (`prism.exe`, native GPUI user interface).
 - **Tauri**: the repo root (`src/` React in WebView2, `src-tauri/` host). This is the original app.
 
-The two builds use the same backend (`gpui/crates/prism-core`) and the same app data (settings and file catalog).
+The two builds use the same backend (`crates/prism-core`) and the same app data (settings and file catalog).
 The bench starts each build from a copy in `%LOCALAPPDATA%\PrismGpuiE2E\<app>\prism.exe`, with `--autostart` (hidden start).
 Only one Prism runs at a time. The commands are in `bench/README.md`.
 

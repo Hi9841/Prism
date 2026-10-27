@@ -5,7 +5,7 @@
 Runs `prism.exe --parity` (fixture data, a parked window) on one UI capture
 scenario, and samples the process 1.3 s after start, when the window has
 painted. Prints the median committed private memory (psutil `private`),
-working set and thread count over the runs. Run it from `gpui/`.
+working set and thread count over the runs. Run it from the repo root.
 """
 
 from __future__ import annotations

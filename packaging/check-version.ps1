@@ -6,7 +6,7 @@ param(
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
 
-# The workspace version (gpui/Cargo.toml) is the release version; prism-core
+# The workspace version (Cargo.toml) is the release version; prism-core
 # keeps its own field, and Cargo.lock records both.
 $repoRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
 $workspaceToml = Get-Content -LiteralPath (Join-Path $repoRoot "Cargo.toml") -Raw

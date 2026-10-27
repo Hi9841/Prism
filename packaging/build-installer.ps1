@@ -87,7 +87,7 @@ Invoke-Native { & $makensis -V2 -INPUTCHARSET UTF8 `
 
 # Same signer as the Tauri release (tauri signer sign, minisign format).
 $tauri = Join-Path $repoRoot "node_modules\.bin\tauri.exe"
-if (-not (Test-Path -LiteralPath $tauri)) { throw "Tauri CLI not found at $tauri (run 'bun install' in gpui/)." }
+if (-not (Test-Path -LiteralPath $tauri)) { throw "Tauri CLI not found at $tauri (run 'bun install' in the repo root)." }
 $env:TAURI_SIGNING_PRIVATE_KEY = Get-Content -LiteralPath $PrivateKeyPath -Raw
 $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = if (Test-Path -LiteralPath $PasswordPath) { (Get-Content -LiteralPath $PasswordPath -Raw).Trim() } else { "" }
 try {

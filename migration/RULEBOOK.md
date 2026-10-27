@@ -162,6 +162,9 @@ another app, Esc cancels, a click works after the drag, and a release over the p
 
 ## Deviation log
 
+- 2026-10-27 (after the app's removal): the contents of `gpui/` moved to the repo root. Paths in older
+  entries and in `HANDOFF.md` that start with `gpui/` now start at the root. The Rust unit tests were
+  removed (owner: no unit tests).
 - 2026-10-27 (after release 1.0.11): the owner removed the original React/Tauri app from the repo. The
   executable spec is now the judge's goldens (captured from the original, 277 scenarios) and this
   rulebook. Removed with it: the parity harness (`migration/parity`), the judge's original-side tools

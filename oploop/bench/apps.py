@@ -28,12 +28,12 @@ E2E_DIR = LOCAL / "PrismGpuiE2E"
 PRISM_JSON = ROAMING / "app.prism.launcher" / "prism.json"
 PRISM_JSON_BACKUP = E2E_DIR / "backup" / "prism.json"
 # prism.exe modes that are not a launcher instance: the Start-button helpers,
-# and the parity capture mode that other agents run from gpui/target.
+# and the parity capture mode that other agents run from target/.
 HELPER_ARGS = ("--prism-start-restore-watchdog", "--prism-restore-start-menu", "--parity")
 
-REPO = Path(__file__).resolve().parents[3]
+REPO = Path(__file__).resolve().parents[2]
 BUILDS = {
-    "gpui": REPO / "gpui" / "target" / "agent-e2e" / "release" / "prism.exe",
+    "gpui": REPO / "target" / "agent-e2e" / "release" / "prism.exe",
 }
 GPUI_ACTIVATE_EVENT = "Local\\PrismGpuiActivate"
 PALETTE_CLASS = "Zed::Window"

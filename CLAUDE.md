@@ -1,6 +1,6 @@
 @C:/Users/hi/Desktop/skills/code-migration/CLAUDE.md
 
-# prism-gpui
+# Prism
 
 The Prism launcher: a native Rust app with a GPUI interface. It replaced the original React/Tauri app
 (releases 1.0.0 to 1.0.11). The port followed the migration kit at
@@ -13,7 +13,7 @@ The Prism launcher: a native Rust app with a GPUI interface. It replaced the ori
 - The original React/Tauri app (the port's behavior spec) left the repo after release 1.0.11 (decided
   2026-10-27). Its behavior lives on in the judge's goldens (`migration/judge/goldens`) and in the design
   rulebook (`migration/RULEBOOK.md`, with its deviation log). Git history keeps the app.
-- This folder holds the whole product: nothing here may depend on a path outside `gpui/`.
+- The repository holds the whole product: nothing in it may depend on a path outside it.
 
 ## The judge
 

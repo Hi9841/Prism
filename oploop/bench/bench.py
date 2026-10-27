@@ -4,14 +4,14 @@
 # ///
 """End-to-end bench for the real Prism: one GPUI build, or an A/B of several.
 
-    uv run gpui/oploop/bench/bench.py run [--j2-runs 20] [--j3-reps 20] [--blocks 2]
-    uv run gpui/oploop/bench/bench.py j4 [--runs 3]
-    uv run gpui/oploop/bench/bench.py restore
+    uv run oploop/bench/bench.py run [--j2-runs 20] [--j3-reps 20] [--blocks 2]
+    uv run oploop/bench/bench.py j4 [--runs 3]
+    uv run oploop/bench/bench.py restore
 
 `run` measures J2 (open) and J3 (type) in interleaved blocks (for example
 gpui-base, gpui, gpui-base, gpui with `--build gpui-base=<exe>`) and keeps the
 settled J3 frames. `j4` measures resources. Raw data goes to
-gpui/oploop/results/raw/<stamp>/. `compare.py` turns raw data into tables.
+oploop/results/raw/<stamp>/. `compare.py` turns raw data into tables.
 See JOURNEYS.md.
 """
 

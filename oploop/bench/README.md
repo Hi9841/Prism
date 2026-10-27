@@ -38,45 +38,45 @@ Use Git Bash at the repo root.
 1. Set the temporary folder (the shell cannot write `%TEMP%`):
 
    ```sh
-   export TMP=$PWD/gpui/target/tmp TEMP=$PWD/gpui/target/tmp
+   export TMP=$PWD/target/tmp TEMP=$PWD/target/tmp
    ```
 
 2. Build the GPUI app (release, own target folder). For an A/B, build the other commit too (for example in a
    worktree) and keep its exe:
 
    ```sh
-   (cd gpui && CARGO_TARGET_DIR=target/agent-e2e cargo build --release -p prism-app)
+   CARGO_TARGET_DIR=target/agent-e2e cargo build --release -p prism-app
    ```
 
 3. Do a smoke test:
 
    ```sh
-   uv run gpui/oploop/bench/probe.py gpui
+   uv run oploop/bench/probe.py gpui
    ```
 
 4. Run J2 and J3 (about 6 minutes per build and block):
 
    ```sh
-   uv run gpui/oploop/bench/bench.py run --apps gpui-base gpui --build gpui-base=<exe> --j2-runs 20 --j3-reps 20 --blocks 2
+   uv run oploop/bench/bench.py run --apps gpui-base gpui --build gpui-base=<exe> --j2-runs 20 --j3-reps 20 --blocks 2
    ```
 
 5. Run J4 (about 4 minutes for each run and build):
 
    ```sh
-   uv run gpui/oploop/bench/bench.py j4 --apps gpui-base gpui --build gpui-base=<exe> --runs 3
+   uv run oploop/bench/bench.py j4 --apps gpui-base gpui --build gpui-base=<exe> --runs 3
    ```
 
 6. Make the tables:
 
    ```sh
-   uv run gpui/oploop/bench/compare.py gpui/oploop/results/raw/<run stamp> gpui gpui-base --j4 gpui/oploop/results/raw/<j4 stamp>-j4
+   uv run oploop/bench/compare.py oploop/results/raw/<run stamp> gpui gpui-base --j4 oploop/results/raw/<j4 stamp>-j4
    ```
 
 If a run stops and the owner's Prism does not run, do this command at once (it restores
 prism.json from the backup that the failed run took at its start; later, it would undo your own changes):
 
 ```sh
-uv run gpui/oploop/bench/bench.py restore
+uv run oploop/bench/bench.py restore
 ```
 
 ## Options
@@ -95,7 +95,7 @@ uv run gpui/oploop/bench/bench.py restore
 
 ## Functional test of the real app (`functest.py`)
 
-`uv run gpui/oploop/bench/functest.py run [test ...]` (`list` shows the tests). It drives the owner's Prism
+`uv run oploop/bench/functest.py run [test ...]` (`list` shows the tests). It drives the owner's Prism
 (the bench's owner launcher, see above) with messages to its own window: keys, characters,
 clicks and wheel steps. It does not send global input.
 

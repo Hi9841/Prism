@@ -4,7 +4,7 @@
 # ///
 """Compares any builds of one bench run (`bench.py run --apps a b c`).
 
-    uv run gpui/oploop/bench/compare.py <raw run dir> <app> <app> [<app> ...] [--j4 <raw j4 dir>]
+    uv run oploop/bench/compare.py <raw run dir> <app> <app> [<app> ...] [--j4 <raw j4 dir>]
 
 For each pair (the first app against each other app) it prints J2 (warm and
 first open) and J3 (query echo, rows done, settled; per query and over all

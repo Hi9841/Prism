@@ -6,12 +6,12 @@
 - Work: `C:\Users\hi\Prism`, uncommitted on `main` at loop start (the 2026-10-27 parity re-check, the
   `prism-core` move into `gpui/`, and the design fixes). They go to a branch as the loop's first commit.
 - Machine: AMD Ryzen 9 7950X3D (32 logical), 31.6 GB RAM, NVIDIA RTX 4090, Windows 11 Pro 26200.
-- Runtime: rustc 1.98.1, Bun 1.3.14, gpui 0.2.2 vendored (`gpui/vendor/gpui`, patches 1-9).
+- Runtime: rustc 1.98.1, Bun 1.3.14, gpui 0.2.2 vendored (`vendor/gpui`, patches 1-9).
 - The spec: the original React/Tauri app at the repo root. It stays unchanged.
 
 ## Correctness floor
 
-| Check | Command (from `gpui/`, with `TMP`/`TEMP` set to `target/tmp`) | Baseline result | Current result |
+| Check | Command (from the repo root, with `TMP`/`TEMP` set to `target/tmp`) | Baseline result | Current result |
 |---|---|---|---|
 | Judge vs original | `bun migration/judge/judge.mjs` | 244/277 (33 stale goldens, see RULEBOOK 2026-10-27) | 277/277 |
 | Judge vs port | `PRISM_ADAPTER_CMD=target/debug/prism-judge.exe bun migration/judge/judge.mjs` | 244/277 (same 33, identical output) | 277/277 |

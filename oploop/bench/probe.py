@@ -7,7 +7,7 @@
 Use it after a product change that can break the bench (window class, key
 handling). It prints the windows, the capture cost, and a short timeline.
 
-    uv run gpui/oploop/bench/probe.py gpui
+    uv run oploop/bench/probe.py gpui
 """
 
 from __future__ import annotations

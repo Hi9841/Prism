@@ -15,8 +15,8 @@ files, the pinned taskbar folder and the clipboard text. After the tests (also
 after an error) it stops the test build, restores what changed, and starts the
 build again hidden (`--autostart`), as the owner runs it.
 
-    uv run gpui/oploop/bench/functest.py run [test ...]
-    uv run gpui/oploop/bench/functest.py list
+    uv run oploop/bench/functest.py run [test ...]
+    uv run oploop/bench/functest.py list
 """
 
 from __future__ import annotations
