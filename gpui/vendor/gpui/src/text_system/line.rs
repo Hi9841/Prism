@@ -205,10 +205,13 @@ fn paint_line(
     );
     window.paint_layer(line_bounds, |window| {
         // prism-gpui patch: Chromium's baseline. Blink rounds the font ascent and
-        // descent to whole pixels and floors the half-leading to a 1/64 px layout unit.
-        let ascent = layout.ascent.round();
-        let descent = layout.descent.round();
-        let padding_top = px((((line_height - ascent - descent) / 2.).0 * 64.).floor() / 64.);
+        // descent to whole pixels and floors the half-leading to a whole pixel
+        // (`InlineBoxState::CalculateLeadingSpace`: `(leading / 2).Floor()` is an int).
+        // Blink lays out in device pixels, so the rounding is in device pixels.
+        let scale = window.scale_factor();
+        let ascent = (layout.ascent * scale).round() / scale;
+        let descent = (layout.descent * scale).round() / scale;
+        let padding_top = ((line_height - ascent - descent) * scale / 2.).floor() / scale;
         let baseline_offset = point(px(0.), padding_top + ascent);
         let mut decoration_runs = decoration_runs.iter();
         let mut wraps = wrap_boundaries.iter().peekable();

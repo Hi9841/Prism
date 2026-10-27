@@ -299,3 +299,31 @@ left of the original's (568 vs 570, centroid -1.9 px).
   other agents' builds), so they are not claimed as wins of this loop.
 - I-016 (open, minor): GPUI's `truncate_line` cuts some long titles 1-2 characters before Chromium's
   ellipsis point.
+
+### I-019 Half-leading floors to a whole pixel, glyph row rounds (patch 24)
+
+- Journey: J1a
+- Profile: `oploop/parity/line_shift.py` (best (dx, dy) per text line): in every settings capture,
+  some lines of every weight sit exactly 1.00 px low (error 0.02-0.05 at the shift, so the same
+  pixels), others 0. A zero-size inline-block probe in Chromium gives the real baselines: "Appearance"
+  (13 px, line-height 18.85) has its baseline at line top + 14.000. Patch 2 put it at + 14.92: it
+  floored the half-leading (0.925) to 1/64 px, but Blink's `(leading / 2).Floor()` gives an int. The
+  I-012 probe compared against a baseline it computed with the same 1/64 px rule, so it did not see it.
+- Hypothesis: with Blink's whole-pixel floor, the port's baselines equal Chromium's; then Skia's
+  row rounding (patch 14, reverted because the baseline was low) is right too. Every text capture
+  should rise; settings most.
+- Result: mean 9.767 -> 9.835 (excl. menus 9.776 -> 9.845), min 9.54 -> 9.58. 32 of 33 captures up
+  (settings-scroll-1 +0.21, settings-scroll-2 +0.13, light-settings +0.13, settings +0.12, idle +0.08);
+  zoom-120 -0.01.
+- Decision: KEEP (vendored patch 24; patch 2 corrected). Closes I-012: the "semibold 1 px low" offset
+  was this baseline error (13 px and 15 px lines lose 0.9 px; 11 px lines only 0.48, so they matched).
+
+### I-020 Scrollbar gutter is 10 px, not 11 (measured in WebView2)
+
+- Profile: in settings-scroll-2 the right-aligned shortcut chips and their note sit exactly 1 px left
+  (error 0.02); the section dividers end at x 608 in the port, 609 in the original. Headless Chrome
+  155: `offsetWidth - clientWidth` of `.scroll-thin` is 10. The real Tauri build (WebView2, Edge 155,
+  scale 1.0, `oploop/bench/webview_probe.py`, read-only CDP, hidden window): thin 10, normal 15. The
+  port reserves 11 (`gfx.rs` `SCROLLBAR_GUTTER`, from an earlier WebView2 measurement).
+- Hypothesis: a 10 px gutter puts right-aligned content and divider ends where both engines put them;
+  the thumb stays at 2 px from the right edge (now 2 px on both sides, as Chromium centers it).

@@ -4,9 +4,11 @@
    fractional line heights; the rounding moved stacked text by 1 px per block
    (measured with migration/parity, settings sheet).
 2. `src/text_system/line.rs`, `paint_line`: the baseline follows Blink. The font
-   ascent and descent round to whole pixels; the half-leading floors to 1/64 px.
-   Settings captures went from 9.53-9.69 to 9.67-9.80. (Rounding the glyph row
-   instead of flooring it made every capture worse; GPUI's floor stays.)
+   ascent and descent round to whole device pixels, and the half-leading floors
+   to a whole device pixel (`InlineBoxState::CalculateLeadingSpace`). Measured in
+   Chromium: a 13 px line with line-height 18.85 has its baseline at line top +
+   14.000, not + 14.92. Settings captures went from 9.53-9.69 to 9.67-9.80 with a
+   1/64 px floor; the whole-pixel floor is patch 24.
 3. `src/tab_stop.rs` `TabStopMap::is_at_end` and `src/window.rs` `Window::focus_at_tab_end`:
    tell whether Tab would wrap. Chromium moves focus to the document body before
    it wraps, and the port does the same.
@@ -82,7 +84,8 @@
     against 104 in Rust, so each shadow after the first read wrong data. Metal
     reads the struct that cbindgen makes from `scene.rs` (`build.rs`), so its
     layout is correct, but `shadow_fragment` in `shaders.metal` has no cut-out.
-14. (Reverted.) A glyph row y rounded instead of floored: the settings captures lost up to 0.16.
+14. (Reverted, then kept in patch 24.) A glyph row y rounded instead of floored: alone, the
+    settings captures lost up to 0.16, because the baseline was still too low (patch 2).
 15. `src/platform/windows/shaders.hlsl` `gradient_color` case 1: the CSS gradient
     line. It runs through the center in the angle's direction, and its length is
     |w sin a| + |h cos a|, so the corners take the end colors. GPUI measured the
@@ -136,3 +139,12 @@
     heavy. Parity (8 text captures): mean 9.726 -> 9.735, none down. The values
     that are constant for a sprite (`skia_mask_preblend_values`: the table
     luminance and its linear values) come from `monochrome_sprite_vertex`.
+24. `src/text_system/line.rs` `paint_line` (patch 2, corrected) and `src/window.rs`
+    `paint_glyph`: the half-leading floors to a whole device pixel, as Blink does,
+    and the glyph row rounds (`floor(y + 0.5)`), as Skia does when there are no y
+    variants. Patch 2 floored the half-leading to 1/64 px, so most baselines were
+    up to 0.95 px low; the floor of the glyph row (patch 14 reverted) hid part of
+    that. Measured with a zero-size baseline probe in Chromium: the port's
+    baselines now equal Chromium's. Parity mean 9.767 -> 9.835, 32 of 33
+    captures up (settings-scroll-1 +0.21), zoom-120 -0.01. This also closes the
+    "weight 500/600 sits 1 px low" item (I-012): it was the baseline, not the font.

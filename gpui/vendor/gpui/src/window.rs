@@ -3106,10 +3106,13 @@ impl Window {
         // it, so text sat 1/8 px left of Chromium's on average.
         let quarters = (glyph_origin.x.0 * SUBPIXEL_VARIANTS_X as f32).round();
         let whole_x = (quarters / SUBPIXEL_VARIANTS_X as f32).floor();
-        let glyph_origin = point(
-            ScaledPixels(quarters / SUBPIXEL_VARIANTS_X as f32),
-            glyph_origin.y,
-        );
+        // PRISM PATCH 24: with no y variants, Skia rounds the glyph row (y + 1/2, floored).
+        let glyph_y = if SUBPIXEL_VARIANTS_Y == 1 {
+            ScaledPixels((glyph_origin.y.0 + 0.5).floor())
+        } else {
+            glyph_origin.y
+        };
+        let glyph_origin = point(ScaledPixels(quarters / SUBPIXEL_VARIANTS_X as f32), glyph_y);
 
         let subpixel_variant = Point {
             x: (quarters - whole_x * SUBPIXEL_VARIANTS_X as f32) as u8,
