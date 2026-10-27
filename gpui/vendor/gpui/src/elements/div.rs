@@ -1744,9 +1744,19 @@ impl Interactivity {
             // high for the maximum scroll, we round the scroll max to 2 decimal
             // places here.
             let padded_content_size = self.content_size + padding_size;
-            let scroll_max = (padded_content_size - bounds.size)
-                .map(round_to_two_decimals)
-                .max(&Default::default());
+            // PRISM PATCH 26: Blink's maximum scroll offset is in whole device pixels: the
+            // pixel-snapped contents size minus the pixel-snapped client size. A fractional
+            // maximum stopped the end of a list up to 1 px away from Chromium's.
+            let scale = window.scale_factor();
+            let snapped = |start: Pixels, len: Pixels| {
+                (((start + len) * scale).round() - (start * scale).round()) / scale
+            };
+            let scroll_max = size(
+                snapped(bounds.origin.x, padded_content_size.width) - snapped(bounds.origin.x, bounds.size.width),
+                snapped(bounds.origin.y, padded_content_size.height) - snapped(bounds.origin.y, bounds.size.height),
+            )
+            .map(round_to_two_decimals)
+            .max(&Default::default());
             // Clamp scroll offset in case scroll max is smaller now (e.g., if children
             // were removed or the bounds became larger).
             let mut scroll_offset = scroll_offset.borrow_mut();

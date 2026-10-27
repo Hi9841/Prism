@@ -153,3 +153,8 @@
     stores it in a LayoutUnit (13 px x 1.45 = 18.85 becomes 18.84375). The 0.006 px per line
     added up down the settings sheet and moved a line by 1 px at some scroll positions.
     Parity: settings-scroll-3 +0.08, none down.
+26. `src/elements/div.rs` `Interactivity::clamp_scroll_position`: the maximum scroll offset is
+    in whole device pixels, the pixel-snapped contents size minus the pixel-snapped client size,
+    as Blink computes it. With the fractional maximum, a list scrolled to its end stopped about
+    0.1 px short of Chromium's, and lines near a pixel edge moved 1 px. Parity: settings-bottom
+    +0.07, idle-bottom +0.04, none down.

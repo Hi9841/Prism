@@ -342,3 +342,14 @@ left of the original's (568 vs 570, centroid -1.9 px).
   itself and did not use `line_height_in_pixels`. With both: mean 9.861 -> 9.864 (excl. menus 9.870 ->
   9.873); settings-scroll-3 +0.08, settings-scroll-1 +0.01, none down.
 - Decision: KEEP (vendored patch 25).
+
+### I-022 Maximum scroll offset in whole pixels (patch 26)
+
+- Profile: settings-bottom (scrolled to the end): "Group apps like Creative..." 1.00 px low and the
+  next line 1.00 px high. Chromium at the end: scrollTop 1600 = scrollHeight 2073 - clientHeight 473,
+  both pixel-snapped; the port's maximum was the fractional content height minus the box height.
+- Hypothesis: a pixel-snapped maximum (Blink `MaximumScrollOffsetInt`) puts the end of each list
+  where Chromium puts it; only the captures scrolled to the end change.
+- Result: mean 9.864 -> 9.867 (excl. menus 9.873 -> 9.877); settings-bottom +0.07, idle-bottom +0.04,
+  no other capture changed.
+- Decision: KEEP (vendored patch 26).
