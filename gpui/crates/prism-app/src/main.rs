@@ -23,6 +23,7 @@ use prism_core::backend::{autostart_disabled_by_user, backend, launched_for_auto
 use prism_ui::lib::bridge::{self, BackendEvent, ShellHandle};
 use windows::Win32::Foundation::{ERROR_ALREADY_EXISTS, GetLastError, HANDLE, HWND, WAIT_ABANDONED, WAIT_OBJECT_0};
 use windows::Win32::System::Threading::{CreateEventW, CreateMutexW, INFINITE, ResetEvent, SetEvent, WaitForSingleObject};
+use windows::Win32::UI::WindowsAndMessaging::{ASFW_ANY, AllowSetForegroundWindow};
 use windows::core::w;
 
 use crate::host::{GpuiHost, HostMessage};
@@ -44,6 +45,9 @@ fn claim_single_instance(open_running: bool) -> Option<HANDLE> {
             // Open the running palette at once; if the owner was only dying,
             // take over instead of exiting (no Prism would run otherwise).
             if open_running {
+                // This launch came from the user (Start menu, a shortcut), so it may set the
+                // foreground. Pass that right on, or the running palette opens without focus.
+                let _ = AllowSetForegroundWindow(ASFW_ANY);
                 let _ = SetEvent(activate);
             }
             let waited = WaitForSingleObject(mutex, DYING_OWNER_WAIT_MS);
