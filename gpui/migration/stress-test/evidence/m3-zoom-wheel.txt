@@ -1,3 +1,0 @@
-{"zoomPercent":100,"seen":[{"deltaY":100,"deltaMode":0,"dpr":1}],"dpr":1}
-{"zoomPercent":150,"seen":[{"deltaY":66.66666666666667,"deltaMode":0,"dpr":1.5}],"dpr":1.5}
-{"zoomPercent":70,"seen":[{"deltaY":142.85714528998554,"deltaMode":0,"dpr":0.699999988079071}],"dpr":0.699999988079071}

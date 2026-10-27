@@ -1,4 +1,0 @@
-# Image tools for the parity scripts (compare.py, crop.py).
-# Install: python -m pip install -r requirements.txt
-numpy>=2.0
-Pillow>=12.0

@@ -1,2 +1,0 @@
-# compiler packages > 1: 0
-# prism-ui is the single tsc program (tsconfig include: src)
