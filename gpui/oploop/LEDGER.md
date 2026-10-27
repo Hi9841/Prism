@@ -376,3 +376,13 @@ left of the original's (568 vs 570, centroid -1.9 px).
 - Result: zoom-120 9.58 -> 9.79, zoom-80 9.67 -> 9.73 (original captures only; the port did not
   change). Mean after I-023 + I-024: 9.867 -> 9.877 (excl. menus 9.877 -> 9.887), min 9.66.
 - Decision: KEEP (a measured fidelity fix of the harness, not a port change).
+
+### I-025 Start-icon SVGs drawn at their painted size
+
+- Profile: the Gem and Diamond icons had no anti-aliasing (binary pixels). GPUI's `img` rasterizes an
+  SVG once at its intrinsic size (96 px) and samples it down to 20 px; Chromium rasterizes it at 20 px.
+- Change: the two one-color icons draw as `svg()` masks in their stroke colors (`#f8fafc`, `#60a5fa`),
+  as every other icon in the port.
+- Result: settings-scroll-2 SSIM 0.9889 -> 0.9891 (score 9.91 both); the icon now has the original's
+  anti-aliased shape. It sits 1 px right because the tile row is 1 px narrower (label widths: I-026).
+- Decision: KEEP (visible fix, score neutral).

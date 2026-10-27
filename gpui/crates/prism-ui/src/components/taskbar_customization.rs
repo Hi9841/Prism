@@ -274,7 +274,19 @@ impl Render for TaskbarCustomization {
             let value = value.to_string();
             let glyph: AnyElement = match index {
                 0 => windows_glyph(&t),
-                _ => img(SharedString::from(format!("taskbar-icons/{value}.svg"))).size(r(20.)).into_any_element(),            };
+                // Chromium rasterizes an `<img>` SVG at its painted size. GPUI's `img` rasterizes
+                // it at its 96px intrinsic size and samples that down with no anti-aliasing, so
+                // the one-color icons draw as masks in their stroke color.
+                _ => {
+                    let stroke = if value == "gem" { 0xf8fafc } else { 0x60a5fa };
+                    gpui::svg()
+                        .path(SharedString::from(format!("taskbar-icons/{value}.svg")))
+                        .size(r(20.))
+                        .flex_none()
+                        .text_color(hsla(gpui::rgb(stroke)))
+                        .into_any_element()
+                }
+            };
             let (tile, _) = icon_tile(("start-icon", index), selected, busy, &t, window, cx);
             tiles = tiles.child(
                 tile
