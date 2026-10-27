@@ -148,3 +148,8 @@
     baselines now equal Chromium's. Parity mean 9.767 -> 9.835, 32 of 33
     captures up (settings-scroll-1 +0.21), zoom-120 -0.01. This also closes the
     "weight 500/600 sits 1 px low" item (I-012): it was the baseline, not the font.
+25. `src/style.rs` `TextStyle::line_height_in_pixels` and `src/elements/text.rs` (the text
+    measure uses it, not its own conversion): the line height floors to 1/64 px, as Blink
+    stores it in a LayoutUnit (13 px x 1.45 = 18.85 becomes 18.84375). The 0.006 px per line
+    added up down the settings sheet and moved a line by 1 px at some scroll positions.
+    Parity: settings-scroll-3 +0.08, none down.

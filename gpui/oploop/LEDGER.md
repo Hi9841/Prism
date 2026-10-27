@@ -331,3 +331,14 @@ left of the original's (568 vs 570, centroid -1.9 px).
   +0.12, search-files +0.11, keyboard-deep +0.10, idle-scrolled +0.07 (the right-aligned file paths: the
   last 1 px of the I-001 path offset was this gutter); zoom-120 -0.01.
 - Decision: KEEP (`gfx.rs` `SCROLLBAR_GUTTER` 10; the real WebView2 value, not a harness value).
+
+### I-021 Line height as a LayoutUnit (patch 25)
+
+- Profile: settings-scroll-3 "Group apps like Creative..." still 1.00 px low (error 0.04). Chromium's
+  line tops step by 18.84375 for an 18.85 px line height (LayoutUnit floor of 1206.4/64); the port
+  stepped by 18.85, about 0.006 px more per line, enough to cross a pixel after some 20 lines.
+- Hypothesis: flooring the line height to 1/64 px keeps the port's line tops on Chromium's.
+- Result: the first build changed only 8 captures by a few pixels: `text.rs` converts the line height
+  itself and did not use `line_height_in_pixels`. With both: mean 9.861 -> 9.864 (excl. menus 9.870 ->
+  9.873); settings-scroll-3 +0.08, settings-scroll-1 +0.01, none down.
+- Decision: KEEP (vendored patch 25).

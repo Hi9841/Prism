@@ -475,7 +475,10 @@ impl TextStyle {
     pub fn line_height_in_pixels(&self, rem_size: Pixels) -> Pixels {
         // prism-gpui patch: keep fractional line heights, as Chromium does
         // (LayoutUnit precision). Rounding drifted stacked text by 1px per block.
-        self.line_height.to_pixels(self.font_size, rem_size)
+        // Blink stores the line height as a LayoutUnit, so it floors to 1/64 px
+        // (18.85 becomes 18.84375): PRISM PATCH 25.
+        let line_height = self.line_height.to_pixels(self.font_size, rem_size);
+        crate::px((f32::from(line_height) * 64.0).floor() / 64.0)
     }
 
     /// Convert this text style into a [`TextRun`], for the given length of the text.
