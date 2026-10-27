@@ -412,3 +412,30 @@ left of the original's (568 vs 570, centroid -1.9 px).
 - Fix: each session stops the installed Prism, then backs up prism.json, then starts the guardian;
   the exit restores only what a test build changed. The E2E re-check waits until the owner's Prism has
   saved again (a session stops the installed Prism, which would drop the state in its memory).
+
+## Session 2026-10-27 (B): performance, the port against the WebView original
+
+Owner: "we need to optimize it much more compared to the webview tauri version". The file index is in the
+shared backend (both apps carry it), so its wins shrink both apps; the port-only layers (GPUI window, host,
+rendering) are where the port pulls ahead. Both kinds are in scope.
+
+Harness: `PRISM_BENCH_DB=<catalog copy> cargo test --release -p prism-core --lib live_catalog -- --ignored
+--nocapture` (index load time and size, per-query search time) on a copy of the owner's catalog (5.84 M rows,
+`target/tmp/bench/catalog.db`, copied with the SQLite backup API). The E2E bench (`bench/`) for J2-J5.
+
+Profile (temporary timers, removed): index load 6.98 s = SQL fetch with owned strings 3.11 s + push 3.07 s
+(of which `path_penalty` 2.55 s) + other 0.8 s. Index memory 217 MiB of the app's 385 MiB.
+
+### P-001 `path_penalty` tests only the needles that can start at each separator
+
+- Hot spot: `catalog/search.rs` `path_penalty`: 2.55 s of the 6.98 s load (37%), because every backslash of
+  every path tests all 25 `LOCATION_PENALTIES` needles.
+- Hypothesis: group the needles by their first byte after the separator (a 128-entry bitmask table built at
+  compile time); a path segment then tests 0-5 needles, not 25. `path_penalty` should drop to about 0.3 s and
+  the load by about 2 s (6.9 -> 4.9 s), with identical penalties.
+- Test first: an equivalence test against the sliding scan over generated paths (every needle, mixed case,
+  at the start, middle and end).
+- Result (interleaved test binaries, same catalog copy): load A 6.12/6.64/6.64/6.66/6.70 s, B 4.36/4.95/4.95/
+  5.01/5.03/5.04 s: median 6.64 -> 4.95 s (-1.69 s, -25%), every B below every A (one-sided rank-sum p about
+  0.002). Index size unchanged (217 MiB). prism-core 255 passed; judge 277/277.
+- Decision: KEEP.

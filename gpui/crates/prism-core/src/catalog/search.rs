@@ -478,22 +478,43 @@ const NOISE_FILE_NAMES: &[&str] = &[
     "swapfile.sys",
 ];
 
+/// The `LOCATION_PENALTIES` needles that can match at a separator, by the
+/// ASCII-lowercase byte after it: one bit per needle.
+const NEEDLES_BY_LEAD: [u32; 128] = {
+    assert!(LOCATION_PENALTIES.len() <= 32);
+    let mut table = [0u32; 128];
+    let mut index = 0;
+    while index < LOCATION_PENALTIES.len() {
+        let lead = LOCATION_PENALTIES[index].0.as_bytes()[1].to_ascii_lowercase();
+        table[lead as usize] |= 1 << index;
+        index += 1;
+    }
+    table
+};
+
 pub fn path_penalty(display_path: &str, lower_name: &str) -> i32 {
     // Every location needle starts with a separator, so a match can only
     // begin at a backslash. Testing the needles there, instead of sliding them
     // over every byte, gives the same result for a fraction of the work - the
-    // name index computes this once per catalog row at load. ASCII
-    // case-insensitive, with no lowercase copy of the path.
+    // name index computes this once per catalog row at load (5.8 M rows on a
+    // large catalog). Only the needles whose next byte matches are tested.
+    // ASCII case-insensitive, with no lowercase copy of the path.
     let bytes = display_path.as_bytes();
     let mut penalty = 0i32;
     for start in (0..bytes.len()).filter(|&index| bytes[index] == b'\\') {
         let rest = &bytes[start..];
-        for (needle, value) in LOCATION_PENALTIES {
-            if *value > penalty
+        let Some(&lead) = rest.get(1).filter(|lead| lead.is_ascii()) else {
+            continue;
+        };
+        let mut candidates = NEEDLES_BY_LEAD[lead.to_ascii_lowercase() as usize];
+        while candidates != 0 {
+            let (needle, value) = LOCATION_PENALTIES[candidates.trailing_zeros() as usize];
+            candidates &= candidates - 1;
+            if value > penalty
                 && rest.len() >= needle.len()
                 && rest[..needle.len()].eq_ignore_ascii_case(needle.as_bytes())
             {
-                penalty = *value;
+                penalty = value;
             }
         }
     }
@@ -820,6 +841,47 @@ mod tests {
             r"E:\PGDATA\base\1",
             r"C:\Users\me\Documents\report.pdf",
         ] {
+            assert_eq!(path_penalty(path, "x"), sliding(path), "{path}");
+        }
+    }
+
+    #[test]
+    fn location_penalty_matches_the_sliding_scan_on_generated_paths() {
+        let sliding = |path: &str| {
+            let lower = path.to_ascii_lowercase();
+            LOCATION_PENALTIES
+                .iter()
+                .filter(|(needle, _)| lower.contains(needle))
+                .map(|(_, value)| *value)
+                .max()
+                .unwrap_or(0)
+        };
+        let upper = |text: &str| text.to_ascii_uppercase();
+        let mixed = |text: &str| {
+            text.chars()
+                .enumerate()
+                .map(|(i, c)| if i % 2 == 0 { c.to_ascii_uppercase() } else { c })
+                .collect::<String>()
+        };
+        let mut paths = Vec::new();
+        for (needle, _) in LOCATION_PENALTIES {
+            let inner = needle.trim_matches('\\');
+            for form in [inner.to_string(), upper(inner), mixed(inner)] {
+                paths.push(format!(r"C:\{form}\file.txt"));
+                paths.push(format!(r"D:\work\{form}\deep\file.txt"));
+                paths.push(format!(r"E:\a\b\{form}"));
+                paths.push(format!(r"C:\x{form}\file.txt"));
+                paths.push(format!(r"C:\{form}x\file.txt"));
+                for (other, _) in LOCATION_PENALTIES {
+                    paths.push(format!(r"C:\{form}{other}tail.bin"));
+                }
+            }
+        }
+        paths.extend(
+            [r"\", r"\\", r"C:", r"C:\", r"\windows\", "", r"C:\Ünïcode\Windows\x", r"C:\é\$Recycle.Bin\x"]
+                .map(str::to_string),
+        );
+        for path in &paths {
             assert_eq!(path_penalty(path, "x"), sliding(path), "{path}");
         }
     }
