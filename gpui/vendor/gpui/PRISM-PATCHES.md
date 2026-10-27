@@ -158,3 +158,8 @@
     as Blink computes it. With the fractional maximum, a list scrolled to its end stopped about
     0.1 px short of Chromium's, and lines near a pixel edge moved 1 px. Parity: settings-bottom
     +0.07, idle-bottom +0.04, none down.
+27. `src/platform/windows/direct_write.rs` `apply_font_features`: `kern` is always in the feature
+    list. Every text run gets an `IDWriteTypography` (an empty one when it has no features), and a
+    typography object replaces DirectWrite's default features, so no text was kerned. Chromium kerns
+    by default (HarfBuzz: "Ta" at 13 px is -1.46 px). A run can still turn it off with `kern` = 0.
+    Parity mean 9.877 -> 9.902, 31 of 33 captures up (settings-scroll-1/2 +0.07), none down.

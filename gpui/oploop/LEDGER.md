@@ -386,3 +386,17 @@ left of the original's (568 vs 570, centroid -1.9 px).
 - Result: settings-scroll-2 SSIM 0.9889 -> 0.9891 (score 9.91 both); the icon now has the original's
   anti-aliased shape. It sits 1 px right because the tile row is 1 px narrower (label widths: I-026).
 - Decision: KEEP (visible fix, score neutral).
+
+### I-026 Kerning was off for all text (patch 27)
+
+- Profile: after I-019..I-025 every line has dy 0, but some lines sit 0.5-1.5 px right. Column profile
+  of "Taskbar density": the "T" is identical, the "a" after it starts 1.5 px later in the port, and
+  the rest of the line keeps that offset. HarfBuzz (Chromium's shaper) on SegUIVar.ttf at wght 600:
+  "Ta" kerns -1.46 px at 13 px. GPUI sets an `IDWriteTypography` on every run; it re-adds liga, clig
+  and calt (and nothing at all when the run has no features), but not `kern`, and a typography
+  object replaces DirectWrite's default features.
+- Hypothesis: listing `kern` puts every glyph after a kerned pair where Chromium puts it, in every
+  capture with text; label widths also change, so tile rows and right-aligned text move too.
+- Result: mean 9.877 -> 9.902 (excl. menus 9.887 -> 9.913), min 9.66 -> 9.67. 31 of 33 captures up
+  (settings-scroll-1 and -2 +0.07, settings +0.05, search-power +0.04, idle +0.02), none down.
+- Decision: KEEP (vendored patch 27).

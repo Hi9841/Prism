@@ -162,6 +162,18 @@ another app, Esc cancels, a click works after the drag, and a release over the p
 
 ## Deviation log
 
+- 2026-10-27 (OpLoop, second pass): text and layout as Blink does them, found with
+  `oploop/parity/line_shift.py` (best offset per text line) and probes in Chromium and the real WebView2.
+  (1) The half-leading floors to a whole pixel, not to 1/64 px (patch 24 corrects item (4) of 2026-10-10;
+  the glyph row now rounds, as Skia does). (2) Line heights floor to 1/64 px, as a LayoutUnit (patch 25).
+  (3) The maximum scroll offset is in whole pixels (patch 26). (4) Kerning was off for all text: GPUI's
+  per-run `IDWriteTypography` replaced DirectWrite's defaults without `kern` (patch 27). (5) The thin
+  scrollbar gutter is 10 px, as WebView2 155 reserves it (read from the real Tauri build with a
+  read-only CDP probe, `oploop/bench/webview_probe.py`); the port reserved 11. (6) The parity harness
+  emulates WebView2 zoom with CSS `zoom` on the root at scale 1.0, not with the device scale: WebView2
+  keeps scrollbars at 10 device px at 80-120%, and the device scale scaled them. (7) The Start-icon
+  tiles keep the 24 px icon box (CSS grid rows do not shrink), and the Gem and Diamond SVGs draw as
+  masks at their painted size. UI parity mean 9.767 -> 9.902 (9.913 without the two menu captures).
 - 2026-10-27: Parity audit after release 1.0.10. (1) The original changed in 1.0.4 (app rows drop the
   "Application" subtitle), so 33 goldens failed against the original and the port alike. The port output
   was identical to the original on all 33. Goldens were captured again from the original: judge 277/277

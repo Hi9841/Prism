@@ -1761,17 +1761,22 @@ fn apply_font_features(
     features: &FontFeatures,
 ) -> Result<()> {
     let tag_values = features.tag_value_list();
-    if tag_values.is_empty() {
-        return Ok(());
-    }
 
     // All of these features are enabled by default by DirectWrite.
     // If you want to (and can) peek into the source of DirectWrite
+    // PRISM PATCH 27: a typography object replaces DirectWrite's default features, and every
+    // run gets one (an empty one when there are no features), so `kern` is listed too, as
+    // Chromium kerns by default ("Ta" at 13px moved 1.5px right without it).
     let mut feature_liga = make_direct_write_feature("liga", 1);
     let mut feature_clig = make_direct_write_feature("clig", 1);
     let mut feature_calt = make_direct_write_feature("calt", 1);
+    let mut feature_kern = make_direct_write_feature("kern", 1);
 
     for (tag, value) in tag_values {
+        if tag.as_str() == "kern" {
+            feature_kern.parameter = *value;
+            continue;
+        }
         if tag.as_str() == "liga" && *value == 0 {
             feature_liga.parameter = 0;
             continue;
@@ -1793,6 +1798,7 @@ fn apply_font_features(
         direct_write_features.AddFontFeature(feature_liga)?;
         direct_write_features.AddFontFeature(feature_clig)?;
         direct_write_features.AddFontFeature(feature_calt)?;
+        direct_write_features.AddFontFeature(feature_kern)?;
     }
 
     Ok(())

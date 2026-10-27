@@ -15,7 +15,7 @@ The goal is the same design, layout, and behavior as the current Prism (1:1), wi
 | 2. Design review and spike (`migration/stress-test/step2-report.md`) | Done 2026-10-09. 7 of 8 spike rows settled (1:1 with headless Chromium baselines); OLE drag moved to Step 5. Rulebook draft 3 (A1, A2, A4-A11). Manifest: 44 units. |
 | 3. Translation | Done 2026-10-10. Queue 44/44 (`queue_runner.mjs status`). |
 | 4-5. Compile, run | Done. Shipped as Prism 1.0.0 on 2026-10-12; current release 1.0.10. |
-| 6. Behavior match | Done. Judge 277/277 against the original and the port. UI parity mean 9.77/10, min 9.54 (9.78 without the two menu captures that differ on purpose); UX 37/37 (`migration/parity`). Re-checked 2026-10-27. Port-only changes are in the RULEBOOK deviation log; the optimization loop is in `oploop/LEDGER.md`. |
+| 6. Behavior match | Done. Judge 277/277 against the original and the port. UI parity mean 9.90/10, min 9.67 (9.91 without the two menu captures that differ on purpose); UX 37/37 (`migration/parity`). Re-checked 2026-10-27. Port-only changes are in the RULEBOOK deviation log; the optimization loop is in `oploop/LEDGER.md`. |
 
 ## Layout
 
