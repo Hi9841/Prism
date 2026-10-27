@@ -439,3 +439,25 @@ Profile (temporary timers, removed): index load 6.98 s = SQL fetch with owned st
   5.01/5.03/5.04 s: median 6.64 -> 4.95 s (-1.69 s, -25%), every B below every A (one-sided rank-sum p about
   0.002). Index size unchanged (217 MiB). prism-core 255 passed; judge 277/277.
 - Decision: KEEP.
+
+### P-002 No driver worker threads for GPUI's Direct3D device (patch 28)
+
+- Profile: the port's UI layer alone (`bench/uimem.py`: the release build in parity mode, fixture data, no
+  file index or SQLite) holds 143.5 MiB private and 116 threads. `bench/memmap.py` (committed private memory
+  by region): 92 MiB in six blocks of 4-31 MiB; a tracing global allocator (temporary) showed no Rust
+  allocation of 4 MiB or more, so the blocks are native: the GPU driver and the D3D runtime.
+- Hypothesis: NVIDIA's threaded optimization starts worker threads with their own command-buffer pools for
+  each D3D11 device. GPUI submits from one thread, so `D3D11_CREATE_DEVICE_PREVENT_INTERNAL_THREADING_OPTIMIZATIONS`
+  should remove those threads and some memory, with identical pixels.
+- Result (interleaved, n=3 per block, 2 blocks each): private 144.4-146.7 -> 134.8-135.7 MiB (-10 MiB, every
+  B below every A), working set 72.3 -> 66.3 MiB, threads 116 -> 49 (-67). The idle-scrolled capture is
+  pixel-identical. J2/J3 latency is checked in the combined E2E A/B at the end of the session.
+- Decision: KEEP (vendored patch 28), pending the E2E latency check.
+
+### P-003 One Direct3D device, not two (reverted)
+
+- Hypothesis: `get_adapter` creates a full device only to test support and drops it; GPUI then creates the
+  real one. One device should save driver memory.
+- Result: private 133.0-137.6 MiB against 135.7-136.4 MiB (ranges overlap), working set -1 MiB. The dropped
+  device's memory is released; no gain beyond noise.
+- Decision: REVERT.

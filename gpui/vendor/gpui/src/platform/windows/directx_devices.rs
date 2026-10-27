@@ -9,6 +9,7 @@ use windows::Win32::{
         },
         Direct3D11::{
             D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_CREATE_DEVICE_DEBUG,
+            D3D11_CREATE_DEVICE_PREVENT_INTERNAL_THREADING_OPTIMIZATIONS,
             D3D11_FEATURE_D3D10_X_HARDWARE_OPTIONS, D3D11_FEATURE_DATA_D3D10_X_HARDWARE_OPTIONS,
             D3D11_SDK_VERSION, D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext,
         },
@@ -150,11 +151,14 @@ fn get_device(
     debug_layer_available: bool,
 ) -> Result<ID3D11Device> {
     let mut device: Option<ID3D11Device> = None;
-    let device_flags = if debug_layer_available {
-        D3D11_CREATE_DEVICE_BGRA_SUPPORT | D3D11_CREATE_DEVICE_DEBUG
-    } else {
-        D3D11_CREATE_DEVICE_BGRA_SUPPORT
-    };
+    // PRISM PATCH 28: no driver worker threads. GPUI submits from one thread; the
+    // driver's threaded optimization only adds threads and command-buffer pools.
+    let device_flags = D3D11_CREATE_DEVICE_PREVENT_INTERNAL_THREADING_OPTIMIZATIONS
+        | if debug_layer_available {
+            D3D11_CREATE_DEVICE_BGRA_SUPPORT | D3D11_CREATE_DEVICE_DEBUG
+        } else {
+            D3D11_CREATE_DEVICE_BGRA_SUPPORT
+        };
     unsafe {
         D3D11CreateDevice(
             adapter,
