@@ -117,6 +117,7 @@ const KEYS = {
   w: ["w", "KeyW", 87],
   menu: ["ContextMenu", "ContextMenu", 93],
   space: [" ", "Space", 32],
+  f10: ["F10", "F10", 121],
 };
 
 async function key(spec) {

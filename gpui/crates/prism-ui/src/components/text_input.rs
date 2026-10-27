@@ -340,9 +340,7 @@ impl TextInput {
 
     fn paste(&mut self, _: &Paste, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
-            // An <input> strips line breaks from pasted text.
-            let single_line: String = text.chars().filter(|c| *c != '\n' && *c != '\r').collect();
-            self.replace_text_in_range(None, &single_line, window, cx);
+            self.replace_text_in_range(None, &text, window, cx);
         }
     }
 
@@ -536,7 +534,10 @@ impl EntityInputHandler for TextInput {
             .map(|range_utf16| self.range_from_utf16(range_utf16))
             .or(self.marked_range.clone())
             .unwrap_or(self.selected_range.clone());
-        let new_text = self.clamp_to_max(&range, new_text);
+        // An <input> value never holds a line break: a paste drops them, and an Enter that the
+        // view lets through inserts nothing.
+        let single_line: String = new_text.chars().filter(|c| *c != '\n' && *c != '\r').collect();
+        let new_text = self.clamp_to_max(&range, &single_line);
         self.wake();
         let next: SharedString =
             (self.content[0..range.start].to_owned() + &new_text + &self.content[range.end..]).into();

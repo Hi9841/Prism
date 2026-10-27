@@ -268,7 +268,11 @@ impl Render for TaskbarCustomization {
         );
 
         let options: [(&str, &str); 3] = [("system", "System"), ("gem", "Gem"), ("diamond", "Diamond")];
-        let mut tiles = div().flex().max_w(r(260.)).flex_wrap().justify_end().gap(r(6.));
+        // CSS sizes a wrapping flex box to its one-line width, clamped to `max-w-65`, so wrapped
+        // lines align right in the full 260 px. Taffy sizes it to its longest line instead. The
+        // four fixed tiles fit (227 px); one more tile (at least 46 px + gap) wraps.
+        let wraps = !self.custom_images.is_empty();
+        let mut tiles = div().flex().max_w(r(260.)).when(wraps, |d| d.w(r(260.))).flex_wrap().justify_end().gap(r(6.));
         for (index, (value, label)) in options.iter().enumerate() {
             let selected = settings.start_icon == *value;
             let value = value.to_string();

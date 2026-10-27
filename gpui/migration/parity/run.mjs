@@ -20,10 +20,20 @@ const scriptPath = join(import.meta.dir, ux ? "ux-scenarios.json" : "scenarios.j
 const script = JSON.parse(readFileSync(scriptPath, "utf8"));
 const scenarios = script.scenarios.filter((s) => only.length === 0 || only.includes(s.name));
 
+function patch(target, extra) {
+  for (const [key, value] of Object.entries(extra)) {
+    const plain = (v) => v && typeof v === "object" && !Array.isArray(v);
+    if (plain(value) && plain(target[key])) patch(target[key], value);
+    else target[key] = value;
+  }
+}
+
 mkdirSync(join(work, "fixtures"), { recursive: true });
 for (const scenario of scenarios) {
   const merged = structuredClone(fixture);
-  merged.state.settings = { ...merged.state.settings, ...(scenario.settings ?? {}) };
+  merged.state.settings = { ...merged.state.settings, ...scenario.settings };
+  // Extra fixture data for one scenario (objects merge, other values replace).
+  patch(merged, scenario.fixture ?? {});
   const fixturePath = join(work, "fixtures", `${scenario.name}.json`);
   writeFileSync(fixturePath, JSON.stringify(merged));
   const port = spawnSync(join(root, "target/debug/prism.exe"), ["--parity", fixturePath, scriptPath, scenario.name, join(work, "port")], {

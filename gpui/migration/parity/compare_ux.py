@@ -6,6 +6,7 @@ Prints one JSON line per scenario and a summary (UX score = 10 x passed / total)
 """
 
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -26,13 +27,19 @@ ACTIONS = {
 def normalize(calls):
     out = []
     for call in calls:
-        cmd, args = call["cmd"], dict(call.get("args") or {})
+        cmd = call["cmd"]
         if cmd not in ACTIONS:
-            continue
+            continue  # reads and `#eval` probes
+        # JavaScript has one number type: 4242.0 and 4242 are the same value.
+        args = json.loads(json.dumps(call.get("args") or {}), parse_float=lambda text: int(float(text)) if float(text).is_integer() else float(text))
         if cmd == "save_state":
             state = json.loads(json.dumps(args.get("state", {})))
             for entry in state.get("history", []):
                 entry.pop("ts", None)
+            # A new collection's id holds the time and a random part.
+            for group in state.get("settings", {}).get("appGroups", []):
+                if re.fullmatch(r"group-[0-9a-z]+-[0-9a-z]{5}", group.get("id", "")):
+                    group["id"] = "group-new"
             args = {"state": state}
         if cmd == "plugin:clipboard-manager|write_text":
             args = {"text": args.get("text")}

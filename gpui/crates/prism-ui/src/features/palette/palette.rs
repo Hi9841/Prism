@@ -1935,13 +1935,17 @@ impl Render for Palette {
                     window.on_mouse_event(move |e: &MouseUpEvent, phase, window, cx| {
                         if phase == DispatchPhase::Capture && e.button == MouseButton::Left {
                             let _ = w.update(cx, |this, cx| {
-                                let release_item = this.reorder_drag.as_ref().map(|d| d.item.clone())
-                                    .or_else(|| this.file_drag.as_ref().map(|d| d.item.clone()));
-                                let from_icon = matches!(this.active_drag, Some(ActiveDrag::Reorder | ActiveDrag::File));
+                                let file_item = match this.active_drag {
+                                    Some(ActiveDrag::File) => this.file_drag.as_ref().map(|d| d.item.clone()),
+                                    _ => None,
+                                };
                                 let dragged = this.pointer_up(window, cx);
                                 // The release that ends an active drag is not an activation.
                                 this.suppress_click = dragged;
-                                let _ = (release_item, from_icon);
+                                // A press on the file grip that never became a drag opens the item.
+                                if !dragged && let Some(item) = file_item {
+                                    this.palette.update(cx, |p, cx| p.run_item(item, cx));
+                                }
                             });
                         }
                     });

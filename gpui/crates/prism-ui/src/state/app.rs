@@ -428,7 +428,8 @@ mod provider {
         fn on_ready(&mut self, cx: &mut Context<Self>) {
             // Follow the OS theme live (only relevant in "system" mode).
             self.system_theme = bridge::get_system_theme();
-            self.refresh_theme(cx);
+            self.update_theme(cx);
+            bridge::set_osd_accent(&self.settings.accent);
             self.apply_window_style(cx);
             self.apply_width(cx);
             self.apply_always_on_top(cx);
@@ -440,22 +441,29 @@ mod provider {
             if self.settings.theme == "system" { &self.system_theme } else { &self.settings.theme }
         }
 
+        /// The original's `[accent, effectiveTheme]` and `[effectiveTheme]` effects: the OSD
+        /// accent and the window style go to the shell only when their own input changes.
         fn refresh_theme(&mut self, cx: &mut Context<Self>) {
+            let (changed, changed_mode) = self.update_theme(cx);
+            if self.ready && changed {
+                bridge::set_osd_accent(&self.settings.accent);
+                if changed_mode {
+                    self.apply_window_style(cx);
+                }
+            }
+        }
+
+        /// Rebuilds the palette theme; returns (anything changed, the mode changed).
+        fn update_theme(&mut self, cx: &mut Context<Self>) -> (bool, bool) {
             let mode = if self.effective_theme() == "light" { Mode::Light } else { Mode::Dark };
             let accent = Accent::parse(&self.settings.accent);
             let changed_mode = self.theme.mode != mode;
-            if changed_mode || self.theme.accent_id != accent {
+            let changed = changed_mode || self.theme.accent_id != accent;
+            if changed {
                 self.theme = Theme::new(mode, accent);
-                if self.ready {
-                    bridge::set_osd_accent(&self.settings.accent);
-                    if changed_mode {
-                        self.apply_window_style(cx);
-                    }
-                }
                 cx.notify();
-            } else if self.ready {
-                bridge::set_osd_accent(&self.settings.accent);
             }
+            (changed, changed_mode)
         }
 
         fn apply_window_style(&mut self, cx: &mut Context<Self>) {
