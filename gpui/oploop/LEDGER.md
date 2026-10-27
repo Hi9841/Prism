@@ -453,6 +453,11 @@ Profile (temporary timers, removed): index load 6.98 s = SQL fetch with owned st
   B below every A), working set 72.3 -> 66.3 MiB, threads 116 -> 49 (-67). The idle-scrolled capture is
   pixel-identical. J2/J3 latency is checked in the combined E2E A/B at the end of the session.
 - Decision: KEEP (vendored patch 28), pending the E2E latency check.
+- E2E check (`results/raw/20261027-111527`, gpui-head = HEAD with P-001 and P-002 against gpui-base):
+  warm first frame 12 (p95 17) -> 17 (p95 27) ms, p 0.0073; settled, echo and rows done unchanged. P-002 is
+  the only change in that range that touches frame presentation. The owner stopped desktop testing before
+  the attribution run (HEAD with and without the flag).
+- Decision, revised: REVERT. Latency outranks the thread count; the 67 driver threads sleep when idle.
 
 ### P-003 One Direct3D device, not two (reverted)
 

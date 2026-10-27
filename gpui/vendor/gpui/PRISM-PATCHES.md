@@ -163,7 +163,5 @@
     typography object replaces DirectWrite's default features, so no text was kerned. Chromium kerns
     by default (HarfBuzz: "Ta" at 13 px is -1.46 px). A run can still turn it off with `kern` = 0.
     Parity mean 9.877 -> 9.902, 31 of 33 captures up (settings-scroll-1/2 +0.07), none down.
-28. `src/platform/windows/directx_devices.rs` `get_device`: the D3D11 device is created with
-    `D3D11_CREATE_DEVICE_PREVENT_INTERNAL_THREADING_OPTIMIZATIONS`. GPUI submits from one thread; the
-    driver's threaded optimization (NVIDIA) added 67 worker threads and about 10 MiB of private memory to a
-    launcher palette. Pixels are identical.
+28. (Reverted.) `D3D11_CREATE_DEVICE_PREVENT_INTERNAL_THREADING_OPTIMIZATIONS`: UI threads 116 -> 49 and
+    -10 MiB, but the warm first frame of an open went from 12 to 17 ms in the E2E run (p 0.007).
