@@ -26,7 +26,7 @@ import psutil
 from PIL import Image
 
 import winapi
-from apps import Session, TestApp, check_prism_json, log, prism_processes, start_installed, kill_tree
+from apps import Session, TestApp, check_prism_json, kill_tree, log, prism_processes, owner_launcher, register_build, start_installed
 
 RESULTS = Path(__file__).resolve().parents[1] / "results" / "raw"
 
@@ -299,8 +299,10 @@ def cmd_j4(args) -> None:
 def cmd_restore(_args) -> None:
     """Emergency, right after a failed run only: stop every test build, start the installed
     Prism, and restore prism.json from that run's backup if a test build changed it."""
+    launcher = owner_launcher()
     for proc in prism_processes():
-        if "PrismGpuiE2E" in (proc.exe() or ""):
+        exe = proc.exe() or ""
+        if "PrismGpuiE2E" in exe and Path(exe) != launcher:
             kill_tree(proc.pid)
     start_installed()
     log(f"prism.json unchanged: {check_prism_json()}")
@@ -321,8 +323,15 @@ def main() -> None:
     j4.add_argument("--cycles", type=int, default=20)
     j4.add_argument("--apps", nargs="+", default=["gpui", "tauri"])
     j4.set_defaults(func=cmd_j4)
+    for command in (run, j4):
+        command.add_argument("--build", action="append", default=[], metavar="NAME=EXE",
+                             help="an extra build to measure, for example gpui-base=<prism.exe>; "
+                                  "use the name in --apps")
     sub.add_parser("restore", help="restore the owner's setup").set_defaults(func=cmd_restore)
     args = parser.parse_args()
+    for spec in getattr(args, "build", []):
+        name, _, exe = spec.partition("=")
+        register_build(name, Path(exe).resolve())
     args.func(args)
 
 

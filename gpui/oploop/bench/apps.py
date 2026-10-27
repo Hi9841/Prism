@@ -138,27 +138,69 @@ def kill_tree(pid: int) -> None:
     psutil.wait_procs([root, *children], timeout=10)
 
 
+def launcher_exes() -> set[Path]:
+    """The exe paths of the launcher instances that run now (no helpers, no parity)."""
+    found = set()
+    for proc in prism_processes():
+        try:
+            found.add(Path(proc.exe()))
+        except (psutil.AccessDenied, psutil.NoSuchProcess):
+            continue
+    return found
+
+
+# The owner's launcher: the Prism that ran when this bench process first looked
+# (the installed Prism, or a build the owner runs from E2E_DIR\gpui). A session
+# stops it and starts it again; it is never treated as a test build.
+_owner_launcher: Path | None = None
+
+
+OWNER_LAUNCHER_FILE = E2E_DIR / "owner-launcher.txt"
+
+
+def owner_launcher() -> Path:
+    """Found once per bench process and written down, so `bench.py restore` (after a failed
+    run, when nothing may run) starts the same exe."""
+    global _owner_launcher
+    if _owner_launcher is None:
+        running = sorted(launcher_exes() - {E2E_DIR / name / "prism.exe" for name in BUILDS if name != "gpui"})
+        if running:
+            _owner_launcher = running[0]
+            OWNER_LAUNCHER_FILE.parent.mkdir(parents=True, exist_ok=True)
+            OWNER_LAUNCHER_FILE.write_text(str(_owner_launcher), encoding="utf8")
+        elif OWNER_LAUNCHER_FILE.exists():
+            _owner_launcher = Path(OWNER_LAUNCHER_FILE.read_text(encoding="utf8").strip())
+        else:
+            _owner_launcher = INSTALLED_EXE
+        log(f"owner's launcher: {_owner_launcher}")
+    return _owner_launcher
+
+
 def stop_installed() -> None:
+    """Stops the owner's launcher (the name stays for the callers)."""
+    launcher = owner_launcher()
     for proc in prism_processes():
         try:
             exe = Path(proc.exe())
         except (psutil.AccessDenied, psutil.NoSuchProcess):
             continue
-        if exe == INSTALLED_EXE:
-            log(f"stop installed Prism pid={proc.pid}")
+        if exe == launcher:
+            log(f"stop the owner's Prism pid={proc.pid}")
             kill_tree(proc.pid)
 
 
 def start_installed() -> int:
+    """Starts the owner's launcher again, hidden, unless it runs."""
+    launcher = owner_launcher()
     for proc in prism_processes():
         try:
-            if Path(proc.exe()) == INSTALLED_EXE:
+            if Path(proc.exe()) == launcher:
                 return proc.pid
         except (psutil.AccessDenied, psutil.NoSuchProcess):
             continue
     # The Run entry starts it with --autostart: hidden, no palette on start.
-    pid = wmi_create(f'"{INSTALLED_EXE}" --autostart', INSTALLED_EXE.parent)
-    log(f"started installed Prism pid={pid}")
+    pid = wmi_create(f'"{launcher}" --autostart', launcher.parent)
+    log(f"started the owner's Prism pid={pid}")
     return pid
 
 
@@ -181,10 +223,24 @@ def check_prism_json() -> bool:
     return False
 
 
+def family(kind: str) -> str:
+    """`gpui` or `tauri`: a build name such as `gpui-base` keeps its family's window rules."""
+    return "tauri" if kind.startswith("tauri") else "gpui"
+
+
+def register_build(name: str, path: Path) -> None:
+    """An extra build to measure (`bench.py --build gpui-base=<exe>`). It deploys to its own folder."""
+    if name == "gpui":
+        raise ValueError("'gpui' is the owner's folder when the owner runs a test build; use another name")
+    BUILDS[name] = path
+
+
 def deploy(kind: str) -> Path:
     """Copies the built exe out of the repo (the repo has a Low integrity label)."""
     source = BUILDS[kind]
     target = E2E_DIR / kind / "prism.exe"
+    if target == owner_launcher():
+        raise RuntimeError(f"{target} is the owner's launcher; measure the build under another name")
     target.parent.mkdir(parents=True, exist_ok=True)
     if not target.exists() or sha256(source) != sha256(target):
         shutil.copy2(source, target)
@@ -202,7 +258,7 @@ def start_guardian() -> None:
     script = Path(__file__).with_name("guardian.ps1")
     wmi_create(
         f'powershell.exe -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass '
-        f'-File "{script}" -BenchPid {os.getpid()}',
+        f'-File "{script}" -BenchPid {os.getpid()} -Launcher "{owner_launcher()}"',
         E2E_DIR,
     )
     _guardian_started = True
@@ -228,7 +284,7 @@ class TestApp:
     def find_palette(self, timeout: float = 20.0) -> int:
         deadline = time.time() + timeout
         while time.time() < deadline:
-            wins = [w for w in winapi.top_windows({self.pid}) if w.cls == PALETTE_CLASS[self.kind]]
+            wins = [w for w in winapi.top_windows({self.pid}) if w.cls == PALETTE_CLASS[family(self.kind)]]
             if wins:
                 self.palette = wins[0].hwnd
                 return self.palette
@@ -238,7 +294,7 @@ class TestApp:
     def find_type_target(self) -> int:
         """GPUI reads keys on the palette window. WebView2 reads them on the
         Chromium render widget, a child window of another process."""
-        if self.kind == "gpui":
+        if family(self.kind) == "gpui":
             self.type_target = self.palette
             return self.type_target
         for _ in range(100):
@@ -251,7 +307,7 @@ class TestApp:
 
     def activate(self) -> None:
         """The second-instance signal, sent the way a second launch sends it."""
-        if self.kind == "gpui":
+        if family(self.kind) == "gpui":
             if not winapi.set_named_event(GPUI_ACTIVATE_EVENT):
                 raise RuntimeError("SetEvent(PrismGpuiActivate) failed")
             return
@@ -285,13 +341,14 @@ class Session:
         self.app: TestApp | None = None
 
     def __enter__(self) -> TestApp:
-        exe = deploy(self.kind)
+        owner_launcher()
         env = default_environment(E2E_DIR / "default-env.txt")
         perf_log = self.out / f"perf-{self.tag}.jsonl"
         perf_log.parent.mkdir(parents=True, exist_ok=True)
         perf_log.unlink(missing_ok=True)
         env["PRISM_PERF_LOG"] = str(perf_log)
         stop_installed()
+        exe = deploy(self.kind)
         # The owner's Prism saves prism.json between sessions, so a difference from an older
         # backup is the owner's own change. Take the backup only now, with the installed Prism
         # stopped; the exit (and the guardian) restore only what a test build changed.
