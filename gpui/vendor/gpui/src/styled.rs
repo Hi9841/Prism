@@ -654,6 +654,19 @@ pub trait Styled: Sized {
         self
     }
 
+    /// PRISM PATCH 8: paints this element and its children scaled by `factor`
+    /// around the center of its bounds, as CSS `transform: scale(factor)`.
+    /// Layout and hit testing do not change.
+    ///
+    /// ```ignore
+    /// // Tailwind `hover:scale-105` and press feedback `active:scale-[0.96]`.
+    /// div().hover(|style| style.scale(1.05)).active(|style| style.scale(0.96))
+    /// ```
+    fn scale(mut self, factor: f32) -> Self {
+        self.style().scale = Some(factor);
+        self
+    }
+
     /// Sets the grid columns of this element.
     fn grid_cols(mut self, cols: u16) -> Self {
         self.style().grid_cols = Some(cols);

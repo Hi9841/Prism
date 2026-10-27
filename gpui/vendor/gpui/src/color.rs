@@ -1,3 +1,4 @@
+use crate::{Point, Size};
 use anyhow::{Context as _, bail};
 use schemars::{JsonSchema, json_schema};
 use serde::{
@@ -658,6 +659,8 @@ pub(crate) enum BackgroundTag {
     Solid = 0,
     LinearGradient = 1,
     PatternSlash = 2,
+    /// PRISM PATCH 9: `solid` holds the center and the radii, see [`radial_gradient`].
+    RadialGradient = 3,
 }
 
 /// A color space for color interpolation.
@@ -673,6 +676,9 @@ pub enum ColorSpace {
     Srgb = 0,
     /// The Oklab color space.
     Oklab = 1,
+    /// PRISM PATCH 17: Oklab, with each stop given as Oklab values (L in `h`, a in `s`, b in `l`).
+    /// CSS mixes `oklch()` stops before it clips to sRGB, so a stop outside sRGB stays exact.
+    OklabValues = 2,
 }
 
 impl Display for ColorSpace {
@@ -680,6 +686,7 @@ impl Display for ColorSpace {
         match self {
             ColorSpace::Srgb => write!(f, "sRGB"),
             ColorSpace::Oklab => write!(f, "Oklab"),
+            ColorSpace::OklabValues => write!(f, "Oklab values"),
         }
     }
 }
@@ -713,6 +720,14 @@ impl std::fmt::Debug for Background {
                     f,
                     "PatternSlash({:?}, {})",
                     self.solid, self.gradient_angle_or_pattern_height
+                )
+            }
+            BackgroundTag::RadialGradient => {
+                let geometry = self.solid;
+                write!(
+                    f,
+                    "RadialGradient(at {} {}, radii {} {}, {:?}, {:?})",
+                    geometry.h, geometry.s, geometry.l, geometry.a, self.colors[0], self.colors[1]
                 )
             }
         }
@@ -775,6 +790,49 @@ pub fn linear_gradient(
     }
 }
 
+/// PRISM PATCH 9: creates a radial gradient background, as CSS
+/// `radial-gradient(<rx> <ry> at <cx> <cy>, <from>, <to>)` with an ellipse.
+///
+/// `center` and `radii` are fractions of the element's bounds (1.0 = 100%);
+/// the center can be outside the bounds. The stop percentages are fractions of
+/// the gradient ray, from the center (0.0) to the ellipse (1.0). Before the
+/// first stop the color is `from`; after the last stop it is `to`. Colors
+/// interpolate with premultiplied alpha, as in CSS, so `transparent_black()`
+/// fades the other color without a dark band. Only the DirectX (Windows)
+/// renderer draws it.
+///
+/// ```
+/// use gpui::{linear_color_stop, point, radial_gradient, rgb, size, transparent_black};
+/// // radial-gradient(120% 90% at 50% -20%, <accent at 8% alpha> 0%, transparent 55%)
+/// let accent = gpui::Hsla::from(rgb(0x6366f1));
+/// let background = radial_gradient(
+///     point(0.5, -0.2),
+///     size(1.2, 0.9),
+///     linear_color_stop(accent.opacity(0.08), 0.0),
+///     linear_color_stop(transparent_black(), 0.55),
+/// );
+/// ```
+pub fn radial_gradient(
+    center: Point<f32>,
+    radii: Size<f32>,
+    from: impl Into<LinearColorStop>,
+    to: impl Into<LinearColorStop>,
+) -> Background {
+    Background {
+        tag: BackgroundTag::RadialGradient,
+        // The shader reads these four values from the unused `solid` field, so
+        // the `repr(C)` layout stays the same for every backend.
+        solid: Hsla {
+            h: center.x,
+            s: center.y,
+            l: radii.width,
+            a: radii.height,
+        },
+        colors: [from.into(), to.into()],
+        ..Default::default()
+    }
+}
+
 /// A color stop in a linear gradient.
 ///
 /// <https://developer.mozilla.org/en-US/docs/Web/CSS/gradient/linear-gradient#linear-color-stop>
@@ -819,7 +877,10 @@ impl Background {
     /// Returns a new background color with the same hue, saturation, and lightness, but with a modified alpha value.
     pub fn opacity(&self, factor: f32) -> Self {
         let mut background = *self;
-        background.solid = background.solid.opacity(factor);
+        // A radial gradient keeps its geometry in `solid`.
+        if self.tag != BackgroundTag::RadialGradient {
+            background.solid = background.solid.opacity(factor);
+        }
         background.colors = [
             self.colors[0].opacity(factor),
             self.colors[1].opacity(factor),
@@ -831,7 +892,9 @@ impl Background {
     pub fn is_transparent(&self) -> bool {
         match self.tag {
             BackgroundTag::Solid => self.solid.is_transparent(),
-            BackgroundTag::LinearGradient => self.colors.iter().all(|c| c.color.is_transparent()),
+            BackgroundTag::LinearGradient | BackgroundTag::RadialGradient => {
+                self.colors.iter().all(|c| c.color.is_transparent())
+            }
             BackgroundTag::PatternSlash => self.solid.is_transparent(),
         }
     }

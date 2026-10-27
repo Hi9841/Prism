@@ -260,6 +260,11 @@ pub struct Style {
     /// The opacity of this element
     pub opacity: Option<f32>,
 
+    /// PRISM PATCH 8: the paint scale of this element and its children around
+    /// the center of its bounds, as CSS `transform: scale()`. Layout and hit
+    /// testing do not change.
+    pub scale: Option<f32>,
+
     /// The grid columns of this element
     /// Equivalent to the Tailwind `grid-cols-<number>`
     pub grid_cols: Option<u16>,
@@ -610,6 +615,21 @@ impl Style {
         cx: &mut App,
         continuation: impl FnOnce(&mut Window, &mut App),
     ) {
+        // PRISM PATCH 8: the scale covers the shadows, the background, the
+        // children (painted by `continuation`) and the border.
+        let scale = self.scale.unwrap_or(1.0);
+        window.with_element_scale(bounds.center(), scale, |window| {
+            self.paint_unscaled(bounds, window, cx, continuation)
+        });
+    }
+
+    fn paint_unscaled(
+        &self,
+        bounds: Bounds<Pixels>,
+        window: &mut Window,
+        cx: &mut App,
+        continuation: impl FnOnce(&mut Window, &mut App),
+    ) {
         #[cfg(debug_assertions)]
         if self.debug_below {
             cx.set_global(DebugBelow)
@@ -633,7 +653,7 @@ impl Style {
             let mut border_color = match background_color {
                 Some(color) => match color.tag {
                     BackgroundTag::Solid => color.solid,
-                    BackgroundTag::LinearGradient => color
+                    BackgroundTag::LinearGradient | BackgroundTag::RadialGradient => color
                         .colors
                         .first()
                         .map(|stop| stop.color)
@@ -771,6 +791,7 @@ impl Default for Style {
             text: TextStyleRefinement::default(),
             mouse_cursor: None,
             opacity: None,
+            scale: None,
             grid_rows: None,
             grid_cols: None,
             grid_location: None,

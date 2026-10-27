@@ -411,14 +411,15 @@ impl DirectWriteState {
                 .log_err()?
         };
         let total_number = unsafe { font.GetFontCount() };
-        for index in 0..total_number {
-            let Some(font_face_ref) = (unsafe { font.GetFontFaceReference(index).log_err() })
-            else {
-                continue;
-            };
-            let Some(font_face) = (unsafe { font_face_ref.CreateFontFace().log_err() }) else {
-                continue;
-            };
+        let from_set = (0..total_number)
+            .filter_map(|index| unsafe { font.GetFontFaceReference(index).log_err()?.CreateFontFace().log_err() });
+        // PRISM PATCH 21: the font set does not match the family name of a variable font's
+        // named instances ("Segoe UI Variable Text"), so GPUI fell back to the system UI font
+        // ("Segoe UI") for all text. The WWS family model finds it, as Chromium does.
+        let from_family = (total_number == 0)
+            .then(|| unsafe { wws_font_face(collection, family_name, font_weight, font_style) })
+            .flatten();
+        for font_face in from_set.chain(from_family) {
             let Some(identifier) = get_font_identifier(&font_face, &self.components.locale) else {
                 continue;
             };
@@ -746,7 +747,12 @@ impl DirectWriteState {
             )?;
         }
         let rendering_mode = match rendering_mode {
-            DWRITE_RENDERING_MODE1_OUTLINE => DWRITE_RENDERING_MODE1_NATURAL_SYMMETRIC,
+            // PRISM PATCH 19: an aliased mode (a gasp table or embedded bitmaps) has no
+            // ClearType 3x1 texture, so the glyph had empty bounds. Skia uses aliased
+            // rendering only for BW masks; its antialiased path renders the outline.
+            DWRITE_RENDERING_MODE1_OUTLINE | DWRITE_RENDERING_MODE1_ALIASED => {
+                DWRITE_RENDERING_MODE1_NATURAL_SYMMETRIC
+            }
             m => m,
         };
 
@@ -757,7 +763,9 @@ impl DirectWriteState {
                 rendering_mode,
                 DWRITE_MEASURING_MODE_NATURAL,
                 grid_fit_mode,
-                DWRITE_TEXT_ANTIALIAS_MODE_GRAYSCALE,
+                // PRISM PATCH 19: Skia (Chromium) asks DirectWrite for ClearType coverage and
+                // averages the three subpixel values into its A8 mask (`rgb_to_a8`).
+                DWRITE_TEXT_ANTIALIAS_MODE_CLEARTYPE,
                 baseline_origin_x,
                 baseline_origin_y,
             )
@@ -768,7 +776,7 @@ impl DirectWriteState {
     fn raster_bounds(&self, params: &RenderGlyphParams) -> Result<Bounds<DevicePixels>> {
         let glyph_analysis = self.create_glyph_run_analysis(params)?;
 
-        let bounds = unsafe { glyph_analysis.GetAlphaTextureBounds(DWRITE_TEXTURE_ALIASED_1x1)? };
+        let bounds = unsafe { glyph_analysis.GetAlphaTextureBounds(DWRITE_TEXTURE_CLEARTYPE_3x1)? };
 
         if bounds.right < bounds.left {
             Ok(Bounds {
@@ -830,23 +838,29 @@ impl DirectWriteState {
         params: &RenderGlyphParams,
         glyph_bounds: Bounds<DevicePixels>,
     ) -> Result<Vec<u8>> {
-        let mut bitmap_data =
-            vec![0u8; glyph_bounds.size.width.0 as usize * glyph_bounds.size.height.0 as usize];
+        let pixels = glyph_bounds.size.width.0 as usize * glyph_bounds.size.height.0 as usize;
+        let mut cleartype = vec![0u8; pixels * 3];
 
         let glyph_analysis = self.create_glyph_run_analysis(params)?;
         unsafe {
             glyph_analysis.CreateAlphaTexture(
-                DWRITE_TEXTURE_ALIASED_1x1,
+                DWRITE_TEXTURE_CLEARTYPE_3x1,
                 &RECT {
                     left: glyph_bounds.origin.x.0,
                     top: glyph_bounds.origin.y.0,
                     right: glyph_bounds.size.width.0 + glyph_bounds.origin.x.0,
                     bottom: glyph_bounds.size.height.0 + glyph_bounds.origin.y.0,
                 },
-                &mut bitmap_data,
+                &mut cleartype,
             )?;
         }
 
+        // The mean of the three subpixel coverages, truncated (Skia's `RGBToA8`).
+        // The shader applies Skia's mask gamma to it (`skia_mask_preblend`).
+        let bitmap_data = cleartype
+            .chunks_exact(3)
+            .map(|rgb| ((rgb[0] as u32 + rgb[1] as u32 + rgb[2] as u32) / 3) as u8)
+            .collect();
         Ok(bitmap_data)
     }
 
@@ -1663,6 +1677,26 @@ fn get_font_names_from_collection(
 
         result
     }
+}
+
+/// PRISM PATCH 21: a face from the WWS family model (`FindFamilyName`, then
+/// `GetFirstMatchingFont`), which knows the named-instance families of variable fonts.
+unsafe fn wws_font_face(
+    collection: &IDWriteFontCollection1,
+    family_name: &str,
+    weight: FontWeight,
+    style: FontStyle,
+) -> Option<IDWriteFontFace3> {
+    let mut index = 0u32;
+    let mut exists = BOOL(0);
+    unsafe { collection.FindFamilyName(&HSTRING::from(family_name), &mut index, &mut exists).log_err()? };
+    if !exists.as_bool() {
+        return None;
+    }
+    let family = unsafe { collection.GetFontFamily(index).log_err()? };
+    let font = unsafe { family.GetFirstMatchingFont(weight.into(), DWRITE_FONT_STRETCH_NORMAL, style.into()).log_err()? };
+    let face = unsafe { font.CreateFontFace().log_err()? };
+    face.cast::<IDWriteFontFace3>().log_err()
 }
 
 fn get_font_identifier_and_font_struct(

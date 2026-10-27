@@ -316,6 +316,8 @@ struct TextLayoutInner {
     lines: SmallVec<[WrappedLine; 1]>,
     line_height: Pixels,
     wrap_width: Option<Pixels>,
+    /// PRISM PATCH 22: the width the text was truncated to (`text_ellipsis`).
+    truncate_width: Option<Pixels>,
     size: Option<Size<Pixels>>,
     bounds: Option<Bounds<Pixels>>,
 }
@@ -334,7 +336,7 @@ impl TextLayout {
             .line_height
             .to_pixels(font_size.into(), window.rem_size());
 
-        let mut runs = if let Some(runs) = runs {
+        let runs = if let Some(runs) = runs {
             runs
         } else {
             vec![text_style.to_run(text.len())]
@@ -352,6 +354,11 @@ impl TextLayout {
                 } else {
                     None
                 };
+                // PRISM PATCH 10: round the wrap width up to a LayoutUnit (1/64 px), as the
+                // measured width is. With taffy rounding off, a parent can give a width 1 ulp
+                // below the measured width, and the last word wrapped.
+                let wrap_width =
+                    wrap_width.map(|width| crate::px((f32::from(width) * 64.0).ceil() / 64.0));
 
                 let (truncate_width, truncation_suffix) =
                     if let Some(text_overflow) = text_style.text_overflow.clone() {
@@ -373,11 +380,17 @@ impl TextLayout {
                 if let Some(text_layout) = element_state.0.borrow().as_ref()
                     && text_layout.size.is_some()
                     && (wrap_width.is_none() || wrap_width == text_layout.wrap_width)
+                    // PRISM PATCH 22: a `nowrap` text has no wrap width, so the first measure (taffy's
+                    // max-content pass, untruncated) stayed cached and `text_ellipsis` never cut.
+                    && truncate_width == text_layout.truncate_width
                 {
                     return text_layout.size.unwrap();
                 }
 
                 let mut line_wrapper = cx.text_system().line_wrapper(text_style.font(), font_size);
+                // PRISM PATCH 22: truncate a copy. The measure runs again for each truncation
+                // width, and a wider pass needs the runs of the full text.
+                let mut runs = runs.clone();
                 let text = if let Some(truncate_width) = truncate_width {
                     line_wrapper.truncate_line(
                         text.clone(),
@@ -406,6 +419,7 @@ impl TextLayout {
                         len: 0,
                         line_height,
                         wrap_width,
+                        truncate_width,
                         size: Some(Size::default()),
                         bounds: None,
                     });
@@ -416,7 +430,10 @@ impl TextLayout {
                 for line in &lines {
                     let line_size = line.size(line_height);
                     size.height += line_size.height;
-                    size.width = size.width.max(line_size.width).ceil();
+                    // PRISM PATCH 10: Blink rounds a text width up to a LayoutUnit (1/64 px),
+                    // not to a whole pixel; right-aligned text moved left by up to 1 px.
+                    size.width = size.width.max(line_size.width);
+                    size.width = crate::px((f32::from(size.width) * 64.0).ceil() / 64.0);
                 }
 
                 element_state.0.borrow_mut().replace(TextLayoutInner {
@@ -424,6 +441,7 @@ impl TextLayout {
                     len,
                     line_height,
                     wrap_width,
+                    truncate_width,
                     size: Some(size),
                     bounds: None,
                 });

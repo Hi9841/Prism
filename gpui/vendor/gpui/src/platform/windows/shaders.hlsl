@@ -45,6 +45,8 @@ struct Background {
     // 0u is Solid
     // 1u is LinearGradient
     // 2u is PatternSlash
+    // 3u is RadialGradient (PRISM PATCH 9): solid holds the center (h, s) and
+    //    the radii (l, a) as fractions of the bounds
     uint tag;
     // 0u is sRGB linear color
     // 1u is Oklab color
@@ -114,13 +116,20 @@ float4 distance_from_clip_rect_transformed(float2 unit_vertex, Bounds bounds, Bo
 }
 
 // Convert linear RGB to sRGB
+// PRISM PATCH 18: the CSS Color 4 sRGB transfer functions. The two helpers were
+// swapped (and approximated as 2.2), so the "Oklab" mix ran on gamma-encoded values.
+// Both extend by sign, so a mix of out-of-gamut stops stays exact until the final clip.
 float3 linear_to_srgb(float3 color) {
-    return pow(color, float3(2.2, 2.2, 2.2));
+    float3 a = abs(color);
+    float3 encoded = a <= 0.0031308 ? 12.92 * a : 1.055 * pow(a, 1.0 / 2.4) - 0.055;
+    return sign(color) * encoded;
 }
 
 // Convert sRGB to linear RGB
 float3 srgb_to_linear(float3 color) {
-    return pow(color, float3(1.0 / 2.2, 1.0 / 2.2, 1.0 / 2.2));
+    float3 a = abs(color);
+    float3 decoded = a <= 0.04045 ? a / 12.92 : pow((a + 0.055) / 1.055, 2.4);
+    return sign(color) * decoded;
 }
 
 /// Hsla to linear RGBA conversion.
@@ -182,9 +191,9 @@ float4 srgb_to_oklab(float4 color) {
     float m = 0.2119034982 * color.r + 0.6806995451 * color.g + 0.1073969566 * color.b;
     float s = 0.0883024619 * color.r + 0.2817188376 * color.g + 0.6299787005 * color.b;
 
-    float l_ = pow(l, 1.0/3.0);
-    float m_ = pow(m, 1.0/3.0);
-    float s_ = pow(s, 1.0/3.0);
+    float l_ = sign(l) * pow(abs(l), 1.0/3.0);
+    float m_ = sign(m) * pow(abs(m), 1.0/3.0);
+    float s_ = sign(s) * pow(abs(s), 1.0/3.0);
 
     return float4(
         0.2104542553 * l_ + 0.7936177850 * m_ - 0.0040720468 * s_,
@@ -211,7 +220,7 @@ float4 oklab_to_srgb(float4 color) {
     );
 
     // Convert linear sRGB to non-linear sRGB
-    return float4(linear_to_srgb(linear_rgb), color.a);
+    return float4(saturate(linear_to_srgb(linear_rgb)), color.a);
 }
 
 // This approximates the error function, needed for the gaussian integral
@@ -247,6 +256,16 @@ float2 to_tile_position(float2 unit_vertex, AtlasTile tile) {
     float2 atlas_size;
     t_sprite.GetDimensions(atlas_size.x, atlas_size.y);
     return (float2(tile.bounds.origin) + unit_vertex * float2(tile.bounds.size)) / atlas_size;
+}
+
+// PRISM PATCH 8: the tile rectangle in texture coordinates (min in xy, max in zw),
+// inset by half a texel. The atlas has no gutter and the sampler is linear, so a
+// scaled sprite sampled the next tile at its edges; the fragment clamps to this.
+float4 to_tile_rect(AtlasTile tile) {
+    float2 atlas_size;
+    t_sprite.GetDimensions(atlas_size.x, atlas_size.y);
+    float2 origin = float2(tile.bounds.origin);
+    return float4(origin + 0.5, origin + float2(tile.bounds.size) - 0.5) / atlas_size.xyxy;
 }
 
 // Selects corner radius based on quadrant.
@@ -306,7 +325,7 @@ GradientColor prepare_gradient_color(uint tag, uint color_space, Hsla solid, Lin
     GradientColor output;
     if (tag == 0 || tag == 2) {
         output.solid = hsla_to_rgba(solid);
-    } else if (tag == 1) {
+    } else if (tag == 1 || tag == 3) {
         output.color0 = hsla_to_rgba(colors[0].color);
         output.color1 = hsla_to_rgba(colors[1].color);
 
@@ -316,10 +335,33 @@ GradientColor prepare_gradient_color(uint tag, uint color_space, Hsla solid, Lin
             // Oklab
             output.color0 = srgb_to_oklab(output.color0);
             output.color1 = srgb_to_oklab(output.color1);
+        } else if (color_space == 2) {
+            // PRISM PATCH 17: the stops already are Oklab values (L, a, b in h, s, l).
+            output.color0 = float4(colors[0].color.h, colors[0].color.s, colors[0].color.l, colors[0].color.a);
+            output.color1 = float4(colors[1].color.h, colors[1].color.s, colors[1].color.l, colors[1].color.a);
         }
     }
 
     return output;
+}
+
+// PRISM PATCH 9: CSS mixes two gradient stops with premultiplied alpha, in sRGB
+// or in Oklab. An unknown color space mixes as sRGB (color_space 0).
+float4 mix_gradient_stops(float4 color0, float4 color1, float t, uint color_space) {
+    float4 premultiplied = lerp(
+        float4(color0.rgb * color0.a, color0.a),
+        float4(color1.rgb * color1.a, color1.a),
+        t);
+    if (premultiplied.a > 0.0) {
+        premultiplied.rgb /= premultiplied.a;
+    }
+    switch (color_space) {
+        case 1:
+        case 2:
+            return oklab_to_srgb(premultiplied);
+        default:
+            return premultiplied;
+    }
 }
 
 float2x2 rotate2d(float angle) {
@@ -339,29 +381,15 @@ float4 gradient_color(Background background,
             color = solid_color;
             break;
         case 1: {
-            // -90 degrees to match the CSS gradient angle.
+            // PRISM PATCH 15: the CSS gradient line. It runs through the center in the
+            // angle's direction (0deg points up, clockwise), and its length makes the
+            // corners take the end colors: |w * sin a| + |h * cos a|.
             float gradient_angle = background.gradient_angle_or_pattern_height;
-            float radians = (fmod(gradient_angle, 360.0) - 90.0) * (M_PI_F / 180.0);
-            float2 direction = float2(cos(radians), sin(radians));
-
-            // Expand the short side to be the same as the long side
-            if (bounds.size.x > bounds.size.y) {
-                direction.y *= bounds.size.y / bounds.size.x;
-            } else {
-                direction.x *=  bounds.size.x / bounds.size.y;
-            }
-
-            // Get the t value for the linear gradient with the color stop percentages.
-            float2 half_size = bounds.size * 0.5;
-            float2 center = bounds.origin + half_size;
-            float2 center_to_point = position - center;
-            float t = dot(center_to_point, direction) / length(direction);
-            // Check the direct to determine the use x or y
-            if (abs(direction.x) > abs(direction.y)) {
-                t = (t + half_size.x) / bounds.size.x;
-            } else {
-                t = (t + half_size.y) / bounds.size.y;
-            }
+            float radians = fmod(gradient_angle, 360.0) * (M_PI_F / 180.0);
+            float2 direction = float2(sin(radians), -cos(radians));
+            float line_length = max(abs(bounds.size.x * direction.x) + abs(bounds.size.y * direction.y), 1e-4);
+            float2 center = bounds.origin + bounds.size * 0.5;
+            float t = dot(position - center, direction) / line_length + 0.5;
 
             // Adjust t based on the stop percentages
             t = (t - background.colors[0].percentage)
@@ -369,16 +397,20 @@ float4 gradient_color(Background background,
                 - background.colors[0].percentage);
             t = clamp(t, 0.0, 1.0);
 
-            switch (background.color_space) {
-                case 0:
-                    color = lerp(color0, color1, t);
-                    break;
-                case 1: {
-                    float4 oklab_color = lerp(color0, color1, t);
-                    color = oklab_to_srgb(oklab_color);
-                    break;
-                }
-            }
+            color = mix_gradient_stops(color0, color1, t, background.color_space);
+            break;
+        }
+        case 3: {
+            // PRISM PATCH 9: CSS radial-gradient with an ellipse. t is the
+            // position on the gradient ray: 0 at the center, 1 on the ellipse.
+            float2 center = bounds.origin + float2(background.solid.h, background.solid.s) * bounds.size;
+            float2 radii = max(float2(background.solid.l, background.solid.a) * bounds.size, 1e-4);
+            float t = length((position - center) / radii);
+            float stop0 = background.colors[0].percentage;
+            float stop1 = background.colors[1].percentage;
+            t = saturate((t - stop0) / max(stop1 - stop0, 1e-4));
+
+            color = mix_gradient_stops(color0, color1, t, background.color_space);
             break;
         }
         case 2: {
@@ -820,6 +852,9 @@ struct Shadow {
     Corners corner_radii;
     Bounds content_mask;
     Hsla color;
+    // PRISM PATCH 12: the casting element's border box; the shadow is cut out under it.
+    Bounds element_bounds;
+    Corners element_radii;
 };
 
 struct ShadowVertexOutput {
@@ -882,6 +917,12 @@ float4 shadow_fragment(ShadowFragmentInput input): SV_TARGET {
                             corner_radius, half_size) *
                 gaussian(y, shadow.blur_radius) * step;
         y += step;
+    }
+
+    // PRISM PATCH 12: CSS paints an outer shadow only outside the border box.
+    if (shadow.element_bounds.size.x > 0. && shadow.element_bounds.size.y > 0.) {
+        float element_distance = quad_sdf(input.position.xy, shadow.element_bounds, shadow.element_radii);
+        alpha *= saturate(element_distance + 0.5);
     }
 
     return input.color * float4(1., 1., 1., alpha);
@@ -1084,6 +1125,9 @@ struct MonochromeSpriteVertexOutput {
     float4 position: SV_Position;
     float2 tile_position: POSITION;
     nointerpolation float4 color: COLOR;
+    nointerpolation uint glyph: TEXCOORD0;
+    nointerpolation float4 tile_rect: TEXCOORD1;
+    nointerpolation float4 preblend: TEXCOORD2;
     float4 clip_distance: SV_ClipDistance;
 };
 
@@ -1091,6 +1135,9 @@ struct MonochromeSpriteFragmentInput {
     float4 position: SV_Position;
     float2 tile_position: POSITION;
     nointerpolation float4 color: COLOR;
+    nointerpolation uint glyph: TEXCOORD0;
+    nointerpolation float4 tile_rect: TEXCOORD1;
+    nointerpolation float4 preblend: TEXCOORD2;
     float4 clip_distance: SV_ClipDistance;
 };
 
@@ -1109,13 +1156,21 @@ MonochromeSpriteVertexOutput monochrome_sprite_vertex(uint vertex_id: SV_VertexI
     output.position = device_position;
     output.tile_position = tile_position;
     output.color = color;
+    output.glyph = sprite.pad;
+    output.tile_rect = to_tile_rect(sprite.tile);
+    output.preblend = skia_mask_preblend_values(color.rgb);
     output.clip_distance = clip_distance;
     return output;
 }
 
 float4 monochrome_sprite_fragment(MonochromeSpriteFragmentInput input): SV_Target {
-    float sample = t_sprite.Sample(s_sprite, input.tile_position).r;
-    float alpha_corrected = apply_contrast_and_gamma_correction(sample, input.color.rgb, grayscale_enhanced_contrast, gamma_ratios);
+    float2 tile_position = clamp(input.tile_position, input.tile_rect.xy, input.tile_rect.zw);
+    float sample = t_sprite.Sample(s_sprite, tile_position).r;
+    // Glyphs get Skia's mask gamma, as Chromium draws text. Icons keep the
+    // linear coverage, as Chromium draws SVG paths with no mask gamma.
+    float alpha_corrected = input.glyph == 1u
+        ? skia_mask_preblend(sample, input.preblend, SKIA_TEXT_CONTRAST)
+        : sample;
     return float4(input.color.rgb, input.color.a * alpha_corrected);
 }
 
@@ -1140,6 +1195,7 @@ struct PolychromeSpriteVertexOutput {
     nointerpolation uint sprite_id: TEXCOORD0;
     float4 position: SV_Position;
     float2 tile_position: POSITION;
+    nointerpolation float4 tile_rect: TEXCOORD1;
     float4 clip_distance: SV_ClipDistance;
 };
 
@@ -1147,6 +1203,7 @@ struct PolychromeSpriteFragmentInput {
     nointerpolation uint sprite_id: TEXCOORD0;
     float4 position: SV_Position;
     float2 tile_position: POSITION;
+    nointerpolation float4 tile_rect: TEXCOORD1;
 };
 
 StructuredBuffer<PolychromeSprite> poly_sprites: register(t1);
@@ -1162,6 +1219,7 @@ PolychromeSpriteVertexOutput polychrome_sprite_vertex(uint vertex_id: SV_VertexI
     PolychromeSpriteVertexOutput output;
     output.position = device_position;
     output.tile_position = tile_position;
+    output.tile_rect = to_tile_rect(sprite.tile);
     output.sprite_id = sprite_id;
     output.clip_distance = clip_distance;
     return output;
@@ -1169,7 +1227,8 @@ PolychromeSpriteVertexOutput polychrome_sprite_vertex(uint vertex_id: SV_VertexI
 
 float4 polychrome_sprite_fragment(PolychromeSpriteFragmentInput input): SV_Target {
     PolychromeSprite sprite = poly_sprites[input.sprite_id];
-    float4 sample = t_sprite.Sample(s_sprite, input.tile_position);
+    float2 tile_position = clamp(input.tile_position, input.tile_rect.xy, input.tile_rect.zw);
+    float4 sample = t_sprite.Sample(s_sprite, tile_position);
     float distance = quad_sdf(input.position.xy, sprite.bounds, sprite.corner_radii);
 
     float4 color = sample;

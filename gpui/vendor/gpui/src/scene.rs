@@ -232,6 +232,96 @@ impl Primitive {
     }
 }
 
+/// PRISM PATCH 8: a uniform scale that the window applies to each primitive
+/// before it goes into the scene (see `Window::with_element_scale`). A device
+/// point `p` maps to `p * factor + offset`. `clip` is the device clip that was
+/// active where the scale started: the scaled content cannot paint outside it,
+/// as a CSS transform is still clipped by the ancestors of the element.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct ElementScale {
+    pub factor: f32,
+    pub offset: Point<ScaledPixels>,
+    pub clip: Bounds<ScaledPixels>,
+}
+
+impl ElementScale {
+    pub fn map_point(&self, point: Point<ScaledPixels>) -> Point<ScaledPixels> {
+        point.map(|value| value * self.factor) + self.offset
+    }
+
+    pub fn map_bounds(&self, bounds: Bounds<ScaledPixels>) -> Bounds<ScaledPixels> {
+        Bounds {
+            origin: self.map_point(bounds.origin),
+            size: bounds.size.map(|value| value * self.factor),
+        }
+    }
+
+    pub fn map_mask(&self, mask: &ContentMask<ScaledPixels>) -> ContentMask<ScaledPixels> {
+        ContentMask {
+            bounds: self.map_bounds(mask.bounds).intersect(&self.clip),
+        }
+    }
+
+    /// Maps the geometry of the primitive: bounds, content mask, radii, border
+    /// widths, blur and line thickness. Colors and atlas tiles do not change, so
+    /// sprites (text, icons, images) are drawn as scaled sprites.
+    pub fn apply(&self, primitive: &mut Primitive) {
+        let factor = self.factor;
+        let length = |value: &mut ScaledPixels| *value = *value * factor;
+        match primitive {
+            Primitive::Shadow(shadow) => {
+                shadow.bounds = self.map_bounds(shadow.bounds);
+                shadow.content_mask = self.map_mask(&shadow.content_mask);
+                shadow.corner_radii = shadow.corner_radii.map(|radius| *radius * factor);
+                shadow.element_bounds = self.map_bounds(shadow.element_bounds);
+                shadow.element_radii = shadow.element_radii.map(|radius| *radius * factor);
+                length(&mut shadow.blur_radius);
+            }
+            Primitive::Quad(quad) => {
+                quad.bounds = self.map_bounds(quad.bounds);
+                quad.content_mask = self.map_mask(&quad.content_mask);
+                quad.corner_radii = quad.corner_radii.map(|radius| *radius * factor);
+                quad.border_widths = quad.border_widths.map(|width| *width * factor);
+            }
+            Primitive::Path(path) => {
+                path.bounds = self.map_bounds(path.bounds);
+                path.content_mask = self.map_mask(&path.content_mask);
+                for vertex in &mut path.vertices {
+                    vertex.xy_position = self.map_point(vertex.xy_position);
+                }
+            }
+            Primitive::Underline(underline) => {
+                underline.bounds = self.map_bounds(underline.bounds);
+                underline.content_mask = self.map_mask(&underline.content_mask);
+                length(&mut underline.thickness);
+            }
+            Primitive::MonochromeSprite(sprite) => {
+                // The shader computes `M * p + t` for each corner `p` of the
+                // bounds. With the bounds mapped to `s * p + b`, the new
+                // translation `s * t + b - M * b` gives `s * (M * p + t) + b`.
+                let [[m00, m01], [m10, m11]] = sprite.transformation.rotation_scale;
+                let [tx, ty] = sprite.transformation.translation;
+                let (bx, by) = (self.offset.x.0, self.offset.y.0);
+                sprite.transformation.translation = [
+                    factor * tx + bx - (m00 * bx + m01 * by),
+                    factor * ty + by - (m10 * bx + m11 * by),
+                ];
+                sprite.bounds = self.map_bounds(sprite.bounds);
+                sprite.content_mask = self.map_mask(&sprite.content_mask);
+            }
+            Primitive::PolychromeSprite(sprite) => {
+                sprite.bounds = self.map_bounds(sprite.bounds);
+                sprite.content_mask = self.map_mask(&sprite.content_mask);
+                sprite.corner_radii = sprite.corner_radii.map(|radius| *radius * factor);
+            }
+            Primitive::Surface(surface) => {
+                surface.bounds = self.map_bounds(surface.bounds);
+                surface.content_mask = self.map_mask(&surface.content_mask);
+            }
+        }
+    }
+}
+
 #[cfg_attr(
     all(
         any(target_os = "linux", target_os = "freebsd"),
@@ -494,6 +584,10 @@ pub(crate) struct Shadow {
     pub corner_radii: Corners<ScaledPixels>,
     pub content_mask: ContentMask<ScaledPixels>,
     pub color: Hsla,
+    /// PRISM PATCH 12: the border box of the element that casts the shadow. CSS paints an
+    /// outer shadow only outside it, so the shader cuts it out (a zero size cuts nothing).
+    pub element_bounds: Bounds<ScaledPixels>,
+    pub element_radii: Corners<ScaledPixels>,
 }
 
 impl From<Shadow> for Primitive {
@@ -620,7 +714,9 @@ impl Default for TransformationMatrix {
 #[repr(C)]
 pub(crate) struct MonochromeSprite {
     pub order: DrawOrder,
-    pub pad: u32, // align to 8 bytes
+    /// PRISM PATCH 23: 1 marks a glyph (the DirectX shader applies Skia's mask gamma),
+    /// 0 an icon. The field also aligns the struct to 8 bytes.
+    pub pad: u32,
     pub bounds: Bounds<ScaledPixels>,
     pub content_mask: ContentMask<ScaledPixels>,
     pub color: Hsla,

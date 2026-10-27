@@ -914,6 +914,9 @@ struct Shadow {
     corner_radii: Corners,
     content_mask: Bounds,
     color: Hsla,
+    // PRISM PATCH 12: the casting element's border box; the shadow is cut out under it.
+    element_bounds: Bounds,
+    element_radii: Corners,
 }
 var<storage, read> b_shadows: array<Shadow>;
 
@@ -973,6 +976,12 @@ fn fs_shadow(input: ShadowVarying) -> @location(0) vec4<f32> {
             shadow.blur_radius, corner_radius, half_size);
         alpha +=  blur * gaussian(y, shadow.blur_radius) * step;
         y += step;
+    }
+
+    // PRISM PATCH 12: CSS paints an outer shadow only outside the border box.
+    if (shadow.element_bounds.size.x > 0.0 && shadow.element_bounds.size.y > 0.0) {
+        let element_distance = quad_sdf(input.position.xy, shadow.element_bounds, shadow.element_radii);
+        alpha *= saturate(element_distance + 0.5);
     }
 
     return blend_color(input.color, alpha);

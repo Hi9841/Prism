@@ -4,15 +4,16 @@ use crate::{
     Action, AnyDrag, AnyElement, AnyImageCache, AnyTooltip, AnyView, App, AppContext, Arena, Asset,
     AsyncWindowContext, AvailableSpace, Background, BorderStyle, Bounds, BoxShadow, Capslock,
     Context, Corners, CursorStyle, Decorations, DevicePixels, DispatchActionListener,
-    DispatchNodeId, DispatchTree, DisplayId, Edges, Effect, Entity, EntityId, EventEmitter,
-    FileDropEvent, FontId, Global, GlobalElementId, GlyphId, GpuSpecs, Hsla, InputHandler, IsZero,
-    KeyBinding, KeyContext, KeyDownEvent, KeyEvent, Keystroke, KeystrokeEvent, LayoutId,
-    LineLayoutIndex, Modifiers, ModifiersChangedEvent, MonochromeSprite, MouseButton, MouseEvent,
-    MouseMoveEvent, MouseUpEvent, Path, Pixels, PlatformAtlas, PlatformDisplay, PlatformInput,
-    PlatformInputHandler, PlatformWindow, Point, PolychromeSprite, PromptButton, PromptLevel, Quad,
-    Render, RenderGlyphParams, RenderImage, RenderImageParams, RenderSvgParams, Replay, ResizeEdge,
-    SMOOTH_SVG_SCALE_FACTOR, SUBPIXEL_VARIANTS_X, SUBPIXEL_VARIANTS_Y, ScaledPixels, Scene, Shadow,
-    SharedString, Size, StrikethroughStyle, Style, SubscriberSet, Subscription, SystemWindowTab,
+    DispatchNodeId, DispatchTree, DisplayId, Edges, Effect, ElementScale, Entity, EntityId,
+    EventEmitter, FileDropEvent, FontId, Global, GlobalElementId, GlyphId, GpuSpecs, Hsla,
+    InputHandler, IsZero, KeyBinding, KeyContext, KeyDownEvent, KeyEvent, Keystroke,
+    KeystrokeEvent, LayoutId, LineLayoutIndex, Modifiers, ModifiersChangedEvent, MonochromeSprite,
+    MouseButton, MouseEvent, MouseMoveEvent, MouseUpEvent, Path, Pixels, PlatformAtlas,
+    PlatformDisplay, PlatformInput, PlatformInputHandler, PlatformWindow, Point, PolychromeSprite,
+    Primitive, PromptButton, PromptLevel, Quad, Render, RenderGlyphParams, RenderImage,
+    RenderImageParams, RenderSvgParams, Replay, ResizeEdge, SMOOTH_SVG_SCALE_FACTOR,
+    SUBPIXEL_VARIANTS_X, SUBPIXEL_VARIANTS_Y, ScaledPixels, Scene, Shadow, SharedString, Size,
+    StrikethroughStyle, Style, SubscriberSet, Subscription, SystemWindowTab,
     SystemWindowTabController, TabStopMap, TaffyLayoutEngine, Task, TextStyle, TextStyleRefinement,
     TransformationMatrix, Underline, UnderlineStyle, WindowAppearance, WindowBackgroundAppearance,
     WindowBounds, WindowControls, WindowDecorations, WindowOptions, WindowParams, WindowTextSystem,
@@ -842,6 +843,7 @@ pub struct Window {
     pub(crate) rendered_entity_stack: Vec<EntityId>,
     pub(crate) element_offset_stack: Vec<Point<Pixels>>,
     pub(crate) element_opacity: f32,
+    element_scale: Option<ElementScale>,
     pub(crate) content_mask_stack: Vec<ContentMask<Pixels>>,
     pub(crate) requested_autoscroll: Option<Bounds<Pixels>>,
     pub(crate) image_cache_stack: Vec<AnyImageCache>,
@@ -928,6 +930,26 @@ fn default_bounds(display_id: Option<DisplayId>, cx: &mut App) -> Bounds<Pixels>
                 .map(|display| display.default_bounds())
                 .unwrap_or_else(|| Bounds::new(point(px(0.), px(0.)), DEFAULT_WINDOW_SIZE))
         })
+}
+
+/// PRISM PATCH 11: Blink paints a box at its pixel-snapped rect: each edge rounds to a
+/// device pixel (`PixelSnappedIntRect`). Layout and text keep fractional positions
+/// (taffy rounding is off), so text sits where Chromium puts it and boxes stay sharp.
+fn snap(bounds: Bounds<ScaledPixels>) -> Bounds<ScaledPixels> {
+    // Blink rounds .5 up. `f32::round` rounds .5 away from zero, so -0.5 went to -1.
+    let round = |value: f32| (value + 0.5).floor();
+    let x0 = round(bounds.origin.x.0);
+    let y0 = round(bounds.origin.y.0);
+    let x1 = round(bounds.origin.x.0 + bounds.size.width.0);
+    let y1 = round(bounds.origin.y.0 + bounds.size.height.0);
+    Bounds {
+        origin: point(ScaledPixels(x0), ScaledPixels(y0)),
+        size: size(ScaledPixels(x1 - x0), ScaledPixels(y1 - y0)),
+    }
+}
+
+fn snap_mask(mask: ContentMask<ScaledPixels>) -> ContentMask<ScaledPixels> {
+    ContentMask { bounds: snap(mask.bounds) }
 }
 
 impl Window {
@@ -1235,6 +1257,7 @@ impl Window {
             element_offset_stack: Vec::new(),
             content_mask_stack: Vec::new(),
             element_opacity: 1.0,
+            element_scale: None,
             requested_autoscroll: None,
             rendered_frame: Frame::new(DispatchTree::new(cx.keymap.clone(), cx.actions.clone())),
             next_frame: Frame::new(DispatchTree::new(cx.keymap.clone(), cx.actions.clone())),
@@ -2478,6 +2501,65 @@ impl Window {
         result
     }
 
+    /// PRISM PATCH 8: paint the content of `f` scaled by `factor` around
+    /// `origin` (window coordinates), as CSS `transform: scale(factor)` with
+    /// `transform-origin` at `origin`. Scales nest. A factor of 1.0 changes
+    /// nothing. Only painting is scaled: layout and hitboxes stay unscaled.
+    /// This method should only be called as part of the paint phase.
+    ///
+    /// ```ignore
+    /// // Press feedback: shrink a button to 96% around its center.
+    /// window.with_element_scale(bounds.center(), 0.96, |window| {
+    ///     window.paint_quad(fill(bounds, accent));
+    /// });
+    /// ```
+    ///
+    /// Elements get the same effect from [`crate::Styled::scale`].
+    pub fn with_element_scale<R>(
+        &mut self,
+        origin: Point<Pixels>,
+        factor: f32,
+        f: impl FnOnce(&mut Self) -> R,
+    ) -> R {
+        self.invalidator.debug_assert_paint();
+
+        if factor == 1.0 {
+            return f(self);
+        }
+
+        let scale_factor = self.scale_factor();
+        let device_mask = self.content_mask().scale(scale_factor);
+        let pivot = origin.scale(scale_factor);
+        // Scale around the pivot in device space, then apply the outer scale.
+        let local_offset = pivot.map(|value| value * (1.0 - factor));
+        let scale = match &self.element_scale {
+            Some(outer) => ElementScale {
+                factor: outer.factor * factor,
+                offset: local_offset.map(|value| value * outer.factor) + outer.offset,
+                clip: outer.map_mask(&device_mask).bounds,
+            },
+            None => ElementScale {
+                factor,
+                offset: local_offset,
+                clip: device_mask.bounds,
+            },
+        };
+
+        let previous_scale = self.element_scale.replace(scale);
+        let result = f(self);
+        self.element_scale = previous_scale;
+        result
+    }
+
+    /// Insert a primitive into the next frame, mapped by the active element scale.
+    fn insert_primitive(&mut self, primitive: impl Into<Primitive>) {
+        let mut primitive = primitive.into();
+        if let Some(scale) = &self.element_scale {
+            scale.apply(&mut primitive);
+        }
+        self.next_frame.scene.insert_primitive(primitive);
+    }
+
     /// Perform prepaint on child elements in a "retryable" manner, so that any side effects
     /// of prepaints can be discarded before prepainting again. This is used to support autoscroll
     /// where we need to prepaint children to detect the autoscroll bounds, then adjust the
@@ -2816,9 +2898,11 @@ impl Window {
         let content_mask = self.content_mask();
         let clipped_bounds = bounds.intersect(&content_mask.bounds);
         if !clipped_bounds.is_empty() {
-            self.next_frame
-                .scene
-                .push_layer(clipped_bounds.scale(scale_factor));
+            let mut layer_bounds = clipped_bounds.scale(scale_factor);
+            if let Some(scale) = &self.element_scale {
+                layer_bounds = scale.map_bounds(layer_bounds).intersect(&scale.clip);
+            }
+            self.next_frame.scene.push_layer(layer_bounds);
         }
 
         let result = f(self);
@@ -2860,10 +2944,10 @@ impl Window {
                     bottom_right: grow(corner_radii.bottom_right),
                     bottom_left: grow(corner_radii.bottom_left),
                 };
-                self.next_frame.scene.insert_primitive(Quad {
+                self.insert_primitive(Quad {
                     order: 0,
-                    bounds: bounds.dilate(spread).scale(scale_factor),
-                    content_mask: content_mask.scale(scale_factor),
+                    bounds: snap(bounds.scale(scale_factor)).dilate(spread.scale(scale_factor)),
+                    content_mask: snap_mask(content_mask.scale(scale_factor)),
                     background: Hsla::transparent_black().into(),
                     border_color: shadow.color.opacity(opacity),
                     corner_radii: radii.scale(scale_factor),
@@ -2874,14 +2958,17 @@ impl Window {
             }
             // The shader divides by the blur; a sharp shadow gets a sub-pixel one.
             let blur_radius = shadow.blur_radius.max(px(0.3));
-            let shadow_bounds = (bounds + shadow.offset).dilate(shadow.spread_radius);
-            self.next_frame.scene.insert_primitive(Shadow {
+            let shadow_bounds =
+                (snap(bounds.scale(scale_factor)) + shadow.offset.scale(scale_factor)).dilate(shadow.spread_radius.scale(scale_factor));
+            self.insert_primitive(Shadow {
                 order: 0,
                 blur_radius: blur_radius.scale(scale_factor),
-                bounds: shadow_bounds.scale(scale_factor),
-                content_mask: content_mask.scale(scale_factor),
+                bounds: shadow_bounds,
+                content_mask: snap_mask(content_mask.scale(scale_factor)),
                 corner_radii: corner_radii.scale(scale_factor),
                 color: shadow.color.opacity(opacity),
+                element_bounds: snap(bounds.scale(scale_factor)),
+                element_radii: corner_radii.scale(scale_factor),
             });
         }
     }
@@ -2901,10 +2988,10 @@ impl Window {
         let scale_factor = self.scale_factor();
         let content_mask = self.content_mask();
         let opacity = self.element_opacity();
-        self.next_frame.scene.insert_primitive(Quad {
+        self.insert_primitive(Quad {
             order: 0,
-            bounds: quad.bounds.scale(scale_factor),
-            content_mask: content_mask.scale(scale_factor),
+            bounds: snap(quad.bounds.scale(scale_factor)),
+            content_mask: snap_mask(content_mask.scale(scale_factor)),
             background: quad.background.opacity(opacity),
             border_color: quad.border_color.opacity(opacity),
             corner_radii: quad.corner_radii.scale(scale_factor),
@@ -2925,9 +3012,7 @@ impl Window {
         path.content_mask = content_mask;
         let color: Background = color.into();
         path.color = color.opacity(opacity);
-        self.next_frame
-            .scene
-            .insert_primitive(path.scale(scale_factor));
+        self.insert_primitive(path.scale(scale_factor));
     }
 
     /// Paint an underline into the scene for the next frame at the current z-index.
@@ -2954,11 +3039,11 @@ impl Window {
         let content_mask = self.content_mask();
         let element_opacity = self.element_opacity();
 
-        self.next_frame.scene.insert_primitive(Underline {
+        self.insert_primitive(Underline {
             order: 0,
             pad: 0,
             bounds: bounds.scale(scale_factor),
-            content_mask: content_mask.scale(scale_factor),
+            content_mask: snap_mask(content_mask.scale(scale_factor)),
             color: style.color.unwrap_or_default().opacity(element_opacity),
             thickness: style.thickness.scale(scale_factor),
             wavy: if style.wavy { 1 } else { 0 },
@@ -2985,11 +3070,11 @@ impl Window {
         let content_mask = self.content_mask();
         let opacity = self.element_opacity();
 
-        self.next_frame.scene.insert_primitive(Underline {
+        self.insert_primitive(Underline {
             order: 0,
             pad: 0,
             bounds: bounds.scale(scale_factor),
-            content_mask: content_mask.scale(scale_factor),
+            content_mask: snap_mask(content_mask.scale(scale_factor)),
             thickness: style.thickness.scale(scale_factor),
             color: style.color.unwrap_or_default().opacity(opacity),
             wavy: 0,
@@ -3017,9 +3102,17 @@ impl Window {
         let element_opacity = self.element_opacity();
         let scale_factor = self.scale_factor();
         let glyph_origin = origin.scale(scale_factor);
+        // PRISM PATCH 13: Skia rounds a glyph's x to the nearest quarter pixel; GPUI floored
+        // it, so text sat 1/8 px left of Chromium's on average.
+        let quarters = (glyph_origin.x.0 * SUBPIXEL_VARIANTS_X as f32).round();
+        let whole_x = (quarters / SUBPIXEL_VARIANTS_X as f32).floor();
+        let glyph_origin = point(
+            ScaledPixels(quarters / SUBPIXEL_VARIANTS_X as f32),
+            glyph_origin.y,
+        );
 
         let subpixel_variant = Point {
-            x: (glyph_origin.x.0.fract() * SUBPIXEL_VARIANTS_X as f32).floor() as u8,
+            x: (quarters - whole_x * SUBPIXEL_VARIANTS_X as f32) as u8,
             y: (glyph_origin.y.0.fract() * SUBPIXEL_VARIANTS_Y as f32).floor() as u8,
         };
         let params = RenderGlyphParams {
@@ -3044,10 +3137,12 @@ impl Window {
                 origin: glyph_origin.map(|px| px.floor()) + raster_bounds.origin.map(Into::into),
                 size: tile.bounds.size.map(Into::into),
             };
-            let content_mask = self.content_mask().scale(scale_factor);
-            self.next_frame.scene.insert_primitive(MonochromeSprite {
+            let content_mask = snap_mask(self.content_mask().scale(scale_factor));
+            self.insert_primitive(MonochromeSprite {
                 order: 0,
-                pad: 0,
+                // 1 marks a glyph: the DirectX shader applies Skia's mask gamma
+                // to glyphs only, not to icons.
+                pad: 1,
                 bounds,
                 content_mask,
                 color: color.opacity(element_opacity),
@@ -3101,10 +3196,10 @@ impl Window {
                 origin: glyph_origin.map(|px| px.floor()) + raster_bounds.origin.map(Into::into),
                 size: tile.bounds.size.map(Into::into),
             };
-            let content_mask = self.content_mask().scale(scale_factor);
+            let content_mask = snap_mask(self.content_mask().scale(scale_factor));
             let opacity = self.element_opacity();
 
-            self.next_frame.scene.insert_primitive(PolychromeSprite {
+            self.insert_primitive(PolychromeSprite {
                 order: 0,
                 pad: 0,
                 grayscale: false,
@@ -3134,7 +3229,7 @@ impl Window {
         let element_opacity = self.element_opacity();
         let scale_factor = self.scale_factor();
 
-        let bounds = bounds.scale(scale_factor);
+        let bounds = snap(bounds.scale(scale_factor));
         let params = RenderSvgParams {
             path,
             size: bounds.size.map(|pixels| {
@@ -3153,7 +3248,7 @@ impl Window {
         else {
             return Ok(());
         };
-        let content_mask = self.content_mask().scale(scale_factor);
+        let content_mask = snap_mask(self.content_mask().scale(scale_factor));
         let svg_bounds = Bounds {
             origin: bounds.center()
                 - Point::new(
@@ -3166,7 +3261,7 @@ impl Window {
                 .map(|value| ScaledPixels(value.0 as f32 / SMOOTH_SVG_SCALE_FACTOR)),
         };
 
-        self.next_frame.scene.insert_primitive(MonochromeSprite {
+        self.insert_primitive(MonochromeSprite {
             order: 0,
             pad: 0,
             bounds: svg_bounds
@@ -3214,17 +3309,15 @@ impl Window {
                 )))
             })?
             .expect("Callback above only returns Some");
-        let content_mask = self.content_mask().scale(scale_factor);
+        let content_mask = snap_mask(self.content_mask().scale(scale_factor));
         let corner_radii = corner_radii.scale(scale_factor);
         let opacity = self.element_opacity();
 
-        self.next_frame.scene.insert_primitive(PolychromeSprite {
+        self.insert_primitive(PolychromeSprite {
             order: 0,
             pad: 0,
             grayscale,
-            bounds: bounds
-                .map_origin(|origin| origin.floor())
-                .map_size(|size| size.ceil()),
+            bounds: snap(bounds),
             content_mask,
             corner_radii,
             tile,
@@ -3244,8 +3337,8 @@ impl Window {
 
         let scale_factor = self.scale_factor();
         let bounds = bounds.scale(scale_factor);
-        let content_mask = self.content_mask().scale(scale_factor);
-        self.next_frame.scene.insert_primitive(PaintSurface {
+        let content_mask = snap_mask(self.content_mask().scale(scale_factor));
+        self.insert_primitive(PaintSurface {
             order: 0,
             bounds,
             content_mask,

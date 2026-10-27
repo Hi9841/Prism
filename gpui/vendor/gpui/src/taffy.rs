@@ -38,7 +38,7 @@ const EXPECT_MESSAGE: &str = "we should avoid taffy layout errors by constructio
 impl TaffyLayoutEngine {
     pub fn new() -> Self {
         let mut taffy = TaffyTree::new();
-        taffy.enable_rounding();
+        taffy.disable_rounding();
         TaffyLayoutEngine {
             taffy,
             absolute_layout_bounds: FxHashMap::default(),
