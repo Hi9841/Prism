@@ -169,7 +169,9 @@ fn icon_tile(
         .h(r(48.))
         .min_w(r(46.))
         .items_center()
-        // `grid` with auto rows: content taller than the box overflows at the bottom.
+        // `grid` with auto rows: content taller than the box overflows at the bottom, and
+        // the rows do not shrink: the 24px icon box gets `flex_shrink_0` (the label cannot
+        // shrink below its line).
         .justify_start()
         .gap(r(2.))
         .rounded(r(8.))
@@ -272,8 +274,7 @@ impl Render for TaskbarCustomization {
             let value = value.to_string();
             let glyph: AnyElement = match index {
                 0 => windows_glyph(&t),
-                _ => img(SharedString::from(format!("taskbar-icons/{value}.svg"))).size(r(20.)).into_any_element(),
-            };
+                _ => img(SharedString::from(format!("taskbar-icons/{value}.svg"))).size(r(20.)).into_any_element(),            };
             let (tile, _) = icon_tile(("start-icon", index), selected, busy, &t, window, cx);
             tiles = tiles.child(
                 tile
@@ -283,7 +284,7 @@ impl Render for TaskbarCustomization {
                             this.apply(BusyControl::Icon, bridge::set_taskbar_start_icon(value.clone()), cx)
                         }))
                     })
-                    .child(div().flex().size(r(24.)).items_center().justify_center().child(glyph))
+                    .child(div().flex().flex_shrink_0().size(r(24.)).items_center().justify_center().child(glyph))
                     .child(*label),
             );
         }
@@ -292,7 +293,7 @@ impl Render for TaskbarCustomization {
             tile
                 .tooltip(title_tooltip("Add custom PNG"))
                 .when(!busy, |d| d.on_click(cx.listener(|this, _, _, cx| this.choose_icon(cx))))
-                .child(div().flex().size(r(24.)).items_center().justify_center().child(icon("image-up", 16., glyph)))
+                .child(div().flex().flex_shrink_0().size(r(24.)).items_center().justify_center().child(icon("image-up", 16., glyph)))
                 .child("Custom"),
         );
         for (index, (id, image)) in self.custom_images.clone().into_iter().enumerate() {
@@ -317,7 +318,7 @@ impl Render for TaskbarCustomization {
                                     this.apply(BusyControl::Icon, bridge::select_custom_start_icon(select_id.clone()), cx)
                                 }))
                             })
-                            .child(div().flex().size(r(24.)).items_center().justify_center().child(img(image).size(r(20.))))
+                            .child(div().flex().flex_shrink_0().size(r(24.)).items_center().justify_center().child(img(image).size(r(20.))))
                             .child(format!("Custom {}", index + 1)),
                     )
                     .child(

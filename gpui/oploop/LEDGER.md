@@ -223,7 +223,7 @@ left of the original's (568 vs 570, centroid -1.9 px).
   offset stays open: what is left is Skia's rasterization and preblend against DirectWrite + GPUI's
   shader correction, which depends on the text color.
 
-### Note: zoom-80 / zoom-120 scrollbar (harness limit, not a port defect)
+### Note: zoom-80 / zoom-120 scrollbar (harness limit, not a port defect; fixed in the harness by I-024)
 
 - At 80% Chromium in the harness draws a 9 px gutter, a 5 px thumb and 2 px inset (11/6/2 x 0.8,
   rounded); the port keeps 11/6/2. The harness emulates view zoom with `deviceScaleFactor = zoom`,
@@ -353,3 +353,26 @@ left of the original's (568 vs 570, centroid -1.9 px).
 - Result: mean 9.864 -> 9.867 (excl. menus 9.873 -> 9.877); settings-bottom +0.07, idle-bottom +0.04,
   no other capture changed.
 - Decision: KEEP (vendored patch 26).
+
+### I-023 Icon tiles: the icon box does not shrink (settings-scroll-2)
+
+- Profile: the Start-button icon tiles: label 2 px high, icon squashed. The original is a CSS grid
+  (`grid h-12 place-items-center`): its content (24 + 2 + 14.5 px) is taller than the 38 px content
+  box, and grid rows overflow at the bottom. The port's flex column shrank the 24 px icon box to 21.5.
+- Change: `flex_shrink_0` on the icon box (`taskbar_customization.rs`).
+- Result (same run as I-024; it changes only this capture): settings-scroll-2 9.87 -> 9.91.
+- Decision: KEEP.
+
+### I-024 Harness: emulate WebView2 zoom with root CSS zoom, not the device scale
+
+- Profile: zoom-120 / zoom-80 lost most at the scrollbar (`Note: zoom-80 / zoom-120 scrollbar`). Real
+  WebView2 155 (`webview_probe.py 1.2` / `0.8`, `set_webview_zoom` as the app calls it): the thin
+  gutter is 8 CSS px at 120% and 12 at 80%, so 10 device px at every zoom. The harness emulated zoom
+  with `deviceScaleFactor`, which scales the scrollbar (thumb 7 px at 120%, 4 px at 80%).
+- Change: `run-original.mjs` sets CSS `zoom` on the root at scale 1.0. Chromium applies browser zoom as
+  a root zoom factor, so layout and text are the same, and scrollbars stay at device size. Input
+  coordinates are device pixels, as in the port. The captured thumb is now x 631-636 at both zooms,
+  the same pixels as the port.
+- Result: zoom-120 9.58 -> 9.79, zoom-80 9.67 -> 9.73 (original captures only; the port did not
+  change). Mean after I-023 + I-024: 9.867 -> 9.877 (excl. menus 9.877 -> 9.887), min 9.66.
+- Decision: KEEP (a measured fidelity fix of the harness, not a port change).

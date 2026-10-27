@@ -8,13 +8,17 @@ The harness runs the original in headless Chrome; this probe checks a value
 against the engine that ships (WebView2). The test build starts hidden
 (`--autostart`), so no window opens; the session restores the installed Prism.
 
-    uv run gpui/oploop/bench/webview_probe.py
+    uv run gpui/oploop/bench/webview_probe.py [zoom]
+
+With a zoom (for example 1.2), the probe first sets the WebView zoom the way
+the app does (`set_webview_zoom`, not saved in the settings).
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
+import sys
 import time
 import urllib.request
 from pathlib import Path
@@ -34,14 +38,20 @@ PROBE = r"""(() => {
   d.className = '';
   const normal = d.offsetWidth - d.clientWidth;
   d.remove();
-  return { thin, normal, dpr: devicePixelRatio, ua: navigator.userAgent };
+  return { thin, normal, dpr: devicePixelRatio, inner: [innerWidth, innerHeight], ua: navigator.userAgent };
 })()"""
+
+
+ZOOM = r"""window.__TAURI_INTERNALS__.invoke('plugin:webview|set_webview_zoom',
+  { label: window.__TAURI_INTERNALS__.metadata.currentWebview.label, value: %s })
+  .then(() => new Promise((done) => setTimeout(() => done('ok'), 500)))"""
 
 
 async def evaluate(ws_url: str, expression: str) -> object:
     async with websockets.connect(ws_url, max_size=None) as ws:
         await ws.send(json.dumps({"id": 1, "method": "Runtime.evaluate",
-                                  "params": {"expression": expression, "returnByValue": True}}))
+                                  "params": {"expression": expression, "returnByValue": True,
+                                             "awaitPromise": True}}))
         while True:
             reply = json.loads(await ws.recv())
             if reply.get("id") == 1:
@@ -71,8 +81,12 @@ def main() -> None:
 
     apps.default_environment = with_debug_port
     out = apps.E2E_DIR / "webview-probe"
+    zoom = float(sys.argv[1]) if len(sys.argv) > 1 else None
     with apps.Session("tauri", out):
-        print(json.dumps(asyncio.run(evaluate(page_target(), PROBE))))
+        target = page_target()
+        if zoom is not None:
+            print("zoom", asyncio.run(evaluate(target, ZOOM % zoom)))
+        print(json.dumps(asyncio.run(evaluate(target, PROBE))))
 
 
 if __name__ == "__main__":

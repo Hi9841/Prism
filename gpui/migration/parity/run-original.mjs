@@ -1,5 +1,5 @@
 // Captures one parity scenario from the original UI: the built frontend in
-// headless Chrome 154 (the Chromium of WebView2 154) with the mocked Tauri
+// headless Chrome 155 (the Chromium of WebView2 155) with the mocked Tauri
 // layer answering from the fixture.
 // Usage: bun run-original.mjs <fixture.json> <script.json> <scenario> <out-dir> <dist-dir>
 import { spawn } from "node:child_process";
@@ -72,13 +72,13 @@ const evaluate = async (expression) =>
 const settings = fixture.state?.settings ?? {};
 let width = [560, 640, 720].includes(settings.width) ? settings.width : 640;
 let zoom = 1;
+// WebView2's zoom (`setZoom`) is Chromium browser zoom: a zoom factor on the root, with
+// scrollbars at their device size (measured in WebView2 155: a thin gutter is 10 device px
+// at 80%, 100% and 120%). CSS `zoom` on the root at scale 1.0 is the same; the device scale
+// would also scale the scrollbars. Input coordinates are device pixels, as in the port.
 async function applyMetrics() {
-  await cdp("Emulation.setDeviceMetricsOverride", {
-    width: Math.round(width / zoom),
-    height: Math.round(620 / zoom),
-    deviceScaleFactor: zoom,
-    mobile: false,
-  });
+  await cdp("Emulation.setDeviceMetricsOverride", { width, height: 620, deviceScaleFactor: 1, mobile: false });
+  await evaluate(`document.documentElement.style.zoom = ${zoom === 1 ? '""' : zoom}`);
 }
 
 await cdp("Page.enable");
@@ -162,17 +162,17 @@ for (const step of scenario.steps) {
   } else if (step.key) {
     await key(step.key);
   } else if (step.move) {
-    await cdp("Input.dispatchMouseEvent", { type: "mouseMoved", x: step.move[0] / zoom, y: step.move[1] / zoom, buttons: pressed ? 1 : 0, button: pressed ? "left" : "none" });
+    await cdp("Input.dispatchMouseEvent", { type: "mouseMoved", x: step.move[0], y: step.move[1], buttons: pressed ? 1 : 0, button: pressed ? "left" : "none" });
   } else if (step.down) {
     pressed = true;
-    await cdp("Input.dispatchMouseEvent", { type: "mouseMoved", x: step.down[0] / zoom, y: step.down[1] / zoom });
-    await cdp("Input.dispatchMouseEvent", { type: "mousePressed", x: step.down[0] / zoom, y: step.down[1] / zoom, button: "left", buttons: 1, clickCount: 1 });
+    await cdp("Input.dispatchMouseEvent", { type: "mouseMoved", x: step.down[0], y: step.down[1] });
+    await cdp("Input.dispatchMouseEvent", { type: "mousePressed", x: step.down[0], y: step.down[1], button: "left", buttons: 1, clickCount: 1 });
   } else if (step.up) {
     pressed = false;
-    await cdp("Input.dispatchMouseEvent", { type: "mouseReleased", x: step.up[0] / zoom, y: step.up[1] / zoom, button: "left", buttons: 0, clickCount: 1 });
+    await cdp("Input.dispatchMouseEvent", { type: "mouseReleased", x: step.up[0], y: step.up[1], button: "left", buttons: 0, clickCount: 1 });
   } else if (step.click) {
     const button = step.button === "right" ? "right" : "left";
-    const [x, y] = [step.click[0] / zoom, step.click[1] / zoom];
+    const [x, y] = step.click;
     await cdp("Input.dispatchMouseEvent", { type: "mouseMoved", x, y });
     await cdp("Input.dispatchMouseEvent", { type: "mousePressed", x, y, button, clickCount: 1, buttons: button === "right" ? 2 : 1 });
     await Bun.sleep(16);
@@ -181,10 +181,10 @@ for (const step of scenario.steps) {
     const [x, y, deltaY] = step.wheel;
     await cdp("Input.dispatchMouseEvent", {
       type: "mouseWheel",
-      x: x / zoom,
-      y: y / zoom,
+      x,
+      y,
       deltaX: 0,
-      deltaY: deltaY / zoom,
+      deltaY,
       modifiers: step.ctrl ? 2 : 0,
     });
   } else if (step.capture) {
