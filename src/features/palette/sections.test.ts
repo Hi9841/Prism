@@ -560,7 +560,7 @@ describe("buildSections - search layout", () => {
 			"Économie d'énergie",
 			"Custom quiet plan",
 		]);
-		expect(section?.items[0].subtitle).toBe("Power plan · active");
+		expect(section?.items[0].subtitle).toBe("Power plan · Active now");
 		expect(section?.items[1].subtitle).toBe("Power plan");
 		await section?.items[2].run();
 		expect(vi.mocked(setPowerPlan)).toHaveBeenCalledWith(
