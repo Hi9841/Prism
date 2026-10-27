@@ -13,6 +13,7 @@ The journeys (J2-J5) and their start and end points are in `../JOURNEYS.md`.
 | `apps.py` | Starts, finds, drives, and stops one build. Stops and restarts the installed Prism. Guards `prism.json`. |
 | `winapi.py` | Win32 calls: windows, posted keys, `PrintWindow` capture, frame compare. |
 | `guardian.ps1` | A detached watcher. If the bench process stops for any reason, it stops the test build, starts the installed Prism, and restores `prism.json`. |
+| `functest.py` | Functional test of the real app (host integration): launches, context menu, settings, taskbar settings, window size, topmost, global hotkey, single instance, Quit. See below. |
 
 ## Safety rules of the bench
 
@@ -97,3 +98,23 @@ uv run gpui/oploop/bench/bench.py restore
 - `perf-<session>.jsonl`: the `PRISM_PERF_LOG` file of each session.
 - `frames/`: the settled J3 frames (`<app>-qNN-rMM.png`) and the side-by-side PNGs (`pair-qNN.png`).
 - `summary.md` and `j5-rows.json`: the output of `report.py`.
+
+## Functional test of the real app (`functest.py`)
+
+`uv run gpui/oploop/bench/functest.py run [test ...]` (`list` shows the tests). It drives the owner's GPUI
+test build (`%LOCALAPPDATA%\PrismGpuiE2E\gpui\prism.exe`) with messages to its own window: keys, characters,
+clicks and wheel steps. It does not send global input.
+
+- It has REAL effects, approved by the owner on 2026-10-27: it launches Character Map and a test `.txt`
+  (and closes them), opens Explorer, Properties and Windows Settings windows (and closes them), changes the
+  taskbar alignment, density, auto-hide, combine mode and Start icon, and changes Prism's settings. It runs
+  no power action and never unpins: on Windows builds that block programmatic pinning, an unpin could not
+  be undone.
+- Before the tests it saves `prism.json`, the taskbar registry values, the auto-hide state, the Start-icon
+  files, the pinned-taskbar folder and the clipboard text. After the tests it stops the build, restores what
+  changed, prints the differences that are left (expected: none), and starts the build hidden again.
+- Results and window captures go to `%LOCALAPPDATA%\PrismGpuiE2E\functest\<stamp>\`.
+- Click positions come from captures of a 560 px window at 100% zoom (`probe_settings_layout`,
+  `probe_palette_layout`). Settings positions are relative to the panel, so other widths work.
+- The tests skip, with a reason, when Notepad or Windows Settings already runs (a test does not close the
+  owner's windows).
