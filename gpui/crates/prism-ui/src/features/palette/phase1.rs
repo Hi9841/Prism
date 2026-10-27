@@ -69,7 +69,7 @@ pub fn power_plan_palette_item(hit: &PowerPlanHit) -> PaletteItem {
         hit.name.clone(),
         RowAction::call("set_power_plan", json!({ "guid": hit.guid })),
     );
-    item.subtitle = Some(if hit.active { "Power plan · active" } else { "Power plan" }.into());
+    item.subtitle = Some(if hit.active { "Power plan · Active now" } else { "Power plan" }.into());
     item.power_plan_guid = Some(hit.guid.clone());
     item
 }
