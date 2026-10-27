@@ -162,8 +162,18 @@ def start_installed() -> int:
     return pid
 
 
+def backup_prism_json() -> None:
+    """Saves the owner's current prism.json as the backup for this session."""
+    PRISM_JSON_BACKUP.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(PRISM_JSON, PRISM_JSON_BACKUP)
+    log("prism.json backed up")
+
+
 def check_prism_json() -> bool:
-    """True if prism.json equals the backup. Restores the backup if not."""
+    """True if prism.json equals this session's backup. Restores the backup if not.
+
+    Call it only after `backup_prism_json` in the same session: an older backup would
+    overwrite the owner's newer settings."""
     if sha256(PRISM_JSON) == sha256(PRISM_JSON_BACKUP):
         return True
     log("prism.json CHANGED: restoring the backup")
@@ -275,19 +285,18 @@ class Session:
         self.app: TestApp | None = None
 
     def __enter__(self) -> TestApp:
-        if not PRISM_JSON_BACKUP.exists():
-            PRISM_JSON_BACKUP.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(PRISM_JSON, PRISM_JSON_BACKUP)
-        if not check_prism_json():
-            raise RuntimeError("prism.json differed from the backup before the run")
         exe = deploy(self.kind)
         env = default_environment(E2E_DIR / "default-env.txt")
         perf_log = self.out / f"perf-{self.tag}.jsonl"
         perf_log.parent.mkdir(parents=True, exist_ok=True)
         perf_log.unlink(missing_ok=True)
         env["PRISM_PERF_LOG"] = str(perf_log)
-        start_guardian()
         stop_installed()
+        # The owner's Prism saves prism.json between sessions, so a difference from an older
+        # backup is the owner's own change. Take the backup only now, with the installed Prism
+        # stopped; the exit (and the guardian) restore only what a test build changed.
+        backup_prism_json()
+        start_guardian()
         try:
             others = prism_processes()
             if others:

@@ -400,3 +400,15 @@ left of the original's (568 vs 570, centroid -1.9 px).
 - Result: mean 9.877 -> 9.902 (excl. menus 9.887 -> 9.913), min 9.66 -> 9.67. 31 of 33 captures up
   (settings-scroll-1 and -2 +0.07, settings +0.05, search-power +0.04, idle +0.02), none down.
 - Decision: KEEP (vendored patch 27).
+
+### Incident 2026-10-27 09:28: the bench restored an old prism.json
+
+- `probe.py gpui` (before an E2E re-check of patches 24-27) found prism.json different from the
+  backup of 00:14 and copied the backup over it. The installed Prism had saved the owner's newer state
+  between 08:54 and 09:28 (parity mode cannot write it: every bridge call answers from the fixture).
+  The installed Prism (not restarted) keeps that state in memory and writes the full state
+  (`settings`, `history`) at its next change.
+- Cause: `Session` took the backup once and treated any later difference as damage.
+- Fix: each session stops the installed Prism, then backs up prism.json, then starts the guardian;
+  the exit restores only what a test build changed. The E2E re-check waits until the owner's Prism has
+  saved again (a session stops the installed Prism, which would drop the state in its memory).

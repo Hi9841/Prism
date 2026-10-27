@@ -297,7 +297,8 @@ def cmd_j4(args) -> None:
 
 
 def cmd_restore(_args) -> None:
-    """Emergency: stop every test build, start the installed Prism, check prism.json."""
+    """Emergency, right after a failed run only: stop every test build, start the installed
+    Prism, and restore prism.json from that run's backup if a test build changed it."""
     for proc in prism_processes():
         if "PrismGpuiE2E" in (proc.exe() or ""):
             kill_tree(proc.pid)

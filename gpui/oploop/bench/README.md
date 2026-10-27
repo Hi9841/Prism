@@ -19,7 +19,7 @@ The journeys (J2-J5) and their start and end points are in `../JOURNEYS.md`.
 - The bench sends keys only to the palette window with `PostMessage`. It does not send global input. It never sends Enter.
 - The bench stops the installed Prism (`%LOCALAPPDATA%\Prism\prism.exe`) before a session. It starts the installed Prism again after each session, also after an error.
 - `guardian.ps1` does the same restore if the bench process is killed.
-- The bench copies `prism.json` to `%LOCALAPPDATA%\PrismGpuiE2E\backup\prism.json` before the first session. After each session, it compares the two files and restores the backup if they are different.
+- At the start of each session, after it stops the installed Prism, the bench copies `prism.json` to `%LOCALAPPDATA%\PrismGpuiE2E\backup\prism.json`. After the session, it compares the two files and restores the backup if a test build changed it. (Until 2026-10-27 the backup was taken once, so a later session restored it over the owner's newer changes.)
 - The bench ignores `prism.exe --parity` processes and the Start-menu helper modes. These are not launcher instances.
 - The palette opens on the desktop during a session. Do not type in the palette during a run.
 
@@ -77,7 +77,8 @@ Use Git Bash at the repo root.
    rm -rf dist src-tauri/gen
    ```
 
-If a run stops and the installed Prism does not run, do this command:
+If a run stops and the installed Prism does not run, do this command at once (it restores
+prism.json from the backup that the failed run took at its start; later, it would undo your own changes):
 
 ```sh
 uv run gpui/oploop/bench/bench.py restore
