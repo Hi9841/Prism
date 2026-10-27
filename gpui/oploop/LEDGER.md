@@ -24,7 +24,7 @@
 
 | ID | Journey | Metric | Baseline (median, range, n) | Current | Change |
 |---|---|---|---|---|---|
-| J1a | UI parity, 33 captures (`bun migration/parity/run.mjs`) | mean / min score of 10 | 9.71 / 9.37 (context-menu); excl. menus 9.73 | 9.766 / 9.54 (context-menu); excl. menus 9.776 / 9.56 | +0.056 (+0.046 excl. menus) |
+| J1a | UI parity, 33 captures (`bun migration/parity/run.mjs`) | mean / min score of 10 | 9.71 / 9.37 (context-menu); excl. menus 9.73 | 9.902 / 9.67 (context-menu); excl. menus 9.913 / 9.74 (zoom-80) | +0.192 (+0.183 excl. menus); the zoom captures also changed with the harness fix I-024 |
 | J1b | UX parity, 37 scenarios (`--ux`) | passed, UX score | 36/37 (ux-context-keys, logged), 9.73 | 37/37, 10.0 | +1 scenario |
 | J2 | Open latency (warm) | ms, activation to first painted frame | original 41 (p95 61, n=16) | GPUI 14 (p95 21) | -66%, p 1.5e-6 |
 | J2b | First open after start | ms, first painted frame | original 204 (200-215, n=4) | GPUI 20 (19-22) | -90% |
