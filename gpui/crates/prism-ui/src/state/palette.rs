@@ -289,12 +289,15 @@ impl PaletteState {
         })
         .detach();
         cx.spawn(async move |this, cx| {
-            if let Ok(items) = bridge::get_quick_access().await {
-                let _ = this.update(cx, |this, cx| {
-                    this.quick_access = items;
-                    this.rederive_inputs(cx);
-                    this.rebuild(cx);
-                });
+            match bridge::get_quick_access().await {
+                Ok(items) => {
+                    let _ = this.update(cx, |this, cx| {
+                        this.quick_access = items;
+                        this.rederive_inputs(cx);
+                        this.rebuild(cx);
+                    });
+                }
+                Err(error) => eprintln!("Prism could not load Quick Access folders: {error}"),
             }
         })
         .detach();
@@ -473,12 +476,15 @@ impl PaletteState {
             return;
         }
         self.history_paths_task = Some(cx.spawn(async move |this, cx| {
-            if let Ok(existing) = bridge::existing_paths(paths).await {
-                let _ = this.update(cx, |this, cx| {
-                    this.existing_history_paths = existing.into_iter().collect();
-                    this.load_history_thumbnails(cx);
-                    this.rebuild(cx);
-                });
+            match bridge::existing_paths(paths).await {
+                Ok(existing) => {
+                    let _ = this.update(cx, |this, cx| {
+                        this.existing_history_paths = existing.into_iter().collect();
+                        this.load_history_thumbnails(cx);
+                        this.rebuild(cx);
+                    });
+                }
+                Err(error) => eprintln!("Prism could not check recent file paths: {error}"),
             }
         }));
     }
@@ -613,11 +619,14 @@ impl PaletteState {
                 return;
             }
             self.file_task = Some(cx.spawn(async move |this, cx| {
-                if let Ok(response) = bridge::search_files(String::new(), 1).await {
-                    let _ = this.update(cx, |this, cx| {
-                        this.apply_file_status(&response);
-                        this.rebuild(cx);
-                    });
+                match bridge::search_files(String::new(), 1).await {
+                    Ok(response) => {
+                        let _ = this.update(cx, |this, cx| {
+                            this.apply_file_status(&response);
+                            this.rebuild(cx);
+                        });
+                    }
+                    Err(error) => eprintln!("Prism could not read the file index status: {error}"),
                 }
             }));
             return;
@@ -886,8 +895,14 @@ impl PaletteState {
 
     pub fn rebuild_index(&mut self, cx: &mut Context<Self>) {
         self.file_indexing = true;
-        cx.spawn(async move |_, _| {
-            let _ = bridge::rebuild_file_index().await;
+        cx.spawn(async move |this, cx| {
+            if let Err(error) = bridge::rebuild_file_index().await {
+                eprintln!("Prism could not rebuild the file index: {error}");
+                let _ = this.update(cx, |this, cx| {
+                    this.file_indexing = false;
+                    this.rebuild(cx);
+                });
+            }
         })
         .detach();
         self.rebuild(cx);

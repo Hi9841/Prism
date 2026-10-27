@@ -15,3 +15,5 @@ pub mod lib;
 pub mod state;
 #[cfg(feature = "gpui")]
 pub mod theme;
+#[cfg(feature = "gpui")]
+pub mod transition;

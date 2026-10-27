@@ -35,12 +35,48 @@ use crate::lib::types::{
 };
 use crate::state::app::{AppEvent, AppState, ToastKind, app_state, error_string};
 use crate::state::palette::{PaletteEvent, PaletteState, palette_state, run_action};
-use crate::theme::{Rgba, Theme, fade, hsla, motion, shadow};
+use crate::theme::{Rgba, TRANSPARENT, Theme, fade, hsla, motion, shadow, tabular_nums, white};
+use crate::transition::{self, Timing};
 
 /// Palette.tsx: `Math.hypot(dx, dy) >= 4`.
 const DRAG_THRESHOLD: f32 = 4.0;
 /// animatePreviewOut.
 const PREVIEW_LEAVE_MS: u64 = 110;
+/// `reorder-drag-pickup`.
+const PREVIEW_PICKUP_MS: u64 = 120;
+
+/// A CSS `inset 0 0 0 1px` ring drawn as a layout border (1 CSS px, scaled by
+/// the zoom). The caller takes the same width off the padding or size.
+fn ring<E: Styled>(element: E, color: Rgba) -> E {
+    element.border_t(r(1.)).border_r(r(1.)).border_b(r(1.)).border_l(r(1.)).border_color(hsla(color))
+}
+
+/// The `(opacity, scale)` of a drag preview: `reorder-drag-pickup` (from
+/// opacity .72 and `scale(.96)`, 120 ms ease-out-soft) or, once `leaving`,
+/// `reorder-drag-out` (to the same values, 110 ms ease-in). The scale is
+/// around the center. Reduced motion shows the end frame (`0.01ms`).
+fn preview_motion(picked_at: Option<Instant>, leaving: Option<Instant>, window: &mut Window) -> (f32, f32) {
+    let progress = |since: Instant, ms: u64| {
+        let duration = motion_ms(ms);
+        if duration == 0 { 1.0 } else { (since.elapsed().as_millis() as f32 / duration as f32).min(1.0) }
+    };
+    // `e` runs from the picked-up look (0) to the resting look (1).
+    let (t, e) = match (leaving, picked_at) {
+        (Some(since), _) => {
+            let t = progress(since, PREVIEW_LEAVE_MS);
+            (t, 1.0 - motion::ease_in(t))
+        }
+        (None, Some(since)) => {
+            let t = progress(since, PREVIEW_PICKUP_MS);
+            (t, motion::ease_out_soft(t))
+        }
+        (None, None) => (1.0, 1.0),
+    };
+    if t < 1.0 {
+        window.request_animation_frame();
+    }
+    (0.72 + 0.28 * e, 0.96 + 0.04 * e)
+}
 
 #[derive(Clone, Debug)]
 struct ReorderDragState {
@@ -48,6 +84,8 @@ struct ReorderDragState {
     start: Point<Pixels>,
     pos: Point<Pixels>,
     active: bool,
+    /// When the drag crossed the threshold: the preview's pickup animation starts here.
+    picked_at: Option<Instant>,
     target_item_id: Option<String>,
 }
 
@@ -72,6 +110,7 @@ struct CategoryDragState {
     start: Point<Pixels>,
     pos: Point<Pixels>,
     active: bool,
+    picked_at: Option<Instant>,
     target_id: Option<String>,
 }
 
@@ -476,7 +515,7 @@ impl Palette {
     /* ---------------- pointer drags (A6) ---------------- */
 
     fn start_reorder_drag(&mut self, item: PaletteItem, position: Point<Pixels>, cx: &mut Context<Self>) {
-        self.reorder_drag = Some(ReorderDragState { item, start: position, pos: position, active: false, target_item_id: None });
+        self.reorder_drag = Some(ReorderDragState { item, start: position, pos: position, active: false, picked_at: None, target_item_id: None });
         self.active_drag = Some(ActiveDrag::Reorder);
         cx.notify();
     }
@@ -489,7 +528,7 @@ impl Palette {
 
     fn start_category_drag(&mut self, kind: CategoryKind, id: String, label: String, position: Point<Pixels>, cx: &mut Context<Self>) {
         self.category_drag =
-            Some(CategoryDragState { kind, id, label, start: position, pos: position, active: false, target_id: None });
+            Some(CategoryDragState { kind, id, label, start: position, pos: position, active: false, picked_at: None, target_id: None });
         self.active_drag = Some(ActiveDrag::Category);
         cx.notify();
     }
@@ -542,6 +581,9 @@ impl Palette {
                 drag.target_item_id =
                     hovered.filter(|h| Some(*h) != source.as_deref() && same_group).map(str::to_owned);
                 drag.pos = position;
+                if active && !drag.active {
+                    drag.picked_at = Some(Instant::now());
+                }
                 drag.active = active;
             }
             Some(ActiveDrag::Category) => {
@@ -552,6 +594,9 @@ impl Palette {
                 let hovered = if active { Self::target_at(list, targets.viewport, position) } else { None };
                 drag.target_id = hovered.filter(|h| *h != drag.id).map(str::to_owned);
                 drag.pos = position;
+                if active && !drag.active {
+                    drag.picked_at = Some(Instant::now());
+                }
                 drag.active = active;
             }
             Some(ActiveDrag::File) => {
@@ -709,7 +754,20 @@ impl Palette {
         let targets = self.targets.clone();
         let reorder_target = can_reorder.then(|| item_reorder_id.clone()).flatten();
 
-        // `.row` background stack.
+        // `.row` background stack. `transition-colors duration-50` moves the
+        // background color; the selected wash (a background image) and the rings
+        // (box shadows) change at once.
+        let key = gpui::ElementId::Name(format!("row-{}", item.id).into());
+        let background = if drop_target {
+            t.drop_target_fill()
+        } else if selected {
+            t.surface_active
+        } else if hovered {
+            t.surface_hover
+        } else {
+            TRANSPARENT
+        };
+        let background = transition::color(&key, "bg", background, Timing::tw(50), window, cx);
         let mut row = div()
             .id(("row", index))
             .group("row")
@@ -721,22 +779,21 @@ impl Palette {
             .py(r(7.))
             .px(r(10.))
             .rounded(r(14.))
+            .bg(hsla(background))
             .map(|d| {
                 if drop_target {
-                    d.bg(hsla(t.drop_target_fill()))
-                        .border_1()
-                        .border_color(hsla(fade(t.accent, 52.0)))
-                        .shadow(zoomed(vec![shadow(0., 3., 10., 0., fade(t.accent, 9.0))], zoom))
+                    ring(d, fade(t.accent, 52.0)).shadow(zoomed(vec![shadow(0., 3., 10., 0., fade(t.accent, 9.0))], zoom))
                 } else if selected {
-                    d.bg(gpui::linear_gradient(
-                        90.,
-                        gpui::linear_color_stop(hsla(crate::theme::over(t.row_selected_wash(), t.surface_active)), 0.0),
-                        gpui::linear_color_stop(hsla(t.surface_active), 0.58),
-                    ))
-                    .border_1()
-                    .border_color(hsla(fade(t.accent, 13.0)))
-                } else if hovered {
-                    d.bg(hsla(t.surface_hover))
+                    // The wash covers the border box, under the 1px ring.
+                    ring(d, fade(t.accent, 13.0)).child(
+                        div().absolute().top(r(-1.)).right(r(-1.)).bottom(r(-1.)).left(r(-1.)).rounded(r(14.)).bg(
+                            gpui::linear_gradient(
+                                90.,
+                                gpui::linear_color_stop(hsla(t.row_selected_wash()), 0.0),
+                                gpui::linear_color_stop(hsla(fade(t.row_selected_wash(), 0.0)), 0.58),
+                            ),
+                        ),
+                    )
                 } else {
                     d
                 }
@@ -794,17 +851,33 @@ impl Palette {
             .absolute()
             // The border box: a selected or drop-target row draws its ring as a 1px border.
             .map(|c| {
-                let edge = if selected || drop_target { px(-1.) } else { px(0.) };
+                let edge = if selected || drop_target { r(-1.) } else { r(0.) };
                 c.top(edge).bottom(edge).left(edge).right(edge)
             }),
         );
+        if selected && !drop_target {
+            // `inset 0 1px 0 rgb(255 255 255 / .025)` on the border box (the row has no CSS border).
+            row = row.child(
+                div()
+                    .absolute()
+                    .top(r(-1.))
+                    .right(r(-1.))
+                    .bottom(r(-1.))
+                    .left(r(-1.))
+                    .rounded(r(14.))
+                    .border_t(r(1.))
+                    .border_color(hsla(white(0.025))),
+            );
+        }
 
         // Icon cell. The original gives the icon a drag handler, but the row's
         // full-size open button paints above it (z-0 positioned inside the z-[1]
         // cell), so Chromium never routes a press to it: the icon acts as the row.
         let icon_cell = div().flex_none().child(row_icon(&item.icon, 40., t, zoom));
 
-        let title_color = if selected { hsla(t.fg) } else { crate::gfx::alpha(t.fg, 0.9) };
+        // `transition-colors duration-150`.
+        let title_color = if selected { t.fg } else { Rgba { a: t.fg.a * 0.9, ..t.fg } };
+        let title_color = hsla(transition::color(&key, "title", title_color, Timing::tw(150), window, cx));
         let text_cell = div()
             .flex_1()
             .min_w_0()
@@ -864,16 +937,23 @@ impl Palette {
             let key_item = item.clone();
             let grabbing = dragged;
             // Keyed by item, so focus follows the item when it moves.
-            let grip = div().id(gpui::ElementId::Name(format!("reorder-grip-{}", item.id).into()));
+            let key = gpui::ElementId::Name(format!("reorder-grip-{}", item.id).into());
+            // `transition-[color,background-color,opacity] duration-100`.
+            let (hovered, hover) = transition::hover(&key, window, cx);
+            let text = if hovered { t.fg } else if grabbing { t.accent } else { t.fg_quiet };
+            let text = transition::color(&key, "text", text, Timing::tw(100), window, cx);
+            let background = if grabbing { t.accent_soft } else if hovered { t.surface_hover } else { TRANSPARENT };
+            let background = transition::color(&key, "bg", background, Timing::tw(100), window, cx);
+            let opacity = if grabbing || show_affordance { 1.0 } else { 0.0 };
+            let opacity = transition::number(&key, "opacity", opacity, Timing::tw(100), window, cx);
             trailing = trailing.child(
-                focus::button(grip, selected, t)
+                focus::button(div().id(key), selected, t)
                     .flex()
                     .flex_none()
                     .items_center()
                     .justify_center()
                     .size(r(32.))
                     .rounded(r(8.))
-                    .group("grip")
                     .tooltip(title_tooltip(format!("Reorder {}", item.title)))
                     .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _, cx| {
                         let direction = match event.keystroke.key.as_str() {
@@ -884,7 +964,9 @@ impl Palette {
                         cx.stop_propagation();
                         this.move_item(&key_item, direction, cx);
                     }))
-                    .map(|d| if grabbing { d.bg(hsla(t.accent_soft)).cursor_grabbing().opacity(1.0) } else { d.cursor_grab().opacity(if show_affordance { 1.0 } else { 0.0 }).hover(|s| s.bg(hsla(t.surface_hover))) })
+                    .map(|d| if grabbing { d.cursor_grabbing() } else { d.cursor_grab() })
+                    .bg(hsla(background))
+                    .opacity(opacity)
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(move |this, event: &MouseDownEvent, window, cx| {
@@ -895,26 +977,32 @@ impl Palette {
                         }),
                     )
                     .on_click(|_, _, cx| cx.stop_propagation())
-                    .child(
-                        icon("grip-vertical", 16., if grabbing { t.accent } else { t.fg_quiet })
-                            .group_hover("grip", |s| s.text_color(hsla(t.fg))),
-                    ),
+                    .child(icon("grip-vertical", 16., text))
+                    .child(hover),
             );
         }
-        let remove_button = |this: &Self, cx: &mut Context<Self>| {
+        // `transition-[color,background-color,opacity] duration-150` (the utility
+        // replaces `.press`'s property list and timing, so the press scale jumps).
+        let remove_button = |this: &Self, window: &mut Window, cx: &mut Context<Self>| {
             let id = item.id.clone();
             let app = this.app.clone();
-            focus::button(square(("remove-recent", index)), selected, t)
-                .group("remove")
+            let key = gpui::ElementId::Name(format!("remove-{}", item.id).into());
+            let (hovered, hover) = transition::hover(&key, window, cx);
+            let text = transition::color(&key, "text", if hovered { t.danger } else { t.fg_tertiary }, Timing::tw(150), window, cx);
+            let background = transition::color(&key, "bg", if hovered { t.danger_soft } else { TRANSPARENT }, Timing::tw(150), window, cx);
+            let opacity = transition::number(&key, "opacity", if show_affordance { 1.0 } else { 0.0 }, Timing::tw(150), window, cx);
+            let button = transition::active_scale(square(("remove-recent", index)), &key, 0.96, Timing::NONE, true, window, cx);
+            focus::button(button, selected, t)
                 .tooltip(title_tooltip("Remove from Recent"))
-                .opacity(if show_affordance { 1.0 } else { 0.0 })
-                .hover(|s| s.bg(hsla(t.danger_soft)))
+                .opacity(opacity)
+                .bg(hsla(background))
                 .on_click(cx.listener(move |_, _, _, cx| {
                     cx.stop_propagation();
                     let id = id.clone();
                     app.update(cx, |app, cx| app.remove_history(&id, cx));
                 }))
-                .child(icon("x", 16., t.fg_tertiary).group_hover("remove", |s| s.text_color(hsla(t.danger))))
+                .child(icon("x", 16., text))
+                .child(hover)
         };
         if item.app_id.is_some() {
             // Pin toggle: visible on row hover; the two icons cross-fade (`.icon-swap`).
@@ -927,19 +1015,24 @@ impl Palette {
             }
             let p = swap.read(cx).animate(window);
             let pin_item = item.clone();
-            let base_color = if pinned { t.accent } else { t.fg_tertiary };
+            // `.press`: color, background-color, opacity, and scale.
+            let key = gpui::ElementId::Name(format!("pin-{}", item.id).into());
+            let (hovered, hover) = transition::hover(&key, window, cx);
+            let text = if pinned { t.accent } else if hovered { t.fg } else { t.fg_tertiary };
+            let text = transition::color(&key, "text", text, Timing::PRESS, window, cx);
+            let background = if pinned { t.accent_soft } else if hovered { t.surface_hover } else { TRANSPARENT };
+            let background = transition::color(&key, "bg", background, Timing::PRESS, window, cx);
+            let opacity = transition::number(&key, "opacity", if show_affordance { 1.0 } else { 0.0 }, Timing::PRESS, window, cx);
             let scaled = |name: &str, visible: f32| {
                 let scale = 0.25 + 0.75 * visible;
-                icon(name, 16., base_color)
-                    .with_transformation(gpui::Transformation::scale(gpui::size(scale, scale)))
-                    .when(!pinned, |s| s.group_hover("pin", |s| s.text_color(hsla(t.fg))))
+                icon(name, 16., text).with_transformation(gpui::Transformation::scale(gpui::size(scale, scale)))
             };
+            let button = transition::press(square(("pin-toggle", index)), &key, true, window, cx);
             trailing = trailing.child(
-                focus::button(square(("pin-toggle", index)), selected, t)
-                    .group("pin")
+                focus::button(button, selected, t)
                     .tooltip(title_tooltip(format!("{} {}", if pinned { "Unpin" } else { "Pin" }, item.title)))
-                    .opacity(if show_affordance { 1.0 } else { 0.0 })
-                    .map(|d| if pinned { d.bg(hsla(t.accent_soft)) } else { d.hover(|s| s.bg(hsla(t.surface_hover))) })
+                    .opacity(opacity)
+                    .bg(hsla(background))
                     .on_click(cx.listener(move |this, _, window, cx| {
                         cx.stop_propagation();
                         this.toggle_pin(&pin_item, window, cx);
@@ -950,16 +1043,17 @@ impl Palette {
                             .size(r(16.))
                             .child(div().absolute().inset_0().opacity(p).child(scaled("pin-off", p)))
                             .child(div().absolute().inset_0().opacity(1.0 - p).child(scaled("pin", 1.0 - p))),
-                    ),
+                    )
+                    .child(hover),
             );
             if removable {
-                trailing = trailing.child(remove_button(self, cx));
+                trailing = trailing.child(remove_button(self, window, cx));
             }
         } else if removable {
-            trailing = trailing.child(remove_button(self, cx));
+            trailing = trailing.child(remove_button(self, window, cx));
         } else if is_clipboard_kind(&item.id) && selected {
             trailing = trailing.child(
-                div()
+                tabular_nums(div())
                     .text_size(r(12.))
                     .font_weight(weight(600.))
                     .line_height(relative(1.45))
@@ -968,6 +1062,12 @@ impl Palette {
             );
         } else if can_drag_file {
             let drag_item = item.clone();
+            // `transition-[color,background-color,opacity] duration-100`.
+            let key = gpui::ElementId::Name(format!("file-grip-{}", item.id).into());
+            let (hovered, hover) = transition::hover(&key, window, cx);
+            let text = transition::color(&key, "text", if hovered { t.accent } else { t.fg_quiet }, Timing::tw(100), window, cx);
+            let background = transition::color(&key, "bg", if hovered { t.surface_hover } else { TRANSPARENT }, Timing::tw(100), window, cx);
+            let opacity = transition::number(&key, "opacity", if show_affordance { 1.0 } else { 0.0 }, Timing::tw(100), window, cx);
             trailing = trailing.child(
                 div()
                     .flex()
@@ -985,11 +1085,10 @@ impl Palette {
                     })
                     .child(
                         focus::button(square(("file-grip", index)), selected, t)
-                            .group("file-grip")
                             .tooltip(title_tooltip(format!("Drag {} into another app (Discord, Explorer, etc.)", item.title)))
-                            .opacity(if show_affordance { 1.0 } else { 0.0 })
+                            .opacity(opacity)
                             .cursor_grab()
-                            .hover(|s| s.bg(hsla(t.surface_hover)))
+                            .bg(hsla(background))
                             .on_mouse_down(
                                 MouseButton::Left,
                                 cx.listener(move |this, event: &MouseDownEvent, window, cx| {
@@ -998,7 +1097,8 @@ impl Palette {
                                     this.start_file_drag(drag_item.clone(), event.position, cx);
                                 }),
                             )
-                            .child(icon("grip-vertical", 16., t.fg_quiet).group_hover("file-grip", |s| s.text_color(hsla(t.accent)))),
+                            .child(icon("grip-vertical", 16., text))
+                            .child(hover),
                     ),
             );
         } else if selected && item.id.starts_with("file::") {
@@ -1072,7 +1172,7 @@ impl Palette {
         });
         let target = if collapsed { 1.0 } else { 0.0 };
         if chevron.read(cx).target() != target {
-            chevron.update(cx, |c, _| c.set(target, motion_ms(150), motion::ease));
+            chevron.update(cx, |c, _| c.set(target, motion_ms(150), motion::tailwind_default));
         }
         let turn = chevron.read(cx).animate(window);
         let group = format!("collapse-{id}");
@@ -1175,10 +1275,10 @@ impl Palette {
         let mut list = div().flex().flex_col().line_height(relative(1.45)).px(r(10.)).pb(r(8.));
 
         if let Some(error) = file_error.clone().filter(|_| !sections_empty) {
-            list = list.child(self.file_error_notice(&error, t, cx));
+            list = list.child(self.file_error_notice(&error, t, window, cx));
         }
         if sections_empty {
-            list = list.size_full().child(self.empty_state(t, cx));
+            list = list.size_full().child(self.empty_state(t, window, cx));
             return viewport
                 .child(scroll.child(list))
                 .child(crate::gfx::wheel_scroll_layer(self.scroll.clone(), self.wheel.clone(), t.scroll))
@@ -1200,9 +1300,7 @@ impl Palette {
                 .relative()
                 .flex()
                 .flex_col()
-                .when(section_drop, |d| {
-                    d.rounded(r(14.)).bg(hsla(fade(t.accent, 8.0))).border_1().border_color(hsla(fade(t.accent, 42.0)))
-                })
+                .when(section_drop, |d| d.rounded(r(14.)).bg(hsla(fade(t.accent, 8.0))).child(drop_ring(t)))
                 .when(section_dragging, |d| d.opacity(0.45))
                 .child(
                     canvas(
@@ -1293,9 +1391,7 @@ impl Palette {
                     .flex()
                     .flex_col()
                     .when(group_index > 0, |d| d.mt(r(4.)).border_t_1().border_color(hsla(t.line)).pt(r(4.)))
-                    .when(group_drop, |d| {
-                        d.rounded(r(14.)).bg(hsla(fade(t.accent, 8.0))).border_1().border_color(hsla(fade(t.accent, 42.0)))
-                    })
+                    .when(group_drop, |d| d.rounded(r(14.)).bg(hsla(fade(t.accent, 8.0))).child(drop_ring(t)))
                     .when(group_dragging, |d| d.opacity(0.45))
                     .child(
                         canvas(
@@ -1391,9 +1487,12 @@ impl Palette {
             .into_any_element()
     }
 
-    fn file_error_notice(&self, error: &FileSearchError, t: &Theme, cx: &mut Context<Self>) -> AnyElement {
+    fn file_error_notice(&self, error: &FileSearchError, t: &Theme, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let index_failed = error.kind == "indexQuery";
         let palette = self.palette.clone();
+        // `.press`: the scale (the button has no color change).
+        let key = gpui::ElementId::Name("file-error-action".into());
+        let action = transition::press(div().id(key.clone()), &key, true, window, cx);
         div()
             .mx(r(10.))
             .mt(r(8.))
@@ -1412,8 +1511,7 @@ impl Palette {
                     .line_height(relative(1.45)),
             )
             .child(
-                div()
-                    .id("file-error-action")
+                action
                     .flex()
                     .flex_none()
                     .items_center()
@@ -1430,7 +1528,7 @@ impl Palette {
             .into_any_element()
     }
 
-    fn empty_state(&self, t: &Theme, cx: &mut Context<Self>) -> AnyElement {
+    fn empty_state(&self, t: &Theme, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let palette = self.palette.read(cx);
         let query = palette.query.clone();
         let loading = if query.is_empty() { !palette.apps_loaded } else { palette.files_busy() };
@@ -1482,26 +1580,29 @@ impl Palette {
             };
             let palette_entity = self.palette.clone();
             let action_kind = kind.clone();
+            // `.press`: color, background-color, and scale.
+            let key = gpui::ElementId::Name("empty-state-action".into());
+            let (hovered, hover) = transition::hover(&key, window, cx);
+            let text = transition::color(&key, "text", if hovered { t.fg } else { t.fg_secondary }, Timing::PRESS, window, cx);
+            let background = transition::color(&key, "bg", if hovered { t.surface_hover } else { t.surface }, Timing::PRESS, window, cx);
+            let action = transition::press(div().id(key.clone()), &key, true, window, cx);
             cell = cell
                 .child(title_style(div()).child(crate::components::pretty_text::pretty(title)))
                 .child(body_style(div()).child(crate::components::pretty_text::pretty(body)))
                 .child(
-                    div()
-                        .id("empty-state-action")
-                        .group("empty-action")
+                    action
                         .mt(r(4.))
                         .flex()
                         .items_center()
                         .gap(r(6.))
                         .min_h(r(44.))
                         .rounded(r(10.))
-                        .bg(hsla(t.surface))
+                        .bg(hsla(background))
                         .px(r(12.))
                         .text_size(r(12.))
                         .font_weight(weight(500.))
                         .line_height(relative(1.45))
-                        .text_color(hsla(t.fg_secondary))
-                        .hover(|s| s.bg(hsla(t.surface_hover)).text_color(hsla(t.fg)))
+                        .text_color(hsla(text))
                         .on_click(cx.listener(move |_, _, _, cx| {
                             palette_entity.update(cx, |p, cx| match action_kind.as_str() {
                                 "directoryAccess" => p.retry_file_search(cx),
@@ -1509,11 +1610,9 @@ impl Palette {
                                 _ => p.refresh_apps(cx),
                             })
                         }))
-                        .child(
-                            icon(if kind == "indexQuery" { "folder-sync" } else { "refresh-cw" }, 14., t.fg_secondary)
-                                .group_hover("empty-action", |s| s.text_color(hsla(t.fg))),
-                        )
-                        .child(if kind == "indexQuery" { "Rebuild index" } else { "Retry" }),
+                        .child(icon(if kind == "indexQuery" { "folder-sync" } else { "refresh-cw" }, 14., text))
+                        .child(if kind == "indexQuery" { "Rebuild index" } else { "Retry" })
+                        .child(hover),
                 );
         } else {
             let (title, body) = if show_loading {
@@ -1548,17 +1647,12 @@ impl Palette {
             let (w, h) = (232.0 * zoom, 54.0 * zoom);
             let x = clamp(f32::from(drag.pos.x) - w - 14.0 * zoom, 8.0 * zoom, vw - w - 8.0 * zoom);
             let y = clamp(f32::from(drag.pos.y) - h / 2.0, 8.0 * zoom, vh - h - 8.0 * zoom);
-            // reorder-drag-pickup (120 ms) and reorder-drag-out (110 ms): opacity .72 <-> 1.
-            let opacity = match leaving {
-                Some(since) => {
-                    window.request_animation_frame();
-                    1.0 - 0.28 * motion::ease_in((since.elapsed().as_millis() as f32 / 110.0).min(1.0))
-                }
-                None => 1.0,
-            };
+            // reorder-drag-pickup (120 ms) and reorder-drag-out (110 ms).
+            let (opacity, scale) = preview_motion(drag.picked_at, leaving, window);
             let item = drag.item.clone();
             return Some(
                 div()
+                    .scale(scale)
                     .absolute()
                     .left(px(x))
                     .top(px(y))
@@ -1602,8 +1696,11 @@ impl Palette {
         let x = clamp(f32::from(drag.pos.x) + 14.0 * zoom, 8.0 * zoom, vw - w - 8.0 * zoom);
         let y = clamp(f32::from(drag.pos.y) - h / 2.0, 8.0 * zoom, vh - h - 8.0 * zoom);
         let _ = cx;
+        // `.category-drag-preview` has no exit animation: it unmounts on drop.
+        let (opacity, scale) = preview_motion(drag.picked_at, None, window);
         Some(
             div()
+                .scale(scale)
                 .absolute()
                 .left(px(x))
                 .top(px(y))
@@ -1616,9 +1713,10 @@ impl Palette {
                 .px(r(9.))
                 .rounded(r(10.))
                 .bg(hsla(t.bg_raised))
-                .border_1()
-                .border_color(hsla(fade(t.accent, 22.0)))
                 .shadow(zoomed(vec![shadow(0., 8., 22., 0., crate::theme::black(0.34))], zoom))
+                .opacity(opacity)
+                // `inset 0 1px 0 fg 10%` over `inset 0 0 0 1px accent 22%`: overlays, no layout border.
+                .child(ring(div().absolute().inset_0().rounded(r(10.)), fade(t.accent, 22.0)))
                 .child(crate::components::ui::inset_top_highlight(t.preview_hi(), 10.))
                 .child(
                     div()
@@ -1654,7 +1752,7 @@ impl Palette {
         )
     }
 
-    fn render_footer(&self, t: &Theme, cx: &mut Context<Self>) -> AnyElement {
+    fn render_footer(&self, t: &Theme, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let palette = self.palette.read(cx);
         let apps_loaded = palette.apps_loaded;
         let apps_error = palette.apps_error;
@@ -1704,6 +1802,8 @@ impl Palette {
                 gpui::linear_color_stop(hsla(crate::theme::TRANSPARENT), 0.0),
                 gpui::linear_color_stop(hsla(crate::theme::black(0.06)), 1.0),
             ))
+            // `inset 0 1px 0 rgb(255 255 255 / .012)`: inside the 1px top border.
+            .child(crate::components::ui::inset_top_highlight(white(0.012), 0.))
             .child(
                 div()
                     .flex()
@@ -1753,6 +1853,8 @@ impl Palette {
                         "folder-sync",
                         14.,
                         move |_, cx| palette_entity.update(cx, |p, cx| p.rebuild_index(cx)),
+                        window,
+                        cx,
                     ))
                     .child(icon_button(
                         "refresh-apps",
@@ -1761,11 +1863,19 @@ impl Palette {
                         "refresh-cw",
                         14.,
                         move |_, cx| palette_entity2.update(cx, |p, cx| p.refresh_apps(cx)),
+                        window,
+                        cx,
                     ))
                     .child(self.power_menu.clone())
             )
             .into_any_element()
     }
+}
+
+/// `.section-category-drop`: `inset 0 0 0 1px accent 42%`. An overlay, because a
+/// layout border would move the content and grow the block by 2px.
+fn drop_ring(t: &Theme) -> gpui::Div {
+    ring(div().absolute().inset_0().rounded(r(14.)), fade(t.accent, 42.0))
 }
 
 fn is_path_subtitle(subtitle: &str) -> bool {
@@ -1806,7 +1916,7 @@ impl Render for Palette {
             },
         );
         let results = self.render_results(&t, zoom, window, cx);
-        let footer = self.render_footer(&t, cx);
+        let footer = self.render_footer(&t, window, cx);
         let previews = self.render_previews(&t, zoom, window, cx);
 
         // Window-level pointer listeners while a drag owns the pointer (A6).

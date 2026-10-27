@@ -12,9 +12,10 @@ use crate::components::taskbar_customization::TaskbarCustomization;
 use crate::components::text_input::{Changed, InputStyle, TextInput};
 use crate::components::focus;
 use crate::components::ui::{
-    SegmentOption, row_icon, segmented, settings_row, theme, title_tooltip, toggle, truncate, weight,
+    SegmentOption, row_icon, segmented, settings_row, theme, title_tooltip, toggle,
+    truncate, weight,
 };
-use crate::gfx::{icon, icon_stroke, r, reduced_motion, zoomed};
+use crate::gfx::{Tween, icon, icon_stroke, r, reduced_motion, zoomed};
 use crate::lib::bridge;
 use crate::lib::emoji::locale_compare;
 use crate::lib::types::{
@@ -23,7 +24,8 @@ use crate::lib::types::{
 };
 use crate::state::app::{AppEvent, AppState, SHORTCUT_OPTIONS, THEME_OPTIONS, ToastKind, app_state, error_string};
 use crate::state::palette::{PaletteState, palette_state};
-use crate::theme::{Accent, Rgba, Theme, fade, hsla, motion, over, shadow, white};
+use crate::theme::{Accent, Rgba, TRANSPARENT, Theme, fade, hsla, motion, over, shadow, tabular_nums, white};
+use crate::transition::{self, Timing};
 
 /// "Ctrl+Alt+Space" -> "Ctrl + Alt + Space"
 pub fn display_shortcut(combo: &str) -> String {
@@ -42,6 +44,13 @@ const QUICK_ACCESS_OPTIONS: [(&str, &str, &str); 7] = [
 
 fn field_style(t: &Theme) -> InputStyle {
     InputStyle { text: t.fg, placeholder: t.fg_quiet, selection: fade(t.accent, 40.0), caret: t.fg }
+}
+
+/// `.focus-ring:focus-visible` on a text field: 1px accent at 65% and 4px accent at 18%, outside the box.
+/// An input matches `:focus-visible` on any focus, so there is no keyboard check. A shadow takes no layout space.
+fn field_ring(t: &Theme, zoom: f32) -> Vec<gpui::BoxShadow> {
+    // GPUI paints the list bottom-up; CSS lists the top shadow first.
+    zoomed(vec![shadow(0., 0., 0., 4., fade(t.accent, 18.)), shadow(0., 0., 0., 1., fade(t.accent, 65.))], zoom)
 }
 
 fn now_base36() -> String {
@@ -472,9 +481,15 @@ fn section_title(label: &str, first: bool, t: &Theme) -> gpui::Div {
         .child(label.to_uppercase())
 }
 
-/// A small pill button used by several pickers.
-fn chip(id: impl Into<gpui::ElementId>, active: bool, t: &Theme) -> gpui::Stateful<gpui::Div> {
-    focus::button(div().id(id.into()), true, &t)
+/// A small pill button used by several pickers. Colors move like `.press`.
+fn chip(id: impl Into<gpui::ElementId>, active: bool, t: &Theme, window: &mut Window, cx: &mut App) -> gpui::Stateful<gpui::Div> {
+    let id: gpui::ElementId = id.into();
+    let paint = if active {
+        transition::hover_paint(&id, (t.fg, t.fg), (t.accent_soft, t.accent_soft), Timing::PRESS, window, cx)
+    } else {
+        transition::hover_paint(&id, (t.fg_tertiary, t.fg_secondary), (t.surface, t.surface_hover), Timing::PRESS, window, cx)
+    };
+    focus::button(div().id(id), true, &t)
         .flex()
         .items_center()
         .rounded(r(9.))
@@ -483,19 +498,13 @@ fn chip(id: impl Into<gpui::ElementId>, active: bool, t: &Theme) -> gpui::Statef
         .text_size(r(11.))
         .font_weight(weight(500.))
         .line_height(relative(1.45))
-        .map(|d| {
-            if active {
-                d.bg(hsla(t.accent_soft)).text_color(hsla(t.fg))
-            } else {
-                d.bg(hsla(t.surface))
-                    .text_color(hsla(t.fg_tertiary))
-                    .hover(|s| s.bg(hsla(t.surface_hover)).text_color(hsla(t.fg_secondary)))
-            }
-        })
+        .bg(hsla(paint.bg))
+        .text_color(hsla(paint.text))
+        .child(paint.tracker)
 }
 
 impl SettingsSheet {
-    fn keybind_picker(&self, settings: &Settings, t: &Theme, cx: &mut Context<Self>) -> AnyElement {
+    fn keybind_picker(&self, settings: &Settings, t: &Theme, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let busy = self.shortcut_busy;
         div()
             .flex()
@@ -523,8 +532,11 @@ impl SettingsSheet {
                 |(index, option)| {
                     let active = settings.shortcut == option.value;
                     let value = option.value.to_owned();
-                    chip(("shortcut", index), active, t)
-                        .when(busy, |d| d.opacity(0.5))
+                    let key: gpui::ElementId = ("shortcut", index).into();
+                    let opacity = transition::number(&key, "opacity", if busy { 0.5 } else { 1.0 }, Timing::PRESS, window, cx);
+                    let chip = chip(key.clone(), active, t, window, cx);
+                    transition::press(chip, &key, !busy, window, cx)
+                        .opacity(opacity)
                         .when(!busy, |d| d.on_click(cx.listener(move |this, _, _, cx| this.apply_shortcut(value.clone(), cx))))
                         .child(option.label)
                 },
@@ -543,28 +555,38 @@ impl SettingsSheet {
             .into_any_element()
     }
 
-    fn view_zoom_control(&self, settings: &Settings, t: &Theme, cx: &mut Context<Self>) -> AnyElement {
+    fn view_zoom_control(&self, settings: &Settings, t: &Theme, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let zoom = settings.view_zoom;
         let at_min = zoom == VIEW_ZOOM_LEVELS[0];
         let at_max = zoom == VIEW_ZOOM_LEVELS[VIEW_ZOOM_LEVELS.len() - 1];
         let at_default = zoom == Settings::default().view_zoom;
-        let button = |id: &'static str, title: &'static str, glyph: &'static str, disabled: bool, action: Box<dyn Fn(&mut AppState, &mut Context<AppState>)>, app: Entity<AppState>| {
-            focus::button(div().id(id), !disabled, &t)
-                .group(id)
+        let button = |id: &'static str,
+                      title: &'static str,
+                      glyph: &'static str,
+                      disabled: bool,
+                      action: Box<dyn Fn(&mut AppState, &mut Context<AppState>)>,
+                      app: Entity<AppState>,
+                      window: &mut Window,
+                      cx: &mut App| {
+            // `.press`: color, background-color, opacity, and scale.
+            let key = gpui::ElementId::Name(id.into());
+            // The hover classes have no `enabled:` guard, and `:hover` also matches a disabled button.
+            let paint = transition::hover_paint(&key, (t.fg_tertiary, t.fg), (TRANSPARENT, t.surface_hover), Timing::PRESS, window, cx);
+            let opacity = transition::number(&key, "opacity", if disabled { 0.35 } else { 1.0 }, Timing::PRESS, window, cx);
+            let button = transition::press(div().id(key.clone()), &key, !disabled, window, cx);
+            focus::button(button, !disabled, &t)
                 .tooltip(title_tooltip(title))
                 .flex()
                 .items_center()
                 .justify_center()
                 .size(r(28.))
                 .rounded(r(7.))
-                .when(disabled, |d| d.opacity(0.35))
-                .when(!disabled, |d| {
-                    d.hover(|s| s.bg(hsla(t.surface_hover)))
-                        .on_click(move |_, _, cx| app.update(cx, |app, cx| action(app, cx)))
-                })
-                .child(icon(glyph, 14., t.fg_tertiary).when(!disabled, |s| s.group_hover(id, |s| s.text_color(hsla(t.fg)))))
+                .bg(hsla(paint.bg))
+                .opacity(opacity)
+                .when(!disabled, |d| d.on_click(move |_, _, cx| app.update(cx, |app, cx| action(app, cx))))
+                .child(icon(glyph, 14., paint.text))
+                .child(paint.tracker)
         };
-        let _ = cx;
         div()
             .flex()
             .items_center()
@@ -582,8 +604,10 @@ impl SettingsSheet {
                     app.update_settings(cx, |s| s.view_zoom = next)
                 }),
                 self.app.clone(),
+                window,
+                cx,
             ))
-            .child(
+            .child(tabular_nums(
                 div()
                     .w(r(44.))
                     .text_center()
@@ -592,7 +616,7 @@ impl SettingsSheet {
                     .line_height(relative(1.45))
                     .text_color(hsla(t.fg))
                     .child(format!("{}%", crate::js::number_to_string(zoom))),
-            )
+            ))
             .child(button(
                 "zoom-in",
                 "Zoom in",
@@ -603,6 +627,8 @@ impl SettingsSheet {
                     app.update_settings(cx, |s| s.view_zoom = next)
                 }),
                 self.app.clone(),
+                window,
+                cx,
             ))
             .child(button(
                 "zoom-reset",
@@ -611,11 +637,13 @@ impl SettingsSheet {
                 at_default,
                 Box::new(|app, cx| app.reset_view_zoom(cx)),
                 self.app.clone(),
+                window,
+                cx,
             ))
             .into_any_element()
     }
 
-    fn quick_access_picker(&self, settings: &Settings, t: &Theme) -> AnyElement {
+    fn quick_access_picker(&self, settings: &Settings, t: &Theme, window: &mut Window, cx: &mut App) -> AnyElement {
         let app = self.app.clone();
         div()
             .grid()
@@ -627,7 +655,16 @@ impl SettingsSheet {
                 let disabled = !active && settings.quick_access.len() >= QUICK_ACCESS_LIMIT;
                 let kind = kind.to_string();
                 let app = app.clone();
-                focus::button(div().id(("quick-access-option", index)), true, &t)
+                // `.press`: color, background-color, opacity, and scale.
+                let key: gpui::ElementId = ("quick-access-option", index).into();
+                let paint = if active {
+                    transition::hover_paint(&key, (t.fg, t.fg), (t.accent_soft, t.accent_soft), Timing::PRESS, window, cx)
+                } else {
+                    transition::hover_paint(&key, (t.fg_tertiary, t.fg_secondary), (t.surface, t.surface_hover), Timing::PRESS, window, cx)
+                };
+                let opacity = transition::number(&key, "opacity", if disabled { 0.35 } else { 1.0 }, Timing::PRESS, window, cx);
+                let button = transition::press(div().id(key.clone()), &key, !disabled, window, cx);
+                focus::button(button, true, &t)
                     .flex()
                     .h(r(32.))
                     .min_w_0()
@@ -638,16 +675,9 @@ impl SettingsSheet {
                     .text_size(r(11.))
                     .font_weight(weight(500.))
                     .line_height(relative(1.45))
-                    .map(|d| {
-                        if active {
-                            d.bg(hsla(t.accent_soft)).text_color(hsla(t.fg))
-                        } else {
-                            d.bg(hsla(t.surface))
-                                .text_color(hsla(t.fg_tertiary))
-                                .hover(|s| s.bg(hsla(t.surface_hover)).text_color(hsla(t.fg_secondary)))
-                        }
-                    })
-                    .when(disabled, |d| d.opacity(0.35))
+                    .bg(hsla(paint.bg))
+                    .text_color(hsla(paint.text))
+                    .opacity(opacity)
                     .when(!disabled, |d| {
                         d.on_click(move |_, _, cx| {
                             let kind = kind.clone();
@@ -662,8 +692,10 @@ impl SettingsSheet {
                             })
                         })
                     })
-                    .child(icon(glyph, 14., if active { t.accent } else { t.fg_tertiary }))
+                    // The icon is `currentColor` unless active (`text-accent`): it follows the chip text.
+                    .child(icon(glyph, 14., if active { t.accent } else { paint.text }))
                     .child(truncate(*label))
+                    .child(paint.tracker)
             }))
             .into_any_element()
     }
@@ -688,7 +720,7 @@ impl SettingsSheet {
                         .py(r(6.))
                         .text_size(r(12.))
                         .line_height(relative(1.45))
-                        .when(new_name_focused, |d| d.border_1().border_color(hsla(fade(t.accent, 65.0))).px(r(9.)).py(r(5.)))
+                        .when(new_name_focused, |d| d.shadow(field_ring(t, zoom)))
                         .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
                             if event.keystroke.key == "enter" && !this.new_name.read(cx).is_composing() {
                                 this.create_group(cx);
@@ -696,8 +728,11 @@ impl SettingsSheet {
                         }))
                         .child(self.new_name.clone()),
                 )
-                .child(
-                    focus::button(div().id("create-collection"), true, &t)
+                .child({
+                    let key = gpui::ElementId::Name("create-collection".into());
+                    let paint = transition::hover_paint(&key, (t.accent, t.accent), (t.accent_soft, t.surface_hover), Timing::PRESS, window, cx);
+                    let button = transition::press(div().id(key.clone()), &key, true, window, cx);
+                    focus::button(button, true, &t)
                         .tooltip(title_tooltip("Create app collection"))
                         .flex()
                         .flex_none()
@@ -705,11 +740,11 @@ impl SettingsSheet {
                         .justify_center()
                         .size(r(32.))
                         .rounded(r(8.))
-                        .bg(hsla(t.accent_soft))
-                        .hover(|s| s.bg(hsla(t.surface_hover)))
+                        .bg(hsla(paint.bg))
                         .on_click(cx.listener(|this, _, _, cx| this.create_group(cx)))
-                        .child(icon("plus", 16., t.accent)),
-                ),
+                        .child(icon("plus", 16., paint.text))
+                        .child(paint.tracker)
+                }),
         );
         let groups = settings.app_groups.clone();
         let filtered = if self.open_group_id.is_some() { self.filtered_apps(cx) } else { Vec::new() };
@@ -741,6 +776,7 @@ impl SettingsSheet {
                                 .text_size(r(12.))
                                 .font_weight(weight(600.))
                                 .line_height(relative(1.45))
+                                .when(name_input_focused, |d| d.shadow(field_ring(t, zoom)))
                                 .child(name_input),
                         )
                         .child(
@@ -749,24 +785,44 @@ impl SettingsSheet {
                                 .flex_none()
                                 .items_center()
                                 .gap(r(2.))
-                                .child(self.small_icon_button(("group-up", group_index), "Move up", "chevron-up", first, false, t, {
+                                .child(self.small_icon_button(gpui::ElementId::Name(format!("group-up-{}", group.id).into()), "Move up", "chevron-up", first, false, t, {
                                     let gid = gid.clone();
                                     cx.listener(move |this, _, _, cx| this.move_group(&gid, -1, cx))
-                                }))
-                                .child(self.small_icon_button(("group-down", group_index), "Move down", "chevron-down", last, false, t, {
+                                }, window, cx))
+                                .child(self.small_icon_button(gpui::ElementId::Name(format!("group-down-{}", group.id).into()), "Move down", "chevron-down", last, false, t, {
                                     let gid = gid.clone();
                                     cx.listener(move |this, _, _, cx| this.move_group(&gid, 1, cx))
-                                }))
-                                .child(self.small_icon_button(("group-delete", group_index), "Delete collection", "trash-2", false, true, t, {
+                                }, window, cx))
+                                .child(self.small_icon_button(gpui::ElementId::Name(format!("group-delete-{}", group.id).into()), "Delete collection", "trash-2", false, true, t, {
                                     let gid = gid.clone();
                                     cx.listener(move |this, _, _, cx| this.remove_group(&gid, cx))
-                                })),
+                                }, window, cx)),
                         ),
                 );
             // The picker trigger.
-            let chevron_turn = if is_open { std::f32::consts::PI } else { 0.0 };
-            let trigger = focus::button(div().id(("group-add-apps", group_index)), true, &t)
-                .group("group-trigger")
+            // `transition-transform duration-150` with the default Tailwind timing.
+            let chevron = window.use_keyed_state(
+                gpui::ElementId::Name(format!("group-chevron-{}", group.id).into()),
+                cx,
+                |_, _| Tween::at(if is_open { 1.0 } else { 0.0 }),
+            );
+            chevron.update(cx, |tween, _| {
+                tween.set(if is_open { 1.0 } else { 0.0 }, crate::gfx::motion_ms(150), motion::tailwind_default)
+            });
+            let chevron_turn = std::f32::consts::PI * chevron.read(cx).animate(window);
+            // `shadow-[inset_0_0_0_1px_var(--accent-ring)]` (utilities) overrides `.focus-ring` while open.
+            // `transition-colors duration-150`.
+            let trigger_key: gpui::ElementId = ("group-add-apps", group_index).into();
+            let paint = if is_open {
+                transition::hover_paint(&trigger_key, (t.fg, t.fg), (t.surface_active, t.surface_active), Timing::tw(150), window, cx)
+            } else {
+                transition::hover_paint(&trigger_key, (t.fg_secondary, t.fg), (t.surface, t.surface_hover), Timing::tw(150), window, cx)
+            };
+            let trigger = div()
+                .id(trigger_key)
+                .tab_index(0)
+                .tab_stop(true)
+                .when(!is_open, |d| focus::focus_ring(d, &t))
                 .flex()
                 .h(r(36.))
                 .w_full()
@@ -777,15 +833,9 @@ impl SettingsSheet {
                 .text_size(r(11.5))
                 .font_weight(weight(500.))
                 .line_height(relative(1.45))
-                .map(|d| {
-                    if is_open {
-                        d.bg(hsla(t.surface_active)).text_color(hsla(t.fg)).border_1().border_color(hsla(t.accent_ring)).px(r(9.))
-                    } else {
-                        d.bg(hsla(t.surface))
-                            .text_color(hsla(t.fg_secondary))
-                            .hover(|s| s.bg(hsla(t.surface_hover)).text_color(hsla(t.fg)))
-                    }
-                })
+                .bg(hsla(paint.bg))
+                .text_color(hsla(paint.text))
+                .when(is_open, |d| d.border_1().border_color(hsla(t.accent_ring)).px(r(9.)))
                 .on_click(cx.listener({
                     let gid = gid.clone();
                     move |this, _, window, cx| this.toggle_app_picker(&gid, window, cx)
@@ -793,16 +843,17 @@ impl SettingsSheet {
                 .child(icon("plus", 14., t.accent))
                 .child(truncate(if is_open { "Choose apps" } else { "Add apps" }).flex_1())
                 .when(!group.app_ids.is_empty(), |d| {
-                    d.child(
+                    d.child(tabular_nums(
                         div()
                             .flex_none()
                             .text_size(r(10.5))
                             .font_weight(weight(600.))
                             .text_color(hsla(t.fg_tertiary))
                             .child(group.app_ids.len().to_string()),
-                    )
+                    ))
                 })
-                .child(crate::gfx::rotated(icon("chevron-down", 14., t.fg_quiet), chevron_turn));
+                .child(crate::gfx::rotated(icon("chevron-down", 14., t.fg_quiet), chevron_turn))
+                .child(paint.tracker);
             let mut picker_block = div().mt(r(6.)).child(trigger);
             if is_open {
                 picker_block = picker_block
@@ -818,24 +869,27 @@ impl SettingsSheet {
                     |(index, entry)| {
                         let gid = gid.clone();
                         let app_id = entry.app_id.clone();
-                        focus::button(div().id(gpui::ElementId::Name(format!("assigned-{}-{index}", group.id).into())), true, &t)
+                        let key = gpui::ElementId::Name(format!("assigned-{}-{index}", group.id).into());
+                        let paint = transition::hover_paint(&key, (t.fg, t.fg), (t.accent_soft, t.surface_hover), Timing::PRESS, window, cx);
+                        let button = transition::press(div().id(key.clone()), &key, true, window, cx);
+                        focus::button(button, true, &t)
                             .tooltip(title_tooltip(format!("Remove {}", entry.name)))
                             .flex()
                             .max_w_full()
                             .items_center()
                             .gap(r(4.))
                             .rounded(r(6.))
-                            .bg(hsla(t.accent_soft))
+                            .bg(hsla(paint.bg))
                             .px(r(8.))
                             .py(r(4.))
                             .text_size(r(10.5))
                             .font_weight(weight(500.))
                             .line_height(relative(1.45))
-                            .text_color(hsla(t.fg))
-                            .hover(|s| s.bg(hsla(t.surface_hover)))
+                            .text_color(hsla(paint.text))
                             .on_click(cx.listener(move |this, _, _, cx| this.remove_app(&gid, &app_id, cx)))
                             .child(truncate(entry.name.clone()))
                             .child(icon("x", 12., t.fg_quiet))
+                            .child(paint.tracker)
                     },
                 )));
             }
@@ -853,24 +907,28 @@ impl SettingsSheet {
         danger: bool,
         t: &Theme,
         on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
+        window: &mut Window,
+        cx: &mut App,
     ) -> gpui::Stateful<gpui::Div> {
-        focus::button(div().id(id.into()), !disabled, &t)
-            .group("small-icon-button")
+        // `.press`: color, background-color, opacity, and scale.
+        let id: gpui::ElementId = id.into();
+        let (text, bg) = if danger { (t.danger, t.danger_soft) } else { (t.fg, t.surface_hover) };
+        // The hover classes have no `enabled:` guard, and `:hover` also matches a disabled button.
+        let paint = transition::hover_paint(&id, (t.fg_quiet, text), (TRANSPARENT, bg), Timing::PRESS, window, cx);
+        let opacity = transition::number(&id, "opacity", if disabled { 0.25 } else { 1.0 }, Timing::PRESS, window, cx);
+        let button = transition::press(div().id(id.clone()), &id, !disabled, window, cx);
+        focus::button(button, !disabled, &t)
             .tooltip(title_tooltip(title))
             .flex()
             .items_center()
             .justify_center()
             .size(r(28.))
             .rounded(r(7.))
-            .when(disabled, |d| d.opacity(0.25))
-            .when(!disabled, |d| {
-                d.hover(move |s| s.bg(hsla(if danger { t.danger_soft } else { t.surface_hover })))
-                    .on_click(on_click)
-            })
-            .child(
-                icon(glyph, 14., t.fg_quiet)
-                    .when(!disabled, |s| s.group_hover("small-icon-button", move |s| s.text_color(hsla(if danger { t.danger } else { t.fg })))),
-            )
+            .bg(hsla(paint.bg))
+            .opacity(opacity)
+            .when(!disabled, |d| d.on_click(on_click))
+            .child(icon(glyph, 14., paint.text))
+            .child(paint.tracker)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -904,6 +962,13 @@ impl SettingsSheet {
                     let disabled = !selected && full;
                     let (gid, app_id) = (gid.clone(), entry.app_id.clone());
                     let icon_value = PaletteIcon::App { name: entry.name.clone(), icon: self.picker_icons.get(&entry.app_id).cloned() };
+                    // `transition-colors duration-100`.
+                    let key = gpui::ElementId::Name(format!("picker-app-{}", entry.app_id).into());
+                    let paint = if selected {
+                        transition::hover_paint(&key, (t.fg, t.fg), (t.accent_soft, t.accent_soft), Timing::tw(100), window, cx)
+                    } else {
+                        transition::hover_paint(&key, (t.fg_secondary, t.fg), (TRANSPARENT, t.surface_hover), Timing::tw(100), window, cx)
+                    };
                     focus::button(div().id(("picker-app", index)), !disabled, &t)
                         .when(disabled, |d| d.tooltip(title_tooltip(format!("{} is full", group.name))))
                         .flex()
@@ -914,13 +979,8 @@ impl SettingsSheet {
                         .rounded(r(7.))
                         .px(r(8.))
                         .py(r(4.))
-                        .map(|d| {
-                            if selected {
-                                d.bg(hsla(t.accent_soft)).text_color(hsla(t.fg))
-                            } else {
-                                d.text_color(hsla(t.fg_secondary)).hover(|s| s.bg(hsla(t.surface_hover)).text_color(hsla(t.fg)))
-                            }
-                        })
+                        .bg(hsla(paint.bg))
+                        .text_color(hsla(paint.text))
                         .when(disabled, |d| d.opacity(0.35))
                         .when(!disabled, |d| {
                             d.on_click(cx.listener(move |this, _, _, cx| {
@@ -958,6 +1018,7 @@ impl SettingsSheet {
                                 .bg(hsla(if selected { t.accent } else { t.surface }))
                                 .child(icon_stroke("check", 2.5, 14., if selected { t.accent_fg } else { crate::theme::TRANSPARENT })),
                         )
+                        .child(paint.tracker)
                 }))
                 .into_any_element()
         };
@@ -1028,7 +1089,7 @@ impl SettingsSheet {
                             .overflow_y_scroll()
                             .track_scroll(&self.picker_scroll)
                             .pr(self.picker_wheel.borrow().gutter())
-                            .child(div().px(r(6.)).pb(r(6.)).child(list)),
+                            .child(div().px(r(5.)).pb(r(6.)).child(list)),
                     )
                     .child(crate::gfx::wheel_scroll_layer(self.picker_scroll.clone(), self.picker_wheel.clone(), t.scroll)),
             )
@@ -1039,31 +1100,39 @@ impl SettingsSheet {
                     .justify_between()
                     .border_t_1()
                     .border_color(hsla(t.line))
-                    .px(r(10.))
-                    .py(r(8.))
-                    .child(
+                    // `px-2.5 py-2` less the 1px ring-as-border of the panel (an inset shadow in CSS).
+                    .px(r(9.))
+                    .pt(r(8.))
+                    .pb(r(7.))
+                    .child(tabular_nums(
                         div()
                             .text_size(r(10.5))
                             .line_height(relative(1.45))
                             .text_color(hsla(t.fg_quiet))
                             .child(format!("{} of {APP_GROUP_APP_LIMIT} selected", group.app_ids.len())),
-                    )
+                    ))
                     .child(
-                        focus::button(div().id("app-picker-done"), true, &t)
+                        {
+                        // `.press`: background-color and scale.
+                        let key = gpui::ElementId::Name("app-picker-done".into());
+                        let paint = transition::hover_paint(&key, (t.fg, t.fg), (t.accent_soft, t.surface_hover), Timing::PRESS, window, cx);
+                        let button = transition::press(div().id(key.clone()), &key, true, window, cx);
+                        focus::button(button, true, &t)
                             .rounded(r(7.))
-                            .bg(hsla(t.accent_soft))
+                            .bg(hsla(paint.bg))
                             .px(r(10.))
                             .py(r(4.))
                             .text_size(r(11.))
                             .font_weight(weight(600.))
                             .line_height(relative(1.45))
-                            .text_color(hsla(t.fg))
-                            .hover(|s| s.bg(hsla(t.surface_hover)))
+                            .text_color(hsla(paint.text))
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.open_group_id = None;
                                 cx.notify();
                             }))
-                            .child("Done"),
+                            .child("Done")
+                            .child(paint.tracker)
+                        },
                     ),
             )
             .into_any_element()
@@ -1183,48 +1252,93 @@ impl Render for SettingsSheet {
             let active = settings.accent == accent.id();
             let app = app_entity.clone();
             let id = accent.id().to_owned();
-            let ring = if active {
-                // `0 0 0 2px var(--t-bg), 0 0 0 4px var(--accent)`.
-                vec![shadow(0., 0., 0., 4., t.accent), shadow(0., 0., 0., 2., t.bg_raised)]
-            } else {
-                vec![shadow(0., 1., 3., 0., crate::theme::black(0.4))]
-            };
-            focus::button(div().id(("accent", index)), true, &t)
+            // The inline `box-shadow` beats `.focus-ring` (the focus ring never shows). The active value,
+            // `0 0 0 2px var(--t-bg), 0 0 0 4px var(--accent)`, is invalid at computed-value time because
+            // `--t-bg` is a gradient: it computes to `none`.
+            // `transition-transform duration-150`: `scale-110` when active, else `hover:scale-105`.
+            let key: gpui::ElementId = ("accent", index).into();
+            let (hovered, hover) = transition::hover(&key, window, cx);
+            let target = if active { 1.1 } else if hovered { 1.05 } else { 1.0 };
+            let scale = transition::number(&key, "scale", target, Timing::tw(150), window, cx);
+            div()
+                .id(key)
+                .tab_index(0)
+                .tab_stop(true)
                 .relative()
-                .size(r(if active { 26.4 } else { 24. }))
-                .m(r(if active { -1.2 } else { 0. }))
+                .size(r(24.))
+                .scale(scale)
                 .rounded_full()
                 .bg(hsla(accent.swatch()))
-                .shadow(zoomed(ring, zoom))
+                .when(!active, |d| {
+                    d.shadow(zoomed(vec![shadow(0., 1., 3., 0., crate::theme::black(0.4))], zoom))
+                        .child(crate::components::ui::inset_top_highlight(white(0.2), 12.))
+                })
                 .on_click(move |_, _, cx| {
                     let id = id.clone();
                     app.update(cx, |app, cx| app.update_settings(cx, |s| s.accent = id))
                 })
-                .child(crate::components::ui::inset_top_highlight(white(0.2), 12.))
+                // `after:-inset-1`: the pseudo-element is part of the button's `:hover`.
+                .child(hover.top(r(-4.)).right(r(-4.)).bottom(r(-4.)).left(r(-4.)))
         }));
+        // `.press` (150ms `--ease-out-soft`) for the buttons below.
+        let button_paint = |id: &'static str, text: (Rgba, Rgba), bg: (Rgba, Rgba), window: &mut Window, cx: &mut App| {
+            transition::hover_paint(&gpui::ElementId::Name(id.into()), text, bg, Timing::PRESS, window, cx)
+        };
+        let history_paint = button_paint("clear-history", (t.fg_secondary, t.fg), (t.surface, t.surface_hover), window, cx);
+        let close_paint = button_paint("close-settings", (t.fg_tertiary, t.fg_secondary), (TRANSPARENT, t.surface_hover), window, cx);
+        let reset_paint = if reset_confirming {
+            button_paint("reset-settings", (white(1.0), white(1.0)), (t.danger, t.danger), window, cx)
+        } else {
+            button_paint("reset-settings", (t.danger, white(1.0)), (t.danger_soft, t.danger), window, cx)
+        };
+        // `disabled:opacity-50` comes after `hover:opacity-90` in Tailwind's variant order.
+        let reset_opacity = if reset_busy { 0.5 } else if reset_confirming && reset_paint.hovered { 0.9 } else { 1.0 };
+        let reset_opacity = transition::number(&"reset-settings".into(), "opacity", reset_opacity, Timing::PRESS, window, cx);
+        let quit_paint = button_paint("quit-prism", (t.danger, t.danger), (t.danger_soft, t.danger_soft), window, cx);
+        let quit_opacity = transition::number(&"quit-prism".into(), "opacity", if quit_paint.hovered { 0.9 } else { 1.0 }, Timing::PRESS, window, cx);
+        // `.press:active:not(:disabled)`: the scale.
+        let pressable = |id: &'static str, enabled: bool, window: &mut Window, cx: &mut App| {
+            let key = gpui::ElementId::Name(id.into());
+            transition::press(div().id(key.clone()), &key, enabled, window, cx)
+        };
+        let history_button = pressable("clear-history", true, window, cx);
+        let close_button = pressable("close-settings", true, window, cx);
+        let reset_button = pressable("reset-settings", !reset_busy, window, cx);
+        let quit_button = pressable("quit-prism", true, window, cx);
+        // Build these two only while they are drawn: a hover state that outlives its overlay
+        // keeps its last value, and the button would come back hovered.
+        let cancel = reset_confirming.then(|| {
+            let paint = button_paint("reset-cancel", (t.danger, t.danger), (TRANSPARENT, t.surface_hover), window, cx);
+            (pressable("reset-cancel", true, window, cx), paint)
+        });
+        let retry = persistence_error.map(|error| {
+            let busy = self.retry_save_busy;
+            let paint = button_paint("retry-save", (t.danger, t.danger), (t.surface, t.surface_hover), window, cx);
+            let opacity = transition::number(&"retry-save".into(), "opacity", if busy { 0.5 } else { 1.0 }, Timing::PRESS, window, cx);
+            (error, pressable("retry-save", !busy, window, cx), paint, opacity)
+        });
         let clear_history = {
             let app = app_entity.clone();
-            focus::button(div().id("clear-history"), true, &t)
-                .group("clear-history")
+            focus::button(history_button, true, &t)
                 .flex()
                 .items_center()
                 .gap(r(6.))
                 .rounded(r(10.))
-                .bg(hsla(t.surface))
+                .bg(hsla(history_paint.bg))
                 .px(r(12.))
                 .py(r(6.))
                 .text_size(r(12.))
                 .font_weight(weight(500.))
                 .line_height(relative(1.45))
-                .text_color(hsla(t.fg_secondary))
-                .hover(|s| s.bg(hsla(t.surface_hover)).text_color(hsla(t.fg)))
+                .text_color(hsla(history_paint.text))
                 .on_click(move |_, _, cx| app.update(cx, |app, cx| app.clear_history(cx)))
-                .child(icon("history", 14., t.fg_secondary).group_hover("clear-history", |s| s.text_color(hsla(t.fg))))
+                .child(icon("history", 14., history_paint.text))
                 .child("Clear")
+                .child(history_paint.tracker)
         };
-        let keybind = self.keybind_picker(&settings, &t, cx);
-        let zoom_control = self.view_zoom_control(&settings, &t, cx);
-        let quick = self.quick_access_picker(&settings, &t);
+        let keybind = self.keybind_picker(&settings, &t, window, cx);
+        let zoom_control = self.view_zoom_control(&settings, &t, window, cx);
+        let quick = self.quick_access_picker(&settings, &t, window, cx);
         let groups = self.app_groups_picker(&settings, &t, zoom, window, cx);
         let version = self.version.clone();
 
@@ -1301,16 +1415,16 @@ impl Render for SettingsSheet {
                             .child("Settings"),
                     )
                     .child(
-                        focus::button_with(div().id("close-settings"), &self.close_focus, true, &t)
-                            .group("close-settings")
+                        focus::button_with(close_button, &self.close_focus, true, &t)
                             .flex()
                             .items_center()
                             .justify_center()
                             .size(r(44.))
                             .rounded(r(6.))
-                            .hover(|s| s.bg(hsla(t.surface_hover)))
+                            .bg(hsla(close_paint.bg))
                             .on_click(cx.listener(|this, _, _, cx| this.request_close(cx)))
-                            .child(icon("x", 16., t.fg_tertiary).group_hover("close-settings", |s| s.text_color(hsla(t.fg_secondary)))),
+                            .child(icon("x", 16., close_paint.text))
+                            .child(close_paint.tracker),
                     ),
             )
             .child(
@@ -1347,8 +1461,7 @@ impl Render for SettingsSheet {
                                     ),
                             )
                             .child(
-                                focus::button(div().id("reset-settings"), true, &t)
-                                    .group("reset-settings")
+                                focus::button(reset_button, true, &t)
                                     .flex()
                                     .flex_none()
                                     .items_center()
@@ -1359,25 +1472,16 @@ impl Render for SettingsSheet {
                                     .text_size(r(12.))
                                     .font_weight(weight(600.))
                                     .line_height(relative(1.45))
-                                    .map(|d| {
-                                        if reset_confirming {
-                                            d.bg(hsla(t.danger)).text_color(gpui::white()).hover(|s| s.opacity(0.9))
-                                        } else {
-                                            d.bg(hsla(t.danger_soft))
-                                                .text_color(hsla(t.danger))
-                                                .hover(|s| s.bg(hsla(t.danger)).text_color(gpui::white()))
-                                        }
-                                    })
-                                    .when(reset_busy, |d| d.opacity(0.5))
+                                    .bg(hsla(reset_paint.bg))
+                                    .text_color(hsla(reset_paint.text))
+                                    .opacity(reset_opacity)
                                     .when(!reset_busy, |d| d.on_click(cx.listener(|this, _, _, cx| this.confirm_reset(cx))))
-                                    .child(
-                                        icon("rotate-ccw", 14., if reset_confirming { white(1.0) } else { t.danger })
-                                            .group_hover("reset-settings", |s| s.text_color(gpui::white())),
-                                    )
-                                    .child(if reset_confirming { "Reset now" } else { "Reset" }),
+                                    .child(icon("rotate-ccw", 14., reset_paint.text))
+                                    .child(if reset_confirming { "Reset now" } else { "Reset" })
+                                    .child(reset_paint.tracker),
                             ),
                     )
-                    .when(reset_confirming, |d| {
+                    .when_some(cancel, |d, (cancel_button, cancel_paint)| {
                         d.child(
                             div()
                                 .mt(r(8.))
@@ -1394,23 +1498,24 @@ impl Render for SettingsSheet {
                                 .text_color(hsla(t.danger))
                                 .child("This cannot be undone.")
                                 .child(
-                                    focus::button(div().id("reset-cancel"), true, &t)
+                                    focus::button(cancel_button, true, &t)
                                         .flex_none()
                                         .rounded(r(6.))
                                         .px(r(8.))
                                         .py(r(4.))
                                         .font_weight(weight(600.))
-                                        .hover(|s| s.bg(hsla(t.surface_hover)))
+                                        .bg(hsla(cancel_paint.bg))
                                         .on_click(cx.listener(|this, _, _, cx| {
                                             this.reset_confirming = false;
                                             cx.notify();
                                         }))
-                                        .child("Cancel"),
+                                        .child("Cancel")
+                                        .child(cancel_paint.tracker),
                                 ),
                         )
                     }),
             )
-            .when_some(persistence_error, |d, error| {
+            .when_some(retry, |d, (error, retry_button, retry_paint, retry_opacity)| {
                 let busy = self.retry_save_busy;
                 d.child(
                     div()
@@ -1427,21 +1532,21 @@ impl Render for SettingsSheet {
                         .text_color(hsla(t.danger))
                         .child(div().min_w_0().text_size(r(11.5)).line_height(relative(1.625)).child(crate::components::pretty_text::pretty(error)))
                         .child(
-                            focus::button(div().id("retry-save"), true, &t)
+                            focus::button(retry_button, true, &t)
                                 .flex()
                                 .flex_none()
                                 .items_center()
                                 .min_h(r(44.))
                                 .rounded(r(8.))
-                                .bg(hsla(t.surface))
+                                .bg(hsla(retry_paint.bg))
                                 .px(r(12.))
                                 .text_size(r(11.5))
                                 .font_weight(weight(600.))
                                 .line_height(relative(1.45))
-                                .hover(|s| s.bg(hsla(t.surface_hover)))
-                                .when(busy, |d| d.opacity(0.5))
+                                .opacity(retry_opacity)
                                 .when(!busy, |d| d.on_click(cx.listener(|this, _, _, cx| this.retry_save(cx))))
-                                .child(if busy { "Saving..." } else { "Retry save" }),
+                                .child(if busy { "Saving..." } else { "Retry save" })
+                                .child(retry_paint.tracker),
                         ),
                 )
             })
@@ -1511,7 +1616,7 @@ impl Render for SettingsSheet {
                                     ),
                             )
                             .child(
-                                focus::button(div().id("quit-prism"), true, &t)
+                                focus::button(quit_button, true, &t)
                                     .flex()
                                     .items_center()
                                     .gap(r(6.))
@@ -1523,10 +1628,11 @@ impl Render for SettingsSheet {
                                     .font_weight(weight(500.))
                                     .line_height(relative(1.45))
                                     .text_color(hsla(t.danger))
-                                    .hover(|s| s.opacity(0.9))
+                                    .opacity(quit_opacity)
                                     .on_click(move |_, _, cx| app_entity.update(cx, |app, cx| app.quit(cx)))
                                     .child(icon("log-out", 14., t.danger))
-                                    .child("Quit"),
+                                    .child("Quit")
+                                    .child(quit_paint.tracker),
                             ),
                     )),
                     )

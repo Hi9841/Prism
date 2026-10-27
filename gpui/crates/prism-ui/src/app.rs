@@ -20,7 +20,7 @@ use crate::lib::launcher_motion::{
 };
 use crate::state::app::{AppState, app_state};
 use crate::state::palette::{PaletteState, palette_state};
-use crate::theme::{Theme, fade, hsla, motion};
+use crate::theme::{Theme, fade, hsla, motion, white};
 
 /// Chromium on Windows: one wheel line is 100/3 CSS px (Step 2, M3).
 const CHROMIUM_PX_PER_LINE: f32 = 100.0 / 3.0;
@@ -121,7 +121,7 @@ impl Launcher {
             return;
         }
         self.phase = next;
-        // `.launcher-stage`: opacity (and scale) over 110 ms ease-out-soft;
+        // `.launcher-stage`: opacity and scale over 110 ms ease-out-soft;
         // reduced motion keeps opacity at 100 ms.
         let duration = if reduced_motion() { 100 } else { LAUNCHER_MOTION_MS };
         let target = if next == LauncherPhase::Visible { 1.0 } else { 0.0 };
@@ -155,14 +155,15 @@ impl Launcher {
         } else {
             self.stage.set(0.0, duration, motion::ease_out_soft);
         }
-        match hide_palette_invocation(origin, next) {
-            HideInvocation::Instant => {
-                let _ = bridge::shell(cx).hide_palette(false, cx);
-            }
-            HideInvocation::Deferred => {
-                let _ = bridge::shell(cx).hide_palette(true, cx);
-            }
-            HideInvocation::None => {}
+        let defer = match hide_palette_invocation(origin, next) {
+            HideInvocation::Instant => Some(false),
+            HideInvocation::Deferred => Some(true),
+            HideInvocation::None => None,
+        };
+        if let Some(defer) = defer
+            && let Err(error) = bridge::shell(cx).hide_palette(defer, cx)
+        {
+            eprintln!("Prism could not hide the palette window: {error}");
         }
         if next == LauncherPhase::Closing {
             self.close_timer = Some(cx.spawn(async move |this, cx| {
@@ -282,7 +283,7 @@ impl Launcher {
 }
 
 /// The `.shell` surface: rounded 24/24/8/8, a 1px line, the accent glow over
-/// the solid gradient, and the inset top highlight.
+/// the solid gradient, the inset top highlight, and the inset 1px ring.
 fn shell(t: &Theme, content: AnyElement) -> gpui::Div {
     div()
         .relative()
@@ -297,17 +298,29 @@ fn shell(t: &Theme, content: AnyElement) -> gpui::Div {
         .border_1()
         .border_color(hsla(t.shell_line))
         .bg(t.shell_solid.background())
+        // `radial-gradient(120% 90% at 50% -20%, color-mix(in oklab, accent 8%, transparent) 0%,
+        // transparent 55%)` over the solid gradient. A background is placed in the padding box;
+        // the `color-mix()` stop is not a legacy color, so the gradient mixes in Oklab.
         .child(
-            // radial-gradient(120% 90% at 50% -20%, accent 8%, transparent 55%)
-            // GPUI clips children to a rectangle: the glow keeps the shell's top radii.
-            div().absolute().top_0().left_0().right_0().h(relative(0.3)).rounded_tl(r(23.)).rounded_tr(r(23.)).bg(gpui::linear_gradient(
-                180.,
-                gpui::linear_color_stop(hsla(fade(t.accent, 4.8)), 0.0),
-                gpui::linear_color_stop(hsla(fade(t.accent, 0.0)), 1.0),
-            )),
+            shell_inset().bg(gpui::radial_gradient(
+                gpui::point(0.5, -0.2),
+                gpui::size(1.2, 0.9),
+                gpui::linear_color_stop(hsla(fade(t.accent, 8.0)), 0.0),
+                gpui::linear_color_stop(hsla(fade(t.accent, 0.0)), 0.55),
+            )
+            .color_space(gpui::ColorSpace::Oklab)),
         )
-        .child(crate::components::ui::inset_top_highlight(t.shell_hi, 24.))
+        // `box-shadow: inset 0 1px 0 var(--t-shell-hi), inset 0 0 0 1px rgb(255 255 255 / .02)`.
+        // Inset shadows follow the padding box (the radii shrink by the 1px border) and
+        // the first one paints on top, so the ring goes first.
+        .child(shell_inset().border_1().border_color(hsla(white(0.02))))
+        .child(shell_inset().border_t(px(1.)).border_color(hsla(t.shell_hi)))
         .child(content)
+}
+
+/// An overlay on the padding box of `.shell`: radii 24/24/8/8 minus the 1px border.
+fn shell_inset() -> gpui::Div {
+    div().absolute().inset_0().rounded_tl(r(23.)).rounded_tr(r(23.)).rounded_bl(r(7.)).rounded_br(r(7.))
 }
 
 impl Render for Launcher {
@@ -375,6 +388,9 @@ impl Launcher {
             .line_height(relative(1.45))
             .text_color(hsla(t.fg))
             .opacity(opacity)
+            // `scale(0.98)` to `scale(1)` with the opacity (same duration and easing);
+            // reduced motion drops the transform.
+            .when(!reduced_motion(), |d| d.scale(0.98 + 0.02 * opacity))
             .child(shell(&t, self.palette.clone().into_any_element()))
             .child(self.settings.clone())
             .child(toasts)

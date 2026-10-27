@@ -5,7 +5,7 @@
 //! the CSS Color 4 formulas Chromium uses, so the port paints the same colors.
 
 pub use gpui::Rgba;
-use gpui::{BoxShadow, Hsla, point, px};
+use gpui::{BoxShadow, FontFeatures, Hsla, Styled, point, px};
 
 /// `oklch(l c h / alpha)` as sRGB. Out-of-gamut channels are clipped, as Chromium does.
 pub fn oklch(l: f32, c: f32, h: f32, alpha: f32) -> Rgba {
@@ -169,15 +169,48 @@ pub struct Gradient {
     pub angle: f32,
     pub from: Rgba,
     pub to: Rgba,
+    /// Chromium interpolates in Oklab when a stop is not a legacy sRGB color
+    /// (`oklch()`), and in sRGB when every stop is legacy (`rgb()`, hex).
+    pub space: gpui::ColorSpace,
+    /// The exact Oklab stops (L, a, b, alpha) of an `oklch()` gradient. A stop can lie
+    /// outside sRGB; CSS mixes the exact values and clips each pixel, not the stops.
+    pub oklab_stops: Option<[[f32; 4]; 2]>,
 }
 
 impl Gradient {
+    /// A gradient whose CSS stops are legacy sRGB colors.
+    pub fn srgb(angle: f32, from: Rgba, to: Rgba) -> Self {
+        Self { angle, from, to, space: gpui::ColorSpace::Srgb, oklab_stops: None }
+    }
+
+    /// A gradient whose CSS stops are `oklch(l c h / alpha)` colors.
+    pub fn oklch(angle: f32, from: (f32, f32, f32, f32), to: (f32, f32, f32, f32)) -> Self {
+        let exact = |(l, c, h, a): (f32, f32, f32, f32)| {
+            let h = h.to_radians();
+            [l, c * h.cos(), c * h.sin(), a]
+        };
+        Self {
+            angle,
+            from: oklch(from.0, from.1, from.2, from.3),
+            to: oklch(to.0, to.1, to.2, to.3),
+            space: gpui::ColorSpace::Oklab,
+            oklab_stops: Some([exact(from), exact(to)]),
+        }
+    }
+
     pub fn background(self) -> gpui::Background {
+        if let Some([from, to]) = self.oklab_stops {
+            // Vendored gpui patch 17: `OklabValues` reads L, a, b from the Hsla fields.
+            let stop = |[l, a, b, alpha]: [f32; 4], at| gpui::linear_color_stop(Hsla { h: l, s: a, l: b, a: alpha }, at);
+            return gpui::linear_gradient(self.angle, stop(from, 0.0), stop(to, 1.0))
+                .color_space(gpui::ColorSpace::OklabValues);
+        }
         gpui::linear_gradient(
             self.angle,
             gpui::linear_color_stop(hsla(self.from), 0.0),
             gpui::linear_color_stop(hsla(self.to), 1.0),
         )
+        .color_space(self.space)
     }
 }
 
@@ -238,11 +271,7 @@ impl Theme {
             Mode::Dark => Theme {
                 mode,
                 accent_id,
-                shell_solid: Gradient {
-                    angle: 180.0,
-                    from: oklch(0.17, 0.009, 268.0, 0.92),
-                    to: oklch(0.152, 0.008, 268.0, 0.9),
-                },
+                shell_solid: Gradient::oklch(180.0, (0.17, 0.009, 268.0, 0.92), (0.152, 0.008, 268.0, 0.9)),
                 shell_line: white(0.08),
                 shell_hi: white(0.06),
                 field_bg: white(0.045),
@@ -254,7 +283,7 @@ impl Theme {
                 surface_active: white(0.075),
                 seg_active: white(0.1),
                 track: white(0.12),
-                kbd: Gradient { angle: 180.0, from: white(0.08), to: white(0.03) },
+                kbd: Gradient::srgb(180.0, white(0.08), white(0.03)),
                 kbd_line: white(0.09),
                 kbd_hi: white(0.06),
                 line: white(0.08),
@@ -280,11 +309,7 @@ impl Theme {
             Mode::Light => Theme {
                 mode,
                 accent_id,
-                shell_solid: Gradient {
-                    angle: 180.0,
-                    from: oklch(0.995, 0.002, 268.0, 0.94),
-                    to: oklch(0.965, 0.004, 268.0, 0.92),
-                },
+                shell_solid: Gradient::oklch(180.0, (0.995, 0.002, 268.0, 0.94), (0.965, 0.004, 268.0, 0.92)),
                 shell_line: black(0.08),
                 shell_hi: white(0.85),
                 field_bg: black(0.03),
@@ -296,7 +321,7 @@ impl Theme {
                 surface_active: black(0.06),
                 seg_active: white(0.85),
                 track: black(0.12),
-                kbd: Gradient { angle: 180.0, from: white(0.95), to: white(0.65) },
+                kbd: Gradient::srgb(180.0, white(0.95), white(0.65)),
                 kbd_line: black(0.1),
                 kbd_hi: white(0.9),
                 line: black(0.08),
@@ -329,26 +354,26 @@ impl Theme {
     /// `.tile-<tint>` gradient (145deg).
     pub fn tile(&self, tint: &str) -> Gradient {
         let (from, to) = match tint {
-            "iris" => (oklch(0.72, 0.16, 292.0, 0.9), oklch(0.5, 0.19, 295.0, 0.9)),
-            "azure" => (oklch(0.74, 0.14, 243.0, 0.9), oklch(0.52, 0.16, 248.0, 0.9)),
-            "mint" => (oklch(0.8, 0.11, 168.0, 0.9), oklch(0.6, 0.14, 172.0, 0.9)),
-            "amber" => (oklch(0.82, 0.12, 80.0, 0.9), oklch(0.64, 0.15, 72.0, 0.9)),
-            "rose" => (oklch(0.74, 0.15, 14.0, 0.9), oklch(0.54, 0.18, 8.0, 0.9)),
-            _ if self.is_light() => (oklch(0.55, 0.02, 268.0, 0.95), oklch(0.42, 0.015, 268.0, 0.95)),
-            _ => (oklch(0.42, 0.01, 268.0, 0.95), oklch(0.3, 0.012, 268.0, 0.95)),
+            "iris" => ((0.72, 0.16, 292.0, 0.9), (0.5, 0.19, 295.0, 0.9)),
+            "azure" => ((0.74, 0.14, 243.0, 0.9), (0.52, 0.16, 248.0, 0.9)),
+            "mint" => ((0.8, 0.11, 168.0, 0.9), (0.6, 0.14, 172.0, 0.9)),
+            "amber" => ((0.82, 0.12, 80.0, 0.9), (0.64, 0.15, 72.0, 0.9)),
+            "rose" => ((0.74, 0.15, 14.0, 0.9), (0.54, 0.18, 8.0, 0.9)),
+            _ if self.is_light() => ((0.55, 0.02, 268.0, 0.95), (0.42, 0.015, 268.0, 0.95)),
+            _ => ((0.42, 0.01, 268.0, 0.95), (0.3, 0.012, 268.0, 0.95)),
         };
-        Gradient { angle: 145.0, from, to }
+        Gradient::oklch(145.0, from, to)
     }
 
     /// `.tile-mono` with `--mono-h: 0.38 + hue * 0.34` (the hue variable is a lightness).
     pub fn mono_tile(&self, hue: f64) -> Gradient {
         let l = (0.38 + hue * 0.34) as f32;
         let (from, to) = if self.is_light() {
-            (oklch(l, 0.12, 268.0, 1.0), oklch(l - 0.15, 0.15, 268.0, 1.0))
+            ((l, 0.12, 268.0, 1.0), (l - 0.15, 0.15, 268.0, 1.0))
         } else {
-            (oklch(l, 0.09, 268.0, 1.0), oklch(l - 0.12, 0.12, 268.0, 1.0))
+            ((l, 0.09, 268.0, 1.0), (l - 0.12, 0.12, 268.0, 1.0))
         };
-        Gradient { angle: 145.0, from, to }
+        Gradient::oklch(145.0, from, to)
     }
 
     /// The `.row[data-selected]` background stack: an accent wash over surface-active.
@@ -447,6 +472,17 @@ pub mod motion {
         cubic_bezier(0.42, 0.0, 1.0, 1.0, t)
     }
 
+    /// Tailwind `--default-transition-timing-function`: `cubic-bezier(0.4, 0, 0.2, 1)`.
+    /// A `transition-*` class without an `ease-*` class uses it.
+    pub fn tailwind_default(t: f32) -> f32 {
+        cubic_bezier(0.4, 0.0, 0.2, 1.0, t)
+    }
+
+    /// Tailwind `ease-out` (`--ease-out`): `cubic-bezier(0, 0, 0.2, 1)`.
+    pub fn tailwind_ease_out(t: f32) -> f32 {
+        cubic_bezier(0.0, 0.0, 0.2, 1.0, t)
+    }
+
     /// CSS `ease-out`: `cubic-bezier(0, 0, 0.58, 1)`.
     pub fn ease_out(t: f32) -> f32 {
         cubic_bezier(0.0, 0.0, 0.58, 1.0, t)
@@ -484,6 +520,13 @@ pub fn shadow_tile() -> Vec<BoxShadow> {
 pub fn shadow(x: f32, y: f32, blur: f32, spread: f32, color: Rgba) -> BoxShadow {
     let sigma = blur / 2.0;
     BoxShadow { color: hsla(color), offset: point(px(x), px(y)), blur_radius: px(sigma), spread_radius: px(spread) }
+}
+
+/// Tailwind `tabular-nums` (`font-variant-numeric: tabular-nums`): the OpenType `tnum` feature.
+pub fn tabular_nums<E: Styled>(mut element: E) -> E {
+    element.text_style().get_or_insert_with(Default::default).font_features =
+        Some(FontFeatures(std::sync::Arc::new(vec![("tnum".into(), 1)])));
+    element
 }
 
 pub const FONT_SANS: &str = "Segoe UI Variable Text";

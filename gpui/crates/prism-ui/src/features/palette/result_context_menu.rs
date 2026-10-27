@@ -1,6 +1,6 @@
 //! The result context menu (`src/features/palette/ResultContextMenu.tsx`).
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use gpui::{
     App, Context, DispatchPhase, EventEmitter, FocusHandle, Focusable, KeyDownEvent, MouseButton, MouseDownEvent,
@@ -9,7 +9,7 @@ use gpui::{
 
 use crate::components::menu::{self, Tone};
 use crate::components::ui::theme;
-use crate::gfx::{motion_ms, r, reduced_motion};
+use crate::gfx::{Tween, r, reduced_motion, scale_from};
 use crate::lib::bridge;
 use crate::lib::launcher_motion::POPOVER_MOTION_MS;
 use crate::lib::types::PaletteItem;
@@ -80,14 +80,20 @@ pub struct ResultContextMenu {
     position: ContextMenuPosition,
     focus: FocusHandle,
     focused_index: usize,
-    closing: Option<Instant>,
-    opened: Instant,
+    closing: bool,
+    /// The open state: 0 is closed, 1 is open.
+    presence: Tween,
     pinned_to_taskbar: Option<bool>,
     _pin_query: Option<Task<()>>,
     close_task: Option<Task<()>>,
 }
 
 impl EventEmitter<MenuEvent> for ResultContextMenu {}
+
+/// The `.context-menu-enter` transition: 110 ms ease-out-soft; reduced motion: 100 ms.
+fn presence_ms() -> u64 {
+    if reduced_motion() { 100 } else { POPOVER_MOTION_MS }
+}
 
 impl ResultContextMenu {
     pub fn new(item: PaletteItem, position: ContextMenuPosition, window: &mut Window, cx: &mut Context<Self>) -> Self {
@@ -117,8 +123,12 @@ impl ResultContextMenu {
             position,
             focus,
             focused_index: 0,
-            closing: None,
-            opened: Instant::now(),
+            closing: false,
+            presence: {
+                let mut presence = Tween::at(0.0);
+                presence.toggle(1.0, presence_ms(), motion::ease_out_soft);
+                presence
+            },
             pinned_to_taskbar: None,
             _pin_query: pin_query,
             close_task: None,
@@ -151,14 +161,15 @@ impl ResultContextMenu {
     /// Deliberate closes animate out first; closes triggered by the palette
     /// hiding snap since the window is gone.
     pub fn close(&mut self, restore_focus: bool, animate: bool, cx: &mut Context<Self>) {
-        if self.closing.is_some() {
+        if self.closing {
             return;
         }
         if !animate {
             cx.emit(MenuEvent::Closed { restore_focus });
             return;
         }
-        self.closing = Some(Instant::now());
+        self.closing = true;
+        self.presence.toggle(0.0, presence_ms(), motion::ease_out_soft);
         self.close_task = Some(cx.spawn(async move |this, cx| {
             Timer::after(Duration::from_millis(POPOVER_MOTION_MS)).await;
             let _ = this.update(cx, |_, cx| cx.emit(MenuEvent::Closed { restore_focus }));
@@ -197,18 +208,11 @@ impl Focusable for ResultContextMenu {
 impl Render for ResultContextMenu {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let (t, zoom) = theme(cx);
-        // `.context-menu-enter`: opacity and scale(0.98) over 110 ms; exit back.
-        // Reduced motion keeps the opacity transition only (100 ms).
-        let (duration, reduced) = if reduced_motion() { (100.0, true) } else { (POPOVER_MOTION_MS as f32, false) };
-        let progress = match self.closing {
-            Some(start) => 1.0 - (start.elapsed().as_millis() as f32 / duration).min(1.0),
-            None => (self.opened.elapsed().as_millis() as f32 / duration).min(1.0),
-        };
-        if progress > 0.0 && progress < 1.0 || self.closing.is_some() && progress > 0.0 {
-            window.request_animation_frame();
-        }
-        let eased = motion::ease_out_soft(progress);
-        let _ = (reduced, motion_ms(0));
+        // `.context-menu-enter`: opacity and scale(0.98), in from `@starting-style` and out to
+        // `.context-menu-exit` (see `presence_ms`). Reduced motion: `transform: none`.
+        let reduced = reduced_motion();
+        let eased = self.presence.animate(window);
+        let scale = if reduced { 1.0 } else { 0.98 + 0.02 * eased };
         let choices = self.choices();
         let focused = self.focused_index.min(choices.len().saturating_sub(1));
         let focus_visible = self.focus.is_focused(window);
@@ -228,7 +232,8 @@ impl Render for ResultContextMenu {
                     .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| this.close(true, true, cx)))
                     .on_mouse_down(MouseButton::Right, cx.listener(|this, _, _, cx| this.close(true, true, cx))),
             )
-            .child(
+            // `transform-origin: 0 0`.
+            .child(scale_from(
                 menu::surface(&t, zoom)
                     .id("result-menu")
                     // A choice must not also press the backdrop or the row below.
@@ -239,14 +244,14 @@ impl Render for ResultContextMenu {
                         let weak = cx.entity().downgrade();
                         canvas(
                             |_, _, _| (),
-                            move |bounds, _, window, cx| {
+                            move |bounds, _, window, _cx| {
                                 let weak = weak.clone();
                                 window.on_mouse_event(move |event: &MouseDownEvent, phase, _, cx| {
                                     if phase != DispatchPhase::Capture || bounds.contains(&event.position) {
                                         return;
                                     }
                                     let _ = weak.update(cx, |this, cx| {
-                                        if this.closing.is_none() {
+                                        if !this.closing {
                                             this.close(true, true, cx);
                                         }
                                     });
@@ -275,7 +280,7 @@ impl Render for ResultContextMenu {
                         let highlighted = focus_visible && index == focused;
                         let separator = (index > 0 && choices[index - 1].group() != choice.group())
                             .then(|| menu::separator(&t).into_any_element());
-                        let row = menu::item(("result-menu-item", index), glyph, label, tone, highlighted, false, &t)
+                        let row = menu::item(("result-menu-item", index), glyph, label, tone, highlighted, false, &t, window, cx)
                             .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
                                 if *hovered && this.focused_index != index {
                                     this.focused_index = index;
@@ -286,7 +291,9 @@ impl Render for ResultContextMenu {
                             .into_any_element();
                         separator.into_iter().chain([row])
                     })),
-            )
+                scale,
+                (0.0, 0.0),
+            ))
     }
 }
 

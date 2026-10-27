@@ -2,7 +2,7 @@
 
 use std::cell::Cell;
 use std::rc::Rc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use gpui::{
     App, Bounds, Context, Entity, FocusHandle, Focusable, KeyDownEvent, MouseDownEvent, ParentElement, Pixels, Render,
@@ -11,7 +11,7 @@ use gpui::{
 
 use crate::components::menu::{self, Tone};
 use crate::components::ui::{IconButtonProps, icon_button, theme};
-use crate::gfx::{r, reduced_motion};
+use crate::gfx::{Tween, r, reduced_motion, scale_from};
 use crate::lib::bridge::{self, BackendEvent};
 use crate::lib::launcher_motion::POPOVER_MOTION_MS;
 use crate::state::app::{AppEvent, AppState, ToastKind, app_state, error_string};
@@ -28,15 +28,23 @@ pub struct PowerMenu {
     app: Entity<AppState>,
     open: bool,
     closing: bool,
-    changed_at: Instant,
+    /// The open state of the popup: 0 is closed, 1 is open.
+    presence: Tween,
     busy: Option<&'static str>,
     focus: FocusHandle,
+    /// The trigger button; Escape returns focus to it.
+    trigger_focus: FocusHandle,
     focused_index: usize,
     /// Painted bounds of the popup. The popup sits outside the trigger, so a
     /// press on it is "outside" the trigger and must not close the menu.
     menu_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
     close_task: Option<Task<()>>,
     _subscriptions: Vec<gpui::Subscription>,
+}
+
+/// The `.power-menu` transition: 110 ms ease-out-soft; reduced motion: 100 ms.
+fn presence_ms() -> u64 {
+    if reduced_motion() { 100 } else { POPOVER_MOTION_MS }
 }
 
 impl PowerMenu {
@@ -57,9 +65,10 @@ impl PowerMenu {
             app,
             open: false,
             closing: false,
-            changed_at: Instant::now(),
+            presence: Tween::at(0.0),
             busy: None,
             focus: cx.focus_handle(),
+            trigger_focus: cx.focus_handle(),
             focused_index: 0,
             menu_bounds: Rc::default(),
             close_task: None,
@@ -75,7 +84,7 @@ impl PowerMenu {
         self.close_task = None;
         self.closing = false;
         self.open = true;
-        self.changed_at = Instant::now();
+        self.presence.toggle(1.0, presence_ms(), motion::ease_out_soft);
         self.focused_index = focus_index;
         self.menu_bounds.set(None);
         window.focus(&self.focus);
@@ -92,11 +101,12 @@ impl PowerMenu {
         if !animate {
             self.closing = false;
             self.open = false;
+            self.presence.jump(0.0);
             cx.notify();
             return;
         }
         self.closing = true;
-        self.changed_at = Instant::now();
+        self.presence.toggle(0.0, presence_ms(), motion::ease_out_soft);
         self.close_task = Some(cx.spawn(async move |this, cx| {
             Timer::after(Duration::from_millis(POPOVER_MOTION_MS)).await;
             let _ = this.update(cx, |this, cx| {
@@ -146,7 +156,7 @@ impl PowerMenu {
             "end" => self.focused_index = count - 1,
             "escape" => {
                 self.close_menu(true, cx);
-                window.blur();
+                window.focus(&self.trigger_focus);
             }
             "enter" | "space" => {
                 let (action, _, _) = ACTIONS[self.focused_index];
@@ -172,7 +182,12 @@ impl Render for PowerMenu {
         let expanded = open && !self.closing;
         let trigger = icon_button(
             "power-trigger",
-            IconButtonProps { label: "Power options", active: open, disabled: false, focus: None },
+            IconButtonProps {
+                label: "Power options",
+                active: open,
+                disabled: false,
+                focus: Some(self.trigger_focus.clone()),
+            },
             &t,
             "power",
             14.,
@@ -188,16 +203,15 @@ impl Render for PowerMenu {
                     });
                 }
             },
+            window,
+            cx,
         );
-        // `.power-menu`: opacity + translateY(4px) + scale(0.98) over 110 ms.
-        let duration = if reduced_motion() { 100.0 } else { POPOVER_MOTION_MS as f32 };
-        let elapsed = self.changed_at.elapsed().as_millis() as f32 / duration;
-        let progress = if self.closing { 1.0 - elapsed.min(1.0) } else { elapsed.min(1.0) };
-        if open && elapsed < 1.0 {
-            window.request_animation_frame();
-        }
-        let eased = motion::ease_out_soft(progress);
-        let lift = if reduced_motion() { 0.0 } else { 4.0 * (1.0 - eased) };
+        // `.power-menu`: opacity + translateY(4px) + scale(0.98), in from `@starting-style` and
+        // out to `.power-menu-exit` (see `presence_ms`). Reduced motion: `transform: none`.
+        let reduced = reduced_motion();
+        let eased = if open { self.presence.animate(window) } else { 0.0 };
+        let lift = if reduced { 0.0 } else { 4.0 * (1.0 - eased) };
+        let scale = if reduced { 1.0 } else { 0.98 + 0.02 * eased };
         let focus_visible = self.focus.is_focused(window);
         let busy = self.busy.is_some();
         div()
@@ -213,8 +227,9 @@ impl Render for PowerMenu {
                     }
                 }))
                 // Deferred: the menu paints above the result list. Occlude: a
-                // press on the menu must not also reach the row below it.
-                .child(deferred(
+                // press on the menu must not also reach the row below it. The
+                // scale wraps the deferred root (`transform-origin: right bottom`).
+                .child(deferred(scale_from(
                     menu::surface(&t, zoom)
                         .id("power-menu")
                         .occlude()
@@ -240,7 +255,7 @@ impl Render for PowerMenu {
                             let highlighted = focus_visible && index == self.focused_index;
                             // Lock stands apart from the actions that end the session.
                             let separator = (index == 1).then(|| menu::separator(&t).into_any_element());
-                            let row = menu::item(("power-action", index), glyph, label, tone, highlighted, busy, &t)
+                            let row = menu::item(("power-action", index), glyph, label, tone, highlighted, busy, &t, window, cx)
                                 .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
                                     if *hovered && this.focused_index != index {
                                         this.focused_index = index;
@@ -251,7 +266,9 @@ impl Render for PowerMenu {
                                 .into_any_element();
                             separator.into_iter().chain([row])
                         })),
-                ))
+                    scale,
+                    (1.0, 1.0),
+                )))
             })
             .child(trigger.when(expanded, |d| d))
     }

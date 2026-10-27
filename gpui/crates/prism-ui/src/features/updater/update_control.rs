@@ -12,7 +12,8 @@ use crate::features::updater::updater::{self, DownloadEvent, Update};
 use crate::gfx::{Tween, icon, motion_ms, r, rotated};
 use crate::lib::bridge::{self, BackendEvent};
 use crate::state::app::{AppState, ToastKind, app_state, error_string};
-use crate::theme::{hsla, motion};
+use crate::theme::{TRANSPARENT, hsla, motion};
+use crate::transition::{self, Timing};
 
 const CHECK_INTERVAL_MS: u64 = 60 * 60 * 1000;
 const NETWORK_TIMEOUT: Duration = Duration::from_secs(10);
@@ -259,18 +260,22 @@ impl Render for UpdateControl {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let (t, _zoom) = theme(cx);
         if self.view == ViewState::Hidden {
-            return crate::components::focus::button(div().id("update-check"), true, &t)
+            // `.press`: color, background-color, and scale.
+            let key = gpui::ElementId::Name("update-check".into());
+            let paint = transition::hover_paint(&key, (t.fg_quiet, t.fg), (TRANSPARENT, t.surface_hover), Timing::PRESS, window, cx);
+            let button = transition::press(div().id(key.clone()), &key, true, window, cx);
+            return crate::components::focus::button(button, true, &t)
                 .tooltip(title_tooltip("Check for updates"))
-                .group("update-check")
                 .flex()
                 .flex_none()
                 .items_center()
                 .justify_center()
                 .size(r(32.))
                 .rounded(r(7.))
-                .hover(|s| s.bg(hsla(t.surface_hover)))
+                .bg(hsla(paint.bg))
                 .on_click(cx.listener(|this, _, _, cx| this.check_for_update(true, cx)))
-                .child(icon("refresh-cw", 14., t.fg_quiet).group_hover("update-check", |s| s.text_color(hsla(t.fg))))
+                .child(icon("refresh-cw", 14., paint.text))
+                .child(paint.tracker)
                 .into_any_element();
         }
         let version = match &self.view {
@@ -314,8 +319,13 @@ impl Render for UpdateControl {
         } else {
             (t.accent_soft, t.accent, t.surface_active, t.fg)
         };
-        let icon_color = fg;
-        crate::components::focus::button(div().id("update-install"), !busy, &t)
+        // `.press`: color, background-color, opacity, and scale; the icons follow the text color.
+        let key = gpui::ElementId::Name("update-install".into());
+        let paint = transition::hover_paint(&key, (fg, hover_fg), (bg, hover_bg), Timing::PRESS, window, cx);
+        let opacity = transition::number(&key, "opacity", if failed && paint.hovered { 0.9 } else { 1.0 }, Timing::PRESS, window, cx);
+        let icon_color = paint.text;
+        let button = transition::press(div().id(key.clone()), &key, !busy, window, cx);
+        crate::components::focus::button(button, !busy, &t)
             .tooltip(title_tooltip(title))
             .flex()
             .flex_none()
@@ -330,12 +340,10 @@ impl Render for UpdateControl {
             .text_size(r(11.))
             .font_weight(weight(600.))
             .line_height(relative(1.45))
-            .bg(hsla(bg))
-            .text_color(hsla(fg))
-            .when(!busy, |d| {
-                d.hover(move |s| if failed { s.opacity(0.9) } else { s.bg(hsla(hover_bg)).text_color(hsla(hover_fg)) })
-                    .on_click(cx.listener(|this, _, _, cx| this.install_update(cx)))
-            })
+            .bg(hsla(paint.bg))
+            .text_color(hsla(paint.text))
+            .opacity(opacity)
+            .when(!busy, |d| d.on_click(cx.listener(|this, _, _, cx| this.install_update(cx))))
             .child(
                 div()
                     .relative()
@@ -345,7 +353,8 @@ impl Render for UpdateControl {
                     .child(swap_icon("update-failed", "circle-alert", failed, icon_color, false, window, cx))
                     .child(swap_icon("update-ready", "arrow-down-to-line", !busy && !failed, icon_color, false, window, cx)),
             )
-            .child(truncate(label))
+            .child(crate::theme::tabular_nums(truncate(label)))
+            .child(paint.tracker)
             .into_any_element()
     }
 }

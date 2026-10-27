@@ -5,15 +5,16 @@ use std::sync::Arc;
 
 use base64::Engine;
 use gpui::{
-    AnyElement, Context, Entity, Image, ParentElement, PathPromptOptions, Render, SharedString, Styled, Window, div,
+    AnyElement, App, Context, Entity, Image, ParentElement, PathPromptOptions, Render, SharedString, Styled, Window, div,
     img, prelude::*, relative,
 };
 
-use crate::components::ui::{SegmentOption, segmented, settings_row, theme, title_tooltip, toggle, weight};
-use crate::gfx::{icon, png_image, r};
+use crate::components::ui::{SegmentOption, segmented, settings_row, shadow_sm, theme, title_tooltip, toggle, weight};
+use crate::gfx::{icon, png_image, r, zoomed};
 use crate::lib::bridge::{self, TaskbarSettings};
 use crate::state::app::{AppState, ToastKind, app_state, error_string};
-use crate::theme::{Theme, fade, hsla};
+use crate::theme::{Rgba, TRANSPARENT, Theme, fade, hsla};
+use crate::transition::{self, Timing};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum BusyControl {
@@ -142,33 +143,47 @@ impl TaskbarCustomization {
     }
 }
 
-fn icon_tile(id: impl Into<gpui::ElementId>, selected: bool, disabled: bool, t: &Theme) -> gpui::Stateful<gpui::Div> {
-    crate::components::focus::button(div().id(id.into()), !disabled, t)
+/// A Start icon tile and its text color (for a glyph that follows it).
+/// Colors move like `.press`; `:hover` also matches a disabled button.
+fn icon_tile(
+    id: impl Into<gpui::ElementId>,
+    selected: bool,
+    disabled: bool,
+    t: &Theme,
+    window: &mut Window,
+    cx: &mut App,
+) -> (gpui::Stateful<gpui::Div>, Rgba) {
+    let id: gpui::ElementId = id.into();
+    let (paint, border) = if selected {
+        let fill = fade(t.accent, 12.0);
+        (transition::hover_paint(&id, (t.fg, t.fg), (fill, fill), Timing::PRESS, window, cx), fade(t.accent, 70.0))
+    } else {
+        (transition::hover_paint(&id, (t.fg_tertiary, t.fg), (t.surface, t.surface_hover), Timing::PRESS, window, cx), TRANSPARENT)
+    };
+    let border = transition::color(&id, "border", border, Timing::PRESS, window, cx);
+    // The `<fieldset disabled>` makes every tile `:disabled` while busy.
+    let tile = transition::press(div().id(id.clone()), &id, !disabled, window, cx);
+    let tile = crate::components::focus::button(tile, !disabled, t)
         .flex()
         .flex_col()
         .h(r(48.))
         .min_w(r(46.))
         .items_center()
-        .justify_center()
+        // `grid` with auto rows: content taller than the box overflows at the bottom.
+        .justify_start()
         .gap(r(2.))
         .rounded(r(8.))
         .border_1()
-        .px(r(7.))
-        .py(r(3.))
+        .px(r(8.))
+        .py(r(4.))
         .text_size(r(10.))
         .font_weight(weight(500.))
         .line_height(relative(1.45))
-        .map(|d| {
-            if selected {
-                d.border_color(hsla(fade(t.accent, 70.0))).bg(hsla(fade(t.accent, 12.0))).text_color(hsla(t.fg))
-            } else {
-                d.border_color(hsla(crate::theme::TRANSPARENT))
-                    .bg(hsla(t.surface))
-                    .text_color(hsla(t.fg_tertiary))
-                    .when(!disabled, |d| d.hover(|s| s.bg(hsla(t.surface_hover)).text_color(hsla(t.fg))))
-            }
-        })
-        .when(disabled, |d| d.opacity(0.55))
+        .border_color(hsla(border))
+        .bg(hsla(paint.bg))
+        .text_color(hsla(paint.text))
+        .child(paint.tracker);
+    (tile, paint.text)
 }
 
 fn windows_glyph(t: &Theme) -> AnyElement {
@@ -259,8 +274,9 @@ impl Render for TaskbarCustomization {
                 0 => windows_glyph(&t),
                 _ => img(SharedString::from(format!("taskbar-icons/{value}.svg"))).size(r(20.)).into_any_element(),
             };
+            let (tile, _) = icon_tile(("start-icon", index), selected, busy, &t, window, cx);
             tiles = tiles.child(
-                icon_tile(("start-icon", index), selected, busy, &t)
+                tile
                     .tooltip(title_tooltip(*label))
                     .when(!busy, |d| {
                         d.on_click(cx.listener(move |this, _, _, cx| {
@@ -271,24 +287,30 @@ impl Render for TaskbarCustomization {
                     .child(*label),
             );
         }
+        let (tile, glyph) = icon_tile("start-icon-custom", false, busy, &t, window, cx);
         tiles = tiles.child(
-            icon_tile("start-icon-custom", false, busy, &t)
+            tile
                 .tooltip(title_tooltip("Add custom PNG"))
                 .when(!busy, |d| d.on_click(cx.listener(|this, _, _, cx| this.choose_icon(cx))))
-                .child(div().flex().size(r(24.)).items_center().justify_center().child(icon("image-up", 16., t.fg_tertiary)))
+                .child(div().flex().size(r(24.)).items_center().justify_center().child(icon("image-up", 16., glyph)))
                 .child("Custom"),
         );
         for (index, (id, image)) in self.custom_images.clone().into_iter().enumerate() {
             let selected = settings.start_icon == "custom" && settings.selected_custom_icon.as_deref() == Some(id.as_str());
             let select_id = id.clone();
             let remove_id = id.clone();
+            // React keys custom icons by id.
+            let (tile, _) = icon_tile(gpui::ElementId::Name(format!("custom-icon-{id}").into()), selected, busy, &t, window, cx);
+            let remove_key = gpui::ElementId::Name(format!("custom-icon-remove-{id}").into());
+            let remove = transition::hover_paint(&remove_key, (t.fg_tertiary, t.danger), (t.bg_raised, t.bg_raised), Timing::PRESS, window, cx);
+            let remove_button = transition::press(div().id(remove_key.clone()), &remove_key, !busy, window, cx);
             tiles = tiles.child(
                 div()
                     .relative()
                     .h(r(48.))
                     .min_w(r(46.))
                     .child(
-                        icon_tile(("custom-icon", index), selected, busy, &t)
+                        tile
                             .tooltip(title_tooltip(format!("Custom icon {}", index + 1)))
                             .when(!busy, |d| {
                                 d.on_click(cx.listener(move |this, _, _, cx| {
@@ -299,9 +321,15 @@ impl Render for TaskbarCustomization {
                             .child(format!("Custom {}", index + 1)),
                     )
                     .child(
-                        crate::components::focus::button(div().id(("custom-icon-remove", index)), !busy, &t)
+                        // `shadow-sm` (utilities layer) overrides the `.focus-ring` box-shadow
+                        // (components layer): this badge shows no focus ring.
+                        // Occlude: the badge sits on the tile, and a press on it must not
+                        // also press, hover, or click the tile (CSS hits the top element only).
+                        remove_button
+                            .occlude()
+                            .tab_index(0)
+                            .tab_stop(!busy)
                             .tooltip(title_tooltip(format!("Remove custom icon {}", index + 1)))
-                            .group("custom-remove")
                             .absolute()
                             .top(r(-4.))
                             .right(r(-4.))
@@ -313,12 +341,14 @@ impl Render for TaskbarCustomization {
                             .border_1()
                             .border_color(hsla(t.line))
                             .bg(hsla(t.bg_raised))
+                            .shadow(zoomed(shadow_sm(), zoom))
                             .when(!busy, |d| {
                                 d.on_click(cx.listener(move |this, _, _, cx| {
                                     this.apply(BusyControl::Icon, bridge::remove_custom_start_icon(remove_id.clone()), cx)
                                 }))
                             })
-                            .child(icon("x", 12., t.fg_tertiary).group_hover("custom-remove", |s| s.text_color(hsla(t.danger)))),
+                            .child(icon("x", 12., remove.text))
+                            .child(remove.tracker),
                     ),
             );
         }

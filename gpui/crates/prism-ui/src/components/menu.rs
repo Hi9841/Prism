@@ -1,10 +1,11 @@
 //! The shared look of the popover menus (power options, result actions).
 
-use gpui::{Div, ElementId, ParentElement, Stateful, Styled, div, prelude::*, relative};
+use gpui::{App, Div, ElementId, ParentElement, Stateful, Styled, Window, div, prelude::*, relative};
 
 use crate::components::ui::weight;
 use crate::gfx::{icon, r, zoomed};
 use crate::theme::{Rgba, Theme, hsla, shadow_pop};
+use crate::transition::{self, Timing};
 
 /// One item row, in CSS px.
 pub const ITEM_HEIGHT: f32 = 32.0;
@@ -36,7 +37,8 @@ pub fn surface(t: &Theme, zoom: f32) -> Div {
 }
 
 /// One item row. Hover and keyboard focus share the one `highlighted`
-/// state, so only one row lights up at a time.
+/// state, so only one row lights up at a time. Colors, opacity, and the
+/// press scale move like `.press` (150ms `--ease-out-soft`).
 pub fn item(
     id: impl Into<ElementId>,
     glyph: &str,
@@ -45,6 +47,8 @@ pub fn item(
     highlighted: bool,
     disabled: bool,
     t: &Theme,
+    window: &mut Window,
+    cx: &mut App,
 ) -> Stateful<Div> {
     let (icon_color, text_color, fill) = match (tone, highlighted && !disabled) {
         (Tone::Danger, true) => (t.danger, t.danger, t.danger_soft),
@@ -53,8 +57,12 @@ pub fn item(
         (Tone::Primary, false) => (t.fg_tertiary, t.fg, Rgba { a: 0.0, ..t.surface_hover }),
         (Tone::Normal, false) => (t.fg_tertiary, t.fg_secondary, Rgba { a: 0.0, ..t.surface_hover }),
     };
-    div()
-        .id(id)
+    let id: ElementId = id.into();
+    let icon_color = transition::color(&id, "icon", icon_color, Timing::PRESS, window, cx);
+    let text_color = transition::color(&id, "text", text_color, Timing::PRESS, window, cx);
+    let fill = transition::color(&id, "bg", fill, Timing::PRESS, window, cx);
+    let opacity = transition::number(&id, "opacity", if disabled { 0.5 } else { 1.0 }, Timing::PRESS, window, cx);
+    transition::press(div().id(id.clone()), &id, !disabled, window, cx)
         .flex()
         .items_center()
         .gap(r(10.))
@@ -67,7 +75,7 @@ pub fn item(
         .line_height(relative(1.45))
         .text_color(hsla(text_color))
         .bg(hsla(fill))
-        .when(disabled, |d| d.opacity(0.5))
+        .opacity(opacity)
         .child(icon(glyph, 15., icon_color))
         .child(label)
 }

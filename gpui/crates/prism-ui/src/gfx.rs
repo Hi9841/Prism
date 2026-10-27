@@ -9,8 +9,9 @@ use std::time::{Duration, Instant};
 
 use base64::Engine;
 use gpui::{
-    AnyElement, AssetSource, BoxShadow, Hsla, Image, ImageFormat, IntoElement, Rems, Rgba, SharedString, Styled,
-    Svg, Transformation, Window, rems, svg,
+    AnyElement, App, AssetSource, Bounds, BoxShadow, Element, ElementId, GlobalElementId, Hsla, Image, ImageFormat,
+    InspectorElementId, IntoElement, LayoutId, Pixels, Rems, Rgba, SharedString, Styled, Svg, Transformation, Window,
+    point, rems, svg,
 };
 
 use crate::theme::hsla;
@@ -178,6 +179,16 @@ impl Tween {
         *self = Self { from, to, start: Instant::now(), duration: Duration::from_millis(duration_ms), ease };
     }
 
+    /// A transition of a presence between 0 (gone) and 1 (shown), for example
+    /// an `@starting-style` entry and an exit class. It starts from the current
+    /// value. An interruption reverses it, and Chromium's reversing shortening
+    /// factor scales the duration by the distance that is left (exact while
+    /// every target is 0 or 1).
+    pub fn toggle(&mut self, to: f32, duration_ms: u64, ease: fn(f32) -> f32) {
+        let left = (to - self.value()).abs().min(1.0);
+        self.set(to, (duration_ms as f32 * left).round() as u64, ease);
+    }
+
     /// Jumps to a value with no transition.
     pub fn jump(&mut self, to: f32) {
         *self = Self::at(to);
@@ -230,6 +241,77 @@ pub fn alpha(color: Rgba, a: f32) -> Hsla {
 
 pub fn into_any(element: impl IntoElement) -> AnyElement {
     element.into_any_element()
+}
+
+/// CSS `transform: scale(factor)` with a `transform-origin` given as fractions
+/// of the bounds (`right bottom` is `(1., 1.)`); `Styled::scale` always scales
+/// around the center. The child keeps its own layout, and only its painting
+/// scales (PRISM-PATCHES 8). Inside `deferred`, wrap the deferred root.
+pub fn scale_from(child: impl IntoElement, factor: f32, origin: (f32, f32)) -> ScaleFrom {
+    ScaleFrom { child: child.into_any_element(), factor, origin }
+}
+
+pub struct ScaleFrom {
+    child: AnyElement,
+    factor: f32,
+    origin: (f32, f32),
+}
+
+impl IntoElement for ScaleFrom {
+    type Element = Self;
+
+    fn into_element(self) -> Self::Element {
+        self
+    }
+}
+
+impl Element for ScaleFrom {
+    type RequestLayoutState = ();
+    type PrepaintState = ();
+
+    fn id(&self) -> Option<ElementId> {
+        None
+    }
+
+    fn source_location(&self) -> Option<&'static core::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        _inspector_id: Option<&InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (LayoutId, ()) {
+        (self.child.request_layout(window, cx), ())
+    }
+
+    fn prepaint(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        _inspector_id: Option<&InspectorElementId>,
+        _bounds: Bounds<Pixels>,
+        _request_layout: &mut (),
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        self.child.prepaint(window, cx);
+    }
+
+    fn paint(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        _inspector_id: Option<&InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        _request_layout: &mut (),
+        _prepaint: &mut (),
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        let origin = bounds.origin + point(bounds.size.width * self.origin.0, bounds.size.height * self.origin.1);
+        window.with_element_scale(origin, self.factor, |window| self.child.paint(window, cx));
+    }
 }
 
 /// Chromium's wheel scrolling for one overflow container: 100/3 px per wheel

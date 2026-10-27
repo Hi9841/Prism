@@ -33,8 +33,9 @@ pub fn search_key(event: &KeyDownEvent, composing: bool) -> Option<SearchKey> {
         "up" => SearchKey::Move(-1),
         "enter" => SearchKey::RunSelected,
         "escape" => SearchKey::Dismiss,
-        "k" if ctrl => SearchKey::Close,
-        "w" if ctrl => SearchKey::Dismiss,
+        // `event.key` is "K" / "W" with Shift held, so the original ignores Ctrl+Shift+K/W.
+        "k" if ctrl && !k.modifiers.shift => SearchKey::Close,
+        "w" if ctrl && !k.modifiers.shift => SearchKey::Dismiss,
         "backspace" if ctrl => SearchKey::ClearQuery,
         _ => return None,
     })
@@ -97,6 +98,8 @@ pub fn render_search_input(
                 "settings-2",
                 16.,
                 on_toggle_settings,
+                window,
+                cx,
             )),
     )
     .into_any_element()

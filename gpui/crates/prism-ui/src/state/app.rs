@@ -649,8 +649,11 @@ mod provider {
             self.persist_revision += 1;
             self.persist_timer = Some(cx.spawn(async move |this, cx| {
                 Timer::after(Duration::from_millis(350)).await;
-                if let Ok(flush) = this.update(cx, |this, cx| this.flush_persistence(cx)) {
-                    let _ = flush.await;
+                if let Ok(flush) = this.update(cx, |this, cx| this.flush_persistence(cx))
+                    // `flush_persistence` also shows the failure in settings (`persistence_error`).
+                    && let Err(error) = flush.await
+                {
+                    eprintln!("Prism could not save settings: {error}");
                 }
             }));
         }

@@ -2,11 +2,12 @@
 //! icons, section labels, the toggle, the segmented control, and icon buttons.
 
 use gpui::{
-    AnyElement, App, ElementId, FontWeight, Hsla, IntoElement, ObjectFit, ParentElement, Rgba,
-    SharedString, StyleRefinement, Styled, TextRun, Window, div, img, prelude::*, px, relative,
+    AnyElement, App, BoxShadow, ClickEvent, ElementId, FontWeight, IntoElement, ObjectFit, ParentElement,
+    Rgba, SharedString, StyleRefinement, Styled, TextRun, Window, div, img, prelude::*, px, relative,
 };
 
 use crate::gfx::{Tween, data_url_image, icon, r, zoomed};
+use crate::transition::{self, Timing};
 use crate::lib::emoji::{hue_for_name, name_to_monogram};
 use crate::lib::types::PaletteIcon;
 use crate::state::app::app_state;
@@ -20,6 +21,12 @@ pub fn theme(cx: &App) -> (Theme, f32) {
 
 pub fn weight(w: f32) -> FontWeight {
     FontWeight(w)
+}
+
+/// Tailwind `shadow-sm`: `0 1px 3px 0 rgb(0 0 0 / .1), 0 1px 2px -1px rgb(0 0 0 / .1)`.
+pub fn shadow_sm() -> Vec<BoxShadow> {
+    // GPUI paints the list bottom-up; CSS lists the top shadow first.
+    vec![shadow(0., 1., 2., -1., crate::theme::black(0.1)), shadow(0., 1., 3., 0., crate::theme::black(0.1))]
 }
 
 /// A single line of text that truncates with an ellipsis.
@@ -129,7 +136,7 @@ pub fn kbd(label: &str, t: &Theme) -> gpui::Div {
         .text_size(r(11.))
         .font_weight(weight(550.))
         .line_height(relative(1.45))
-        .child(inset_top_highlight(t.kbd_hi, 6.))
+        .child(inset_top_highlight(t.kbd_hi, 5.))
         // Segoe UI has no U+21B5; Chromium falls back to Cambria Math (CSS.getPlatformFontsForNode).
         .when(label.contains('\u{21B5}'), |d| d.font_family("Cambria Math"))
         .child(label.to_owned())
@@ -267,18 +274,9 @@ pub fn toggle(
     on_change: impl Fn(bool, &mut Window, &mut App) + 'static,
 ) -> AnyElement {
     let id: ElementId = id.into();
-    let knob = window.use_keyed_state(ElementId::Name(format!("{id}-knob").into()), cx, |_, _| Tween::at(0.0));
-    let track = window.use_keyed_state(ElementId::Name(format!("{id}-track").into()), cx, |_, _| Tween::at(0.0));
-    let target = if checked { 1.0 } else { 0.0 };
-    if knob.read(cx).target() != target {
-        // First render jumps; later changes transition (transform 150ms, colors 200ms).
-        let first = knob.read(cx).value() == 0.0 && track.read(cx).value() == 0.0 && checked && !knob.read(cx).is_active();
-        knob.update(cx, |k, _| if first { k.jump(target) } else { k.set(target, crate::gfx::motion_ms(150), motion::ease_out_soft) });
-        track.update(cx, |k, _| if first { k.jump(target) } else { k.set(target, crate::gfx::motion_ms(200), motion::ease) });
-    }
-    let progress = knob.read(cx).animate(window);
-    let color = track.read(cx).animate(window);
-    let background = blend(t.track, t.accent, color);
+    // The knob: `transition-transform duration-150 ease-out-soft`. The track: `transition-colors duration-200`.
+    let progress = transition::number(&id, "knob", if checked { 1.0 } else { 0.0 }, Timing { ms: 150, ease: motion::ease_out_soft }, window, cx);
+    let background = transition::color(&id, "track", if checked { t.accent } else { t.track }, Timing::tw(200), window, cx);
     let on_change = std::rc::Rc::new(on_change);
     let key_change = on_change.clone();
     let track = div()
@@ -292,7 +290,7 @@ pub fn toggle(
         .h(r(24.))
         .w(r(40.))
         .rounded_full()
-        .bg(background)
+        .bg(hsla(background))
         .when(disabled, |d| d.opacity(0.45))
         .child(
             div()
@@ -302,7 +300,7 @@ pub fn toggle(
                 .size(r(18.))
                 .rounded_full()
                 .bg(gpui::white())
-                .shadow(zoomed(vec![shadow(0., 1., 2., 0., crate::theme::black(0.05))], zoom)),
+                .shadow(zoomed(shadow_sm(), zoom)),
         )
         .child(
             // `after:-inset-2.5`: the hit area extends 10px past the track.
@@ -324,16 +322,6 @@ pub fn toggle(
     // The switch is an inline-block on the row's text baseline (14px Segoe UI,
     // line-height 1.45): its line box adds the 5.3px font descent below it.
     div().flex_none().h(r(24. + 5.296875)).child(track).into_any_element()
-}
-
-/// Linear sRGB interpolation of two colors (CSS color transitions).
-pub fn blend(from: Rgba, to: Rgba, t: f32) -> Hsla {
-    hsla(Rgba {
-        r: from.r + (to.r - from.r) * t,
-        g: from.g + (to.g - from.g) * t,
-        b: from.b + (to.b - from.b) * t,
-        a: from.a + (to.a - from.a) * t,
-    })
 }
 
 /* ---------------- Segmented ---------------- */
@@ -435,8 +423,13 @@ pub fn segmented(
             let active = index == active_index;
             let on_change = on_change.clone();
             let value = option.value.clone();
+            let segment_id = ElementId::Name(format!("{id}-{index}").into());
+            let (hovered, hover) = transition::hover(&segment_id, window, cx);
+            let text = if active { t.fg } else if hovered { t.fg_secondary } else { t.fg_tertiary };
+            // `transition-colors duration-150`.
+            let text = transition::color(&segment_id, "text", text, Timing::tw(150), window, cx);
             div()
-                .id(ElementId::Name(format!("{id}-{index}").into()))
+                .id(segment_id)
                 .when(!disabled, |d| crate::components::focus::button_with(d, &handles[index], active, t))
                 .relative()
                 .flex()
@@ -448,10 +441,10 @@ pub fn segmented(
                 .text_size(r(12.))
                 .font_weight(weight(500.))
                 .line_height(relative(1.45))
-                .text_color(hsla(if active { t.fg } else { t.fg_tertiary }))
-                .when(!active, |d| d.hover(|s| s.text_color(hsla(t.fg_secondary))))
+                .text_color(hsla(text))
                 .when(!disabled, |d| d.on_click(move |_, window, cx| on_change(value.clone(), window, cx)))
                 .child(option.label)
+                .child(hover)
         }))
         .into_any_element()
 }
@@ -475,22 +468,50 @@ pub fn icon_button(
     icon_name: &str,
     icon_size: f32,
     on_click: impl Fn(&mut Window, &mut App) + 'static,
+    window: &mut Window,
+    cx: &mut App,
 ) -> gpui::Stateful<gpui::Div> {
     let IconButtonProps { label, active, disabled, focus } = props;
-    let glyph = icon(icon_name, icon_size, if active { t.fg } else { t.fg_tertiary });
-    let glyph = if active || disabled {
-        glyph
+    let id: ElementId = id.into();
+    let (hovered, hover) = transition::hover(&id, window, cx);
+    let hovered = hovered && !active && !disabled;
+    // `.press`: color, background-color, opacity, and the press scale.
+    let glyph = if active { t.fg } else if hovered { t.fg_secondary } else { t.fg_tertiary };
+    let glyph = transition::color(&id, "text", glyph, Timing::PRESS, window, cx);
+    let background = if disabled {
+        crate::theme::TRANSPARENT
+    } else if active {
+        t.surface_active
+    } else if hovered {
+        t.surface_hover
     } else {
-        glyph.group_hover("icon-button", |s| s.text_color(hsla(t.fg_secondary)))
+        crate::theme::TRANSPARENT
     };
-    let button = div().id(id.into());
+    let background = transition::color(&id, "bg", background, Timing::PRESS, window, cx);
+    let opacity = transition::number(&id, "opacity", if disabled { 0.4 } else { 1.0 }, Timing::PRESS, window, cx);
+    let button = transition::press(div().id(id.clone()), &id, !disabled, window, cx);
+    // `after:-inset-1.5`: the pseudo-element is part of the button, so it extends the button's
+    // `:hover`, `:active`, and mouse clicks 6px past each side. The overlay takes the mouse
+    // clicks (and lets them bubble, as the DOM does); the button keeps the keyboard clicks.
+    let on_click = std::rc::Rc::new(on_click);
+    let hover = hover.top(r(-6.)).right(r(-6.)).bottom(r(-6.)).left(r(-6.));
+    let hover = if disabled {
+        hover
+    } else {
+        let on_mouse_click = on_click.clone();
+        let (_, hover) = transition::active(hover, &id, window, cx);
+        hover.on_click(move |event, window, cx| {
+            if !matches!(event, ClickEvent::Keyboard(_)) {
+                on_mouse_click(window, cx)
+            }
+        })
+    };
     // `aria-disabled` keeps the button focusable.
     let button = match &focus {
         Some(handle) => crate::components::focus::button_with(button, handle, true, t),
         None => crate::components::focus::button(button, true, t),
     };
     button
-        .group("icon-button")
         .relative()
         .flex()
         .flex_none()
@@ -498,18 +519,18 @@ pub fn icon_button(
         .justify_center()
         .size(r(32.))
         .rounded(r(10.))
-        .map(|d| {
-            if disabled {
-                d.opacity(0.4)
-            } else if active {
-                d.bg(hsla(t.surface_active))
-            } else {
-                d.hover(|s| s.bg(hsla(t.surface_hover)))
-            }
+        .bg(hsla(background))
+        .opacity(opacity)
+        .when(!disabled, |d| {
+            d.on_click(move |event, window, cx| {
+                if matches!(event, ClickEvent::Keyboard(_)) {
+                    on_click(window, cx)
+                }
+            })
         })
-        .when(!disabled, |d| d.on_click(move |_, window, cx| on_click(window, cx)))
         .tooltip(title_tooltip(label))
-        .child(glyph)
+        .child(icon(icon_name, icon_size, glyph))
+        .child(hover)
 }
 
 /// Applies `text-*` color to an icon child that inherits it (`currentColor`).
