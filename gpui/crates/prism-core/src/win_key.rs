@@ -36,6 +36,9 @@ use windows::Win32::System::Com::{
     CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED,
 };
 use windows::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress, LoadLibraryW};
+use windows::Win32::System::RemoteDesktop::{
+    WTSRegisterSessionNotification, WTSUnRegisterSessionNotification, NOTIFY_FOR_THIS_SESSION,
+};
 use windows::Win32::System::Threading::GetCurrentThreadId;
 use windows::Win32::System::Variant::VARIANT;
 use windows::Win32::UI::Accessibility::{
@@ -57,7 +60,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     PostThreadMessageW, RegisterClassW, RegisterWindowMessageW, SetWindowsHookExW,
     TranslateMessage, UnhookWindowsHookEx, HHOOK, MSG, MSGFLT_ALLOW, PM_REMOVE, QS_ALLINPUT,
     RI_KEY_BREAK, WH_GETMESSAGE, WH_MOUSE, WM_APP, WM_INPUT, WM_KEYDOWN, WM_KEYUP, WM_SYSKEYDOWN,
-    WM_SYSKEYUP, WNDCLASSW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_POPUP,
+    WM_SYSKEYUP, WM_WTSSESSION_CHANGE, WNDCLASSW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_POPUP,
 };
 
 const ACTION_MESSAGE: u32 = WM_APP + 1;
@@ -318,6 +321,29 @@ impl WinKeyMachine {
         self.ctrl_esc = Press::default();
         self.non_win_down.fill(false);
         self.search_combo_until = None;
+    }
+
+    /// Forgets held keys that are no longer physically down. Raw input loses a
+    /// release that happens on another desktop (the lock screen after Win+L,
+    /// UAC, Ctrl+Alt+Del); a key left "held" made every later Win press a
+    /// chord until that key was typed again. Call it before each key-down: a
+    /// key released after the press began still reports its release next,
+    /// and any non-Win event while Win is held marks the press as a chord.
+    pub fn forget_released(&mut self, physically_down: impl Fn(u16) -> bool) {
+        for (key, down) in self.non_win_down.iter_mut().enumerate() {
+            if *down && !physically_down(key as u16) {
+                *down = false;
+            }
+        }
+        if self.left.down && !physically_down(VK_LWIN.0) {
+            self.left = Press::default();
+        }
+        if self.right.down && !physically_down(VK_RWIN.0) {
+            self.right = Press::default();
+        }
+        if self.ctrl_esc.down && !physically_down(VK_ESCAPE_CODE) {
+            self.ctrl_esc = Press::default();
+        }
     }
 
     fn press_mut(&mut self, side: WinSide) -> &mut Press {
@@ -1824,6 +1850,12 @@ unsafe fn create_raw_input_window() -> Result<HWND, String> {
         let _ = DestroyWindow(window);
         return Err(format!("register raw keyboard observer: {error}"));
     }
+    // Lock and unlock reset the press state (`WM_WTSSESSION_CHANGE`). Without
+    // it, reconciling at the next key-down still recovers, so a failure here
+    // is not fatal.
+    if let Err(error) = WTSRegisterSessionNotification(window, NOTIFY_FOR_THIS_SESSION) {
+        debug_trace(&format!("session-notification-error {error}"));
+    }
     Ok(window)
 }
 
@@ -1835,6 +1867,7 @@ unsafe fn destroy_raw_input_window(window: HWND) {
         hwndTarget: HWND::default(),
     };
     let _ = RegisterRawInputDevices(&[remove], std::mem::size_of::<RAWINPUTDEVICE>() as u32);
+    let _ = WTSUnRegisterSessionNotification(window);
     let _ = DestroyWindow(window);
 }
 
@@ -1941,10 +1974,7 @@ fn note_shell_search_command() {
 }
 
 fn win_keys_physically_down() -> bool {
-    unsafe {
-        GetAsyncKeyState(i32::from(VK_LWIN.0)) as u16 & 0x8000 != 0
-            || GetAsyncKeyState(i32::from(VK_RWIN.0)) as u16 & 0x8000 != 0
-    }
+    key_physically_down(VK_LWIN.0) || key_physically_down(VK_RWIN.0)
 }
 
 /// Explorer saw a bare Win / Ctrl+Esc (`SC_TASKLIST`) but the raw observer may
@@ -2028,12 +2058,15 @@ fn pending_win_toggle_wait() -> Option<Duration> {
         .and_then(|pending| pending.wait_duration(Instant::now()))
 }
 
+fn key_physically_down(key: u16) -> bool {
+    unsafe { GetAsyncKeyState(i32::from(key)) as u16 & 0x8000 != 0 }
+}
+
 fn non_win_keys_down() -> [bool; 256] {
     let mut down = [false; 256];
     for key in 0x08u16..=0xfe {
         if key != VK_LWIN.0 && key != VK_RWIN.0 {
-            let is_down = unsafe { GetAsyncKeyState(i32::from(key)) } as u16 & 0x8000 != 0;
-            down[canonical_non_win_key(key) as usize] |= is_down;
+            down[canonical_non_win_key(key) as usize] |= key_physically_down(key);
         }
     }
     down
@@ -2079,6 +2112,15 @@ unsafe extern "system" fn raw_input_window_proc(
     if message != 0 && message == taskbar_created_message() {
         debug_trace("taskbar-created");
         TASKBAR_RESTARTED.store(true, Ordering::Release);
+        return LRESULT(0);
+    }
+    if message == WM_WTSSESSION_CHANGE {
+        // A lock, unlock or session switch: the releases of Win+L and every key
+        // typed on the lock screen never reach this observer. Start clean, so
+        // the first Win press after unlock is not taken as a held key.
+        debug_trace(&format!("session-change {}", wparam.0));
+        RAW_MACHINE.lock().map(|mut machine| machine.reset()).ok();
+        cancel_pending_win_toggle();
         return LRESULT(0);
     }
     if shell_bridge_message().is_ok_and(|bridge_message| message == bridge_message) {
@@ -2158,7 +2200,12 @@ unsafe extern "system" fn raw_input_window_proc(
                 }
                 let decision = RAW_MACHINE
                     .lock()
-                    .map(|mut machine| machine.feed(kind, is_down))
+                    .map(|mut machine| {
+                        if is_down {
+                            machine.forget_released(key_physically_down);
+                        }
+                        machine.feed(kind, is_down)
+                    })
                     .unwrap_or(Decision::Pass);
                 if matches!(kind, KeyKind::Win(_)) || matches!(decision, Decision::Toggle(_)) {
                     debug_trace(&format!("raw-key {kind:?} down={is_down} -> {decision:?}"));
@@ -2640,6 +2687,82 @@ mod tests {
                 Decision::Pass,
                 Decision::Pass,
             ]
+        );
+    }
+
+    const VK_L: u16 = 0x4c;
+    const VK_MENU_CODE: u16 = 0x12;
+    const VK_SHIFT_CODE: u16 = 0x10;
+
+    #[test]
+    fn a_key_left_held_by_a_lost_release_blocks_win_without_reconciling() {
+        // Ctrl+Alt+Del: the releases happen on the secure desktop, so raw
+        // input never reports them.
+        let mut m = WinKeyMachine::default();
+        m.feed(KeyKind::Other(VK_CONTROL_CODE), true);
+        m.feed(KeyKind::Other(VK_MENU_CODE), true);
+        // Without reconciling, every later Win press counts as a chord.
+        assert_eq!(m.feed(win(WinSide::Left), true), Decision::Pass);
+        assert_eq!(m.feed(win(WinSide::Left), false), Decision::Pass);
+    }
+
+    #[test]
+    fn forgetting_released_keys_restores_a_standalone_win_press() {
+        let mut m = WinKeyMachine::default();
+        m.feed(KeyKind::Other(VK_CONTROL_CODE), true);
+        m.feed(KeyKind::Other(VK_MENU_CODE), true);
+        // The next Win press: only Win is physically down.
+        m.forget_released(|key| key == VK_LWIN.0);
+        assert_eq!(m.feed(win(WinSide::Left), true), Decision::Mask);
+        assert_eq!(
+            m.feed(win(WinSide::Left), false),
+            Decision::Toggle(WinSide::Left)
+        );
+    }
+
+    #[test]
+    fn win_l_lock_leaves_no_held_win_or_l_after_the_next_key_down() {
+        // Win+L: Win-down and L-down arrive; both releases happen on the lock
+        // screen. After unlock the user types a key, then presses Win alone.
+        let mut m = WinKeyMachine::default();
+        assert_eq!(m.feed(win(WinSide::Left), true), Decision::Mask);
+        assert_eq!(m.feed(KeyKind::Other(VK_L), true), Decision::Pass);
+        m.forget_released(|key| key == 0x41);
+        m.feed(KeyKind::Other(0x41), true);
+        m.feed(KeyKind::Other(0x41), false);
+        m.forget_released(|key| key == VK_LWIN.0);
+        assert_eq!(m.feed(win(WinSide::Left), true), Decision::Mask);
+        assert_eq!(
+            m.feed(win(WinSide::Left), false),
+            Decision::Toggle(WinSide::Left)
+        );
+    }
+
+    #[test]
+    fn forgetting_released_keys_keeps_a_held_modifier_chord() {
+        let mut m = WinKeyMachine::default();
+        m.feed(KeyKind::Other(VK_SHIFT_CODE), true);
+        // Shift is still physically held: Shift+Win stays a chord.
+        m.forget_released(|key| key == VK_SHIFT_CODE || key == VK_LWIN.0);
+        assert_eq!(m.feed(win(WinSide::Left), true), Decision::Pass);
+        assert_eq!(m.feed(win(WinSide::Left), false), Decision::Pass);
+    }
+
+    #[test]
+    fn forgetting_released_keys_clears_a_lost_ctrl_esc_press() {
+        // Ctrl+Esc whose releases were lost, then typing: a later lone Esc
+        // must not toggle.
+        let mut m = WinKeyMachine::default();
+        m.feed(KeyKind::Other(VK_CONTROL_CODE), true);
+        assert_eq!(m.feed(KeyKind::Other(VK_ESCAPE_CODE), true), Decision::Mask);
+        m.forget_released(|key| key == 0x41);
+        m.feed(KeyKind::Other(0x41), true);
+        m.feed(KeyKind::Other(0x41), false);
+        m.forget_released(|key| key == VK_ESCAPE_CODE);
+        assert_eq!(m.feed(KeyKind::Other(VK_ESCAPE_CODE), true), Decision::Pass);
+        assert_eq!(
+            m.feed(KeyKind::Other(VK_ESCAPE_CODE), false),
+            Decision::Pass
         );
     }
 
