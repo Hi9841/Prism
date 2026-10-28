@@ -1475,9 +1475,11 @@ impl Database {
             // `LIKE` is case-insensitive, so it scanned every key of the
             // volume (about 1 s on a 5 M-row catalog) for each rename.
             let old_prefix_end = format!("{old_normalized}]");
-            let new_prefix = format!("{}\\", new_item.normalized_path);
-            let old_display_prefix = format!("{}\\", old_normalized);
-            let new_display_prefix = format!("{}\\", new_item.display_path);
+            // Each descendant path and parent starts with the old folder path:
+            // replace that path (no trailing separator, so a direct child's
+            // parent becomes the new folder itself, not `new\`). `SUBSTR`
+            // counts characters, so the cut is a character count.
+            let cut = old_normalized.chars().count() as i64 + 1;
 
             // Update children paths. Their ids stay; the name index refreshes
             // their path-based ranking inputs from the returned ids.
@@ -1485,19 +1487,18 @@ impl Database {
                 .prepare(
                     "UPDATE files SET
                         normalized_path = ?1 || SUBSTR(normalized_path, ?2),
-                        display_path = ?3 || SUBSTR(display_path, ?4),
-                        parent = ?3 || SUBSTR(parent, ?4)
-                     WHERE volume_id = ?5 AND normalized_path >= ?6 AND normalized_path < ?7
+                        display_path = ?3 || SUBSTR(display_path, ?2),
+                        parent = ?3 || SUBSTR(parent, ?2)
+                     WHERE volume_id = ?4 AND normalized_path >= ?5 AND normalized_path < ?6
                      RETURNING id;",
                 )
                 .map_err(|e| e.to_string())?;
             let ids = stmt
                 .query_map(
                     params![
-                        new_prefix,
-                        (old_prefix.len() + 1) as i64,
-                        new_display_prefix,
-                        (old_display_prefix.len() + 1) as i64,
+                        new_item.normalized_path,
+                        cut,
+                        new_item.display_path,
                         volume_id,
                         old_prefix,
                         old_prefix_end,

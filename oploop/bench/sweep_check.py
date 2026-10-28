@@ -73,12 +73,10 @@ def main() -> None:
     delete_under_renamed()
     failures += sweep(exe, db, "4 deleted under renamed folders")
     # Folder renames as the watcher applies them (`Database::rename_file`), one at a time.
-    renamed = 0
     for old, new in (("alpha", "alpha two"), ("José", "Josefina"), ("deep", "deeper")):
         (TREE / old).rename(TREE / new)
-        renamed += sweep(exe, db, f"5 watcher rename {old} -> {new}", "--rename", str(TREE / old), str(TREE / new))
+        failures += sweep(exe, db, f"5 watcher rename {old} -> {new}", "--rename", str(TREE / old), str(TREE / new))
     shutil.rmtree(TREE, ignore_errors=True)
-    print(f"rename differences (known defects D1/D2, the floor): {renamed}")
     print("PASS" if failures == 0 else f"FAIL: {failures} differences")
     sys.exit(1 if failures else 0)
 

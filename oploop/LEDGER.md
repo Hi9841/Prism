@@ -843,3 +843,19 @@ probes, S-004, S-009 first form.
 Diminishing returns without a schema change: the load's span decode is bound by Windows cache copies (three
 probes), the sweep is 75% Windows folder enumeration, and its database part reads one table row per child
 (a covering `(volume_id, parent, ...)` index would remove those reads: schema, owner decision).
+
+### Defects D1 and D2 fixed (2026-10-28, owner: "continue improving")
+
+- `rename_file` replaces the old folder path in each descendant's path, display path and parent without a
+  trailing separator (a direct child's parent becomes `new`, not `new\`: D1), and passes `SUBSTR` a
+  character count (D2: a byte count cut characters under non-ASCII folders such as `José`).
+- Result: `sweep_check.py` rename step 72 -> 0 differences; the rename step now counts toward PASS/FAIL (the
+  S-009 build fails it with 72). Typecheck, clippy pass; judge 277/277.
+- Not done (owner decision): a one-time removal of the 3,931 rows that already have a trailing-backslash
+  parent. A migration runs inside `Database::open` and would need an unindexed scan at startup.
+
+### UI: opaque surfaces and theme-aware shadows (outside the loop; RULEBOOK deviation 2026-10-28)
+
+Parity captures (port only, `prism --parity`, scenarios restored from git history into `target/tmp/parity`):
+dark shell over a white window 34,36,38 -> 11,13,16 (same as over a dark one); settings-panel ghosting 5
+levels -> 0; light tile shadows at 40%; light text steps 13.9/7.4/5.7/5.2 -> 16.0/10.5/7.2/5.6:1.
