@@ -723,12 +723,14 @@ fn apply_queued_events(
         changed |= inserted > 0;
     }
 
-    for path in &removed {
-        let normalized = path.to_string_lossy().to_lowercase();
-        if let Ok(removed) = db.remove_file(volume_id, &normalized, true) {
-            delta -= removed;
-            changed |= removed > 0;
-        }
+    // One transaction for the whole flush (see `Database::remove_rows`).
+    let removed = removed
+        .iter()
+        .map(|path| (path.to_string_lossy().to_lowercase(), true))
+        .collect::<Vec<_>>();
+    if let Ok(removed) = db.remove_rows(volume_id, &removed) {
+        delta -= removed as i64;
+        changed |= removed > 0;
     }
 
     counts.adjust(drive, delta);

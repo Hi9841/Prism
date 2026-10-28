@@ -32,6 +32,10 @@ use super::types::{CandidateEntry, NameRow, RowLookup};
 /// Rows per SQLite read while loading. One batch holds the reader connection
 /// for tens of milliseconds, so searches on the SQL path keep running.
 const LOAD_BATCH: usize = 100_000;
+/// Ids per span of the parallel full load: about 20,000 rows on a catalog
+/// whose ids are a third dense.
+const LOAD_SPAN_IDS: usize = 1 << 16;
+const MAX_LOAD_THREADS: usize = 8;
 /// New rows a search appends inline before it answers. A larger backlog (a
 /// full rescan) goes to the background loader and the search uses SQL.
 const SEARCH_CATCH_UP: usize = 10_000;
@@ -362,6 +366,20 @@ impl NameIndex {
     pub fn load(&self, db: &Database) -> Result<bool, String> {
         let from_empty =
             self.reload_requested.swap(false, AtomicOrdering::AcqRel) || !self.is_loaded();
+        if !from_empty {
+            return self.load_rows(db, false);
+        }
+        // A full load reads most of the catalog: bring the file into the
+        // cache with large reads beside it, so its scattered page reads hit.
+        std::thread::scope(|scope| {
+            let _ = std::thread::Builder::new()
+                .name("prism-catalog-prefetch".into())
+                .spawn_scoped(scope, || db.prefetch_file());
+            self.load_rows(db, true)
+        })
+    }
+
+    fn load_rows(&self, db: &Database, from_empty: bool) -> Result<bool, String> {
         if from_empty {
             if self.is_loaded() {
                 self.reset();
@@ -378,6 +396,7 @@ impl NameIndex {
                 let (held_rows, held_bytes) = (names.ids.len(), names.text.len());
                 names.reserve(rows.saturating_sub(held_rows), bytes.saturating_sub(held_bytes));
             }
+            self.load_spans(db)?;
         }
         while !self.catch_up(db, LOAD_BATCH, usize::MAX)? {}
         if from_empty {
@@ -389,6 +408,43 @@ impl NameIndex {
         self.behind.store(false, AtomicOrdering::Release);
         self.loaded.store(true, AtomicOrdering::Release);
         Ok(from_empty)
+    }
+
+    /// Appends every row up to the highest id at the start, read on several
+    /// threads (see `Database::file_names_in_spans`). Rows added later and
+    /// rewritten rows are left to `catch_up`.
+    fn load_spans(&self, db: &Database) -> Result<(), String> {
+        let Some((first, last)) = db.file_id_bounds()? else {
+            return Ok(());
+        };
+        let (after, generation) = {
+            let names = self.names.read().unwrap_or_else(|e| e.into_inner());
+            (names.max_id.max(first - 1), names.generation)
+        };
+        let spans = (after..last)
+            .step_by(LOAD_SPAN_IDS)
+            .map(|start| (start, start.saturating_add(LOAD_SPAN_IDS as i64).min(last)))
+            .collect::<Vec<_>>();
+        let threads = std::thread::available_parallelism()
+            .map(usize::from)
+            .unwrap_or(1)
+            .min(MAX_LOAD_THREADS);
+        let mut reset = false;
+        let loaded = db.file_names_in_spans(&spans, threads, |rows| {
+            let mut names = self.names.write().unwrap_or_else(|e| e.into_inner());
+            // A reset in between: these rows belong to the old buffers, and
+            // `catch_up` loads the new ones.
+            if names.generation != generation {
+                reset = true;
+                return Err("the name index was reset during the load".into());
+            }
+            let fresh = rows.partition_point(|row| row.id <= names.max_id);
+            names.push_rows(&rows[fresh..])
+        });
+        match loaded {
+            Err(_) if reset => Ok(()),
+            loaded => loaded,
+        }
     }
 
     /// Applies up to `max_rewrites` rewritten rows and appends up to

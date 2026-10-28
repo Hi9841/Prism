@@ -1,4 +1,4 @@
-use std::collections::{HashSet, VecDeque};
+use std::collections::VecDeque;
 use std::ffi::OsString;
 use std::os::windows::ffi::OsStringExt;
 use std::path::{Path, PathBuf};
@@ -6,10 +6,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use windows::core::PCWSTR;
+use windows::Win32::Foundation::{CloseHandle, ERROR_NO_MORE_FILES};
 use windows::Win32::Storage::FileSystem::{
-    FindClose, FindExInfoBasic, FindExSearchNameMatch, FindFirstFileExW, FindNextFileW,
-    FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT, FIND_FIRST_EX_LARGE_FETCH,
-    WIN32_FIND_DATAW,
+    CreateFileW, FileFullDirectoryInfo, GetFileInformationByHandleEx, FILE_ATTRIBUTE_DIRECTORY,
+    FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS, FILE_FULL_DIR_INFO,
+    FILE_LIST_DIRECTORY, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
 };
 use windows::Win32::System::SystemServices::{IO_REPARSE_TAG_CLOUD, IO_REPARSE_TAG_CLOUD_MASK};
 use windows::Win32::System::Threading::{
@@ -63,7 +64,7 @@ fn is_cloud_reparse_tag(tag: u32) -> bool {
 /// mtimes, so the whole tree is enumerated every sweep. Cost is contained
 /// three ways:
 /// - rows whose (mtime, size) are unchanged are never written again
-///   (`filter_changed`), so an idle sweep does almost no writes;
+///   (`Database::children_of`), so an idle sweep does almost no writes;
 /// - junctions and symlinks stay leaves, so no subtree is walked twice.
 pub fn scan_volume(
     root: &Path,
@@ -219,6 +220,7 @@ fn scan_volume_inner(
 
     let mut batch = Vec::with_capacity(BATCH_SIZE);
     let mut total_scanned = 0u64;
+    let mut read_buffer = vec![0u64; READ_BUFFER_BYTES / 8];
 
     while let Some(dir) = queue.pop_front() {
         if cancel.load(Ordering::Relaxed) {
@@ -231,85 +233,52 @@ fn scan_volume_inner(
             continue;
         }
 
-        let search_pattern = format_win32_search_pattern(&dir);
-        let wide_pattern: Vec<u16> = search_pattern.encode_utf16().chain(Some(0)).collect();
-
-        let mut find_data = WIN32_FIND_DATAW::default();
-        let handle = match unsafe {
-            FindFirstFileExW(
-                PCWSTR(wide_pattern.as_ptr()),
-                FindExInfoBasic,
-                &mut find_data as *mut _ as *mut _,
-                FindExSearchNameMatch,
-                None,
-                FIND_FIRST_EX_LARGE_FETCH,
-            )
-        } {
-            Ok(h) => h,
-            Err(_) => {
-                // Access denied or unreadable directory; continue with remaining queue
-                continue;
-            }
+        let Some(listing) = read_folder(&dir, &mut read_buffer) else {
+            // Access denied or unreadable directory; continue with remaining queue
+            continue;
         };
 
         let parent_display = dir.to_string_lossy().into_owned();
-        let mut seen: HashSet<String> = HashSet::new();
+        // The catalog's rows of this folder's children. Each entry the
+        // enumeration finds leaves the map; an entry whose write time, size,
+        // and kind match its row is not written again. The rows left at the
+        // end were removed from disk. A row whose `parent` text differs (a
+        // case-only rename of this folder) is not in the map, so its entry is
+        // written again with the current parent.
+        let mut stored = db.children_of(volume_id, &parent_display)?;
 
-        // NTFS enumeration can return the same entry repeatedly when the
-        // directory is being modified concurrently (Postgres data dirs,
-        // browser caches, temp churn). Detect the stall and stop enumerating
-        // this directory instead of spinning forever. The prune below is
-        // skipped for an incomplete enumeration so existing rows survive.
-        let mut complete = true;
-        let mut repeats = 0u32;
-        let mut last_name = String::new();
+        for FolderEntry {
+            name: filename,
+            attributes,
+            write_time: filetime_ticks,
+            size: file_size,
+            reparse_tag,
+        } in listing.entries
+        {
+            let is_dir = (attributes & FILE_ATTRIBUTE_DIRECTORY.0) != 0;
+            let is_reparse = (attributes & FILE_ATTRIBUTE_REPARSE_POINT.0) != 0;
 
-        loop {
-            let filename = wide_filename_to_string(&find_data.cFileName);
-            if !filename.is_empty() && filename != "." && filename != ".." {
-                if filename == last_name {
-                    repeats += 1;
-                    if repeats >= 4 {
-                        eprintln!(
-                            "[Prism Catalog] enumeration stalled on '{}' in {}; stopping this directory",
-                            filename, parent_display
-                        );
-                        complete = false;
-                        break;
-                    }
-                    // Skip re-processing the stalled entry; the first
-                    // occurrence already recorded it.
-                    let next_ok = unsafe { FindNextFileW(handle, &mut find_data).is_ok() };
-                    if !next_ok {
-                        break;
-                    }
-                    continue;
-                }
-                repeats = 0;
-                last_name = filename.clone();
-                let attributes = find_data.dwFileAttributes;
-                let is_dir = (attributes & FILE_ATTRIBUTE_DIRECTORY.0) != 0;
-                let is_reparse = (attributes & FILE_ATTRIBUTE_REPARSE_POINT.0) != 0;
+            let child_path = dir.join(&filename);
+            let child_display = child_path.to_string_lossy().into_owned();
+            let child_normalized = child_display.to_lowercase();
+            let lower_name = filename.to_lowercase();
 
-                let child_path = dir.join(&filename);
-                let child_display = child_path.to_string_lossy().into_owned();
-                let child_normalized = child_display.to_lowercase();
-                let lower_name = filename.to_lowercase();
-                let filetime_ticks = ((find_data.ftLastWriteTime.dwHighDateTime as u64) << 32)
-                    | (find_data.ftLastWriteTime.dwLowDateTime as u64);
+            let size = if is_dir { 0 } else { file_size };
 
-                // System-attributed files (desktop.ini, pagefile.sys, ...) are
-                // indexed too - full coverage means rank-down at query time,
-                // never silent exclusion. Offline cloud placeholders stay
-                // searchable: opening one hydrates it through the provider.
+            // System-attributed files (desktop.ini, pagefile.sys, ...) are
+            // indexed too - full coverage means rank-down at query time,
+            // never silent exclusion. Offline cloud placeholders stay
+            // searchable: opening one hydrates it through the provider.
 
-                seen.insert(child_normalized.clone());
-                total_scanned += 1;
+            let unchanged = stored.remove(&child_normalized)
+                == Some((filetime_ticks as i64, size as i64, is_dir));
+            total_scanned += 1;
 
-                if is_dir {
+            if is_dir {
+                if !unchanged {
                     batch.push(ScannedItem {
-                        normalized_path: child_normalized.clone(),
-                        display_path: child_display.clone(),
+                        normalized_path: child_normalized,
+                        display_path: child_display,
                         name: filename.clone(),
                         lower_name: lower_name.clone(),
                         parent: parent_display.clone(),
@@ -318,62 +287,58 @@ fn scan_volume_inner(
                         modified_at: filetime_ticks,
                         size: 0,
                     });
-
-                    if batch.len() >= BATCH_SIZE {
-                        flush_file_batch(db, volume_id, plan.generation, &mut batch)?;
-                        progress_callback(total_scanned);
-                    }
-
-                    // Full coverage: descend everywhere except the excluded
-                    // roots. Reparse directories are leaves unless they are
-                    // cloud placeholder roots (OneDrive) - see
-                    // `is_cloud_reparse_tag`.
-                    let descend = if is_reparse {
-                        is_cloud_reparse_tag(find_data.dwReserved0)
-                    } else {
-                        !is_excluded_dir(&lower_name)
-                    };
-                    if descend && plan.descend_directories {
-                        queue.push_back(child_path);
-                    }
-                } else {
-                    let extension = Path::new(&filename)
-                        .extension()
-                        .map(|ext| ext.to_string_lossy().to_lowercase());
-
-                    batch.push(ScannedItem {
-                        normalized_path: child_normalized,
-                        display_path: child_display,
-                        name: filename,
-                        lower_name,
-                        parent: parent_display.clone(),
-                        is_directory: false,
-                        extension,
-                        modified_at: filetime_ticks,
-                        size: ((find_data.nFileSizeHigh as u64) << 32)
-                            | (find_data.nFileSizeLow as u64),
-                    });
-
-                    if batch.len() >= BATCH_SIZE {
-                        flush_file_batch(db, volume_id, plan.generation, &mut batch)?;
-                        progress_callback(total_scanned);
-                    }
                 }
-            }
 
-            let next_ok = unsafe { FindNextFileW(handle, &mut find_data).is_ok() };
-            if !next_ok {
-                break;
+                if batch.len() >= BATCH_SIZE {
+                    flush_file_batch(db, volume_id, plan.generation, &mut batch)?;
+                    progress_callback(total_scanned);
+                }
+
+                // Full coverage: descend everywhere except the excluded
+                // roots. Reparse directories are leaves unless they are
+                // cloud placeholder roots (OneDrive) - see
+                // `is_cloud_reparse_tag`.
+                let descend = if is_reparse {
+                    is_cloud_reparse_tag(reparse_tag)
+                } else {
+                    !is_excluded_dir(&lower_name)
+                };
+                if descend && plan.descend_directories {
+                    queue.push_back(child_path);
+                }
+            } else if !unchanged {
+                let extension = Path::new(&filename)
+                    .extension()
+                    .map(|ext| ext.to_string_lossy().to_lowercase());
+
+                batch.push(ScannedItem {
+                    normalized_path: child_normalized,
+                    display_path: child_display,
+                    name: filename,
+                    lower_name,
+                    parent: parent_display.clone(),
+                    is_directory: false,
+                    extension,
+                    modified_at: filetime_ticks,
+                    size,
+                });
+
+                if batch.len() >= BATCH_SIZE {
+                    flush_file_batch(db, volume_id, plan.generation, &mut batch)?;
+                    progress_callback(total_scanned);
+                }
             }
         }
 
-        let _ = unsafe { FindClose(handle) };
-
         // Children that disappeared since the last scan are removed here - the
-        // directory was walked, so everything current is in `seen`. Skipped
-        // when the enumeration stalled (partial `seen` would prune live rows).
-        if complete {
-            db.prune_removed_children(volume_id, &parent_display, &seen)?;
+        // directory was walked, so every current entry left `stored`. Skipped
+        // when the enumeration stalled (the rest of `stored` may be live).
+        if listing.complete {
+            let removed = stored
+                .into_iter()
+                .map(|(path, (_, _, is_dir))| (path, is_dir))
+                .collect::<Vec<_>>();
+            db.remove_rows(volume_id, &removed)?;
         }
     }
 
@@ -400,27 +365,134 @@ fn flush_file_batch(
     if batch.is_empty() {
         return Ok(());
     }
-    let changed = db.filter_changed(volume_id, batch)?;
-    db.insert_batch(volume_id, generation, &changed)?;
+    db.insert_batch(volume_id, generation, batch)?;
     batch.clear();
     Ok(())
 }
 
-fn format_win32_search_pattern(dir: &Path) -> String {
+/// One entry of a folder listing, as the catalog needs it.
+struct FolderEntry {
+    name: String,
+    attributes: u32,
+    /// Last write time in FILETIME ticks.
+    write_time: u64,
+    size: u64,
+    /// The reparse tag when `attributes` has `FILE_ATTRIBUTE_REPARSE_POINT`.
+    reparse_tag: u32,
+}
+
+/// The entries of one folder (without `.` and `..`). `complete` is false when
+/// the listing stopped early, so its rows must not be pruned.
+struct FolderListing {
+    entries: Vec<FolderEntry>,
+    complete: bool,
+}
+
+/// Bytes of the reused listing buffer: one read returns about 600 entries.
+const READ_BUFFER_BYTES: usize = 64 * 1024;
+
+/// Lists `dir` with `GetFileInformationByHandleEx(FileFullDirectoryInfo)`
+/// into `buffer`. `FindFirstFileExW`/`FindNextFileW` added about 1.5 s of
+/// CPU to a walk of 155,000 folders for the same entries. `None` when the
+/// folder cannot be opened (access denied, removed).
+fn read_folder(dir: &Path, buffer: &mut [u64]) -> Option<FolderListing> {
+    let wide: Vec<u16> = win32_long_path(dir).encode_utf16().chain(Some(0)).collect();
+    // SAFETY: `wide` is NUL-terminated and outlives the call.
+    let handle = unsafe {
+        CreateFileW(
+            PCWSTR(wide.as_ptr()),
+            FILE_LIST_DIRECTORY.0,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            None,
+            OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS,
+            None,
+        )
+    }
+    .ok()?;
+    let mut listing = FolderListing {
+        entries: Vec::new(),
+        complete: true,
+    };
+    // NTFS enumeration can return the same entry repeatedly when the
+    // directory is being modified concurrently (Postgres data dirs, browser
+    // caches, temp churn). Detect the stall and stop listing this directory
+    // instead of spinning forever.
+    let mut repeats = 0u32;
+    'reads: loop {
+        // SAFETY: `buffer` is writable for its whole length, 8-byte aligned.
+        let read = unsafe {
+            GetFileInformationByHandleEx(
+                handle,
+                FileFullDirectoryInfo,
+                buffer.as_mut_ptr().cast(),
+                (buffer.len() * 8) as u32,
+            )
+        };
+        if let Err(error) = read {
+            // Any error but the end leaves the listing incomplete.
+            listing.complete = error.code() == ERROR_NO_MORE_FILES.to_hresult();
+            break;
+        }
+        let bytes = buffer.as_ptr().cast::<u8>();
+        let mut offset = 0usize;
+        loop {
+            // SAFETY: the system wrote a chain of `FILE_FULL_DIR_INFO` records
+            // into `buffer`; each `NextEntryOffset` stays inside it, and each
+            // name is `FileNameLength` bytes after its record's start.
+            let (entry, name) = unsafe {
+                let entry = &*bytes.add(offset).cast::<FILE_FULL_DIR_INFO>();
+                let name = std::slice::from_raw_parts(
+                    entry.FileName.as_ptr(),
+                    entry.FileNameLength as usize / 2,
+                );
+                (entry, name)
+            };
+            let name = OsString::from_wide(name).to_string_lossy().into_owned();
+            if name != "." && name != ".." {
+                if listing.entries.last().is_some_and(|last| last.name == name) {
+                    repeats += 1;
+                    if repeats >= 4 {
+                        eprintln!(
+                            "[Prism Catalog] enumeration stalled on '{}' in {}; stopping this directory",
+                            name,
+                            dir.display()
+                        );
+                        listing.complete = false;
+                        break 'reads;
+                    }
+                } else {
+                    repeats = 0;
+                    listing.entries.push(FolderEntry {
+                        name,
+                        attributes: entry.FileAttributes,
+                        write_time: entry.LastWriteTime as u64,
+                        size: entry.EndOfFile as u64,
+                        reparse_tag: entry.EaSize,
+                    });
+                }
+            }
+            if entry.NextEntryOffset == 0 {
+                break;
+            }
+            offset += entry.NextEntryOffset as usize;
+        }
+    }
+    // SAFETY: `handle` was opened above and is closed once.
+    let _ = unsafe { CloseHandle(handle) };
+    Some(listing)
+}
+
+/// `dir` as a `\\?\` path that ends with a separator (a bare `\\?\C:` would
+/// name the volume, not its root folder).
+fn win32_long_path(dir: &Path) -> String {
     let raw = dir.to_string_lossy();
     let trimmed = raw.trim_end_matches(['\\', '/']);
     if trimmed.starts_with(r"\\?\") {
-        format!("{trimmed}\\*")
+        format!("{trimmed}\\")
     } else if let Some(stripped) = trimmed.strip_prefix(r"\\") {
-        format!(r"\\?\UNC\{stripped}\*")
+        format!(r"\\?\UNC\{stripped}\")
     } else {
-        format!(r"\\?\{trimmed}\*")
+        format!(r"\\?\{trimmed}\")
     }
-}
-
-fn wide_filename_to_string(wide: &[u16]) -> String {
-    let end = wide.iter().position(|&c| c == 0).unwrap_or(wide.len());
-    OsString::from_wide(&wide[..end])
-        .to_string_lossy()
-        .into_owned()
 }

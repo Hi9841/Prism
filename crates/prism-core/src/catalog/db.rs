@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -1145,7 +1145,31 @@ impl Database {
         let tx = conn.transaction().map_err(|e| e.to_string())?;
         let mut changed = 0u64;
         {
-            let mut stmt = tx
+            // A new row, or a changed file whose name, parent text, and kind
+            // stay: then only the columns outside every index. Setting an
+            // indexed column, even to its own value, rewrites its index entry
+            // (about 2.3x the WAL bytes per changed row). Another conflict
+            // changes no row and goes to the full upsert below.
+            let mut update = tx
+                .prepare_cached(
+                    "INSERT INTO files(
+                        volume_id, normalized_path, display_path, name, lower_name, parent,
+                        is_directory, extension, scan_generation, modified_at, size
+                    ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+                    ON CONFLICT(volume_id, normalized_path) DO UPDATE SET
+                        display_path = excluded.display_path,
+                        name = excluded.name,
+                        extension = excluded.extension,
+                        scan_generation = excluded.scan_generation,
+                        modified_at = excluded.modified_at,
+                        size = excluded.size
+                    WHERE lower_name = excluded.lower_name
+                      AND parent = excluded.parent
+                      AND is_directory = excluded.is_directory;",
+                )
+                .map_err(|e| e.to_string())?;
+            // A row whose parent text or kind changed.
+            let mut upsert = tx
                 .prepare_cached(
                     "INSERT INTO files(
                         volume_id, normalized_path, display_path, name, lower_name, parent,
@@ -1165,21 +1189,23 @@ impl Database {
                 .map_err(|e| e.to_string())?;
 
             for item in items {
-                let rows = stmt
-                    .execute(params![
-                        volume_id,
-                        item.normalized_path,
-                        item.display_path,
-                        item.name,
-                        item.lower_name,
-                        item.parent,
-                        item.is_directory as i32,
-                        item.extension,
-                        generation as i64,
-                        item.modified_at as i64,
-                        item.size as i64,
-                    ])
-                    .map_err(|e| e.to_string())?;
+                let values = params![
+                    volume_id,
+                    item.normalized_path,
+                    item.display_path,
+                    item.name,
+                    item.lower_name,
+                    item.parent,
+                    item.is_directory as i32,
+                    item.extension,
+                    generation as i64,
+                    item.modified_at as i64,
+                    item.size as i64,
+                ];
+                let mut rows = update.execute(values).map_err(|e| e.to_string())?;
+                if rows == 0 {
+                    rows = upsert.execute(values).map_err(|e| e.to_string())?;
+                }
                 changed += rows as u64;
             }
         }
@@ -1187,104 +1213,51 @@ impl Database {
         Ok(changed)
     }
 
-    /// Drops items whose (mtime, size) already match the index, so sweeps only
-    /// write rows that actually changed. One indexed lookup per batch.
-    pub fn filter_changed(
-        &self,
-        volume_id: &str,
-        items: &[ScannedItem],
-    ) -> Result<Vec<ScannedItem>, String> {
-        if items.is_empty() {
-            return Ok(Vec::new());
-        }
-        let conn = self.reader.lock().map_err(|e| e.to_string())?;
-        let mut existing: HashSet<(String, i64, i64)> = HashSet::with_capacity(items.len());
-
-        for chunk in items.chunks(500) {
-            let placeholders = vec!["?"; chunk.len()].join(",");
-            let sql = format!(
-                "SELECT normalized_path, modified_at, size FROM files
-                 WHERE volume_id = ?1 AND normalized_path IN ({placeholders});"
-            );
-            let mut stmt = conn.prepare_cached(&sql).map_err(|e| e.to_string())?;
-            let mut params: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(chunk.len() + 1);
-            params.push(&volume_id);
-            for item in chunk {
-                params.push(&item.normalized_path);
-            }
-            let rows = stmt
-                .query_map(params_from_iter(params.iter().copied()), |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, i64>(1)?,
-                        row.get::<_, i64>(2)?,
-                    ))
-                })
-                .map_err(|e| e.to_string())?;
-            for row in rows.flatten() {
-                existing.insert(row);
-            }
-        }
-
-        Ok(items
-            .iter()
-            .filter(|item| {
-                !existing.contains(&(
-                    item.normalized_path.clone(),
-                    item.modified_at as i64,
-                    item.size as i64,
-                ))
-            })
-            .cloned()
-            .collect())
-    }
-
-    /// Removes index rows for children of `dir` that no longer exist on disk.
-    /// Directories are deleted with their whole subtree. Runs for every walked
-    /// directory, which is what keeps deletions out of the index.
-    pub fn prune_removed_children(
+    /// The rows whose `parent` is `dir_display`: normalized path -> (write
+    /// time, size, folder flag). One query per walked folder, through the
+    /// `(volume_id, parent)` index, serves both the sweep's change test and
+    /// its removal of entries that left the disk.
+    pub fn children_of(
         &self,
         volume_id: &str,
         dir_display: &str,
-        seen: &HashSet<String>,
-    ) -> Result<(), String> {
+    ) -> Result<HashMap<String, (i64, i64, bool)>, String> {
         let conn = self.reader.lock().map_err(|e| e.to_string())?;
-        let mut existing: Vec<(String, bool)> = Vec::new();
-        {
-            let mut stmt = conn
-                .prepare_cached(
-                    "SELECT normalized_path, is_directory FROM files
-                     WHERE volume_id = ?1 AND parent = ?2;",
-                )
-                .map_err(|e| e.to_string())?;
-            let rows = stmt
-                .query_map(params![volume_id, dir_display], |row| {
-                    Ok((row.get::<_, String>(0)?, row.get::<_, i32>(1)? != 0))
-                })
-                .map_err(|e| e.to_string())?;
-            for row in rows.flatten() {
-                existing.push(row);
-            }
-        }
-        drop(conn);
+        let mut stmt = conn
+            .prepare_cached(
+                "SELECT normalized_path, modified_at, size, is_directory FROM files
+                 WHERE volume_id = ?1 AND parent = ?2;",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(params![volume_id, dir_display], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    (row.get(1)?, row.get(2)?, row.get::<_, i32>(3)? != 0),
+                ))
+            })
+            .map_err(|e| e.to_string())?;
+        rows.collect::<Result<HashMap<_, _>, _>>()
+            .map_err(|e| e.to_string())
+    }
 
-        let missing: Vec<(String, bool)> = existing
-            .into_iter()
-            .filter(|(path, _)| !seen.contains(path))
-            .collect();
-        if missing.is_empty() {
-            return Ok(());
+    /// Removes the rows of `paths` (normalized path, folder flag) that left
+    /// the disk, in one transaction, and returns how many rows went. A folder
+    /// goes with its whole subtree. One transaction per path wrote about 20 KB
+    /// of WAL for each removed file.
+    pub fn remove_rows(&self, volume_id: &str, paths: &[(String, bool)]) -> Result<usize, String> {
+        if paths.is_empty() {
+            return Ok(0);
         }
-
         let mut conn = self.writer.lock().map_err(|e| e.to_string())?;
         let tx = conn.transaction().map_err(|e| e.to_string())?;
         let mut removed = 0;
-        for (path, is_dir) in &missing {
+        for (path, is_dir) in paths {
             removed += Self::delete_path_rows(&tx, volume_id, path, *is_dir)?;
         }
         tx.commit().map_err(|e| e.to_string())?;
         self.note_rows_deleted(removed);
-        Ok(())
+        Ok(removed)
     }
 
     /// Marks a volume scan complete. Removed entries are handled incrementally
@@ -1498,7 +1471,10 @@ impl Database {
 
         if new_item.is_directory {
             let old_prefix = format!("{old_normalized}\\");
-            let old_prefix_like = escape_like_pattern(&old_prefix);
+            // The descendants as a key range (see `delete_path_rows`). A
+            // `LIKE` is case-insensitive, so it scanned every key of the
+            // volume (about 1 s on a 5 M-row catalog) for each rename.
+            let old_prefix_end = format!("{old_normalized}]");
             let new_prefix = format!("{}\\", new_item.normalized_path);
             let old_display_prefix = format!("{}\\", old_normalized);
             let new_display_prefix = format!("{}\\", new_item.display_path);
@@ -1511,7 +1487,7 @@ impl Database {
                         normalized_path = ?1 || SUBSTR(normalized_path, ?2),
                         display_path = ?3 || SUBSTR(display_path, ?4),
                         parent = ?3 || SUBSTR(parent, ?4)
-                     WHERE volume_id = ?5 AND normalized_path LIKE ?6 || '%' ESCAPE '!'
+                     WHERE volume_id = ?5 AND normalized_path >= ?6 AND normalized_path < ?7
                      RETURNING id;",
                 )
                 .map_err(|e| e.to_string())?;
@@ -1523,7 +1499,8 @@ impl Database {
                         new_display_prefix,
                         (old_display_prefix.len() + 1) as i64,
                         volume_id,
-                        old_prefix_like,
+                        old_prefix,
+                        old_prefix_end,
                     ],
                     |row| row.get::<_, i64>(0),
                 )
@@ -1683,6 +1660,60 @@ impl Database {
         .map_err(|e| e.to_string())
     }
 
+    /// Brings the whole catalog file into the system file cache with large
+    /// reads, and returns when they are done. A full table scan on a cold
+    /// cache reads one scattered 4 KiB page at a time (about 85 MB/s on NVMe;
+    /// over a minute for a 5 GB catalog after a reboot); read in large
+    /// blocks, the same file takes about 2 s, and the scan then finds its
+    /// pages in the cache. Pages already in the cache are not read or copied.
+    pub fn prefetch_file(&self) {
+        use std::os::windows::io::AsRawHandle;
+        use windows::Win32::Foundation::{CloseHandle, HANDLE};
+        use windows::Win32::System::Memory::{
+            CreateFileMappingW, MapViewOfFile, PrefetchVirtualMemory, UnmapViewOfFile,
+            FILE_MAP_READ, PAGE_READONLY, WIN32_MEMORY_RANGE_ENTRY,
+        };
+        use windows::Win32::System::Threading::GetCurrentProcess;
+
+        let Ok(file) = std::fs::File::open(&self.db_path) else {
+            return;
+        };
+        let Some(length) = file
+            .metadata()
+            .ok()
+            .and_then(|metadata| usize::try_from(metadata.len()).ok())
+            .filter(|&length| length > 0)
+        else {
+            return;
+        };
+        // SAFETY: the view is read-only, never dereferenced here, and
+        // unmapped before the mapping and the file handle close. A mapped
+        // view blocks a truncation of the file (an incremental vacuum), so
+        // it stays mapped only for the prefetch.
+        unsafe {
+            let Ok(mapping) = CreateFileMappingW(
+                HANDLE(file.as_raw_handle()),
+                None,
+                PAGE_READONLY,
+                0,
+                0,
+                windows::core::PCWSTR::null(),
+            ) else {
+                return;
+            };
+            let view = MapViewOfFile(mapping, FILE_MAP_READ, 0, 0, 0);
+            if !view.Value.is_null() {
+                let range = WIN32_MEMORY_RANGE_ENTRY {
+                    VirtualAddress: view.Value,
+                    NumberOfBytes: length,
+                };
+                let _ = PrefetchVirtualMemory(GetCurrentProcess(), &[range], 0);
+                let _ = UnmapViewOfFile(view);
+            }
+            let _ = CloseHandle(mapping);
+        }
+    }
+
     /// Row count and total `lower_name` bytes of `files`, read from the
     /// covering name index rather than the table.
     pub fn file_name_totals(&self) -> Result<(usize, usize), String> {
@@ -1704,33 +1735,81 @@ impl Database {
         limit: usize,
     ) -> Result<Vec<NameRow>, String> {
         let conn = self.reader.lock().map_err(|e| e.to_string())?;
-        let mut stmt = conn
-            .prepare_cached(
-                "SELECT id, lower_name, display_path, is_directory FROM files
-                 WHERE id > ?1 ORDER BY id LIMIT ?2;",
-            )
+        file_names_between(&conn, after_id, i64::MAX, limit)
+    }
+
+    /// The lowest and highest `files` id, or `None` for an empty table.
+    pub fn file_id_bounds(&self) -> Result<Option<(i64, i64)>, String> {
+        let conn = self.reader.lock().map_err(|e| e.to_string())?;
+        conn.query_row("SELECT MIN(id), MAX(id) FROM files;", [], |row| {
+            Ok(row.get::<_, Option<i64>>(0)?.zip(row.get::<_, Option<i64>>(1)?))
+        })
+        .map_err(|e| e.to_string())
+    }
+
+    /// The rows of each id span `(after, last]`, read on up to `threads`
+    /// read-only connections of their own (one decoding thread reads about
+    /// 1.7 M rows a second). `each` runs on the calling thread and receives
+    /// the rows of every span in span order. A thread holds at most one span
+    /// that `each` has not taken, so memory stays bounded.
+    pub fn file_names_in_spans(
+        &self,
+        spans: &[(i64, i64)],
+        threads: usize,
+        mut each: impl FnMut(Vec<NameRow>) -> Result<(), String>,
+    ) -> Result<(), String> {
+        let threads = threads.clamp(1, spans.len().max(1));
+        let (senders, receivers): (Vec<_>, Vec<_>) = (0..threads)
+            .map(|_| std::sync::mpsc::sync_channel::<Result<Vec<NameRow>, String>>(1))
+            .unzip();
+        std::thread::scope(|scope| {
+            for (worker, sender) in senders.into_iter().enumerate() {
+                scope.spawn(move || {
+                    let conn = match self.open_bulk_reader() {
+                        Ok(conn) => conn,
+                        Err(error) => {
+                            let _ = sender.send(Err(error));
+                            return;
+                        }
+                    };
+                    for &(after, last) in spans.iter().skip(worker).step_by(threads) {
+                        let rows = file_names_between(&conn, after, last, usize::MAX);
+                        let failed = rows.is_err();
+                        if sender.send(rows).is_err() || failed {
+                            return;
+                        }
+                    }
+                });
+            }
+            let mut take_all = || {
+                for span in 0..spans.len() {
+                    let rows = receivers[span % threads]
+                        .recv()
+                        .map_err(|_| "a catalog reader stopped".to_string())??;
+                    each(rows)?;
+                }
+                Ok(())
+            };
+            let taken = take_all();
+            // Unblocks the threads that still wait to hand over a span.
+            drop(receivers);
+            taken
+        })
+    }
+
+    /// A read-only connection for one bulk scan: a small page cache (a scan
+    /// does not read a page twice) and no memory map.
+    fn open_bulk_reader(&self) -> Result<Connection, String> {
+        let conn = Connection::open_with_flags(
+            &self.db_path,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )
+        .map_err(|e| e.to_string())?;
+        conn.busy_timeout(Duration::from_secs(5))
             .map_err(|e| e.to_string())?;
-        let rows = stmt
-            .query_map(params![after_id, limit as i64], |row| {
-                // The path is read in place (no copy): the index keeps only
-                // numbers computed from it.
-                let display_path = row.get_ref(2)?.as_str().map_err(|error| {
-                    rusqlite::Error::FromSqlConversionFailure(
-                        2,
-                        rusqlite::types::Type::Text,
-                        Box::new(error),
-                    )
-                })?;
-                Ok(NameRow::new(
-                    row.get(0)?,
-                    row.get(1)?,
-                    display_path,
-                    row.get::<_, i32>(3)? != 0,
-                ))
-            })
+        conn.execute_batch("PRAGMA cache_size = -2000;")
             .map_err(|e| e.to_string())?;
-        rows.collect::<Result<Vec<_>, _>>()
-            .map_err(|e| e.to_string())
+        Ok(conn)
     }
 
     /// Current state of each requested fallback row. A row that a scan
@@ -2354,11 +2433,42 @@ fn append_ntfs_candidates(
     Ok(())
 }
 
-fn escape_like_pattern(value: &str) -> String {
-    value
-        .replace('!', "!!")
-        .replace('%', "!%")
-        .replace('_', "!_")
+/// Fallback-catalog rows with `after < id <= last`, in id order, at most
+/// `limit` of them.
+fn file_names_between(
+    conn: &Connection,
+    after: i64,
+    last: i64,
+    limit: usize,
+) -> Result<Vec<NameRow>, String> {
+    let mut stmt = conn
+        .prepare_cached(
+            "SELECT id, lower_name, display_path, is_directory FROM files
+             WHERE id > ?1 AND id <= ?2 ORDER BY id LIMIT ?3;",
+        )
+        .map_err(|e| e.to_string())?;
+    let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+    let rows = stmt
+        .query_map(params![after, last, limit], |row| {
+            // The path is read in place (no copy): the index keeps only
+            // numbers computed from it.
+            let display_path = row.get_ref(2)?.as_str().map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    2,
+                    rusqlite::types::Type::Text,
+                    Box::new(error),
+                )
+            })?;
+            Ok(NameRow::new(
+                row.get(0)?,
+                row.get(1)?,
+                display_path,
+                row.get::<_, i32>(3)? != 0,
+            ))
+        })
+        .map_err(|e| e.to_string())?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())
 }
 
 /// Removes `catalog.recovery-*.db{,-wal,-shm}` copies older than a week from
