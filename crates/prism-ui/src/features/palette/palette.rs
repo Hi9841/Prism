@@ -374,8 +374,12 @@ impl Palette {
         if event.keystroke.key == "escape" && (self.reorder_drag.is_some() || self.category_drag.is_some() || self.file_drag.is_some()) {
             self.cancel_drags(cx);
         }
-        // The search field's `onKeyDown`: a focused button gets no palette keys.
+        // The search field's `onKeyDown`: a focused button gets no palette
+        // keys, except the ones that take the keyboard back to the field.
         if !self.input.read(cx).focus_handle(cx).is_focused(window) {
+            if self.return_to_search(event, window, cx) {
+                self.on_search_key(event, window, cx);
+            }
             return;
         }
         let Some(command) = search_key(event, composing) else { return };
@@ -388,6 +392,35 @@ impl Palette {
             SearchKey::Close => bridge::emit_event(BackendEvent::CloseRequested, cx),
             SearchKey::ClearQuery => self.palette.update(cx, |p, cx| p.set_query("", cx)),
         }
+    }
+
+    /// A palette button holds the focus (the settings button after the sheet
+    /// closes, a footer button after Tab): text goes into the search field,
+    /// and Escape moves the focus there and returns true so the field handles
+    /// it. Without this, typing and Escape did nothing until a click. Open
+    /// menus and the settings sheet keep their keys.
+    fn return_to_search(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if self.result_menu.is_some() || self.power_menu.read(cx).is_open() || self.app.read(cx).open_settings {
+            return false;
+        }
+        let keystroke = &event.keystroke;
+        let modifiers = &keystroke.modifiers;
+        if modifiers.control || modifiers.alt || modifiers.platform || modifiers.function {
+            return false;
+        }
+        // Space keeps pressing the focused button.
+        let text = keystroke.key_char.clone().filter(|text| !text.trim().is_empty() && !text.chars().any(char::is_control));
+        if text.is_none() && keystroke.key != "escape" {
+            return false;
+        }
+        self.input.read(cx).focus(window);
+        let Some(text) = text else { return true };
+        // The key is handled here, so Windows sends no WM_CHAR for it.
+        cx.stop_propagation();
+        let query = format!("{}{text}", self.input.read(cx).text());
+        self.input.update(cx, |input, cx| input.set_text(query.clone(), cx));
+        self.palette.update(cx, |palette, cx| palette.set_query(&query, cx));
+        false
     }
 
     fn open_selected_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {

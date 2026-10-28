@@ -162,6 +162,12 @@ another app, Esc cancels, a click works after the drag, and a release over the p
 
 ## Deviation log
 
+- 2026-10-29: Found in 1.0.13 by random-input testing on the owner's machine. (1) With a palette button
+  focused (the settings button after the sheet closes, or a footer button after Tab), text goes into the
+  search field and Escape acts as in the field. The original gave a focused button no palette keys, so
+  after the sheet closed, typing and Escape did nothing until a click. Space and Enter still press the
+  button. (2) A button whose panel or menu is open (Settings, Power) shows no tooltip; the tooltip covered
+  the open settings panel.
 - 2026-10-29: One row highlight (owner: "the hovering and selected ... coloring is broken and a bit weird").
   (1) The pointer no longer paints its own hover fill: a real pointer move selects the row under it, and
   a keyboard move takes the selection away from it, so only one row is ever highlighted (the original

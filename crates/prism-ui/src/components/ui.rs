@@ -528,7 +528,9 @@ pub fn icon_button(
                 }
             })
         })
-        .tooltip(title_tooltip(label))
+        // An open panel or menu (`active`) would sit under its button's
+        // tooltip: a native tooltip hides on the click that opens it.
+        .when(!active, |d| d.tooltip(title_tooltip(label)))
         .child(icon(icon_name, icon_size, glyph))
         .child(hover)
 }
