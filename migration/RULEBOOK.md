@@ -162,6 +162,11 @@ another app, Esc cancels, a click works after the drag, and a release over the p
 
 ## Deviation log
 
+- 2026-10-28: File thumbnails no longer flash during disk activity. The original cleared its thumbnail
+  cache and stripped the shown results on each `FileIndexUpdated` (every 750 ms while the disk is busy),
+  so each image fell back to its tile icon until a fetch completed again. The port now marks the cache
+  entries stale, keeps showing them, fetches them again, and replaces a row's image only when the data
+  changed (`state/palette.rs`, `ThumbnailCache`). No golden covers the index-update flow.
 - 2026-10-27 (after the app's removal): the contents of `gpui/` moved to the repo root. Paths in older
   entries and in `HANDOFF.md` that start with `gpui/` now start at the root. The Rust unit tests were
   removed (owner: no unit tests).

@@ -33,20 +33,30 @@ const THUMBNAIL_EXTENSIONS: [&str; 6] = ["png", "jpg", "jpeg", "gif", "bmp", "we
 struct ThumbnailCache {
     map: HashMap<String, Option<String>>,
     order: VecDeque<String>,
+    /// Entries from before the last index update: still shown, fetched again.
+    /// Clearing them instead made every visible image fall back to its tile
+    /// icon on each watcher tick (750 ms), a flash.
+    stale: HashSet<String>,
 }
 
 impl ThumbnailCache {
-    fn remember(&mut self, path: &str, thumbnail: Option<String>) {
+    /// Returns true when the cached value changed.
+    fn remember(&mut self, path: &str, thumbnail: Option<String>) -> bool {
+        self.stale.remove(path);
         // Refresh insertion order so recently shown images survive eviction.
-        if self.map.remove(path).is_some() {
+        let previous = self.map.remove(path);
+        if previous.is_some() {
             self.order.retain(|p| p != path);
         }
+        let changed = previous.as_ref() != Some(&thumbnail);
         self.map.insert(path.to_owned(), thumbnail);
         self.order.push_back(path.to_owned());
         while self.map.len() > THUMBNAIL_CACHE_LIMIT {
             let Some(oldest) = self.order.pop_front() else { break };
             self.map.remove(&oldest);
+            self.stale.remove(&oldest);
         }
+        changed
     }
 
     fn get(&self, path: &str) -> Option<&Option<String>> {
@@ -57,9 +67,12 @@ impl ThumbnailCache {
         self.map.contains_key(path)
     }
 
-    fn clear(&mut self) {
-        self.map.clear();
-        self.order.clear();
+    fn is_fresh(&self, path: &str) -> bool {
+        self.has(path) && !self.stale.contains(path)
+    }
+
+    fn mark_stale(&mut self) {
+        self.stale.extend(self.map.keys().cloned());
     }
 }
 
@@ -71,12 +84,6 @@ fn picture_extension(path: &str, split_dots_and_slashes: bool) -> Option<String>
     }?;
     let extension = js::lower(last);
     THUMBNAIL_EXTENSIONS.contains(&extension.as_str()).then_some(extension)
-}
-
-fn strip_thumbnails(entries: &mut [FileEntry]) {
-    for entry in entries {
-        entry.thumbnail = None;
-    }
 }
 
 /// Volume status fields that matter to the rendered UI.
@@ -149,10 +156,10 @@ impl EventEmitter<PaletteEvent> for PaletteState {}
 impl PaletteState {
     fn refresh_after_index_update(&mut self, cx: &mut Context<Self>) {
         self.index_update_pending = false;
+        // Replies started before the update may hold old images: drop them.
         self.thumbnail_epoch += 1;
-        self.thumbnails.clear();
+        self.thumbnails.mark_stale();
         self.thumbnails_in_flight.clear();
-        strip_thumbnails(&mut self.file_results);
         // A refresh may have flipped ready/indexing; re-query the status.
         self.file_status_known = false;
         self.validate_history_paths(cx);
@@ -505,7 +512,7 @@ impl PaletteState {
         }
         let pending: Vec<String> = image_paths
             .into_iter()
-            .filter(|path| !self.thumbnails.has(path) && !self.thumbnails_in_flight.contains(path))
+            .filter(|path| !self.thumbnails.is_fresh(path) && !self.thumbnails_in_flight.contains(path))
             .collect();
         if pending.is_empty() {
             return;
@@ -522,10 +529,13 @@ impl PaletteState {
                     this.thumbnails_in_flight.remove(path);
                 }
                 if let Ok(thumbnails) = result {
+                    let mut changed = false;
                     for (path, thumbnail) in pending.iter().zip(thumbnails) {
-                        this.thumbnails.remember(path, thumbnail);
+                        changed |= this.thumbnails.remember(path, thumbnail);
                     }
-                    this.rebuild(cx);
+                    if changed {
+                        this.rebuild(cx);
+                    }
                 }
             });
         })
@@ -686,9 +696,10 @@ impl PaletteState {
         let pending: Vec<String> = items
             .iter()
             .filter(|entry| {
+                // A thumbnail on an uncached entry came with the search reply.
                 !entry.is_directory
-                    && entry.thumbnail.as_deref().is_none_or(str::is_empty)
-                    && !self.thumbnails.has(&entry.path)
+                    && (entry.thumbnail.as_deref().is_none_or(str::is_empty) || self.thumbnails.has(&entry.path))
+                    && !self.thumbnails.is_fresh(&entry.path)
                     && picture_extension(&entry.name, false).is_some()
                     && !self.thumbnails_in_flight.contains(&entry.path)
             })
@@ -715,22 +726,21 @@ impl PaletteState {
                 for (path, thumbnail) in pending.iter().zip(thumbnails) {
                     this.thumbnails.remember(path, thumbnail.clone());
                     this.thumbnails_in_flight.remove(path);
-                    if let Some(thumbnail) = thumbnail.filter(|t| !t.is_empty()) {
-                        by_path.insert(path.clone(), thumbnail);
-                    }
+                    by_path.insert(path, thumbnail.filter(|t| !t.is_empty()));
                 }
-                if by_path.is_empty() {
-                    return;
-                }
+                // An unchanged image keeps its data URL, so its row does not change.
+                let mut changed = false;
                 for entry in &mut this.file_results {
-                    if entry.thumbnail.as_deref().is_some_and(|t| !t.is_empty()) {
-                        continue;
-                    }
-                    if let Some(thumbnail) = by_path.get(&entry.path) {
-                        entry.thumbnail = Some(thumbnail.clone());
+                    if let Some(thumbnail) = by_path.get(&entry.path)
+                        && entry.thumbnail != *thumbnail
+                    {
+                        entry.thumbnail = thumbnail.clone();
+                        changed = true;
                     }
                 }
-                this.rebuild(cx);
+                if changed {
+                    this.rebuild(cx);
+                }
             });
         })
         .detach();
