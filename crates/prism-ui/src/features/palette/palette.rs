@@ -24,7 +24,7 @@ use crate::features::palette::palette_search_input::{
 use crate::features::palette::result_context_menu::{
     MenuChoice, MenuEvent, ResultContextMenu, menu_position_for,
 };
-use crate::features::palette::sections::is_clipboard_kind;
+use crate::features::palette::sections::{Section, is_clipboard_kind};
 use crate::features::updater::update_control::UpdateControl;
 use crate::gfx::{Tween, icon, motion_ms, r, rotated, zoomed};
 use crate::js;
@@ -139,6 +139,80 @@ struct HitTargets {
     viewport: Option<Bounds<Pixels>>,
     /// The results' scroll offset when the bounds above were recorded.
     painted_offset: Point<Pixels>,
+    /// The layout that placed `rows` (see [`layout_runs`]).
+    layout: Vec<(u64, usize)>,
+    /// A row box showed in the viewport and the next frame builds it.
+    refresh_scheduled: bool,
+}
+
+/// The results layout as runs of rows: one entry per row list, with a hash of
+/// everything above it since the last run, and its row count. Rows have one
+/// height, so two frames with equal runs place every row at the same y.
+fn layout_runs(sections: &[Section], notice: bool, reorderable: bool, zoom: f32) -> Vec<(u64, usize)> {
+    use std::hash::{DefaultHasher, Hash, Hasher};
+    let mut runs = Vec::new();
+    let mut head = DefaultHasher::new();
+    (notice, reorderable, zoom.to_bits()).hash(&mut head);
+    for section in sections {
+        (&section.id, &section.label, section.collapsible, section.collapsed).hash(&mut head);
+        let groups = section.groups.as_deref().unwrap_or_default();
+        for group in groups {
+            (&group.id, &group.label, group.collapsed).hash(&mut head);
+            runs.push((std::mem::take(&mut head).finish(), group.items.len()));
+        }
+        (groups.is_empty(), section.items.is_empty()).hash(&mut head);
+        runs.push((std::mem::take(&mut head).finish(), section.items.len()));
+    }
+    runs
+}
+
+/// The number of leading rows that keep their place from `old` to `new`.
+fn stable_rows(old: &[(u64, usize)], new: &[(u64, usize)]) -> usize {
+    let mut stable = 0;
+    for (&(old_head, old_rows), &(new_head, new_rows)) in old.iter().zip(new) {
+        if old_head != new_head {
+            break;
+        }
+        stable += old_rows.min(new_rows);
+        if old_rows != new_rows {
+            break;
+        }
+    }
+    stable
+}
+
+/// Rows far from the view render as empty boxes of their measured height:
+/// a frame that built every app (or 500 files) took 16-30 ms. A box holds the
+/// row's place, so the layout, the scroll range, and the hit targets stay the
+/// same.
+struct RowCulling {
+    /// Last frame's row bounds, in window coordinates.
+    previous: HashMap<usize, Bounds<Pixels>>,
+    /// Rows from this index on may have moved since last frame: they build.
+    stable: usize,
+    selected: usize,
+    /// Window y of content y 0 when `previous` was recorded.
+    origin: Pixels,
+    /// Content y ranges that build: around the scroll position and around
+    /// the selection (a key move scrolls the selection into view).
+    keep: Vec<(Pixels, Pixels)>,
+}
+
+impl RowCulling {
+    /// Rows this near the selection always build.
+    const NEAR_SELECTION: usize = 12;
+
+    /// The box height for a row far from the view, or `None` to build it.
+    fn placeholder(&self, index: usize) -> Option<Pixels> {
+        if index >= self.stable || index.abs_diff(self.selected) <= Self::NEAR_SELECTION {
+            return None;
+        }
+        let bounds = self.previous.get(&index)?;
+        let top = bounds.origin.y - self.origin;
+        let bottom = top + bounds.size.height;
+        let near = self.keep.iter().any(|&(from, to)| bottom > from && top < to);
+        (!near).then_some(bounds.size.height)
+    }
 }
 
 pub struct Palette {
@@ -898,6 +972,36 @@ impl Palette {
         row.child(icon_cell).child(text_cell).child(trailing).into_any_element()
     }
 
+    /// An empty box in place of a row far from the view (see [`RowCulling`]).
+    fn row_placeholder(&self, index: usize, height: Pixels, cx: &mut Context<Self>) -> AnyElement {
+        let targets = self.targets.clone();
+        let this = cx.entity().downgrade();
+        div()
+            .flex_none()
+            .h(height)
+            .child(
+                canvas(
+                    move |bounds, window, _| {
+                        let mut targets = targets.borrow_mut();
+                        targets.rows.insert(index, bounds);
+                        // A jump past the kept range (a scrollbar drag) showed
+                        // the box: the next frame builds the row.
+                        if !targets.refresh_scheduled && targets.viewport.is_some_and(|v| v.intersects(&bounds)) {
+                            targets.refresh_scheduled = true;
+                            let this = this.clone();
+                            window.on_next_frame(move |_, cx| {
+                                let _ = this.update(cx, |_, cx| cx.notify());
+                            });
+                        }
+                    },
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .size_full(),
+            )
+            .into_any_element()
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn render_trailing(
         &self,
@@ -1214,13 +1318,29 @@ impl Palette {
         let drop_target = self.reorder_drag.as_ref().filter(|d| d.active).and_then(|d| d.target_item_id.clone());
         let category = self.category_drag.clone();
 
-        {
+        let culling = {
             let mut targets = self.targets.borrow_mut();
-            targets.rows.clear();
+            let previous = std::mem::take(&mut targets.rows);
             targets.reorder.clear();
             targets.sections.clear();
             targets.groups.clear();
-        }
+            targets.refresh_scheduled = false;
+            let layout = layout_runs(&sections, file_error.is_some(), section_reorderable, zoom);
+            let stable = if targets.viewport.is_some() { stable_rows(&targets.layout, &layout) } else { 0 };
+            targets.layout = layout;
+            let origin = targets.viewport.map_or(px(0.), |v| v.origin.y) + targets.painted_offset.y;
+            let mut keep = Vec::new();
+            if let Some(viewport) = targets.viewport {
+                let height = viewport.size.height;
+                let top = px(0.) - self.scroll.offset().y;
+                keep.push((top - height * 0.5, top + height * 1.5));
+                if let Some(row) = previous.get(&selected) {
+                    let y = row.origin.y - origin;
+                    keep.push((y - height, y + height));
+                }
+            }
+            RowCulling { previous, stable, selected, origin, keep }
+        };
         let targets = self.targets.clone();
         let painted_scroll = self.scroll.clone();
         let palette_state = self.palette.clone();
@@ -1413,6 +1533,10 @@ impl Palette {
                 for item in &group.items {
                     let index = flat;
                     flat += 1;
+                    if let Some(height) = culling.placeholder(index).filter(|_| dragged_id.as_deref() != Some(item.id.as_str())) {
+                        rows = rows.child(self.row_placeholder(index, height, cx));
+                        continue;
+                    }
                     let flags = RowFlags {
                         index,
                         selected: selected == index,
@@ -1452,6 +1576,14 @@ impl Palette {
             for item in &section.items {
                 let index = flat;
                 flat += 1;
+                // Reorder targets come from built rows; a file drag keeps its row.
+                if let Some(height) = culling
+                    .placeholder(index)
+                    .filter(|_| !reorderable && dragged_id.as_deref() != Some(item.id.as_str()))
+                {
+                    rows = rows.child(self.row_placeholder(index, height, cx));
+                    continue;
+                }
                 let item_reorder_id = reorder_item_id(item);
                 let can_reorder = reorderable && item_reorder_id.is_some();
                 let can_drag_file = !can_reorder && item.shell_path.is_some() && item.drag_file.is_some();

@@ -123,6 +123,8 @@ pub struct PaletteState {
     file_results: Vec<FileEntry>,
     /// The file results the current query asks for (grows by `FILE_PAGE`).
     file_limit: usize,
+    /// The last reply filled its page: more matches may exist.
+    file_more: bool,
     pub volumes: Vec<VolumeCoverage>,
     pub total_indexed: f64,
     file_result_query: String,
@@ -250,6 +252,7 @@ impl PaletteState {
             quick_access: Vec::new(),
             file_results: Vec::new(),
             file_limit: FILE_PAGE,
+            file_more: false,
             volumes: Vec::new(),
             total_indexed: 0.0,
             file_result_query: String::new(),
@@ -625,10 +628,19 @@ impl PaletteState {
     }
 
     fn search_files(&mut self, cx: &mut Context<Self>) {
+        self.run_file_search(false, cx);
+    }
+
+    /// Asks the backend for `file_limit` results. A page load (`append`)
+    /// keeps the rows already shown and adds the new ones after them: the
+    /// backend ranks a candidate pool that grows with the limit, so a larger
+    /// reply can rank new rows above rows the user already scrolled past.
+    fn run_file_search(&mut self, append: bool, cx: &mut Context<Self>) {
         let search_text = js::trim(&self.query).to_owned();
         let normalized = js::lower(&search_text);
         if js::len(&normalized) < 2 {
             self.file_results.clear();
+            self.file_more = false;
             self.file_result_query = normalized;
             self.files_searching = false;
             self.files_error = false;
@@ -679,6 +691,17 @@ impl PaletteState {
                                 entry
                             })
                             .collect();
+                        this.file_more = items.len() >= limit;
+                        let items = if append && this.file_result_query == normalized {
+                            let shown: HashSet<String> =
+                                this.file_results.iter().map(|entry| entry.path.to_lowercase()).collect();
+                            let mut merged = std::mem::take(&mut this.file_results);
+                            merged.extend(items.into_iter().filter(|entry| !shown.contains(&entry.path.to_lowercase())));
+                            merged.truncate(MAX_FILE_RESULTS);
+                            merged
+                        } else {
+                            items
+                        };
                         this.file_result_query = normalized;
                         this.file_path_browse = response.path_browse;
                         this.file_error = response.error.clone();
@@ -691,6 +714,7 @@ impl PaletteState {
                         this.file_status_known = true;
                         this.index_status = (false, false);
                         this.file_results.clear();
+                        this.file_more = false;
                         this.file_result_query = normalized;
                         this.file_index_ready = false;
                         this.file_indexing = false;
@@ -805,18 +829,18 @@ impl PaletteState {
 
     /// Asks for the next page of file results. Does nothing while a search
     /// runs, after a reply that did not fill its page (no more matches), or at
-    /// the cap. The current rows stay until the larger reply replaces them.
+    /// the cap. The current rows stay, and the reply adds rows after them.
     pub fn load_more_files(&mut self, cx: &mut Context<Self>) {
         let query = js::lower(js::trim(&self.query));
         if self.files_searching
             || self.file_result_query != query
-            || self.file_results.len() < self.file_limit
+            || !self.file_more
             || self.file_limit >= MAX_FILE_RESULTS
         {
             return;
         }
         self.file_limit = (self.file_limit + FILE_PAGE).min(MAX_FILE_RESULTS);
-        self.search_files(cx);
+        self.run_file_search(true, cx);
     }
 
     pub fn select(&mut self, index: usize, cx: &mut Context<Self>) {

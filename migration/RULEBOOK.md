@@ -176,10 +176,13 @@ another app, Esc cancels, a click works after the drag, and a release over the p
   were updated by hand, and only rows were added after the original rows. (2) A file search asks for one page of 50
   results and asks for the next page when the list scrolls within one screen of its end or the keyboard
   selection is within 5 rows of it, up to 500 (the backend cap was 50). On the 5.85 M-row catalog copy a
-  `.png` search costs 5 / 21 / 42 ms (warm) at 50 / 250 / 500 results, and the rows already shown keep their
-  order. (3) Thumbnails are fetched in batches of the backend's 64-path cap (a longer request marked the
+  `.png` search costs 5 / 21 / 42 ms (warm) at 50 / 250 / 500 results. A page keeps the rows already shown
+  and adds its new rows after them: the backend ranks a candidate pool that grows with the limit, so a
+  larger reply ranked new rows above rows the user had scrolled past (fixed in 1.0.14). (3) Thumbnails are fetched in batches of the backend's 64-path cap (a longer request marked the
   rest iconless), and the thumbnail cache holds a full list. (4) The view shares the built sections
-  (`Rc<[Section]>`) instead of copying every row and its image data on each frame.
+  (`Rc<[Section]>`) instead of copying every row and its image data on each frame. (5) Rows far from the
+  view and from the selection render as empty boxes of their measured height (fixed in 1.0.14): a frame
+  that built all the idle apps took 17.7 ms in 1.0.13 (2.6 ms in 1.0.12); now 2.7 ms.
 - 2026-10-28: Opaque surfaces and theme-aware shadows (owner: "some shadows are weird and contrast make no
   sense"). (1) The palette shell was 90-92% opaque in a window with no system material, so whatever lay
   behind the palette showed through unblurred and set its contrast (dark shell over a white window: 13 ->
