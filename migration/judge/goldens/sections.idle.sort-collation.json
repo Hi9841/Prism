@@ -13,7 +13,8 @@
     "app::app-10b",
     "app::beta",
     "app::delta",
-    "app::eclair"
+    "app::eclair",
+    "app::zeta"
   ],
   "sections": [
     {
@@ -561,6 +562,26 @@
             ]
           },
           "title": "Éclair"
+        },
+        {
+          "appId": "zeta",
+          "historyTitle": "zeta",
+          "icon": {
+            "kind": "app",
+            "name": "zeta"
+          },
+          "id": "app::zeta",
+          "run": {
+            "calls": [
+              {
+                "args": {
+                  "id": "zeta"
+                },
+                "cmd": "launch_app"
+              }
+            ]
+          },
+          "title": "zeta"
         }
       ],
       "label": "Apps"

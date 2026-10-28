@@ -15,7 +15,20 @@
     "app::calendar",
     "app::clock",
     "app::portal",
-    "app::discord"
+    "app::discord",
+    "app::fortnite",
+    "app::intranet",
+    "app::notepad",
+    "app::obsidian",
+    "app::paint",
+    "app::photos",
+    "app::relative-tool",
+    "app::share-tool",
+    "app::snipping",
+    "app::spotify",
+    "app::steam",
+    "app::taskmgr",
+    "app::Microsoft.WindowsTerminal_8wekyb3d8bbwe!App"
   ],
   "sections": [
     {
@@ -1006,6 +1019,702 @@
               }
             ]
           }
+        },
+        {
+          "appId": "fortnite",
+          "historyTitle": "Fortnite",
+          "icon": {
+            "kind": "app",
+            "name": "Fortnite"
+          },
+          "id": "app::fortnite",
+          "run": {
+            "calls": [
+              {
+                "args": {
+                  "id": "fortnite"
+                },
+                "cmd": "launch_app"
+              }
+            ]
+          },
+          "title": "Fortnite"
+        },
+        {
+          "appId": "intranet",
+          "dragFile": {
+            "calls": [
+              {
+                "args": {
+                  "paths": [
+                    "C:\\Users\\You\\Desktop\\Intranet.url"
+                  ]
+                },
+                "cmd": "start_file_drag"
+              }
+            ]
+          },
+          "historyTitle": "Intranet",
+          "icon": {
+            "kind": "app",
+            "name": "Intranet"
+          },
+          "id": "app::intranet",
+          "openLocation": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You\\Desktop\\Intranet.url"
+                },
+                "cmd": "open_path_location"
+              }
+            ]
+          },
+          "run": {
+            "calls": [
+              {
+                "args": {
+                  "id": "intranet"
+                },
+                "cmd": "launch_app"
+              }
+            ]
+          },
+          "shellPath": "C:\\Users\\You\\Desktop\\Intranet.url",
+          "showProperties": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You\\Desktop\\Intranet.url"
+                },
+                "cmd": "show_path_properties"
+              }
+            ]
+          },
+          "title": "Intranet"
+        },
+        {
+          "appId": "notepad",
+          "dragFile": {
+            "calls": [
+              {
+                "args": {
+                  "paths": [
+                    "C:\\Windows\\System32\\notepad.exe"
+                  ]
+                },
+                "cmd": "start_file_drag"
+              }
+            ]
+          },
+          "historyTitle": "Notepad",
+          "icon": {
+            "kind": "app",
+            "name": "Notepad"
+          },
+          "id": "app::notepad",
+          "openLocation": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Windows\\System32\\notepad.exe"
+                },
+                "cmd": "open_path_location"
+              }
+            ]
+          },
+          "run": {
+            "calls": [
+              {
+                "args": {
+                  "id": "notepad"
+                },
+                "cmd": "launch_app"
+              }
+            ]
+          },
+          "runAsAdmin": {
+            "calls": [
+              {
+                "args": {
+                  "id": "notepad"
+                },
+                "cmd": "launch_app_as_admin"
+              }
+            ]
+          },
+          "shellPath": "C:\\Windows\\System32\\notepad.exe",
+          "showProperties": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Windows\\System32\\notepad.exe"
+                },
+                "cmd": "show_path_properties"
+              }
+            ]
+          },
+          "title": "Notepad",
+          "toggleTaskbarPin": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Windows\\System32\\notepad.exe"
+                },
+                "cmd": "is_pinned_to_taskbar"
+              },
+              {
+                "args": {
+                  "path": "C:\\Windows\\System32\\notepad.exe",
+                  "pinned": true
+                },
+                "cmd": "set_taskbar_pinned"
+              }
+            ]
+          }
+        },
+        {
+          "appId": "obsidian",
+          "dragFile": {
+            "calls": [
+              {
+                "args": {
+                  "paths": [
+                    "C:\\Users\\You\\AppData\\Local\\Obsidian\\Obsidian.exe"
+                  ]
+                },
+                "cmd": "start_file_drag"
+              }
+            ]
+          },
+          "historyTitle": "obsidian",
+          "icon": {
+            "kind": "app",
+            "name": "obsidian"
+          },
+          "id": "app::obsidian",
+          "openLocation": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You\\AppData\\Local\\Obsidian\\Obsidian.exe"
+                },
+                "cmd": "open_path_location"
+              }
+            ]
+          },
+          "run": {
+            "calls": [
+              {
+                "args": {
+                  "id": "obsidian"
+                },
+                "cmd": "launch_app"
+              }
+            ]
+          },
+          "runAsAdmin": {
+            "calls": [
+              {
+                "args": {
+                  "id": "obsidian"
+                },
+                "cmd": "launch_app_as_admin"
+              }
+            ]
+          },
+          "shellPath": "C:\\Users\\You\\AppData\\Local\\Obsidian\\Obsidian.exe",
+          "showProperties": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You\\AppData\\Local\\Obsidian\\Obsidian.exe"
+                },
+                "cmd": "show_path_properties"
+              }
+            ]
+          },
+          "title": "obsidian",
+          "toggleTaskbarPin": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Users\\You\\AppData\\Local\\Obsidian\\Obsidian.exe"
+                },
+                "cmd": "is_pinned_to_taskbar"
+              },
+              {
+                "args": {
+                  "path": "C:\\Users\\You\\AppData\\Local\\Obsidian\\Obsidian.exe",
+                  "pinned": true
+                },
+                "cmd": "set_taskbar_pinned"
+              }
+            ]
+          }
+        },
+        {
+          "appId": "paint",
+          "dragFile": {
+            "calls": [
+              {
+                "args": {
+                  "paths": [
+                    "C:\\Windows\\System32\\mspaint.exe"
+                  ]
+                },
+                "cmd": "start_file_drag"
+              }
+            ]
+          },
+          "historyTitle": "Paint",
+          "icon": {
+            "kind": "app",
+            "name": "Paint"
+          },
+          "id": "app::paint",
+          "openLocation": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Windows\\System32\\mspaint.exe"
+                },
+                "cmd": "open_path_location"
+              }
+            ]
+          },
+          "run": {
+            "calls": [
+              {
+                "args": {
+                  "id": "paint"
+                },
+                "cmd": "launch_app"
+              }
+            ]
+          },
+          "runAsAdmin": {
+            "calls": [
+              {
+                "args": {
+                  "id": "paint"
+                },
+                "cmd": "launch_app_as_admin"
+              }
+            ]
+          },
+          "shellPath": "C:\\Windows\\System32\\mspaint.exe",
+          "showProperties": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Windows\\System32\\mspaint.exe"
+                },
+                "cmd": "show_path_properties"
+              }
+            ]
+          },
+          "title": "Paint",
+          "toggleTaskbarPin": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Windows\\System32\\mspaint.exe"
+                },
+                "cmd": "is_pinned_to_taskbar"
+              },
+              {
+                "args": {
+                  "path": "C:\\Windows\\System32\\mspaint.exe",
+                  "pinned": true
+                },
+                "cmd": "set_taskbar_pinned"
+              }
+            ]
+          }
+        },
+        {
+          "appId": "photos",
+          "historyTitle": "Photos",
+          "icon": {
+            "kind": "app",
+            "name": "Photos"
+          },
+          "id": "app::photos",
+          "run": {
+            "calls": [
+              {
+                "args": {
+                  "id": "photos"
+                },
+                "cmd": "launch_app"
+              }
+            ]
+          },
+          "title": "Photos"
+        },
+        {
+          "appId": "relative-tool",
+          "historyTitle": "Relative Tool",
+          "icon": {
+            "kind": "app",
+            "name": "Relative Tool"
+          },
+          "id": "app::relative-tool",
+          "run": {
+            "calls": [
+              {
+                "args": {
+                  "id": "relative-tool"
+                },
+                "cmd": "launch_app"
+              }
+            ]
+          },
+          "runAsAdmin": {
+            "calls": [
+              {
+                "args": {
+                  "id": "relative-tool"
+                },
+                "cmd": "launch_app_as_admin"
+              }
+            ]
+          },
+          "title": "Relative Tool"
+        },
+        {
+          "appId": "share-tool",
+          "dragFile": {
+            "calls": [
+              {
+                "args": {
+                  "paths": [
+                    "\\\\server\\share\\tool.exe"
+                  ]
+                },
+                "cmd": "start_file_drag"
+              }
+            ]
+          },
+          "historyTitle": "Share Tool",
+          "icon": {
+            "kind": "app",
+            "name": "Share Tool"
+          },
+          "id": "app::share-tool",
+          "openLocation": {
+            "calls": [
+              {
+                "args": {
+                  "path": "\\\\server\\share\\tool.exe"
+                },
+                "cmd": "open_path_location"
+              }
+            ]
+          },
+          "run": {
+            "calls": [
+              {
+                "args": {
+                  "id": "share-tool"
+                },
+                "cmd": "launch_app"
+              }
+            ]
+          },
+          "runAsAdmin": {
+            "calls": [
+              {
+                "args": {
+                  "id": "share-tool"
+                },
+                "cmd": "launch_app_as_admin"
+              }
+            ]
+          },
+          "shellPath": "\\\\server\\share\\tool.exe",
+          "showProperties": {
+            "calls": [
+              {
+                "args": {
+                  "path": "\\\\server\\share\\tool.exe"
+                },
+                "cmd": "show_path_properties"
+              }
+            ]
+          },
+          "title": "Share Tool",
+          "toggleTaskbarPin": {
+            "calls": [
+              {
+                "args": {
+                  "path": "\\\\server\\share\\tool.exe"
+                },
+                "cmd": "is_pinned_to_taskbar"
+              },
+              {
+                "args": {
+                  "path": "\\\\server\\share\\tool.exe",
+                  "pinned": true
+                },
+                "cmd": "set_taskbar_pinned"
+              }
+            ]
+          }
+        },
+        {
+          "appId": "snipping",
+          "historyTitle": "Snipping Tool",
+          "icon": {
+            "kind": "app",
+            "name": "Snipping Tool"
+          },
+          "id": "app::snipping",
+          "run": {
+            "calls": [
+              {
+                "args": {
+                  "id": "snipping"
+                },
+                "cmd": "launch_app"
+              }
+            ]
+          },
+          "title": "Snipping Tool"
+        },
+        {
+          "appId": "spotify",
+          "dragFile": {
+            "calls": [
+              {
+                "args": {
+                  "paths": [
+                    "spotify:"
+                  ]
+                },
+                "cmd": "start_file_drag"
+              }
+            ]
+          },
+          "historyTitle": "Spotify",
+          "icon": {
+            "kind": "app",
+            "name": "Spotify"
+          },
+          "id": "app::spotify",
+          "openLocation": {
+            "calls": [
+              {
+                "args": {
+                  "path": "spotify:"
+                },
+                "cmd": "open_path_location"
+              }
+            ]
+          },
+          "run": {
+            "calls": [
+              {
+                "args": {
+                  "id": "spotify"
+                },
+                "cmd": "launch_app"
+              }
+            ]
+          },
+          "shellPath": "spotify:",
+          "showProperties": {
+            "calls": [
+              {
+                "args": {
+                  "path": "spotify:"
+                },
+                "cmd": "show_path_properties"
+              }
+            ]
+          },
+          "title": "Spotify"
+        },
+        {
+          "appId": "steam",
+          "dragFile": {
+            "calls": [
+              {
+                "args": {
+                  "paths": [
+                    "C:\\Program Files (x86)\\Steam\\steam.exe"
+                  ]
+                },
+                "cmd": "start_file_drag"
+              }
+            ]
+          },
+          "historyTitle": "Steam",
+          "icon": {
+            "kind": "app",
+            "name": "Steam"
+          },
+          "id": "app::steam",
+          "openLocation": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Program Files (x86)\\Steam\\steam.exe"
+                },
+                "cmd": "open_path_location"
+              }
+            ]
+          },
+          "run": {
+            "calls": [
+              {
+                "args": {
+                  "id": "steam"
+                },
+                "cmd": "launch_app"
+              }
+            ]
+          },
+          "runAsAdmin": {
+            "calls": [
+              {
+                "args": {
+                  "id": "steam"
+                },
+                "cmd": "launch_app_as_admin"
+              }
+            ]
+          },
+          "shellPath": "C:\\Program Files (x86)\\Steam\\steam.exe",
+          "showProperties": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Program Files (x86)\\Steam\\steam.exe"
+                },
+                "cmd": "show_path_properties"
+              }
+            ]
+          },
+          "title": "Steam",
+          "toggleTaskbarPin": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Program Files (x86)\\Steam\\steam.exe"
+                },
+                "cmd": "is_pinned_to_taskbar"
+              },
+              {
+                "args": {
+                  "path": "C:\\Program Files (x86)\\Steam\\steam.exe",
+                  "pinned": true
+                },
+                "cmd": "set_taskbar_pinned"
+              }
+            ]
+          }
+        },
+        {
+          "appId": "taskmgr",
+          "dragFile": {
+            "calls": [
+              {
+                "args": {
+                  "paths": [
+                    "C:\\Windows\\System32\\Taskmgr.exe"
+                  ]
+                },
+                "cmd": "start_file_drag"
+              }
+            ]
+          },
+          "historyTitle": "Task Manager",
+          "icon": {
+            "kind": "app",
+            "name": "Task Manager"
+          },
+          "id": "app::taskmgr",
+          "openLocation": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Windows\\System32\\Taskmgr.exe"
+                },
+                "cmd": "open_path_location"
+              }
+            ]
+          },
+          "run": {
+            "calls": [
+              {
+                "args": {
+                  "id": "taskmgr"
+                },
+                "cmd": "launch_app"
+              }
+            ]
+          },
+          "runAsAdmin": {
+            "calls": [
+              {
+                "args": {
+                  "id": "taskmgr"
+                },
+                "cmd": "launch_app_as_admin"
+              }
+            ]
+          },
+          "shellPath": "C:\\Windows\\System32\\Taskmgr.exe",
+          "showProperties": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Windows\\System32\\Taskmgr.exe"
+                },
+                "cmd": "show_path_properties"
+              }
+            ]
+          },
+          "title": "Task Manager",
+          "toggleTaskbarPin": {
+            "calls": [
+              {
+                "args": {
+                  "path": "C:\\Windows\\System32\\Taskmgr.exe"
+                },
+                "cmd": "is_pinned_to_taskbar"
+              },
+              {
+                "args": {
+                  "path": "C:\\Windows\\System32\\Taskmgr.exe",
+                  "pinned": true
+                },
+                "cmd": "set_taskbar_pinned"
+              }
+            ]
+          }
+        },
+        {
+          "appId": "Microsoft.WindowsTerminal_8wekyb3d8bbwe!App",
+          "historyTitle": "Terminal",
+          "icon": {
+            "kind": "app",
+            "name": "Terminal"
+          },
+          "id": "app::Microsoft.WindowsTerminal_8wekyb3d8bbwe!App",
+          "run": {
+            "calls": [
+              {
+                "args": {
+                  "id": "Microsoft.WindowsTerminal_8wekyb3d8bbwe!App"
+                },
+                "cmd": "launch_app"
+              }
+            ]
+          },
+          "title": "Terminal"
         }
       ],
       "label": "Apps"

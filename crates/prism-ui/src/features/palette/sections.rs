@@ -83,10 +83,10 @@ pub struct BuiltSections {
     pub flat_items: Vec<PaletteItem>,
 }
 
-/// Caps on the idle view; matching the displayed rows, not the data limits.
+/// Caps on the displayed rows, not the data limits. The idle view lists every
+/// app (no cap), so the user can scroll through all of them.
 const RECENT_LIMIT: usize = 5;
 const IDLE_QUICK_LIMIT: usize = 6;
-const IDLE_APPS_LIMIT: usize = 8;
 const SEARCH_QUICK_LIMIT: usize = 3;
 const SEARCH_APPS_LIMIT: usize = 6;
 
@@ -178,7 +178,7 @@ pub fn build_sections(sources: &PaletteSources) -> BuiltSections {
 
         let unpinned: Vec<&AppEntry> =
             sorted_apps.into_iter().filter(|entry| !pinned_app_id_set.contains(entry.app_id.as_str())).collect();
-        if let Some(apps_section) = build_apps_section(&unpinned, app_icons, app_groups, IDLE_APPS_LIMIT) {
+        if let Some(apps_section) = build_apps_section(&unpinned, app_icons, app_groups, usize::MAX) {
             out.push(apps_section);
         }
     } else {

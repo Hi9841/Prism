@@ -384,9 +384,16 @@ impl Theme {
         Gradient::oklch(145.0, from, to)
     }
 
-    /// The `.row[data-selected]` background stack: an accent wash over surface-active.
-    pub fn row_selected_wash(&self) -> Rgba {
-        fade(self.accent, 7.0)
+    /// The selected row: one even accent tint, stronger than any neutral
+    /// surface in both themes (the old left-edge wash over surface-active read
+    /// weaker than a hovered row on the light theme).
+    pub fn row_selected_fill(&self) -> Rgba {
+        fade(self.accent, if self.mode == Mode::Dark { 24.0 } else { 24.0 })
+    }
+
+    /// The selected row's 1px ring.
+    pub fn row_selected_ring(&self) -> Rgba {
+        fade(self.accent, if self.mode == Mode::Dark { 60.0 } else { 72.0 })
     }
 
     /// `color-mix(in oklab, var(--accent) 13%, var(--t-surface-active))`.

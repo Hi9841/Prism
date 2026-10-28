@@ -167,7 +167,10 @@ pub struct Palette {
     announce_loading: bool,
     announce_task: Option<Task<()>>,
     reveal_pending: bool,
-    hovered_row: Option<usize>,
+    /// The last pointer position a row saw move: Windows repeats a move
+    /// message at the same spot, which must not take the selection back from
+    /// the keyboard.
+    row_pointer: Option<Point<Pixels>>,
     _subscriptions: Vec<gpui::Subscription>,
 }
 
@@ -242,7 +245,7 @@ impl Palette {
             announce_loading: false,
             announce_task: None,
             reveal_pending: false,
-            hovered_row: None,
+            row_pointer: None,
             _subscriptions: vec![input_sub, palette_sub, observe_palette, observe_app, app_sub, hub_sub],
         }
     }
@@ -737,7 +740,6 @@ impl Focusable for Palette {
 struct RowFlags {
     index: usize,
     selected: bool,
-    hovered: bool,
     pinned: bool,
     reorderable: bool,
     removable: bool,
@@ -746,24 +748,29 @@ struct RowFlags {
 }
 
 impl Palette {
-    fn render_row(&self, item: &PaletteItem, flags: RowFlags, t: &Theme, zoom: f32, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        let RowFlags { index, selected, hovered, pinned, reorderable, removable, dragged, drop_target } = flags;
+    #[allow(clippy::too_many_arguments)]
+    fn render_row(&self, item: &PaletteItem, scope: &str, flags: RowFlags, t: &Theme, zoom: f32, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let RowFlags { index, selected, pinned, reorderable, removable, dragged, drop_target } = flags;
         let item_reorder_id = reorder_item_id(item);
         let can_reorder = reorderable && item_reorder_id.is_some();
         let can_drag_file = !can_reorder && item.shell_path.is_some() && item.drag_file.is_some();
         let targets = self.targets.clone();
         let reorder_target = can_reorder.then(|| item_reorder_id.clone()).flatten();
 
-        // `.row` background stack. `transition-colors duration-50` moves the
-        // background color; the selected wash (a background image) and the rings
-        // (box shadows) change at once.
-        let key = gpui::ElementId::Name(format!("row-{}", item.id).into());
+        // The selection is the only highlighted row. Pointer movement over a
+        // row selects it, so a separate hover color only ever marked a second
+        // row: the one under a resting pointer after the keyboard or a new
+        // query moved the selection. `transition-colors duration-50` moves the
+        // background color; the ring changes at once.
+        // One app can show in two sections (Recent and Apps): the animation
+        // keys include the section, or the two rows share one animation state
+        // and the unselected copy resets the selected one.
+        let row_key = format!("{scope}/{}", item.id);
+        let key = gpui::ElementId::Name(format!("row-{row_key}").into());
         let background = if drop_target {
             t.drop_target_fill()
         } else if selected {
-            t.surface_active
-        } else if hovered {
-            t.surface_hover
+            t.row_selected_fill()
         } else {
             TRANSPARENT
         };
@@ -784,34 +791,23 @@ impl Palette {
                 if drop_target {
                     ring(d, fade(t.accent, 52.0)).shadow(zoomed(vec![shadow(0., 3., 10., 0., fade(t.accent, 9.0))], zoom))
                 } else if selected {
-                    // The wash covers the border box, under the 1px ring.
-                    ring(d, fade(t.accent, 13.0)).child(
-                        div().absolute().top(r(-1.)).right(r(-1.)).bottom(r(-1.)).left(r(-1.)).rounded(r(14.)).bg(
-                            gpui::linear_gradient(
-                                90.,
-                                gpui::linear_color_stop(hsla(t.row_selected_wash()), 0.0),
-                                gpui::linear_color_stop(hsla(fade(t.row_selected_wash(), 0.0)), 0.58),
-                            ),
-                        ),
-                    )
+                    ring(d, t.row_selected_ring())
                 } else {
                     d
                 }
             })
             .when(dragged, |d| d.opacity(0.42))
-            .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
-                // A drag holds the pointer (pointer capture): other rows get no hover.
-                if this.active_drag.is_some() {
+            .on_mouse_move(cx.listener(move |this, event: &MouseMoveEvent, _, cx| {
+                // A drag holds the pointer (pointer capture): other rows do not select.
+                if this.active_drag.is_some() || this.row_pointer == Some(event.position) {
                     return;
                 }
-                if *hovered {
-                    this.hovered_row = Some(index);
-                    // `onMouseEnter`: hovering selects.
+                this.row_pointer = Some(event.position);
+                // `onMouseEnter`: hovering selects. Any move also takes the
+                // selection back after the keyboard moved it off this row.
+                if this.palette.read(cx).selected != index {
                     this.palette.update(cx, |p, cx| p.select(index, cx));
-                } else if this.hovered_row == Some(index) {
-                    this.hovered_row = None;
                 }
-                cx.notify();
             }));
         if selected || drop_target {
             // The selected/drop ring is an inset shadow in CSS; compensate the 1px border.
@@ -898,7 +894,7 @@ impl Palette {
                 )
             });
 
-        let trailing = self.render_trailing(item, index, selected, hovered, pinned, can_reorder, can_drag_file, removable, dragged, t, window, cx);
+        let trailing = self.render_trailing(item, &row_key, index, selected, pinned, can_reorder, can_drag_file, removable, dragged, t, window, cx);
         row.child(icon_cell).child(text_cell).child(trailing).into_any_element()
     }
 
@@ -906,9 +902,9 @@ impl Palette {
     fn render_trailing(
         &self,
         item: &PaletteItem,
+        row_key: &str,
         index: usize,
         selected: bool,
-        row_hovered: bool,
         pinned: bool,
         can_reorder: bool,
         can_drag_file: bool,
@@ -919,7 +915,8 @@ impl Palette {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let mut trailing = div().relative().flex().flex_none().items_center().gap(r(6.));
-        let show_affordance = row_hovered || selected;
+        // Row buttons belong to the selected row only (see `render_row`).
+        let show_affordance = selected;
         if let Some(path) = item.subtitle.as_ref().filter(|s| is_path_subtitle(s)) {
             trailing = trailing.child(
                 truncate(path.clone())
@@ -937,7 +934,7 @@ impl Palette {
             let key_item = item.clone();
             let grabbing = dragged;
             // Keyed by item, so focus follows the item when it moves.
-            let key = gpui::ElementId::Name(format!("reorder-grip-{}", item.id).into());
+            let key = gpui::ElementId::Name(format!("reorder-grip-{row_key}").into());
             // `transition-[color,background-color,opacity] duration-100`.
             let (hovered, hover) = transition::hover(&key, window, cx);
             let text = if hovered { t.fg } else if grabbing { t.accent } else { t.fg_quiet };
@@ -986,7 +983,7 @@ impl Palette {
         let remove_button = |this: &Self, window: &mut Window, cx: &mut Context<Self>| {
             let id = item.id.clone();
             let app = this.app.clone();
-            let key = gpui::ElementId::Name(format!("remove-{}", item.id).into());
+            let key = gpui::ElementId::Name(format!("remove-{row_key}").into());
             let (hovered, hover) = transition::hover(&key, window, cx);
             let text = transition::color(&key, "text", if hovered { t.danger } else { t.fg_tertiary }, Timing::tw(150), window, cx);
             let background = transition::color(&key, "bg", if hovered { t.danger_soft } else { TRANSPARENT }, Timing::tw(150), window, cx);
@@ -1006,7 +1003,7 @@ impl Palette {
         };
         if item.app_id.is_some() {
             // Pin toggle: visible on row hover; the two icons cross-fade (`.icon-swap`).
-            let swap = window.use_keyed_state(gpui::ElementId::Name(format!("pin-swap-{}", item.id).into()), cx, |_, _| {
+            let swap = window.use_keyed_state(gpui::ElementId::Name(format!("pin-swap-{row_key}").into()), cx, |_, _| {
                 Tween::at(if pinned { 1.0 } else { 0.0 })
             });
             let target = if pinned { 1.0 } else { 0.0 };
@@ -1016,7 +1013,7 @@ impl Palette {
             let p = swap.read(cx).animate(window);
             let pin_item = item.clone();
             // `.press`: color, background-color, opacity, and scale.
-            let key = gpui::ElementId::Name(format!("pin-{}", item.id).into());
+            let key = gpui::ElementId::Name(format!("pin-{row_key}").into());
             let (hovered, hover) = transition::hover(&key, window, cx);
             let text = if pinned { t.accent } else if hovered { t.fg } else { t.fg_tertiary };
             let text = transition::color(&key, "text", text, Timing::PRESS, window, cx);
@@ -1063,7 +1060,7 @@ impl Palette {
         } else if can_drag_file {
             let drag_item = item.clone();
             // `transition-[color,background-color,opacity] duration-100`.
-            let key = gpui::ElementId::Name(format!("file-grip-{}", item.id).into());
+            let key = gpui::ElementId::Name(format!("file-grip-{row_key}").into());
             let (hovered, hover) = transition::hover(&key, window, cx);
             let text = transition::color(&key, "text", if hovered { t.accent } else { t.fg_quiet }, Timing::tw(100), window, cx);
             let background = transition::color(&key, "bg", if hovered { t.surface_hover } else { TRANSPARENT }, Timing::tw(100), window, cx);
@@ -1201,7 +1198,7 @@ impl Palette {
 
     fn render_results(&mut self, t: &Theme, zoom: f32, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let palette = self.palette.read(cx);
-        let sections = palette.sections.clone();
+        let sections = Rc::clone(&palette.sections);
         let selected = palette.selected;
         let query = palette.query.clone();
         let file_error = palette.file_error.clone();
@@ -1216,21 +1213,6 @@ impl Palette {
         };
         let drop_target = self.reorder_drag.as_ref().filter(|d| d.active).and_then(|d| d.target_item_id.clone());
         let category = self.category_drag.clone();
-        // A hover whose leave event never came (the row moved under a drag,
-        // which holds the pointer) is dropped when the pointer is not over
-        // that row's last painted bounds.
-        if let Some(index) = self.hovered_row
-            && self.active_drag.is_none()
-        {
-            let pointer = window.mouse_position();
-            let targets = self.targets.borrow();
-            let inside = targets.rows.get(&index).is_some_and(|bounds| bounds.contains(&pointer))
-                && targets.viewport.is_none_or(|viewport| viewport.contains(&pointer));
-            if !inside {
-                self.hovered_row = None;
-            }
-        }
-        let hovered_row = self.hovered_row;
 
         {
             let mut targets = self.targets.borrow_mut();
@@ -1241,6 +1223,7 @@ impl Palette {
         }
         let targets = self.targets.clone();
         let painted_scroll = self.scroll.clone();
+        let palette_state = self.palette.clone();
         // The scroll container carries Chromium's wheel line (100/3 px); the
         // content resets the line height (gfx::CHROMIUM_LINE_PX).
         let viewport = div()
@@ -1251,10 +1234,18 @@ impl Palette {
             .min_h_0()
             .child(
                 canvas(
-                    move |bounds, _, _| {
-                        let mut targets = targets.borrow_mut();
-                        targets.viewport = Some(bounds);
-                        targets.painted_offset = painted_scroll.offset();
+                    move |bounds, _, cx| {
+                        let offset = painted_scroll.offset();
+                        {
+                            let mut targets = targets.borrow_mut();
+                            targets.viewport = Some(bounds);
+                            targets.painted_offset = offset;
+                        }
+                        // Within one screen of the end: ask for the next page of files.
+                        let max = painted_scroll.max_offset().height;
+                        if max > px(0.) && max + offset.y <= bounds.size.height {
+                            palette_state.update(cx, |palette, cx| palette.load_more_files(cx));
+                        }
                     },
                     |_, _, _, _| {},
                 )
@@ -1286,7 +1277,7 @@ impl Palette {
         }
 
         let mut flat = 0usize;
-        for section in sections {
+        for section in sections.iter() {
             let section_drop = category
                 .as_ref()
                 .is_some_and(|c| c.active && c.kind == CategoryKind::Section && c.target_id.as_deref() == Some(&section.id));
@@ -1425,14 +1416,13 @@ impl Palette {
                     let flags = RowFlags {
                         index,
                         selected: selected == index,
-                        hovered: hovered_row == Some(index),
                         pinned: item.app_id.as_ref().is_some_and(|id| pinned_apps.contains(id)),
                         reorderable: false,
                         removable: false,
                         dragged: dragged_id.as_deref() == Some(item.id.as_str()),
                         drop_target: false,
                     };
-                    rows = rows.child(self.render_row(item, flags, t, zoom, window, cx));
+                    rows = rows.child(self.render_row(item, &group.id, flags, t, zoom, window, cx));
                 }
                 group_block = group_block.child(rows);
                 block = block.child(group_block);
@@ -1468,7 +1458,6 @@ impl Palette {
                 let flags = RowFlags {
                     index,
                     selected: selected == index,
-                    hovered: hovered_row == Some(index),
                     pinned: item.app_id.as_ref().is_some_and(|id| pinned_apps.contains(id)),
                     reorderable,
                     removable,
@@ -1476,7 +1465,7 @@ impl Palette {
                         || (can_drag_file && dragged_id.as_deref() == Some(item.id.as_str())),
                     drop_target: can_reorder && drop_target.is_some() && drop_target == item_reorder_id,
                 };
-                rows = rows.child(self.render_row(item, flags, t, zoom, window, cx));
+                rows = rows.child(self.render_row(item, &section.id, flags, t, zoom, window, cx));
             }
             block = block.child(rows);
             list = list.child(block);

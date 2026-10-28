@@ -1377,8 +1377,9 @@ const THUMBNAIL_SIZE: u32 = 64;
 /// before the preview is produced. Mirrors the custom-icon decoder.
 const THUMBNAIL_MAX_EDGE: u32 = 8_192;
 const THUMBNAIL_MAX_PIXELS: u64 = 16_777_216; // 8_192 * 2_048
-/// Bounds the per-request decode work; one result page is at most ~20 files.
-const THUMBNAIL_BATCH_CAP: usize = 64;
+/// Bounds the per-request decode work; callers split longer lists into
+/// batches of this size.
+pub const THUMBNAIL_BATCH_CAP: usize = 64;
 
 fn thumbnail_dimensions_within_limit(width: u32, height: u32) -> bool {
     width != 0

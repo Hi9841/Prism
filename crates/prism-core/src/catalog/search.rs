@@ -10,7 +10,9 @@ use super::types::{
 };
 
 const DEFAULT_LIMIT: usize = 10;
-const MAX_LIMIT: usize = 50;
+/// The most results one search returns. The palette asks for one page at a
+/// time and raises its limit as the user scrolls, up to this cap.
+pub const MAX_LIMIT: usize = 500;
 
 pub fn clamp_limit(limit: Option<usize>) -> usize {
     limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT)

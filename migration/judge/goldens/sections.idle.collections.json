@@ -21,6 +21,7 @@
     "app::app-2",
     "app::paint",
     "app::discord",
+    "app::steam",
     "app::snipping",
     "app::Microsoft.WindowsCalculator_8wekyb3d8bbwe!App",
     "app::calendar",
@@ -29,7 +30,9 @@
     "app::intranet",
     "app::photos",
     "app::relative-tool",
-    "app::share-tool"
+    "app::share-tool",
+    "app::spotify",
+    "app::Microsoft.WindowsTerminal_8wekyb3d8bbwe!App"
   ],
   "sections": [
     {
@@ -1576,6 +1579,86 @@
                   }
                 ]
               }
+            },
+            {
+              "appId": "steam",
+              "dragFile": {
+                "calls": [
+                  {
+                    "args": {
+                      "paths": [
+                        "C:\\Program Files (x86)\\Steam\\steam.exe"
+                      ]
+                    },
+                    "cmd": "start_file_drag"
+                  }
+                ]
+              },
+              "historyTitle": "Steam",
+              "icon": {
+                "kind": "app",
+                "name": "Steam"
+              },
+              "id": "app::steam",
+              "openLocation": {
+                "calls": [
+                  {
+                    "args": {
+                      "path": "C:\\Program Files (x86)\\Steam\\steam.exe"
+                    },
+                    "cmd": "open_path_location"
+                  }
+                ]
+              },
+              "run": {
+                "calls": [
+                  {
+                    "args": {
+                      "id": "steam"
+                    },
+                    "cmd": "launch_app"
+                  }
+                ]
+              },
+              "runAsAdmin": {
+                "calls": [
+                  {
+                    "args": {
+                      "id": "steam"
+                    },
+                    "cmd": "launch_app_as_admin"
+                  }
+                ]
+              },
+              "shellPath": "C:\\Program Files (x86)\\Steam\\steam.exe",
+              "showProperties": {
+                "calls": [
+                  {
+                    "args": {
+                      "path": "C:\\Program Files (x86)\\Steam\\steam.exe"
+                    },
+                    "cmd": "show_path_properties"
+                  }
+                ]
+              },
+              "title": "Steam",
+              "toggleTaskbarPin": {
+                "calls": [
+                  {
+                    "args": {
+                      "path": "C:\\Program Files (x86)\\Steam\\steam.exe"
+                    },
+                    "cmd": "is_pinned_to_taskbar"
+                  },
+                  {
+                    "args": {
+                      "path": "C:\\Program Files (x86)\\Steam\\steam.exe",
+                      "pinned": true
+                    },
+                    "cmd": "set_taskbar_pinned"
+                  }
+                ]
+              }
             }
           ],
           "label": "Dev"
@@ -1915,6 +1998,79 @@
               }
             ]
           }
+        },
+        {
+          "appId": "spotify",
+          "dragFile": {
+            "calls": [
+              {
+                "args": {
+                  "paths": [
+                    "spotify:"
+                  ]
+                },
+                "cmd": "start_file_drag"
+              }
+            ]
+          },
+          "historyTitle": "Spotify",
+          "icon": {
+            "kind": "app",
+            "name": "Spotify"
+          },
+          "id": "app::spotify",
+          "openLocation": {
+            "calls": [
+              {
+                "args": {
+                  "path": "spotify:"
+                },
+                "cmd": "open_path_location"
+              }
+            ]
+          },
+          "run": {
+            "calls": [
+              {
+                "args": {
+                  "id": "spotify"
+                },
+                "cmd": "launch_app"
+              }
+            ]
+          },
+          "shellPath": "spotify:",
+          "showProperties": {
+            "calls": [
+              {
+                "args": {
+                  "path": "spotify:"
+                },
+                "cmd": "show_path_properties"
+              }
+            ]
+          },
+          "title": "Spotify"
+        },
+        {
+          "appId": "Microsoft.WindowsTerminal_8wekyb3d8bbwe!App",
+          "historyTitle": "Terminal",
+          "icon": {
+            "kind": "app",
+            "name": "Terminal"
+          },
+          "id": "app::Microsoft.WindowsTerminal_8wekyb3d8bbwe!App",
+          "run": {
+            "calls": [
+              {
+                "args": {
+                  "id": "Microsoft.WindowsTerminal_8wekyb3d8bbwe!App"
+                },
+                "cmd": "launch_app"
+              }
+            ]
+          },
+          "title": "Terminal"
         }
       ],
       "label": "Apps"

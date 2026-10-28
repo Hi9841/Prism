@@ -2,9 +2,12 @@
 //! the derived sections, the selection, and running results.
 
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::rc::Rc;
 use std::time::Duration;
 
 use gpui::{App, AppContext, Context, Entity, EventEmitter, Task, Timer};
+use prism_core::catalog::THUMBNAIL_BATCH_CAP;
+use prism_core::catalog::search::MAX_LIMIT as MAX_FILE_RESULTS;
 
 use crate::features::palette::sections::{
     BuiltSections, PaletteSources, Section, build_sections, history_file_path, is_clipboard_kind,
@@ -22,8 +25,15 @@ use crate::lib::types::{
 };
 use crate::state::app::{AppEvent, AppState, ToastKind, app_state, error_string};
 
-/// Bounds the retained thumbnail data URLs; the palette lives for weeks.
-const THUMBNAIL_CACHE_LIMIT: usize = 128;
+/// Bounds the retained thumbnail data URLs; the palette lives for weeks. It
+/// holds a full result list and the recent rows: a smaller cache evicted the
+/// images of a long list and fetched them again on each page.
+const THUMBNAIL_CACHE_LIMIT: usize = MAX_FILE_RESULTS + 128;
+/// File results per page: the first request asks for one page, and each
+/// scroll to the end of the list asks for one more.
+const FILE_PAGE: usize = 50;
+/// Rows from the end of the list at which keyboard selection loads the next page.
+const LOAD_MORE_ROWS: usize = 5;
 const POWER_PLAN_QUERY_DELAY_MS: u64 = 50;
 const FILE_SEARCH_DELAY_MS: u64 = 35;
 const THUMBNAIL_EXTENSIONS: [&str; 6] = ["png", "jpg", "jpeg", "gif", "bmp", "webp"];
@@ -111,6 +121,8 @@ pub struct PaletteState {
     pub apps_error: bool,
     quick_access: Vec<QuickAccessEntry>,
     file_results: Vec<FileEntry>,
+    /// The file results the current query asks for (grows by `FILE_PAGE`).
+    file_limit: usize,
     pub volumes: Vec<VolumeCoverage>,
     pub total_indexed: f64,
     file_result_query: String,
@@ -138,7 +150,8 @@ pub struct PaletteState {
     // Derived (the useMemo values).
     visible_apps: Vec<AppEntry>,
     quick_items: Vec<PaletteItem>,
-    pub sections: Vec<Section>,
+    /// Shared with the view, which reads it on every frame without a copy.
+    pub sections: Rc<[Section]>,
     pub flat_items: Vec<PaletteItem>,
     // In-flight requests: replacing a task drops (cancels) the older one, as the
     // request counters in the original ignore stale replies.
@@ -236,6 +249,7 @@ impl PaletteState {
             apps_error: false,
             quick_access: Vec::new(),
             file_results: Vec::new(),
+            file_limit: FILE_PAGE,
             volumes: Vec::new(),
             total_indexed: 0.0,
             file_result_query: String::new(),
@@ -263,7 +277,7 @@ impl PaletteState {
             icon_retry: None,
             visible_apps: Vec::new(),
             quick_items: Vec::new(),
-            sections: Vec::new(),
+            sections: Rc::from(Vec::new()),
             flat_items: Vec::new(),
             phase1_task: None,
             power_task: None,
@@ -354,7 +368,6 @@ impl PaletteState {
             self.visible_apps.iter().map(|entry| (entry.app_id.as_str(), entry)).collect();
         let pinned_apps: Vec<&AppEntry> =
             settings.pinned_apps.iter().filter_map(|id| apps_by_id.get(id.as_str()).copied()).collect();
-        let file_thumbnails = self.thumbnails.map.clone();
         let sources = PaletteSources {
             query: &self.query,
             apps: &self.visible_apps,
@@ -366,7 +379,7 @@ impl PaletteState {
             pinned_app_ids: &settings.pinned_apps,
             history: &app.history,
             existing_history_paths: &self.existing_history_paths,
-            file_thumbnails: &file_thumbnails,
+            file_thumbnails: &self.thumbnails.map,
             app_icons: &self.app_icons,
             file_results: &self.file_results,
             file_result_query: &self.file_result_query,
@@ -380,7 +393,7 @@ impl PaletteState {
         };
         let BuiltSections { sections, flat_items } = build_sections(&sources);
         let pinned_ids = settings.pinned_apps.clone();
-        self.sections = sections;
+        self.sections = sections.into();
         self.flat_items = flat_items;
 
         // Clamp the selection to the list, then honor a pending selection target.
@@ -645,9 +658,10 @@ impl PaletteState {
         self.files_searching = true;
         self.files_error = false;
         self.file_error = None;
+        let limit = self.file_limit;
         self.file_task = Some(cx.spawn(async move |this, cx| {
             Timer::after(Duration::from_millis(FILE_SEARCH_DELAY_MS)).await;
-            let result = bridge::search_files(search_text, 50).await;
+            let result = bridge::search_files(search_text, limit).await;
             let _ = this.update(cx, |this, cx| {
                 match result {
                     Ok(response) => {
@@ -711,37 +725,45 @@ impl PaletteState {
         self.thumbnails_in_flight.extend(pending.iter().cloned());
         let epoch = self.thumbnail_epoch;
         cx.spawn(async move |this, cx| {
-            let result = bridge::get_file_thumbnails(pending.clone()).await;
-            let _ = this.update(cx, |this, cx| {
-                if epoch != this.thumbnail_epoch {
-                    return;
-                }
-                let Ok(thumbnails) = result else {
-                    for path in &pending {
+            // The backend answers at most THUMBNAIL_BATCH_CAP paths per call
+            // and pads the rest with None, which would mark them iconless.
+            for batch in pending.chunks(THUMBNAIL_BATCH_CAP) {
+                let result = bridge::get_file_thumbnails(batch.to_vec()).await;
+                let current = this.update(cx, |this, cx| {
+                    if epoch != this.thumbnail_epoch {
+                        return false;
+                    }
+                    let Ok(thumbnails) = result else {
+                        for path in batch {
+                            this.thumbnails_in_flight.remove(path);
+                        }
+                        return true;
+                    };
+                    let mut by_path = HashMap::new();
+                    for (path, thumbnail) in batch.iter().zip(thumbnails) {
+                        this.thumbnails.remember(path, thumbnail.clone());
                         this.thumbnails_in_flight.remove(path);
+                        by_path.insert(path, thumbnail.filter(|t| !t.is_empty()));
                     }
-                    return;
-                };
-                let mut by_path = HashMap::new();
-                for (path, thumbnail) in pending.iter().zip(thumbnails) {
-                    this.thumbnails.remember(path, thumbnail.clone());
-                    this.thumbnails_in_flight.remove(path);
-                    by_path.insert(path, thumbnail.filter(|t| !t.is_empty()));
-                }
-                // An unchanged image keeps its data URL, so its row does not change.
-                let mut changed = false;
-                for entry in &mut this.file_results {
-                    if let Some(thumbnail) = by_path.get(&entry.path)
-                        && entry.thumbnail != *thumbnail
-                    {
-                        entry.thumbnail = thumbnail.clone();
-                        changed = true;
+                    // An unchanged image keeps its data URL, so its row does not change.
+                    let mut changed = false;
+                    for entry in &mut this.file_results {
+                        if let Some(thumbnail) = by_path.get(&entry.path)
+                            && entry.thumbnail != *thumbnail
+                        {
+                            entry.thumbnail = thumbnail.clone();
+                            changed = true;
+                        }
                     }
+                    if changed {
+                        this.rebuild(cx);
+                    }
+                    true
+                });
+                if !matches!(current, Ok(true)) {
+                    break;
                 }
-                if changed {
-                    this.rebuild(cx);
-                }
-            });
+            }
         })
         .detach();
     }
@@ -756,6 +778,7 @@ impl PaletteState {
             cx.emit(PaletteEvent::SelectionChanged);
         }
         if changed {
+            self.file_limit = FILE_PAGE;
             self.query_phase1(cx);
             self.query_power_plans(cx);
             self.search_files(cx);
@@ -775,6 +798,25 @@ impl PaletteState {
             cx.emit(PaletteEvent::SelectionChanged);
             cx.notify();
         }
+        if next + LOAD_MORE_ROWS >= self.flat_items.len() {
+            self.load_more_files(cx);
+        }
+    }
+
+    /// Asks for the next page of file results. Does nothing while a search
+    /// runs, after a reply that did not fill its page (no more matches), or at
+    /// the cap. The current rows stay until the larger reply replaces them.
+    pub fn load_more_files(&mut self, cx: &mut Context<Self>) {
+        let query = js::lower(js::trim(&self.query));
+        if self.files_searching
+            || self.file_result_query != query
+            || self.file_results.len() < self.file_limit
+            || self.file_limit >= MAX_FILE_RESULTS
+        {
+            return;
+        }
+        self.file_limit = (self.file_limit + FILE_PAGE).min(MAX_FILE_RESULTS);
+        self.search_files(cx);
     }
 
     pub fn select(&mut self, index: usize, cx: &mut Context<Self>) {

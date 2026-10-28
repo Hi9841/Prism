@@ -162,6 +162,24 @@ another app, Esc cancels, a click works after the drag, and a release over the p
 
 ## Deviation log
 
+- 2026-10-29: One row highlight (owner: "the hovering and selected ... coloring is broken and a bit weird").
+  (1) The pointer no longer paints its own hover fill: a real pointer move selects the row under it, and
+  a keyboard move takes the selection away from it, so only one row is ever highlighted (the original
+  painted the hovered row and the selected row at once, and a resting pointer kept its fill while the
+  user typed or used the arrows). (2) The row buttons (pin, remove, grips) show on the selected row only.
+  (3) The selected row is one even accent tint with an accent ring (24% fill and 60% / 72% ring in dark
+  / light), in place of the left-edge wash over the active surface. Fill vs panel contrast: dark 1.18 ->
+  1.40:1, light 1.13 -> 1.26:1. (4) Row animation keys carry the section id, so an app in both Recent
+  and Apps no longer shares one transition state (its tint and pin did not show).
+- 2026-10-28: Long result lists (owner: "scroll through all my apps and when search .png see all my .png").
+  (1) The idle view lists every unpinned app (the original showed 8); the nine `sections.idle.*` goldens
+  were updated by hand, and only rows were added after the original rows. (2) A file search asks for one page of 50
+  results and asks for the next page when the list scrolls within one screen of its end or the keyboard
+  selection is within 5 rows of it, up to 500 (the backend cap was 50). On the 5.85 M-row catalog copy a
+  `.png` search costs 5 / 21 / 42 ms (warm) at 50 / 250 / 500 results, and the rows already shown keep their
+  order. (3) Thumbnails are fetched in batches of the backend's 64-path cap (a longer request marked the
+  rest iconless), and the thumbnail cache holds a full list. (4) The view shares the built sections
+  (`Rc<[Section]>`) instead of copying every row and its image data on each frame.
 - 2026-10-28: Opaque surfaces and theme-aware shadows (owner: "some shadows are weird and contrast make no
   sense"). (1) The palette shell was 90-92% opaque in a window with no system material, so whatever lay
   behind the palette showed through unblurred and set its contrast (dark shell over a white window: 13 ->
