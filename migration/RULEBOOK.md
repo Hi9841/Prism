@@ -162,6 +162,15 @@ another app, Esc cancels, a click works after the drag, and a release over the p
 
 ## Deviation log
 
+- 2026-10-28: Opaque surfaces and theme-aware shadows (owner: "some shadows are weird and contrast make no
+  sense"). (1) The palette shell was 90-92% opaque in a window with no system material, so whatever lay
+  behind the palette showed through unblurred and set its contrast (dark shell over a white window: 13 ->
+  34 levels); the shell, the settings panel (which showed the palette through it, as in the original), the
+  menus, the toast, and the drag previews are now opaque. (2) The shadow tokens were tuned on the dark
+  theme; on the light theme they painted dark smudges under every tile, so `Theme::shade` paints them at
+  40% there (dark unchanged). (3) Light text steps were 13.9 / 7.4 / 5.7 / 5.2:1 (tertiary and quiet almost
+  equal); they are now 16.0 / 10.5 / 7.2 / 5.6:1, spaced like the dark theme's 17.1 / 9.7 / 6.3 / 5.1:1.
+  No golden covers colors (judge 277/277).
 - 2026-10-28: File thumbnails no longer flash during disk activity. The original cleared its thumbnail
   cache and stripped the shown results on each `FileIndexUpdated` (every 750 ms while the disk is busy),
   so each image fell back to its tile icon until a fetch completed again. The port now marks the cache

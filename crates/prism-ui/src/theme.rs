@@ -271,7 +271,7 @@ impl Theme {
             Mode::Dark => Theme {
                 mode,
                 accent_id,
-                shell_solid: Gradient::oklch(180.0, (0.17, 0.009, 268.0, 0.92), (0.152, 0.008, 268.0, 0.9)),
+                shell_solid: Gradient::oklch(180.0, (0.17, 0.009, 268.0, 1.0), (0.152, 0.008, 268.0, 1.0)),
                 shell_line: white(0.08),
                 shell_hi: white(0.06),
                 field_bg: white(0.045),
@@ -309,7 +309,7 @@ impl Theme {
             Mode::Light => Theme {
                 mode,
                 accent_id,
-                shell_solid: Gradient::oklch(180.0, (0.995, 0.002, 268.0, 0.94), (0.965, 0.004, 268.0, 0.92)),
+                shell_solid: Gradient::oklch(180.0, (0.995, 0.002, 268.0, 1.0), (0.965, 0.004, 268.0, 1.0)),
                 shell_line: black(0.08),
                 shell_hi: white(0.85),
                 field_bg: black(0.03),
@@ -330,9 +330,9 @@ impl Theme {
                 toast: oklch(0.995, 0.002, 268.0, 0.9),
                 bg_raised: oklch(0.995, 0.002, 268.0, 0.88),
                 fg: oklch(0.22, 0.012, 268.0, 1.0),
-                fg_secondary: oklch(0.4, 0.012, 268.0, 1.0),
-                fg_tertiary: oklch(0.46, 0.01, 268.0, 1.0),
-                fg_quiet: oklch(0.48, 0.008, 268.0, 1.0),
+                fg_secondary: oklch(0.35, 0.012, 268.0, 1.0),
+                fg_tertiary: oklch(0.44, 0.01, 268.0, 1.0),
+                fg_quiet: oklch(0.5, 0.008, 268.0, 1.0),
                 danger: oklch(0.55, 0.16, 20.0, 1.0),
                 danger_soft: oklch(0.55, 0.16, 20.0, 0.1),
                 scroll: black(0.12),
@@ -349,6 +349,14 @@ impl Theme {
 
     pub fn is_light(&self) -> bool {
         self.mode == Mode::Light
+    }
+
+    /// Black at `alpha`, for a shadow. The tokens were tuned on the dark
+    /// theme, where a shadow falls on a near-black surface; on the light
+    /// theme the same values read as smudges, so it paints them at
+    /// `LIGHT_SHADOW_STRENGTH`.
+    pub fn shade(&self, alpha: f32) -> Rgba {
+        black(if self.is_light() { alpha * LIGHT_SHADOW_STRENGTH } else { alpha })
     }
 
     /// `.tile-<tint>` gradient (145deg).
@@ -499,19 +507,22 @@ pub mod motion {
     }
 }
 
+/// Share of a shadow's alpha that the light theme paints (see `Theme::shade`).
+const LIGHT_SHADOW_STRENGTH: f32 = 0.4;
+
 /// `--shadow-pop`.
-pub fn shadow_pop() -> Vec<BoxShadow> {
-    vec![shadow(0.0, 1.0, 2.0, 0.0, black(0.35)), shadow(0.0, 8.0, 24.0, 0.0, black(0.28)), shadow(0.0, 24.0, 64.0, 0.0, black(0.35))]
+pub fn shadow_pop(t: &Theme) -> Vec<BoxShadow> {
+    vec![shadow(0.0, 1.0, 2.0, 0.0, t.shade(0.35)), shadow(0.0, 8.0, 24.0, 0.0, t.shade(0.28)), shadow(0.0, 24.0, 64.0, 0.0, t.shade(0.35))]
 }
 
 /// `--shadow-raised`.
-pub fn shadow_raised() -> Vec<BoxShadow> {
-    vec![shadow(0.0, 1.0, 2.0, 0.0, black(0.3)), shadow(0.0, 4.0, 14.0, 0.0, black(0.24))]
+pub fn shadow_raised(t: &Theme) -> Vec<BoxShadow> {
+    vec![shadow(0.0, 1.0, 2.0, 0.0, t.shade(0.3)), shadow(0.0, 4.0, 14.0, 0.0, t.shade(0.24))]
 }
 
 /// `--shadow-tile`.
-pub fn shadow_tile() -> Vec<BoxShadow> {
-    vec![shadow(0.0, 1.0, 1.5, 0.0, black(0.4)), shadow(0.0, 4.0, 10.0, 0.0, black(0.3))]
+pub fn shadow_tile(t: &Theme) -> Vec<BoxShadow> {
+    vec![shadow(0.0, 1.0, 1.5, 0.0, t.shade(0.4)), shadow(0.0, 4.0, 10.0, 0.0, t.shade(0.3))]
 }
 
 /// One CSS box shadow, lengths in px (rem-scaled by the caller when needed).

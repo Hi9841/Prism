@@ -30,10 +30,10 @@ pub fn surface(t: &Theme, zoom: f32) -> Div {
         .rounded(r(10.))
         .border_1()
         .border_color(hsla(t.line))
-        // D4: the backdrop blur becomes a near-opaque fill.
-        .bg(hsla(Rgba { a: 0.98, ..t.bg_raised }))
+        // D4: the backdrop blur becomes an opaque fill.
+        .bg(hsla(Rgba { a: 1.0, ..t.bg_raised }))
         .p(r(PADDING / 2.))
-        .shadow(zoomed(shadow_pop(), zoom))
+        .shadow(zoomed(shadow_pop(t), zoom))
 }
 
 /// One item row. Hover and keyboard focus share the one `highlighted`

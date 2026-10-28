@@ -103,11 +103,11 @@ pub fn render_toast_stack(app: &Entity<AppState>, t: &Theme, zoom: f32, window: 
                 .border_1()
                 .border_color(hsla(if is_error { fade(t.danger, 35.0) } else { t.line }))
                 // D4: the backdrop blur becomes a near-opaque fill.
-                .bg(hsla(Rgba { a: 0.96, ..t.toast }))
+                .bg(hsla(Rgba { a: 1.0, ..t.toast }))
                 .py(r(6.))
                 .pl(r(12.))
                 .pr(r(if is_error { 4. } else { 16. }))
-                .shadow(zoomed(shadow_raised(), zoom))
+                .shadow(zoomed(shadow_raised(t), zoom))
                 .child(crate::components::ui::inset_top_highlight(white(0.05), 13.))
                 .child(
                     div()

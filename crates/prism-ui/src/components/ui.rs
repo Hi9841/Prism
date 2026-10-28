@@ -154,7 +154,7 @@ pub fn inset_top_highlight(color: Rgba, radius: f32) -> gpui::Div {
 
 pub fn row_icon(icon_value: &PaletteIcon, size: f32, t: &Theme, zoom: f32) -> AnyElement {
     match icon_value {
-        PaletteIcon::Tile { icon: lucide, tint } => tile(t.tile(tint).background(), size, zoom)
+        PaletteIcon::Tile { icon: lucide, tint } => tile(t.tile(tint).background(), size, t, zoom)
             .child(icon(&lucide_file(lucide.0), size * 19.0 / 40.0, white(0.95)))
             .into_any_element(),
         PaletteIcon::Emoji { char } => div()
@@ -197,7 +197,7 @@ pub fn row_icon(icon_value: &PaletteIcon, size: f32, t: &Theme, zoom: f32) -> An
 }
 
 /// `.tile`: a gradient chip with a top highlight and the tile shadow.
-fn tile(background: gpui::Background, size: f32, zoom: f32) -> gpui::Div {
+fn tile(background: gpui::Background, size: f32, t: &Theme, zoom: f32) -> gpui::Div {
     div()
         .relative()
         .flex()
@@ -207,13 +207,13 @@ fn tile(background: gpui::Background, size: f32, zoom: f32) -> gpui::Div {
         .size(r(size))
         .rounded(r(10.))
         .bg(background)
-        .shadow(zoomed(shadow_tile(), zoom))
+        .shadow(zoomed(shadow_tile(t), zoom))
         .child(inset_top_highlight(white(0.14), 10.))
 }
 
 fn monogram(name: &str, size: f32, t: &Theme, zoom: f32) -> AnyElement {
     let hue = hue_for_name(name);
-    tile(t.mono_tile(hue).background(), size, zoom)
+    tile(t.mono_tile(hue).background(), size, t, zoom)
         .child(
             div()
                 .font_weight(weight(600.))
@@ -416,7 +416,7 @@ pub fn segmented(
                 .w(r(segment))
                 .rounded(r(7.))
                 .bg(hsla(t.seg_active))
-                .shadow(zoomed(vec![shadow(0., 1., 3., 0., crate::theme::black(0.25))], zoom))
+                .shadow(zoomed(vec![shadow(0., 1., 3., 0., t.shade(0.25))], zoom))
                 .child(inset_top_highlight(white(0.08), 7.)),
         )
         .children(options.into_iter().enumerate().map(|(index, option)| {

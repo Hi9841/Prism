@@ -24,7 +24,7 @@ use crate::lib::types::{
 };
 use crate::state::app::{AppEvent, AppState, SHORTCUT_OPTIONS, THEME_OPTIONS, ToastKind, app_state, error_string};
 use crate::state::palette::{PaletteState, palette_state};
-use crate::theme::{Accent, Rgba, TRANSPARENT, Theme, fade, hsla, motion, over, shadow, tabular_nums, white};
+use crate::theme::{Accent, Rgba, TRANSPARENT, Theme, fade, hsla, motion, shadow, tabular_nums, white};
 use crate::transition::{self, Timing};
 
 /// "Ctrl+Alt+Space" -> "Ctrl + Alt + Space"
@@ -1270,7 +1270,7 @@ impl Render for SettingsSheet {
                 .rounded_full()
                 .bg(hsla(accent.swatch()))
                 .when(!active, |d| {
-                    d.shadow(zoomed(vec![shadow(0., 1., 3., 0., crate::theme::black(0.4))], zoom))
+                    d.shadow(zoomed(vec![shadow(0., 1., 3., 0., t.shade(0.4))], zoom))
                         .child(crate::components::ui::inset_top_highlight(white(0.2), 12.))
                 })
                 .on_click(move |_, _, cx| {
@@ -1380,10 +1380,10 @@ impl Render for SettingsSheet {
             .rounded_br(r(8.))
             .border_l_1()
             .border_color(hsla(t.line))
-            // `backdrop-blur-2xl`: the animated `.settings-backdrop` is the backdrop root, so
-            // the blur sees only the uniform backdrop fill. The panel paints that fill a second
-            // time under `bg-raised`; the palette shows through, unblurred.
-            .bg(hsla(over(t.bg_raised, Rgba { a: t.backdrop.a * backdrop_opacity, ..t.backdrop })))
+            // `backdrop-blur-2xl` blurred nothing in the original (the animated
+            // `.settings-backdrop` is the backdrop root), so the palette showed through the
+            // panel unblurred. The port paints `bg-raised` opaque (D4, deviation 2026-10-28).
+            .bg(hsla(Rgba { a: 1.0, ..t.bg_raised }))
             .opacity(panel_opacity)
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .child(
