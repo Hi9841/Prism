@@ -954,3 +954,15 @@ Open, for the owner:
   launch gate holds until the box closes. The owner's index has no such entry today (the MSYS2
   entries are AUMID-only and go through `explorer.exe`).
 - The first `ShellExecuteW` in a new Prism process costs 25-115 ms more (shell DLL load).
+
+### Incident 2026-10-29 ~14:20-14:58: the launch bench ended Explorer
+
+`launch_bench.rs` ended any process that outlived its closed window by 5 s. File Explorer and Control Panel
+windows belong to the shell (`explorer.exe`), so the L-002 runs ended the owner's Explorer; Windows restarted
+it for a time and then stopped. Prism 1.0.15 then started (update, 14:55) with no Explorer, gave up the
+Win-key bridge after its 120 s startup retries, and showed "Win-key mode disabled". Explorer was started
+again by hand at 14:58.
+
+- Bench fix: `close` ends only a process created after the launch began.
+- Product fix: the startup shortcut retries wait for Explorer for as long as it is missing; only attempts made
+  while Explorer runs count toward the 480 (`backend.rs` `apply_startup_shortcut`).

@@ -18,11 +18,12 @@ use prism_core::apps::{self, AppEntry};
 use prism_core::runtime::{block_on, spawn_blocking};
 use serde_json::{json, Value};
 use windows::core::{BOOL, PWSTR};
-use windows::Win32::Foundation::{CloseHandle, HWND, LPARAM, WPARAM};
+use windows::Win32::Foundation::{CloseHandle, FILETIME, HWND, LPARAM, WPARAM};
 use windows::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_CLOAKED};
 use windows::Win32::System::Threading::{
-    OpenProcess, QueryFullProcessImageNameW, TerminateProcess, WaitForSingleObject,
-    PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE, PROCESS_TERMINATE,
+    GetProcessTimes, OpenProcess, QueryFullProcessImageNameW, TerminateProcess,
+    WaitForSingleObject, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
+    PROCESS_SYNCHRONIZE, PROCESS_TERMINATE,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     EnumWindows, GetWindow, GetWindowTextW, GetWindowThreadProcessId, IsWindow, IsWindowVisible,
@@ -58,6 +59,7 @@ fn main() {
             .map(|hwnd| hwnd.0 as isize)
             .collect();
         let launch_entry = entry.clone();
+        let launched_at = file_time_now();
         let started = Instant::now();
         // The palette's path: a pool thread blocks on the runtime, which runs
         // the launch on its blocking pool.
@@ -82,7 +84,7 @@ fn main() {
             })
         );
         if let Some((hwnd, _)) = window {
-            close(hwnd);
+            close(hwnd, launched_at);
         }
         std::thread::sleep(gap);
     }
@@ -173,18 +175,50 @@ fn matches(hwnd: HWND, matcher: &str) -> bool {
     process_name(process_id(hwnd)).contains(matcher) || title(hwnd).to_lowercase().contains(matcher)
 }
 
-/// Closes the window and waits for it to go; a process that outlives its
-/// window by 5 s is ended, unless it hosts other apps' frames.
-fn close(hwnd: HWND) {
+/// Now, as a FILETIME count (100 ns steps since 1601).
+fn file_time_now() -> u64 {
+    const UNIX_EPOCH_AS_FILETIME: u64 = 116_444_736_000_000_000;
+    let since_unix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    UNIX_EPOCH_AS_FILETIME + (since_unix.as_nanos() / 100) as u64
+}
+
+/// When the process started, as a FILETIME count; 0 when unknown.
+fn process_started(pid: u32) -> u64 {
+    unsafe {
+        let Ok(process) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) else {
+            return 0;
+        };
+        let (mut created, mut exited, mut kernel, mut user) = (
+            FILETIME::default(),
+            FILETIME::default(),
+            FILETIME::default(),
+            FILETIME::default(),
+        );
+        let ok = GetProcessTimes(process, &mut created, &mut exited, &mut kernel, &mut user);
+        let _ = CloseHandle(process);
+        if ok.is_err() {
+            return 0;
+        }
+        (u64::from(created.dwHighDateTime) << 32) | u64::from(created.dwLowDateTime)
+    }
+}
+
+/// Closes the window and waits for it to go. A process that the launch
+/// started and that outlives its window by 5 s is ended. A process from
+/// before the launch is never ended: File Explorer windows belong to the
+/// shell (`explorer.exe`), and packaged apps' frames to their host.
+fn close(hwnd: HWND, launched_at: u64) {
     let pid = process_id(hwnd);
-    let hosted = process_name(pid) == "applicationframehost.exe";
+    let ours = process_started(pid) >= launched_at;
     unsafe {
         let _ = PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0));
         let deadline = Instant::now() + Duration::from_secs(5);
         while IsWindow(Some(hwnd)).as_bool() && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(20));
         }
-        if hosted {
+        if !ours {
             return;
         }
         if let Ok(process) = OpenProcess(PROCESS_SYNCHRONIZE | PROCESS_TERMINATE, false, pid) {
