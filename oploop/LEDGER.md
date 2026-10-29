@@ -859,3 +859,97 @@ probes), the sweep is 75% Windows folder enumeration, and its database part read
 Parity captures (port only, `prism --parity`, scenarios restored from git history into `target/tmp/parity`):
 dark shell over a white window 34,36,38 -> 11,13,16 (same as over a dark one); settings-panel ghosting 5
 levels -> 0; light tile shadows at 40%; light text steps 13.9/7.4/5.7/5.2 -> 16.0/10.5/7.2/5.6:1.
+
+## Session 2026-10-29 (D): app launch
+
+Owner report: "apps take a long time to open sometimes"; the palette goes at once, the app comes late.
+Owner approved desktop runs that launch and close real apps (also Discord and Spotify).
+
+### Journeys
+
+| ID | Journey | Harness | Metric |
+|---|---|---|---|
+| L1 | Enter on an app row to the app window, real Prism | `python oploop/bench/launch_e2e.py <query> <match> [reps] [--kill IMAGE]` (Win key, type, Enter with SendInput) | `hiddenMs` palette hidden, `windowMs` new app window visible, `focusMs` the app window has the foreground |
+| L2 | `apps::launch` alone, same thread path as the palette | `cargo run --release -p prism-core --example launch_bench -- <apps.json> <name> <match> [reps]` | `callMs` launch call, `windowMs` app window visible |
+
+### Correctness floor
+
+`cargo check --workspace --all-targets`, `cargo clippy -p prism-core -p prism-ui -p prism-app`, judge
+(`cargo build -p prism-judge`, `bun migration/judge/judge.mjs`). No unit tests (owner rule).
+
+### Baseline (installed 1.0.14, 2026-10-29)
+
+| App (launch path) | n | hiddenMs | windowMs | focusMs |
+|---|---|---|---|---|
+| WezTerm (exe, `ShellExecuteW`) | 11 | 5-8 | 349-405 | = windowMs |
+| Spotify (exe, killed between reps) | 8 | 8 (40 first) | 249-276 (1069 cold) | = windowMs |
+| Display settings (`ms-settings:`) | 3 | 211-274 | 151-419 | = windowMs |
+| Calculator (packaged, `ActivateApplication`) | 6 | 221-357 | 306-455 | **never** |
+
+L2 matches L1 for exe apps (WezTerm call 5 ms, window 351-408 ms; 7-Zip 56 ms): for an exe, Prism adds
+about 8 ms. Prism's own CPU in the 3 s after Enter: 0-140 ms; the watcher writes 3-5 MiB while Spotify
+starts.
+
+Foreground trace of a Calculator launch: prism 0 ms -> previous window (WezTerm) 221 ms (the palette hides
+when `ActivateApplication` returns) -> Calculator frame appears 307 ms -> the previous window keeps the
+foreground. Packaged apps open without focus, often behind the window the user came from.
+
+### L-001 Packaged apps get the right to take the foreground
+
+Hypothesis: `apps.rs` `activate_packaged_app` calls `ActivateApplication` without
+`CoAllowSetForegroundWindow` on the activation manager, so the activated app cannot take the foreground,
+and the palette hide gives it back to the previous window. 125 of the owner's 412 apps take this path.
+Calling `CoAllowSetForegroundWindow(&manager)` first (the documented pattern) should make `focusMs` equal
+`windowMs` (about 300 ms instead of never).
+
+Result (`launch_ab.py`, 2 blocks x 4 reps, A = HEAD, B = candidate): Calculator `focusMs` never (0/8) ->
+304-315 ms, equal to `windowMs` (8/8); `hiddenMs` 219-241 -> 221-227, `windowMs` 302-327 -> 304-315
+(unchanged). **Kept** (0f161ce9, branch `oploop-launch`).
+
+Checked, no defect: Discord and Spotify (exe) take the foreground when their window shows; Discord in the
+tray comes to the front 126 ms after Enter (3/3). `dedupe_apps` prefers the Start Menu alias, so of the 107
+desktop-app AUMID entries only 15 run through the AUMID path (File Explorer, Control Panel, Run, Docker
+Desktop, MSYS2 shells). File Explorer through the palette: foreground at 179-211 ms.
+
+### L-002 Desktop app ids open through the Apps folder in-process
+
+Hypothesis: for an AUMID without `!` (a desktop app id), `ActivateApplication` always fails (L2: call
+24-36 ms for `org.wezfurlong.wezterm`), and the fallback starts a new `explorer.exe` that hands the item to
+the shell (WezTerm window 797-960 ms by this path against 349-408 ms by its exe). Skipping the activation
+for ids without `!` and opening `shell:AppsFolder\<id>` with `ShellExecuteW` in Prism's process should
+save about 25 ms (activation) plus the `explorer.exe` start, about 100 ms or more.
+
+Result, in-process form (L2, `bench-A` = HEAD, `bench-B` = candidate): File Explorer `windowMs` 493-559 ->
+299-346 ms warm (first call in a process 470-480 ms, call 175-192 ms), Control Panel 415-452 -> 263 ms.
+**Reverted**: MSYS2 is uninstalled but its Start Menu shortcuts remain, and opening `shell:AppsFolder\C:\msys64\ucrt64.exe`
+in Prism's process blocked the launch thread: first with a modal "Problem with Shortcut" box (15.5 s, then
+more than 9 min), and with `SEE_MASK_FLAG_NO_UI` still more than 120 s with no box (the shell searches for
+the missing target). `explorer.exe` keeps that search out of Prism. The diff is in
+`target/tmp/launch/l002-inprocess.diff`.
+
+### L-002a Desktop app ids skip only the activation
+
+Same first half: `aumid.contains('!') && activate_packaged_app(..)`, then `explorer.exe` as before.
+L2, File Explorer, 3 interleaved blocks x 4 reps: call 23.6 (22.9-34.3) -> 1.9 (1.8-3.9) ms, p 3e-5;
+`windowMs` 481 (459-499) -> 467 (430-535) ms, p 0.07 (not significant). The palette hides 22 ms sooner for
+the 15 AUMID-only apps. **Kept** (41056d70). Gate: `cargo check --workspace --all-targets` pass; clippy
+prism-core 3 warnings (floor 3); judge 277/277.
+
+### Session D summary
+
+| Journey | Baseline | Now | Change | n |
+|---|---|---|---|---|
+| L1 Calculator (packaged), Enter to app has focus | never (0/8) | 304-315 ms (8/8) | fixed | 8 + 8 |
+| L2 File Explorer (desktop app id), launch call | 23.6 ms (22.9-34.3) | 1.9 ms (1.8-3.9) | -92%, p 3e-5 | 12 + 12 |
+| L1 exe apps (WezTerm, Spotify, Discord), Enter to window | 249-405 ms, focus at window | not changed | Prism adds 5-8 ms | 22 |
+
+Kept: L-001 (0f161ce9), L-002a (41056d70). Reverted: L-002 in-process form.
+
+Open, for the owner:
+- Packaged apps keep the palette on screen 220-360 ms after Enter: `ActivateApplication` returns after the
+  app is activated, and the palette hides only then (the order gives the app Prism's foreground right).
+  Hiding before the call changes the UI timing: a taste decision.
+- `shell_open` (`ShellExecuteW`, error UI on) also opens `.lnk`/`.url` locations in Prism's process. A
+  shortcut with a missing target shows a modal "Problem with Shortcut" box on the launch thread, and the
+  launch gate holds until the box closes. The owner's index has 9 such entries (MSYS2, uninstalled).
+- The first `ShellExecuteW` in a new Prism process costs 25-115 ms more (shell DLL load).
