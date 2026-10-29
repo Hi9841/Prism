@@ -24,8 +24,8 @@ use windows::Win32::Graphics::Gdi::{
 use windows::Win32::Storage::EnhancedStorage::PKEY_AppUserModel_ID;
 use windows::Win32::System::Com::StructuredStorage::{PropVariantClear, PROPVARIANT};
 use windows::Win32::System::Com::{
-    CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize, IPersistFile,
-    CLSCTX_INPROC_SERVER, CLSCTX_LOCAL_SERVER, COINIT_APARTMENTTHREADED, STGM_READ,
+    CoAllowSetForegroundWindow, CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize,
+    IPersistFile, CLSCTX_INPROC_SERVER, CLSCTX_LOCAL_SERVER, COINIT_APARTMENTTHREADED, STGM_READ,
 };
 use windows::Win32::System::Registry::{
     RegCloseKey, RegEnumKeyExW, RegOpenKeyExW, RegQueryInfoKeyW, RegQueryValueExW, HKEY,
@@ -2297,6 +2297,9 @@ fn activate_packaged_app(aumid: &str) -> Result<(), String> {
         let manager: IApplicationActivationManager =
             CoCreateInstance(&ApplicationActivationManager, None, CLSCTX_LOCAL_SERVER)
                 .map_err(|error| format!("failed to create app activation manager: {error}"))?;
+        // The app takes the foreground only with Prism's right to it; without
+        // it the app opens behind the window the user came from.
+        let _ = CoAllowSetForegroundWindow(&manager, None);
         let app_id = wide(aumid);
         manager
             .ActivateApplication(PCWSTR(app_id.as_ptr()), PCWSTR::null(), AO_NONE)
