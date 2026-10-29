@@ -951,5 +951,6 @@ Open, for the owner:
   Hiding before the call changes the UI timing: a taste decision.
 - `shell_open` (`ShellExecuteW`, error UI on) also opens `.lnk`/`.url` locations in Prism's process. A
   shortcut with a missing target shows a modal "Problem with Shortcut" box on the launch thread, and the
-  launch gate holds until the box closes. The owner's index has 9 such entries (MSYS2, uninstalled).
+  launch gate holds until the box closes. The owner's index has no such entry today (the MSYS2
+  entries are AUMID-only and go through `explorer.exe`).
 - The first `ShellExecuteW` in a new Prism process costs 25-115 ms more (shell DLL load).
