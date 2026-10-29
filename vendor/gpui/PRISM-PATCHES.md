@@ -172,3 +172,12 @@
     descent), and since the glyph row rounds (patch 24) the clip cut the last pixel row of a "g" or
     "y" when a row's top fell at a fractional y of 0.5-0.625 (the owner saw "grilling" cut). CSS
     clips both axes, so Chromium can cut the same rows; this is a deliberate difference.
+31. `src/timer.rs` `Timer` (it replaces `pub use smol::Timer`) and
+    `src/platform/windows/dispatcher.rs` `precise_timer` (also used by `dispatch_after`):
+    a timer waits on one thread with a high-resolution waitable timer
+    (`CREATE_WAITABLE_TIMER_HIGH_RESOLUTION`, Windows 10 1803 and later). `smol::Timer`
+    waits in the async-io reactor, and the thread-pool timer behind `dispatch_after` waits on a
+    thread-pool timer. On Windows both wake on the 15.6 ms system tick. Measured in the real app:
+    the 35 ms file-search delay took 46.9-47.5 ms, and now takes 35.5 ms. The system timer
+    resolution does not change (no `timeBeginPeriod`). Without that timer, `Timer` is a
+    `smol::Timer` and `dispatch_after` uses the thread pool, as before.
