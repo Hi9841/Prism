@@ -31,7 +31,8 @@ pub const DEFAULT_SHORTCUT: &str = "Win";
 pub const LEGACY_STATE_VERSION: u32 = 2;
 pub const STATE_VERSION: u32 = 3;
 const STARTUP_SHELL_RETRY_DELAY: Duration = Duration::from_millis(250);
-/// Two minutes: a launch at sign-in can come long before Explorer's taskbar.
+/// Two minutes of attempts while Explorer runs; a launch at sign-in can come
+/// long before Explorer's taskbar, and that wait does not count.
 const STARTUP_SHELL_RETRY_ATTEMPTS: usize = 480;
 const STARTUP_ALIGNMENT_DELAY: Duration = Duration::from_secs(1);
 
@@ -593,16 +594,21 @@ impl Backend {
                 return;
             }
 
-            for _ in 0..STARTUP_SHELL_RETRY_ATTEMPTS {
+            let mut attempts = 0;
+            while attempts < STARTUP_SHELL_RETRY_ATTEMPTS {
                 tokio::time::sleep(STARTUP_SHELL_RETRY_DELAY).await;
                 if self.shortcut_generation.load(Ordering::Acquire) != generation {
                     return;
                 }
                 // The Win mode needs Explorer's taskbar; until it exists an
                 // attempt would only write and delete the bridge library.
+                // Explorer can be missing for longer than the retries (a
+                // stopped shell that the user starts again): wait for it,
+                // and count only the attempts made while it runs.
                 if combo == "Win" && !win_key::shell_windows_ready() {
                     continue;
                 }
+                attempts += 1;
                 let retry_combo = combo.clone();
                 let result = crate::runtime::spawn_blocking(move || {
                     self.apply_shortcut_if_current(&retry_combo, generation)
