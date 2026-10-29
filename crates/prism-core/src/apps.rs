@@ -2190,7 +2190,9 @@ pub fn launch(app: &AppEntry) -> Result<(), String> {
             }
         }
         if let Some(aumid) = &app.aumid {
-            if activate_packaged_app(aumid).is_ok() {
+            // Packaged app ids are `PackageFamilyName!AppId`. Activation always
+            // fails on a desktop app id, which only the Apps folder opens.
+            if aumid.contains('!') && activate_packaged_app(aumid).is_ok() {
                 return Ok(());
             }
             return explorer_arg(&format!("shell:AppsFolder\\{aumid}"));
