@@ -60,7 +60,7 @@ impl TaskbarCustomization {
                 match result {
                     Ok(settings) => this.set_settings(settings),
                     Err(error) => app.update(cx, |app, cx| {
-                        app.show_toast("Taskbar settings unavailable", Some(error_string(&error)), ToastKind::Success, cx)
+                        app.show_toast("Taskbar settings unavailable", Some(error_string(&error)), ToastKind::Error, cx)
                     }),
                 }
                 this.busy = None;
@@ -90,7 +90,7 @@ impl TaskbarCustomization {
                 match result {
                     Ok(settings) => this.set_settings(settings),
                     Err(error) => app.update(cx, |app, cx| {
-                        app.show_toast("Taskbar not changed", Some(error_string(&error)), ToastKind::Success, cx)
+                        app.show_toast("Taskbar not changed", Some(error_string(&error)), ToastKind::Error, cx)
                     }),
                 }
                 this.busy = None;

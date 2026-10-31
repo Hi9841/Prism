@@ -856,9 +856,9 @@ impl PaletteState {
         let clipboard_item = is_clipboard_kind(&item.id);
         let app = self.app.clone();
         cx.spawn(async move |this, cx| {
-            let toast = |title: &str, detail: String, cx: &mut gpui::AsyncApp| {
+            let toast = |title: &str, detail: String, kind: ToastKind, cx: &mut gpui::AsyncApp| {
                 let title = title.to_owned();
-                let _ = app.update(cx, |app, cx| app.show_toast(title, Some(detail), ToastKind::Success, cx));
+                let _ = app.update(cx, |app, cx| app.show_toast(title, Some(detail), kind, cx));
             };
             if item.power_plan_guid.is_some() {
                 let result = match cx.update(|cx| run_action(item.run.clone(), cx)) {
@@ -868,12 +868,12 @@ impl PaletteState {
                 // The plan is set: the list refresh below needs no gate.
                 drop(ticket);
                 if let Err(error) = result {
-                    toast("Power plan not changed", error_string(&error), cx);
+                    toast("Power plan not changed", error_string(&error), ToastKind::Error, cx);
                     return;
                 }
                 let current = this.update(cx, |this, _| js::trim(&this.query).to_owned()).unwrap_or_default();
                 if current != submitted_query {
-                    toast("Power plan changed", item.title.clone(), cx);
+                    toast("Power plan changed", item.title.clone(), ToastKind::Success, cx);
                     return;
                 }
                 let refresh = this.update(cx, |this, cx| this.refresh_power_plans(submitted_query.clone(), cx));
@@ -889,12 +889,13 @@ impl PaletteState {
                                 this.rebuild(cx);
                             }
                         });
-                        toast("Power plan changed", item.title.clone(), cx);
+                        toast("Power plan changed", item.title.clone(), ToastKind::Success, cx);
                     }
                     Err(error) => {
                         toast(
                             "Power plan changed",
                             format!("Could not refresh the list: {}", error_string(&error)),
+                            ToastKind::Success,
                             cx,
                         );
                     }
@@ -904,9 +905,9 @@ impl PaletteState {
             let result: Result<(), String> = async {
                 let run = cx.update(|cx| run_action(item.run.clone(), cx)).map_err(|e| e.to_string())?;
                 run.await?;
-                if !clipboard_item {
-                    // Launch while Prism is foreground so the new process inherits
-                    // activation rights, then hide. Never concurrent.
+                // A fresh palette open resets the gate. Hide only the palette
+                // that this launch still owns.
+                if !clipboard_item && ticket.is_current() {
                     cx.update(|cx| bridge::shell(cx).hide_palette(false, cx)).map_err(|e| e.to_string())??;
                 }
                 Ok(())
@@ -927,7 +928,7 @@ impl PaletteState {
                         let _ = bridge::accept_intent(query, action_id.to_owned()).await;
                     }
                 }
-                Err(_) => toast("Couldn\u{2019}t open item", item.title.clone(), cx),
+                Err(_) => toast("Couldn\u{2019}t open item", item.title.clone(), ToastKind::Error, cx),
             }
         })
         .detach();
@@ -943,7 +944,9 @@ impl PaletteState {
             let result: Result<(), String> = async {
                 let run = cx.update(|cx| run_action(action, cx)).map_err(|e| e.to_string())?;
                 run.await?;
-                cx.update(|cx| bridge::shell(cx).hide_palette(false, cx)).map_err(|e| e.to_string())??;
+                if _ticket.is_current() {
+                    cx.update(|cx| bridge::shell(cx).hide_palette(false, cx)).map_err(|e| e.to_string())??;
+                }
                 Ok(())
             }
             .await;
@@ -952,7 +955,7 @@ impl PaletteState {
                 Err(error) => app.show_toast(
                     "Could not run as administrator",
                     Some(error_string(&error)),
-                    ToastKind::Success,
+                    ToastKind::Error,
                     cx,
                 ),
             });

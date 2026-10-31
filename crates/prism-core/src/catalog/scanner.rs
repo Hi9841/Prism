@@ -434,17 +434,34 @@ fn read_folder(dir: &Path, buffer: &mut [u64]) -> Option<FolderListing> {
             listing.complete = error.code() == ERROR_NO_MORE_FILES.to_hresult();
             break;
         }
+        let buffer_bytes = buffer.len() * 8;
         let bytes = buffer.as_ptr().cast::<u8>();
         let mut offset = 0usize;
+        // `FileName` starts at byte 68. A short or oversized name must not
+        // be read past `buffer`.
+        const HEADER: usize = 68;
         loop {
-            // SAFETY: the system wrote a chain of `FILE_FULL_DIR_INFO` records
-            // into `buffer`; each `NextEntryOffset` stays inside it, and each
-            // name is `FileNameLength` bytes after its record's start.
+            let Some(header_end) = offset.checked_add(HEADER) else {
+                listing.complete = false;
+                break 'reads;
+            };
+            if header_end > buffer_bytes || offset % 8 != 0 {
+                listing.complete = false;
+                break 'reads;
+            }
+            // SAFETY: `offset` is 8-byte aligned and the 68-byte header is
+            // inside `buffer`. The name length is checked before the slice.
             let (entry, name) = unsafe {
                 let entry = &*bytes.add(offset).cast::<FILE_FULL_DIR_INFO>();
+                let name_bytes = entry.FileNameLength as usize;
+                let name_end = header_end.checked_add(name_bytes);
+                if name_bytes % 2 != 0 || name_end.is_none_or(|end| end > buffer_bytes) {
+                    listing.complete = false;
+                    break 'reads;
+                }
                 let name = std::slice::from_raw_parts(
-                    entry.FileName.as_ptr(),
-                    entry.FileNameLength as usize / 2,
+                    bytes.add(header_end).cast::<u16>(),
+                    name_bytes / 2,
                 );
                 (entry, name)
             };
@@ -475,7 +492,17 @@ fn read_folder(dir: &Path, buffer: &mut [u64]) -> Option<FolderListing> {
             if entry.NextEntryOffset == 0 {
                 break;
             }
-            offset += entry.NextEntryOffset as usize;
+            let next = entry.NextEntryOffset as usize;
+            let Some(next_offset) = offset.checked_add(next) else {
+                listing.complete = false;
+                break 'reads;
+            };
+            // NextEntryOffset is a multiple of 8, and it must stay in `buffer`.
+            if next < 8 || next % 8 != 0 || next_offset > buffer_bytes {
+                listing.complete = false;
+                break 'reads;
+            }
+            offset = next_offset;
         }
     }
     // SAFETY: `handle` was opened above and is closed once.

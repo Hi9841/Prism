@@ -80,6 +80,8 @@ pub fn check(timeout: Duration, no_cache: bool, current_version: &str) -> Result
     Ok((remote > current).then(|| Update { version: remote.to_string(), url, signature }))
 }
 
+const MAX_INSTALLER_BYTES: u64 = 256 * 1024 * 1024;
+
 pub enum DownloadEvent {
     Started { content_length: Option<u64> },
     Progress { chunk_length: u64 },
@@ -95,12 +97,15 @@ pub fn download(update: &Update, timeout: Duration, mut on_event: impl FnMut(Dow
     let content_length = response.header("Content-Length").and_then(|v| v.parse::<u64>().ok());
     on_event(DownloadEvent::Started { content_length });
     let mut reader = response.into_reader();
-    let mut bytes = Vec::with_capacity(content_length.unwrap_or(0) as usize);
+    let mut bytes = Vec::new();
     let mut chunk = vec![0u8; 64 * 1024];
     loop {
         let read = reader.read(&mut chunk).map_err(|error| error.to_string())?;
         if read == 0 {
             break;
+        }
+        if bytes.len() as u64 + read as u64 > MAX_INSTALLER_BYTES {
+            return Err("the installer is larger than 256 MB".into());
         }
         bytes.extend_from_slice(&chunk[..read]);
         on_event(DownloadEvent::Progress { chunk_length: read as u64 });

@@ -1827,8 +1827,9 @@ unsafe fn bitmap_to_png(bitmap: HBITMAP) -> Option<Vec<u8>> {
     // GetDIBits yields BGRA; shell bitmaps arrive with premultiplied alpha.
     let has_alpha = pixels.as_chunks::<4>().0.iter().any(|p| p[3] != 0);
     if !has_alpha {
-        // No alpha channel: the 32-bit conversion filled 0s - force opaque.
+        // GetDIBits writes BGRA. No alpha channel: swap to RGBA and force opaque.
         for px in pixels.as_chunks_mut::<4>().0 {
+            px.swap(0, 2);
             px[3] = 255;
         }
     } else {

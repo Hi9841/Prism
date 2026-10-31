@@ -137,7 +137,7 @@ impl PowerMenu {
                     Err(error) => {
                         let verb = if action == "shutdown" { "shut down" } else { action };
                         app.update(cx, |app, cx| {
-                            app.show_toast(format!("Could not {verb}"), Some(error_string(&error)), ToastKind::Success, cx)
+                            app.show_toast(format!("Could not {verb}"), Some(error_string(&error)), ToastKind::Error, cx)
                         });
                     }
                 }

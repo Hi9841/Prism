@@ -9,7 +9,7 @@ use crate::components::ui::{text_width, theme, title_tooltip, truncate, weight};
 use crate::features::updater::update_policy::should_check_for_update;
 use crate::features::updater::update_progress::update_percent;
 use crate::features::updater::updater::{self, DownloadEvent, Update};
-use crate::gfx::{Tween, icon, motion_ms, r, rotated};
+use crate::gfx::{Tween, icon, motion_ms, r};
 use crate::lib::bridge::{self, BackendEvent};
 use crate::state::app::{AppState, ToastKind, app_state, error_string};
 use crate::theme::{TRANSPARENT, hsla, motion};
@@ -243,16 +243,17 @@ fn swap_icon(
     }
     let p = state.read(cx).animate(window);
     let scale = 0.25 + 0.75 * p;
-    let mut glyph = icon(name, 14., color).with_transformation(gpui::Transformation::scale(gpui::size(scale, scale)));
-    if spin {
+    let transform = if spin {
         // `animate-spin`: one turn per second, linear.
         window.request_animation_frame();
         let turn = (std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis()
             % 1000) as f32
             / 1000.0;
-        glyph = rotated(glyph, turn * std::f32::consts::TAU)
-            .with_transformation(gpui::Transformation::rotate(gpui::radians(turn * std::f32::consts::TAU)).with_scaling(gpui::size(scale, scale)));
-    }
+        gpui::Transformation::rotate(gpui::radians(turn * std::f32::consts::TAU)).with_scaling(gpui::size(scale, scale))
+    } else {
+        gpui::Transformation::scale(gpui::size(scale, scale))
+    };
+    let glyph = icon(name, 14., color).with_transformation(transform);
     div().absolute().inset_0().flex().items_center().justify_center().opacity(p).child(glyph).into_any_element()
 }
 

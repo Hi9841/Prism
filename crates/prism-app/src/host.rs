@@ -16,9 +16,6 @@ pub enum HostMessage {
     Activate,
 }
 
-// RECT and POINT are plain data.
-unsafe impl Send for HostMessage {}
-
 pub struct GpuiHost {
     pub sender: UnboundedSender<HostMessage>,
     pub app_data_dir: PathBuf,

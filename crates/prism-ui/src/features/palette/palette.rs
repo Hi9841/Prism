@@ -236,6 +236,7 @@ pub struct Palette {
     leave_task: Option<Task<()>>,
     file_drag_task: Option<Task<()>>,
     result_menu: Option<Entity<ResultContextMenu>>,
+    result_menu_sub: Option<gpui::Subscription>,
     power_menu: Entity<PowerMenu>,
     update_control: Entity<UpdateControl>,
     announce_loading: bool,
@@ -314,6 +315,7 @@ impl Palette {
             leave_task: None,
             file_drag_task: None,
             result_menu: None,
+            result_menu_sub: None,
             power_menu,
             update_control,
             announce_loading: false,
@@ -472,7 +474,7 @@ impl Palette {
                 cx.notify();
             }
         });
-        self._subscriptions.push(sub);
+        self.result_menu_sub = Some(sub);
         self.result_menu = Some(menu);
         cx.notify();
     }
@@ -521,11 +523,11 @@ impl Palette {
                                         "Open {}, then right-click its taskbar icon and choose \"Pin to taskbar\".",
                                         item.title
                                     )),
-                                    ToastKind::Success,
+                                    ToastKind::Error,
                                     cx,
                                 );
                             } else {
-                                app.show_toast("Could not update taskbar pin", Some(message), ToastKind::Success, cx);
+                                app.show_toast("Could not update taskbar pin", Some(message), ToastKind::Error, cx);
                             }
                         }
                     });
@@ -538,7 +540,7 @@ impl Palette {
                 cx.spawn(async move |_, cx| {
                     if let Err(error) = task.await {
                         let _ = app.update(cx, |app, cx| {
-                            app.show_toast("Could not open properties", Some(error_string(&error)), ToastKind::Success, cx)
+                            app.show_toast("Could not open properties", Some(error_string(&error)), ToastKind::Error, cx)
                         });
                     }
                 })

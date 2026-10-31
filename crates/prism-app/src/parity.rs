@@ -143,6 +143,10 @@ impl bridge::Shell for ParityShell {
     }
 
     fn window_activation_changed(&self, _active: bool, _cx: &mut App) {}
+
+    fn palette_held_open(&self) -> bool {
+        true
+    }
 }
 
 /// Captures the window's client area as RGBA through PrintWindow.
@@ -151,6 +155,9 @@ fn capture(hwnd: HWND) -> Result<image::RgbaImage, String> {
         let mut rect = Default::default();
         GetWindowRect(hwnd, &mut rect).map_err(|e| e.to_string())?;
         let (width, height) = (rect.right - rect.left, rect.bottom - rect.top);
+        if width <= 0 || height <= 0 {
+            return Err("bad capture size".into());
+        }
         let screen = GetDC(None);
         let dc = CreateCompatibleDC(Some(screen));
         let info = BITMAPINFO {
@@ -166,18 +173,28 @@ fn capture(hwnd: HWND) -> Result<image::RgbaImage, String> {
             ..Default::default()
         };
         let mut bits = std::ptr::null_mut();
-        let bitmap = CreateDIBSection(Some(dc), &info, DIB_RGB_COLORS, &mut bits, None, 0).map_err(|e| e.to_string())?;
+        let bitmap = match CreateDIBSection(Some(dc), &info, DIB_RGB_COLORS, &mut bits, None, 0) {
+            Ok(bitmap) => bitmap,
+            Err(error) => {
+                let _ = DeleteDC(dc);
+                ReleaseDC(None, screen);
+                return Err(error.to_string());
+            }
+        };
         let previous = SelectObject(dc, bitmap.into());
         let ok = PrintWindow(hwnd, dc, PRINT_WINDOW_FLAGS(PW_RENDERFULLCONTENT)).as_bool();
-        let pixels = std::slice::from_raw_parts(bits as *const u8, (width * height * 4) as usize).to_vec();
+        let len = (width as usize).saturating_mul(height as usize).saturating_mul(4);
+        let pixels = if ok && !bits.is_null() {
+            Some(std::slice::from_raw_parts(bits as *const u8, len).to_vec())
+        } else {
+            None
+        };
         SelectObject(dc, previous);
         let _ = DeleteObject(bitmap.into());
         let _ = DeleteDC(dc);
         ReleaseDC(None, screen);
-        if !ok {
-            return Err("PrintWindow failed".into());
-        }
-        let mut rgba = pixels;
+        let mut rgba = pixels.ok_or_else(|| "PrintWindow failed".to_string())?;
+
         for px in rgba.chunks_exact_mut(4) {
             px.swap(0, 2);
             px[3] = 255;
@@ -187,10 +204,13 @@ fn capture(hwnd: HWND) -> Result<image::RgbaImage, String> {
 }
 
 fn key_event(window: &mut gpui::Window, spec: &str, cx: &mut App) {
-    if let Ok(keystroke) = Keystroke::parse(spec) {
-        window.dispatch_keystroke(keystroke.clone(), cx);
-        // The release: GPUI clicks a focused element on Enter or Space key-up.
-        window.dispatch_key_up(keystroke, cx);
+    match Keystroke::parse(spec) {
+        Ok(keystroke) => {
+            window.dispatch_keystroke(keystroke.clone(), cx);
+            // The release: GPUI clicks a focused element on Enter or Space key-up.
+            window.dispatch_key_up(keystroke, cx);
+        }
+        Err(error) => eprintln!("parity key '{spec}' was not parsed: {error}"),
     }
 }
 

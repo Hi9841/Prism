@@ -478,7 +478,7 @@ mod provider {
                 self.show_toast(
                     "Always on top not applied",
                     Some(format!("Toggle the setting to retry. {}", error_string(&error))),
-                    ToastKind::Success,
+                    ToastKind::Error,
                     cx,
                 );
             }
@@ -505,7 +505,7 @@ mod provider {
                     self.show_toast(
                         "Window width not applied",
                         Some(format!("Try selecting the width again. {}", error_string(&error))),
-                        ToastKind::Success,
+                        ToastKind::Error,
                         cx,
                     );
                 }
@@ -535,7 +535,7 @@ mod provider {
                                     this.show_toast(
                                         "Window width not applied",
                                         Some(format!("Try selecting the width again. {}", error_string(&error))),
-                                        ToastKind::Success,
+                                        ToastKind::Error,
                                         cx,
                                     );
                                 }

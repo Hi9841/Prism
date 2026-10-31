@@ -15,24 +15,6 @@ use super::super::backend::{select_backend, BackendKind};
 use super::mft;
 use super::usn::{self, JournalReadBatch};
 
-/// Narrow transport boundary for raw-volume operations. A future service
-/// implementation can satisfy this interface over a validated named-pipe
-/// protocol without changing catalog/database synchronization code.
-pub trait NtfsTransport {
-    fn query_journal(&self) -> Result<JournalMetadata, String>;
-    fn enumerate_mft(
-        &mut self,
-        high_usn: i64,
-        consume: &mut dyn FnMut(crate::catalog::types::NtfsNode) -> Result<(), String>,
-    ) -> Result<(), String>;
-    fn read_journal(
-        &self,
-        start_usn: i64,
-        journal_id: u64,
-        target_usn: i64,
-    ) -> Result<JournalReadBatch, String>;
-}
-
 pub struct NtfsVolume {
     pub(super) handle: HANDLE,
 }
@@ -118,29 +100,6 @@ impl NtfsVolume {
 impl Drop for NtfsVolume {
     fn drop(&mut self) {
         let _ = unsafe { CloseHandle(self.handle) };
-    }
-}
-
-impl NtfsTransport for NtfsVolume {
-    fn query_journal(&self) -> Result<JournalMetadata, String> {
-        self.query_journal()
-    }
-
-    fn enumerate_mft(
-        &mut self,
-        high_usn: i64,
-        consume: &mut dyn FnMut(crate::catalog::types::NtfsNode) -> Result<(), String>,
-    ) -> Result<(), String> {
-        self.enumerate_mft(high_usn, consume)
-    }
-
-    fn read_journal(
-        &self,
-        start_usn: i64,
-        journal_id: u64,
-        target_usn: i64,
-    ) -> Result<JournalReadBatch, String> {
-        self.read_journal(start_usn, journal_id, target_usn)
     }
 }
 

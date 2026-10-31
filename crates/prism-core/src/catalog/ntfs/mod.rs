@@ -10,7 +10,6 @@ use super::types::{JournalCheckpoint, VolumeInfo};
 
 pub use path::{resolve_path, PathNode, PathResolution};
 pub use usn::{journal_continuity, JournalContinuity};
-use volume::NtfsTransport;
 pub use volume::NtfsVolume;
 
 const INGEST_BATCH_SIZE: usize = 8_192;
@@ -22,19 +21,17 @@ pub struct SyncStats {
 }
 
 pub struct NtfsBackend {
-    transport: Box<dyn NtfsTransport>,
+    volume: NtfsVolume,
 }
 
 impl NtfsBackend {
     pub fn open(info: &VolumeInfo) -> Result<Self, String> {
-        Ok(Self {
-            transport: Box::new(NtfsVolume::open(info)?),
-        })
+        Ok(Self { volume: NtfsVolume::open(info)? })
     }
 
     pub fn synchronize(&mut self, info: &VolumeInfo, db: &Database) -> Result<SyncStats, String> {
         let query_started = Instant::now();
-        let journal = self.transport.query_journal()?;
+        let journal = self.volume.query_journal()?;
         // synchronize runs on every poll; only surface journal queries slow
         // enough to matter instead of logging each pass.
         if query_started.elapsed().as_millis() > 50 {
@@ -81,7 +78,7 @@ impl NtfsBackend {
             }
             Ok(())
         };
-        let enumeration = self.transport.enumerate_mft(journal.next_usn, &mut consume);
+        let enumeration = self.volume.enumerate_mft(journal.next_usn, &mut consume);
 
         if let Err(error) = enumeration {
             let _ = db.abort_ntfs_rebuild(&info.volume_id, generation);
@@ -116,7 +113,7 @@ impl NtfsBackend {
 
         // Changes after the MFT snapshot remain in the journal. Consume them
         // immediately so a long rebuild does not wait for the next poll.
-        let catch_up = match self.transport.query_journal() {
+        let catch_up = match self.volume.query_journal() {
             Ok(current) => match self.catch_up(info, db, current.next_usn) {
                 Ok(stats) => stats,
                 Err(error) => {
@@ -159,9 +156,7 @@ impl NtfsBackend {
         let mut records = 0u64;
 
         while cursor < target_usn {
-            let batch = self
-                .transport
-                .read_journal(cursor, checkpoint.journal_id, target_usn)?;
+            let batch = self.volume.read_journal(cursor, checkpoint.journal_id, target_usn)?;
             if batch.next_usn < cursor {
                 return Err("USN journal returned a regressing cursor".to_string());
             }

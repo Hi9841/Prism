@@ -43,11 +43,35 @@ impl LaunchGate {
     }
 }
 
+impl LaunchTicket {
+    /// True until [`LaunchGate::reset`] or a newer ticket replaces this one.
+    pub fn is_current(&self) -> bool {
+        self.state.current.get() == Some(self.id)
+    }
+}
+
 impl Drop for LaunchTicket {
     fn drop(&mut self) {
         // A ticket from before a reset must not release a newer launch.
-        if self.state.current.get() == Some(self.id) {
+        if self.is_current() {
             self.state.current.set(None);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::LaunchGate;
+
+    #[test]
+    fn reset_retires_the_old_ticket() {
+        let gate = LaunchGate::default();
+        let old = gate.try_begin().expect("first ticket");
+        assert!(old.is_current());
+        gate.reset();
+        assert!(!old.is_current());
+        let fresh = gate.try_begin().expect("ticket after reset");
+        assert!(fresh.is_current());
+        assert!(!old.is_current());
     }
 }

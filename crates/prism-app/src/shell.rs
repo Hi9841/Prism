@@ -120,11 +120,31 @@ pub fn set_instance(shell: std::rc::Rc<GpuiShell>) {
 pub struct GpuiShell {
     hwnd: Cell<isize>,
     pub palette_visible: Arc<AtomicBool>,
+    /// The Settings value. Default on. `raise` always asks for the topmost band
+    /// so a denied foreground does not drop the request. This flag puts the
+    /// window back when the setting is off.
+    always_on_top: Cell<bool>,
 }
 
 impl GpuiShell {
     pub fn new(palette_visible: Arc<AtomicBool>) -> Self {
-        Self { hwnd: Cell::new(0), palette_visible }
+        Self { hwnd: Cell::new(0), palette_visible, always_on_top: Cell::new(true) }
+    }
+
+    fn apply_topmost(&self) -> Result<(), String> {
+        let band = if self.always_on_top.get() { HWND_TOPMOST } else { HWND_NOTOPMOST };
+        unsafe {
+            SetWindowPos(
+                self.hwnd(),
+                Some(band),
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+            )
+        }
+        .map_err(|error| error.to_string())
     }
 
     pub fn set_hwnd(&self, hwnd: HWND) {
@@ -274,27 +294,7 @@ impl GpuiShell {
         if opening {
             PALETTE_TOOK_FOREGROUND.store(false, Ordering::Release);
             backend().schedule_installed_apps_refresh();
-            // Windows can report the palette as unfocused once while it is still
-            // acquiring foreground from an elevated window.
-            ACTIVATION_FOCUS_PENDING.store(true, Ordering::Release);
-            let task = cx.spawn(async move |cx: &mut AsyncApp| {
-                Timer::after(ACTIVATION_FOCUS_GRACE).await;
-                if PALETTE_TRANSITION.load(Ordering::Acquire) != transition {
-                    return;
-                }
-                ACTIVATION_FOCUS_PENDING.store(false, Ordering::Release);
-                // The grace can swallow a real click on another window, and
-                // Windows sends no second blur. A palette that held the
-                // foreground and lost it during the grace was clicked away.
-                if PALETTE_TOOK_FOREGROUND.load(Ordering::Acquire) {
-                    let _ = cx.update(|cx| {
-                        if let Some(shell) = instance() {
-                            shell.dismiss_on_blur("palette-hide-blur-after-grace", cx);
-                        }
-                    });
-                }
-            });
-            self.keep(task);
+            self.arm_focus_grace(transition, cx);
             PRESENTATION_ANCHOR.lock().map(|mut value| *value = anchor).ok();
         } else {
             ACTIVATION_FOCUS_PENDING.store(false, Ordering::Release);
@@ -308,11 +308,39 @@ impl GpuiShell {
 
     /// A launch or second instance: open the palette and present it.
     pub fn activate_palette(&self, cx: &mut App) {
-        ACTIVATION_FOCUS_PENDING.store(true, Ordering::Release);
-        if !PALETTE_OPEN.load(Ordering::Acquire) {
+        if PALETTE_OPEN.load(Ordering::Acquire) {
+            // The open path already armed a timer. A second launch must arm
+            // one too, or the grace flag stays set and the first click-away
+            // does not close the palette.
+            self.arm_focus_grace(PALETTE_TRANSITION.load(Ordering::Acquire), cx);
+        } else {
             self.toggle_palette(cx);
         }
         let _ = self.present(cx);
+    }
+
+    /// Windows can report the palette as unfocused once while it is still
+    /// acquiring foreground. The flag and the timer are one state.
+    fn arm_focus_grace(&self, transition: u64, cx: &mut App) {
+        ACTIVATION_FOCUS_PENDING.store(true, Ordering::Release);
+        let task = cx.spawn(async move |cx: &mut AsyncApp| {
+            Timer::after(ACTIVATION_FOCUS_GRACE).await;
+            if PALETTE_TRANSITION.load(Ordering::Acquire) != transition {
+                return;
+            }
+            ACTIVATION_FOCUS_PENDING.store(false, Ordering::Release);
+            // The grace can swallow a real click on another window, and
+            // Windows sends no second blur. A palette that held the
+            // foreground and lost it during the grace was clicked away.
+            if PALETTE_TOOK_FOREGROUND.load(Ordering::Acquire) {
+                let _ = cx.update(|cx| {
+                    if let Some(shell) = instance() {
+                        shell.dismiss_on_blur("palette-hide-blur-after-grace", cx);
+                    }
+                });
+            }
+        });
+        self.keep(task);
     }
 
     /// Moves, sizes, and shows the window from a foreground task: a synchronous
@@ -347,6 +375,9 @@ impl GpuiShell {
         // A transient focus denial must not fail the presentation after the
         // window is already shown; the bridge and the retries finish the job.
         let _ = self.raise_palette();
+        if !self.always_on_top.get() {
+            let _ = self.apply_topmost();
+        }
         if !is_prism_foreground() {
             let granted = win_key::request_foreground(self.hwnd.get());
             win_key::debug_trace(&format!("explorer-fg granted={granted} self={}", is_prism_foreground()));
@@ -400,18 +431,8 @@ impl bridge::Shell for GpuiShell {
     }
 
     fn set_always_on_top(&self, on: bool, _cx: &mut App) -> BridgeResult<()> {
-        unsafe {
-            SetWindowPos(
-                self.hwnd(),
-                Some(if on { HWND_TOPMOST } else { HWND_NOTOPMOST }),
-                0,
-                0,
-                0,
-                0,
-                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
-            )
-        }
-        .map_err(|e| e.to_string())
+        self.always_on_top.set(on);
+        self.apply_topmost()
     }
 
     /// The Tauri app set the native window theme and cleared DWM materials.
@@ -501,20 +522,9 @@ impl bridge::Shell for GpuiShell {
             }
             PALETTE_TOOK_FOREGROUND.store(true, Ordering::Release);
             // Windows ignores z-order requests from a process without
-            // foreground rights; an open without them could leave the palette
-            // under other windows. Now that Prism holds the foreground, take
-            // the topmost band (the presentation always does).
-            unsafe {
-                let _ = SetWindowPos(
-                    self.hwnd(),
-                    Some(HWND_TOPMOST),
-                    0,
-                    0,
-                    0,
-                    0,
-                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
-                );
-            }
+            // foreground rights. Apply the stored band now that Prism holds
+            // the foreground. `raise` asked for the topmost band first.
+            let _ = self.apply_topmost();
             ACTIVATION_FOCUS_PENDING.store(false, Ordering::Release);
             return;
         }

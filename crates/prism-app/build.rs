@@ -61,5 +61,7 @@ END
     );
     let out = PathBuf::from(std::env::var("OUT_DIR").expect("OUT_DIR")).join("prism.rc");
     std::fs::write(&out, rc).expect("write the resource script");
-    let _ = embed_resource::compile(&out, embed_resource::NONE);
+    if let Err(error) = embed_resource::compile(&out, embed_resource::NONE).manifest_required() {
+        panic!("embed prism.rc: {error}");
+    }
 }

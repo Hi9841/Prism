@@ -474,10 +474,8 @@ impl TextInput {
         let Some(max) = self.max_len else {
             return new_text.to_owned();
         };
-        let kept = self.content.len() - (range.end - range.start);
         let kept_units = self.content[..range.start].encode_utf16().count()
             + self.content[range.end..].encode_utf16().count();
-        let _ = kept;
         let mut room = max.saturating_sub(kept_units);
         let mut out = String::new();
         for ch in new_text.chars() {
@@ -490,6 +488,20 @@ impl TextInput {
         }
         out
     }
+}
+
+/// Byte index of a UTF-16 offset in `text`. The index is always on a char boundary.
+fn utf8_index_at_utf16(text: &str, utf16_offset: usize) -> usize {
+    let mut utf8 = 0;
+    let mut units = 0;
+    for ch in text.chars() {
+        if units >= utf16_offset {
+            break;
+        }
+        units += ch.len_utf16();
+        utf8 += ch.len_utf8();
+    }
+    utf8
 }
 
 impl EntityInputHandler for TextInput {
@@ -569,11 +581,17 @@ impl EntityInputHandler for TextInput {
         self.wake();
         self.content = (self.content[0..range.start].to_owned() + new_text + &self.content[range.end..]).into();
         self.marked_range = if new_text.is_empty() { None } else { Some(range.start..range.start + new_text.len()) };
-        self.selected_range = new_selected_range_utf16
-            .as_ref()
-            .map(|range_utf16| self.range_from_utf16(range_utf16))
-            .map(|new_range| new_range.start + range.start..new_range.end + range.start)
-            .unwrap_or_else(|| range.start + new_text.len()..range.start + new_text.len());
+        // `new_selected_range_utf16` is a caret inside the composition string
+        // (`GCS_CURSORPOS`), not an offset into the whole field.
+        let caret = match new_selected_range_utf16.as_ref() {
+            Some(sel) => {
+                let start = utf8_index_at_utf16(new_text, sel.start);
+                let end = utf8_index_at_utf16(new_text, sel.end);
+                start.min(end)..start.max(end)
+            }
+            None => new_text.len()..new_text.len(),
+        };
+        self.selected_range = range.start + caret.start..range.start + caret.end;
         // Composition text is not a committed value: no `Changed` until commit
         // (the original ignores input while `isComposing`).
         cx.notify();
@@ -831,6 +849,20 @@ impl Render for TextInput {
 impl Focusable for TextInput {
     fn focus_handle(&self, _: &App) -> FocusHandle {
         self.focus_handle.clone()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::utf8_index_at_utf16;
+
+    #[test]
+    fn composition_caret_stays_on_a_char_boundary() {
+        assert_eq!(utf8_index_at_utf16("あ", 0), 0);
+        assert_eq!(utf8_index_at_utf16("あ", 1), "あ".len());
+        let emoji = "🙂";
+        assert_eq!(utf8_index_at_utf16(emoji, 1), emoji.len());
+        assert_eq!(utf8_index_at_utf16("aあ", 2), "aあ".len());
     }
 }
 

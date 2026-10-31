@@ -567,20 +567,35 @@ fn run_reader_loop(
             }
             reconnect_backoff.reset();
 
-            let mut offset = 0;
+            let returned = bytes_returned as usize;
+            let mut offset = 0usize;
+            // `FILE_NOTIFY_INFORMATION` is 12 bytes before `FileName`. `size_of`
+            // is 16 because of tail padding, so a 14-byte final record is valid.
+            const HEADER: usize = 12;
             loop {
-                if offset + std::mem::size_of::<FILE_NOTIFY_INFORMATION>() > bytes_returned as usize
-                {
+                let Some(header_end) = offset.checked_add(HEADER) else {
+                    break;
+                };
+                if header_end > returned || offset % 4 != 0 {
                     break;
                 }
 
+                // SAFETY: `header_end` is inside the bytes `ReadDirectoryChangesW`
+                // wrote, and `offset` is 4-byte aligned. The name slice below
+                // stays inside those bytes.
                 let info =
                     unsafe { &*(buffer.as_ptr().add(offset) as *const FILE_NOTIFY_INFORMATION) };
-                let name_len = (info.FileNameLength / 2) as usize;
+                let name_bytes = info.FileNameLength as usize;
+                let Some(name_end) = header_end.checked_add(name_bytes) else {
+                    break;
+                };
+                if name_bytes % 2 != 0 || name_end > returned {
+                    break;
+                }
                 let name_slice = unsafe {
                     std::slice::from_raw_parts(
-                        buffer.as_ptr().add(offset + 12) as *const u16,
-                        name_len,
+                        buffer.as_ptr().add(header_end) as *const u16,
+                        name_bytes / 2,
                     )
                 };
                 let relative_name = OsString::from_wide(name_slice)
@@ -618,7 +633,14 @@ fn run_reader_loop(
                 if info.NextEntryOffset == 0 {
                     break;
                 }
-                offset += info.NextEntryOffset as usize;
+                let next = info.NextEntryOffset as usize;
+                let Some(next_offset) = offset.checked_add(next) else {
+                    break;
+                };
+                if next < HEADER || next % 4 != 0 || next_offset > returned {
+                    break;
+                }
+                offset = next_offset;
             }
         }
 

@@ -216,7 +216,7 @@ impl SettingsSheet {
             });
             let _ = app.update(cx, |app, cx| match result {
                 Ok(()) => app.show_toast("Settings reset", Some("Prism is back to its defaults".into()), ToastKind::Success, cx),
-                Err(error) => app.show_toast("Settings not reset", Some(error_string(&error)), ToastKind::Success, cx),
+                Err(error) => app.show_toast("Settings not reset", Some(error_string(&error)), ToastKind::Error, cx),
             });
         })
         .detach();
@@ -262,7 +262,7 @@ impl SettingsSheet {
                     app.update_settings(cx, |s| s.shortcut = value);
                     app.show_toast("Shortcut set", Some(display_shortcut(&combo)), ToastKind::Success, cx);
                 }
-                Err(error) => app.show_toast("Shortcut not changed", Some(error_string(&error)), ToastKind::Success, cx),
+                Err(error) => app.show_toast("Shortcut not changed", Some(error_string(&error)), ToastKind::Error, cx),
             });
             let _ = this.update(cx, |this, cx| {
                 this.shortcut_busy = false;
@@ -280,7 +280,7 @@ impl SettingsSheet {
         let result = bridge::shell(cx).set_taskbar_alignment(&alignment, cx);
         self.app.update(cx, |app, cx| match result {
             Ok(()) => app.update_settings(cx, |s| s.taskbar_alignment = alignment),
-            Err(error) => app.show_toast("Taskbar not changed", Some(error_string(&error)), ToastKind::Success, cx),
+            Err(error) => app.show_toast("Taskbar not changed", Some(error_string(&error)), ToastKind::Error, cx),
         });
         self.alignment_busy = false;
         cx.notify();

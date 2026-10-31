@@ -11,7 +11,9 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     HOT_KEY_MODIFIERS, MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, MOD_SHIFT, RegisterHotKey, UnregisterHotKey, VK_RETURN,
     VK_SPACE,
 };
-use windows::Win32::UI::WindowsAndMessaging::{GetMessageW, MSG, PostThreadMessageW, WM_APP, WM_HOTKEY};
+use windows::Win32::UI::WindowsAndMessaging::{
+    GetMessageW, MSG, PM_NOREMOVE, PeekMessageW, PostThreadMessageW, WM_APP, WM_HOTKEY,
+};
 
 use crate::host::HostMessage;
 
@@ -56,11 +58,19 @@ impl Hotkeys {
         std::thread::Builder::new()
             .name("prism-hotkeys".into())
             .spawn(move || {
-                let _ = id_tx.send(unsafe { GetCurrentThreadId() });
                 let mut registered: Vec<(String, i32)> = Vec::new();
                 let mut next_id = 1;
                 let mut msg = MSG::default();
-                while unsafe { GetMessageW(&mut msg, None, 0, 0) }.as_bool() {
+                // Create the thread queue before another thread can post to it.
+                unsafe {
+                    let _ = PeekMessageW(&mut msg, None, 0, 0, PM_NOREMOVE);
+                }
+                let _ = id_tx.send(unsafe { GetCurrentThreadId() });
+                loop {
+                    let code = unsafe { GetMessageW(&mut msg, None, 0, 0) }.0;
+                    if code == 0 || code == -1 {
+                        break;
+                    }
                     match msg.message {
                         WM_HOTKEY => {
                             let _ = sender.unbounded_send(HostMessage::ToggleShortcut);
