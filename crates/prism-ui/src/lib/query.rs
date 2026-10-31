@@ -4,13 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::js;
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct RecentCommand {
-    pub id: String,
-    pub title: String,
-}
-
-/// One Phase 1 hit. `kind` is "recent" | "window" | "app" | "action".
+/// One Phase 1 hit. `kind` is "window" | "app" | "action".
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct Phase1Hit {
@@ -54,7 +48,6 @@ pub struct PowerPlanHit {
 #[serde(default, rename_all = "camelCase")]
 pub struct Phase1Response {
     pub query: String,
-    pub recents: Vec<Phase1Hit>,
     pub windows: Vec<Phase1Hit>,
     pub apps: Vec<Phase1Hit>,
     pub actions: Vec<Phase1Hit>,

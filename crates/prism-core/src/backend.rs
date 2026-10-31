@@ -399,11 +399,7 @@ impl Backend {
         Ok(path_bufs)
     }
 
-    pub fn query_phase1(
-        &self,
-        query: String,
-        recent: Vec<query::RecentCommand>,
-    ) -> query::Phase1Response {
+    pub fn query_phase1(&self, query: String) -> query::Phase1Response {
         let timer = perf::start();
         let query_length = query.chars().count();
         let windows = query::list_open_windows();
@@ -413,14 +409,13 @@ impl Backend {
             .and_then(|guard| guard.as_ref())
             .map(|list| list.as_slice())
             .unwrap_or(&[]);
-        let response = query::phase1(&query, &recent, apps, &windows, &self.intent);
+        let response = query::phase1(&query, apps, &windows, &self.intent);
         perf::finish(timer, "query_phase1", || {
             format!(
-                "queryLength={query_length};actions={};apps={};windows={};recents={}",
+                "queryLength={query_length};actions={};apps={};windows={}",
                 response.actions.len(),
                 response.apps.len(),
-                response.windows.len(),
-                response.recents.len()
+                response.windows.len()
             )
         });
         response

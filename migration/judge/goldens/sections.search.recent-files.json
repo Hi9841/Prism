@@ -1,79 +1,11 @@
 {
   "flatIds": [
     "file::f::C:\\Users\\You\\Documents\\report.pdf",
-    "file::f::C:\\Users\\You\\Documents\\report.pdf",
     "file::f::C:\\Users\\You\\Documents\\report-final.docx",
     "file::d::C:\\Users\\You\\Documents\\Reports",
     "file::f::C:\\Users\\You\\Pictures\\report.png"
   ],
   "sections": [
-    {
-      "collapsed": false,
-      "collapsible": false,
-      "id": "recent",
-      "items": [
-        {
-          "dragFile": {
-            "calls": [
-              {
-                "args": {
-                  "paths": [
-                    "C:\\Users\\You\\Documents\\report.pdf"
-                  ]
-                },
-                "cmd": "start_file_drag"
-              }
-            ]
-          },
-          "historyTitle": "report.pdf",
-          "icon": {
-            "kind": "tile",
-            "name": "FileText",
-            "tint": "slate"
-          },
-          "id": "file::f::C:\\Users\\You\\Documents\\report.pdf",
-          "isPicture": false,
-          "keywords": [
-            "C:\\Users\\You\\Documents\\report.pdf",
-            "C:\\Users\\You\\Documents"
-          ],
-          "openLocation": {
-            "calls": [
-              {
-                "args": {
-                  "path": "C:\\Users\\You\\Documents\\report.pdf"
-                },
-                "cmd": "open_path_location"
-              }
-            ]
-          },
-          "run": {
-            "calls": [
-              {
-                "args": {
-                  "path": "C:\\Users\\You\\Documents\\report.pdf"
-                },
-                "cmd": "open_path"
-              }
-            ]
-          },
-          "shellPath": "C:\\Users\\You\\Documents\\report.pdf",
-          "showProperties": {
-            "calls": [
-              {
-                "args": {
-                  "path": "C:\\Users\\You\\Documents\\report.pdf"
-                },
-                "cmd": "show_path_properties"
-              }
-            ]
-          },
-          "subtitle": "C:\\Users\\You\\Documents",
-          "title": "report.pdf"
-        }
-      ],
-      "label": "Recent"
-    },
     {
       "collapsed": false,
       "collapsible": false,

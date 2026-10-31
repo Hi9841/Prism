@@ -224,21 +224,6 @@ pub fn build_sections(sources: &PaletteSources) -> BuiltSections {
         }
 
         let browse_phase1 = phase1.filter(|_| !file_path_browse);
-        let recent_items: Vec<PaletteItem> = browse_phase1
-            .map(|p| {
-                p.recents
-                    .iter()
-                    .filter_map(|hit| {
-                        let entry = HistoryEntry { id: hit.id.clone(), title: hit.title.clone(), ts: 0.0 };
-                        rehydrate(&entry, &apps_by_id, existing_history_paths, app_icons, file_thumbnails)
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-        if !recent_items.is_empty() {
-            out.push(Section::new("recent", "Recent", recent_items));
-        }
-
         let window_items: Vec<PaletteItem> =
             browse_phase1.map(|p| p.windows.iter().map(window_palette_item).collect()).unwrap_or_default();
         if !window_items.is_empty() {

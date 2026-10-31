@@ -1,6 +1,6 @@
 //! Two-phase palette query.
 //!
-//! Phase 1 is in-process: recent commands, open windows, Start Menu / UWP apps,
+//! Phase 1 is in-process: open windows, Start Menu / UWP apps,
 //! and the typed action catalog (plus Jev phrase mapping).
 //! Phase 2 is SQLite FTS5 file search and stays on `search_files`.
 
@@ -10,13 +10,12 @@ mod open_windows;
 pub mod score;
 
 use crate::apps::AppEntry;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 pub use jev::IntentStore;
 pub use open_windows::list as list_open_windows;
 pub use open_windows::OpenWindow;
 
-const RECENT_LIMIT: usize = 5;
 const WINDOW_LIMIT: usize = 8;
 const APP_LIMIT: usize = 6;
 const ACTION_LIMIT: usize = 16;
@@ -28,7 +27,6 @@ const SETTING_KEYWORD_CAP: i32 = 799;
 #[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub enum Phase1Kind {
-    Recent,
     Window,
     App,
     Action,
@@ -64,7 +62,6 @@ pub struct Phase1Hit {
 #[serde(rename_all = "camelCase")]
 pub struct Phase1Response {
     pub query: String,
-    pub recents: Vec<Phase1Hit>,
     pub windows: Vec<Phase1Hit>,
     pub apps: Vec<Phase1Hit>,
     pub actions: Vec<Phase1Hit>,
@@ -72,17 +69,9 @@ pub struct Phase1Response {
     pub intent_action_id: Option<String>,
 }
 
-#[derive(Clone, Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RecentCommand {
-    pub id: String,
-    pub title: String,
-}
-
 pub fn empty_phase1(query: &str) -> Phase1Response {
     Phase1Response {
         query: query.to_string(),
-        recents: Vec::new(),
         windows: Vec::new(),
         apps: Vec::new(),
         actions: Vec::new(),
@@ -92,7 +81,6 @@ pub fn empty_phase1(query: &str) -> Phase1Response {
 
 pub fn phase1(
     query: &str,
-    recent: &[RecentCommand],
     apps: &[AppEntry],
     windows: &[OpenWindow],
     intent: &IntentStore,
@@ -104,7 +92,6 @@ pub fn phase1(
     let query_lower = trimmed.to_lowercase();
     let intent_action_id = jev::resolve(&query_lower, intent).map(str::to_string);
 
-    let recents = search_recents(&query_lower, recent);
     let window_hits = open_windows::search(&query_lower, windows, WINDOW_LIMIT)
         .into_iter()
         .map(|(window, score)| window_hit(&window, score))
@@ -114,7 +101,6 @@ pub fn phase1(
 
     Phase1Response {
         query: trimmed.to_string(),
-        recents,
         windows: window_hits,
         apps: app_hits,
         actions,
@@ -219,18 +205,6 @@ fn search_apps(query: &str, apps: &[AppEntry]) -> Vec<Phase1Hit> {
         .collect()
 }
 
-fn search_recents(query: &str, recent: &[RecentCommand]) -> Vec<Phase1Hit> {
-    let mut ranked: Vec<Phase1Hit> = recent
-        .iter()
-        .filter_map(|entry| {
-            score::score_text(query, &entry.title).map(|score| recent_hit(entry, score))
-        })
-        .collect();
-    ranked.sort_by_key(|hit| std::cmp::Reverse(hit.score));
-    ranked.truncate(RECENT_LIMIT);
-    ranked
-}
-
 fn action_hit(action: &catalog::TypedAction, score: i32, from_intent: bool) -> Phase1Hit {
     Phase1Hit {
         id: format!("action::{}", action.id),
@@ -328,24 +302,6 @@ fn window_hit(window: &OpenWindow, score: i32) -> Phase1Hit {
         action_id: None,
         uri: None,
         icon_key: Some("window".to_string()),
-        icon: None,
-        source: None,
-    }
-}
-
-fn recent_hit(entry: &RecentCommand, score: i32) -> Phase1Hit {
-    Phase1Hit {
-        id: entry.id.clone(),
-        kind: Phase1Kind::Recent,
-        title: entry.title.clone(),
-        subtitle: "Recent".to_string(),
-        score,
-        app_id: None,
-        path: None,
-        hwnd: None,
-        action_id: None,
-        uri: None,
-        icon_key: None,
         icon: None,
         source: None,
     }

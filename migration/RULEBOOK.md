@@ -162,6 +162,13 @@ another app, Esc cancels, a click works after the drag, and a release over the p
 
 ## Deviation log
 
+- 2026-10-31: No Recent section while searching (owner: "When I'm searching I shouldn't see recent at
+  all. I should see what I search for."). The original showed history rows whose title matched the query
+  above the other search sections. Phase 1 no longer receives or scores history, and a history change no
+  longer re-runs Phase 1. The idle Recent section, history storage, "Remove from Recent" and "Clear
+  history" do not change. The goldens `sections.search.chrome`, `.recent-files`, `.calc-recent-windows`
+  and `.recent-windows-plans-quick` were edited by hand: each lost only its "recent" section and that
+  section's ids in `flatIds` (the scenario names stay as golden ids).
 - 2026-10-29: Found in 1.0.13 by random-input testing on the owner's machine. (1) With a palette button
   focused (the settings button after the sheet closes, or a footer button after Tab), text goes into the
   search field and Escape acts as in the field. The original gave a focused button no palette keys, so

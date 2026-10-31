@@ -117,7 +117,7 @@ function hit(fields) {
 }
 
 function phase1(query, fields = {}) {
-  return { query, recents: [], windows: [], apps: [], actions: [], ...fields };
+  return { query, windows: [], apps: [], actions: [], ...fields };
 }
 
 // Phase 1 hits as the backend builds them.
@@ -139,11 +139,6 @@ function appHit(entry, score = 500) {
 // query/mod.rs window_hit: no appId.
 function windowHit(hwnd, title, process) {
   return hit({ id: `window::${hwnd}`, kind: "window", title, subtitle: `Open window · ${process}`, hwnd, iconKey: "window", score: 800 });
-}
-
-// query/mod.rs recent_hit: the history id, no appId or path.
-function recentHit(entry, score = 900) {
-  return hit({ id: entry.id, kind: "recent", title: entry.title, subtitle: "Recent", score });
 }
 
 // query/mod.rs tool_hit: windows_tools.rs subtitles are "Windows tool" or
@@ -282,7 +277,6 @@ const sectionCases = [
     "search.chrome",
     settled("chrome", {
       phase1: phase1("chrome", {
-        recents: [recentHit(history[0])],
         windows: [windowHit(42, "Inbox - Google Chrome", "chrome")],
         apps: [appHit(byId.chrome)],
       }),
@@ -291,22 +285,22 @@ const sectionCases = [
   [
     "search.recent-files",
     settled("report", {
-      phase1: phase1("report", { recents: [recentHit(history[1]), recentHit(history[7], 800)] }),
+      phase1: phase1("report"),
       fileResults: reportFiles,
     }),
   ],
-  // calc, recent, and windows together.
+  // calc and windows together.
   [
     "search.calc-recent-windows",
     settled("1+1", {
-      phase1: phase1("1+1", { recents: [recentHit(history[3])], windows: [windowHit(5, "1+1 - Notepad", "notepad")] }),
+      phase1: phase1("1+1", { windows: [windowHit(5, "1+1 - Notepad", "notepad")] }),
     }),
   ],
-  // recent, windows, picker power plans, and Quick Access together.
+  // windows, picker power plans, and Quick Access together.
   [
     "search.recent-windows-plans-quick",
     settled("do", {
-      phase1: phase1("do", { recents: [recentHit(history[1])], windows: [windowHit(6, "Documents", "explorer")] }),
+      phase1: phase1("do", { windows: [windowHit(6, "Documents", "explorer")] }),
       powerPlans: [plan(BALANCED, "Balanced", true, 900, true), plan(SAVER, "Power saver", false, 700, true)],
     }),
   ],
@@ -453,7 +447,7 @@ const sectionCases = [
     settled("notepad", { fileResults: [file("NOTEPAD.EXE", "C:\\WINDOWS\\system32\\NOTEPAD.EXE"), file("notepad-notes.txt", `${HOME}\\notepad-notes.txt`)] }),
   ],
 
-  // Path browsing hides recents, windows, settings, tools, commands and power
+  // Path browsing hides windows, settings, tools, commands and power
   // plans; Folder Contents stays above Apps; no copy fallback.
   [
     "search.path-browse",
@@ -477,7 +471,6 @@ const sectionCases = [
       filePathBrowse: true,
       fileResults: [file("build.bat", "C:\\Tools\\build.bat"), file("build-log.txt", "C:\\Tools\\build-log.txt")],
       phase1: phase1("C:\\Tools\\build", {
-        recents: [recentHit(history[0])],
         windows: [windowHit(9, "build", "cmd")],
         actions: [settingsHit("settings.display", "Display", "ms-settings:display", "display"), commandHit("power.lock", "Lock", "lock", "Power"), toolHit("windows.services", "Services", "tool")],
       }),

@@ -1,6 +1,5 @@
 {
   "flatIds": [
-    "file::f::C:\\Users\\You\\Documents\\report.pdf",
     "window::6",
     "power-plan::381b4222-f694-41f0-9685-ff5bb260df2e",
     "power-plan::a1841308-3541-4fab-bc81-f71556f20b4a",
@@ -12,73 +11,6 @@
     "app::vscode"
   ],
   "sections": [
-    {
-      "collapsed": false,
-      "collapsible": false,
-      "id": "recent",
-      "items": [
-        {
-          "dragFile": {
-            "calls": [
-              {
-                "args": {
-                  "paths": [
-                    "C:\\Users\\You\\Documents\\report.pdf"
-                  ]
-                },
-                "cmd": "start_file_drag"
-              }
-            ]
-          },
-          "historyTitle": "report.pdf",
-          "icon": {
-            "kind": "tile",
-            "name": "FileText",
-            "tint": "slate"
-          },
-          "id": "file::f::C:\\Users\\You\\Documents\\report.pdf",
-          "isPicture": false,
-          "keywords": [
-            "C:\\Users\\You\\Documents\\report.pdf",
-            "C:\\Users\\You\\Documents"
-          ],
-          "openLocation": {
-            "calls": [
-              {
-                "args": {
-                  "path": "C:\\Users\\You\\Documents\\report.pdf"
-                },
-                "cmd": "open_path_location"
-              }
-            ]
-          },
-          "run": {
-            "calls": [
-              {
-                "args": {
-                  "path": "C:\\Users\\You\\Documents\\report.pdf"
-                },
-                "cmd": "open_path"
-              }
-            ]
-          },
-          "shellPath": "C:\\Users\\You\\Documents\\report.pdf",
-          "showProperties": {
-            "calls": [
-              {
-                "args": {
-                  "path": "C:\\Users\\You\\Documents\\report.pdf"
-                },
-                "cmd": "show_path_properties"
-              }
-            ]
-          },
-          "subtitle": "C:\\Users\\You\\Documents",
-          "title": "report.pdf"
-        }
-      ],
-      "label": "Recent"
-    },
     {
       "collapsed": false,
       "collapsible": false,

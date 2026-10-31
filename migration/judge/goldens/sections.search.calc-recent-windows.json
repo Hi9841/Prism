@@ -1,7 +1,6 @@
 {
   "flatIds": [
     "calc::2",
-    "app::notepad",
     "window::5"
   ],
   "sections": [
@@ -34,94 +33,6 @@
         }
       ],
       "label": "Calculator"
-    },
-    {
-      "collapsed": false,
-      "collapsible": false,
-      "id": "recent",
-      "items": [
-        {
-          "appId": "notepad",
-          "dragFile": {
-            "calls": [
-              {
-                "args": {
-                  "paths": [
-                    "C:\\Windows\\System32\\notepad.exe"
-                  ]
-                },
-                "cmd": "start_file_drag"
-              }
-            ]
-          },
-          "historyTitle": "Notepad",
-          "icon": {
-            "kind": "app",
-            "name": "Notepad"
-          },
-          "id": "app::notepad",
-          "openLocation": {
-            "calls": [
-              {
-                "args": {
-                  "path": "C:\\Windows\\System32\\notepad.exe"
-                },
-                "cmd": "open_path_location"
-              }
-            ]
-          },
-          "run": {
-            "calls": [
-              {
-                "args": {
-                  "id": "notepad"
-                },
-                "cmd": "launch_app"
-              }
-            ]
-          },
-          "runAsAdmin": {
-            "calls": [
-              {
-                "args": {
-                  "id": "notepad"
-                },
-                "cmd": "launch_app_as_admin"
-              }
-            ]
-          },
-          "shellPath": "C:\\Windows\\System32\\notepad.exe",
-          "showProperties": {
-            "calls": [
-              {
-                "args": {
-                  "path": "C:\\Windows\\System32\\notepad.exe"
-                },
-                "cmd": "show_path_properties"
-              }
-            ]
-          },
-          "title": "Notepad",
-          "toggleTaskbarPin": {
-            "calls": [
-              {
-                "args": {
-                  "path": "C:\\Windows\\System32\\notepad.exe"
-                },
-                "cmd": "is_pinned_to_taskbar"
-              },
-              {
-                "args": {
-                  "path": "C:\\Windows\\System32\\notepad.exe",
-                  "pinned": true
-                },
-                "cmd": "set_taskbar_pinned"
-              }
-            ]
-          }
-        }
-      ],
-      "label": "Recent"
     },
     {
       "collapsed": false,

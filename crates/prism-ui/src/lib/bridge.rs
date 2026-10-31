@@ -14,7 +14,7 @@ use prism_core::backend::backend;
 use serde::{Deserialize, Serialize};
 
 use crate::lib::fixture;
-use crate::lib::query::{Phase1Response, PowerPlanHit, RecentCommand};
+use crate::lib::query::{Phase1Response, PowerPlanHit};
 use crate::lib::types::{AppEntry, FileSearchResponse, QuickAccessEntry};
 
 pub type BridgeResult<T> = Result<T, String>;
@@ -258,12 +258,9 @@ pub fn refresh_apps() -> Reply<Vec<AppEntry>> {
     )
 }
 
-pub fn query_phase1(query: String, recent: Vec<RecentCommand>) -> Reply<Phase1Response> {
+pub fn query_phase1(query: String) -> Reply<Phase1Response> {
     let canned = query.clone();
-    answer(move |f| reshape(f.phase1(&canned)), async move {
-        let recent = reshape(recent)?;
-        reshape(backend().query_phase1(query, recent))
-    })
+    answer(move |f| reshape(f.phase1(&canned)), async move { reshape(backend().query_phase1(query)) })
 }
 
 pub fn query_power_plans(query: String) -> Reply<Vec<PowerPlanHit>> {

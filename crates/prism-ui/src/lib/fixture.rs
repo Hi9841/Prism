@@ -111,7 +111,7 @@ impl Fixture {
             .phase1
             .get(&key)
             .cloned()
-            .unwrap_or_else(|| json!({"recents": [], "windows": [], "apps": [], "actions": []}));
+            .unwrap_or_else(|| json!({"windows": [], "apps": [], "actions": []}));
         response["query"] = json!(query);
         response
     }

@@ -17,7 +17,7 @@ use crate::js;
 use crate::lib::bridge::{self, BackendEvent};
 use crate::lib::icon_loading::{AppIconRequestState, app_icon_retry_delay, select_app_icon_request_ids};
 use crate::lib::launch_gate::LaunchGate;
-use crate::lib::query::{Phase1Response, PowerPlanHit, RecentCommand};
+use crate::lib::query::{Phase1Response, PowerPlanHit};
 use crate::lib::search::dedupe_apps;
 use crate::lib::types::{
     AppEntry, FileEntry, FileSearchError, FileSearchResponse, PaletteItem, QuickAccessEntry, RowAction,
@@ -195,7 +195,6 @@ impl PaletteState {
             AppEvent::HistoryChanged => {
                 this.validate_history_paths(cx);
                 this.load_history_thumbnails(cx);
-                this.query_phase1(cx);
                 this.rebuild(cx);
             }
             AppEvent::OpenSettingsChanged => {}
@@ -565,16 +564,8 @@ impl PaletteState {
             self.phase1 = None;
             return;
         }
-        let recent: Vec<RecentCommand> = self
-            .app
-            .read(cx)
-            .history
-            .iter()
-            .take(20)
-            .map(|entry| RecentCommand { id: entry.id.clone(), title: entry.title.clone() })
-            .collect();
         self.phase1_task = Some(cx.spawn(async move |this, cx| {
-            let result = bridge::query_phase1(search_text, recent).await;
+            let result = bridge::query_phase1(search_text).await;
             let _ = this.update(cx, |this, cx| {
                 this.phase1 = result.ok().filter(|response| !response.query.is_empty());
                 this.rebuild(cx);

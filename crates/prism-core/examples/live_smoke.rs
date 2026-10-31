@@ -92,7 +92,6 @@ fn phase1_summary(response: &Value) -> Value {
     json!({
         "query": response["query"],
         "intent": response["intentActionId"],
-        "recents": titles(&response["recents"], 2),
         "windows": titles(&response["windows"], 2),
         "apps": titles(&response["apps"], 3),
         "actions": titles(&response["actions"], 4),
@@ -233,22 +232,11 @@ fn main() {
     for query in phase1_queries {
         report(
             "query_phase1",
-            json!({ "query": query, "recent": [] }),
-            || {
-                serde_json::to_value(core.query_phase1(query.into(), Vec::new()))
-                    .map_err(|e| e.to_string())
-            },
+            json!({ "query": query }),
+            || serde_json::to_value(core.query_phase1(query.into())).map_err(|e| e.to_string()),
             phase1_summary,
         );
     }
-    let recent: Vec<prism_core::query::RecentCommand> =
-        serde_json::from_value(json!([{ "id": "action::power.lock", "title": "Lock" }, { "id": "x", "title": "Chrome Canary" }])).unwrap();
-    report(
-        "query_phase1",
-        json!({ "query": "lo", "recent": "[Lock, Chrome Canary]" }),
-        || serde_json::to_value(core.query_phase1("lo".into(), recent)).map_err(|e| e.to_string()),
-        phase1_summary,
-    );
 
     for query in ["power plan", "balanced", "xyzzy"] {
         report(
