@@ -131,9 +131,9 @@ pub fn active_scale<E: InteractiveElement + Styled>(
     element.scale(scale)
 }
 
-/// `.press:active:not(:disabled) { scale: 0.96 }` with the `.press` transition.
+/// `.press:active:not(:disabled) { scale: 0.97 }` with the `.press` transition.
 pub fn press<E: InteractiveElement + Styled>(element: E, id: &ElementId, enabled: bool, window: &mut Window, cx: &mut App) -> E {
-    active_scale(element, id, 0.96, Timing::PRESS, enabled, window, cx)
+    active_scale(element, id, 0.97, Timing::PRESS, enabled, window, cx)
 }
 
 /// The common button case: a text color and a background, each `(rest, hover)`.

@@ -239,16 +239,16 @@ fn swap_icon(
     });
     let target = if visible { 1.0 } else { 0.0 };
     if state.read(cx).target() != target {
-        state.update(cx, |s, _| s.set(target, motion_ms(300), motion::icon_swap));
+        state.update(cx, |s, _| s.set(target, motion_ms(motion::BASE_MS), motion::icon_swap));
     }
     let p = state.read(cx).animate(window);
-    let scale = 0.25 + 0.75 * p;
+    let scale = 0.93 + 0.07 * p;
     let transform = if spin {
-        // `animate-spin`: one turn per second, linear.
+        // `animate-spin`: one turn per `SPIN_MS`, linear.
         window.request_animation_frame();
         let turn = (std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis()
-            % 1000) as f32
-            / 1000.0;
+            % motion::SPIN_MS as u128) as f32
+            / motion::SPIN_MS as f32;
         gpui::Transformation::rotate(gpui::radians(turn * std::f32::consts::TAU)).with_scaling(gpui::size(scale, scale))
     } else {
         gpui::Transformation::scale(gpui::size(scale, scale))

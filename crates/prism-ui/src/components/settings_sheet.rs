@@ -1157,14 +1157,14 @@ impl Render for SettingsSheet {
                 let ms = since.elapsed().as_millis() as f32;
                 let b = if reduced { 1.0 } else { (ms / 110.0).min(1.0) };
                 let p = if reduced { 1.0 } else { (ms / 140.0).min(1.0) };
-                (1.0 - motion::ease_in(b), 1.0 - motion::ease_in(p), 32.0 * motion::ease_in(p), b < 1.0 || p < 1.0)
+                (1.0 - motion::ease_out_soft(b), 1.0 - motion::ease_out_soft(p), 32.0 * motion::ease_out_soft(p), b < 1.0 || p < 1.0)
             }
             None => {
                 let ms = self.opened_at.elapsed().as_millis() as f32;
                 let b = if reduced { 1.0 } else { (ms / 120.0).min(1.0) };
                 let p = if reduced { 1.0 } else { (ms / 180.0).min(1.0) };
                 let e = motion::ease_out_soft(p);
-                (motion::ease_out(b), e, 32.0 * (1.0 - e), b < 1.0 || p < 1.0)
+                (motion::ease_out_soft(b), e, 32.0 * (1.0 - e), b < 1.0 || p < 1.0)
             }
         };
         if animating {

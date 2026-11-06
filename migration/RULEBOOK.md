@@ -162,6 +162,11 @@ another app, Esc cancels, a click works after the drag, and a release over the p
 
 ## Deviation log
 
+- 2026-11-06: Motion audit (owner: "do the recommended stuff"). The launcher opens and closes with no
+  animation: a hotkey action repeats many times a day (`LAUNCHER_MOTION_MS` and `PALETTE_HIDE_DELAY` are 0,
+  the stage jumps, the 0.98 scale is gone). Exits use ease-out-soft, not ease-in. The icon swap runs 170 ms
+  from 0.93 (was 300 ms from 0.25). `.press` scales to 0.97 (was 0.96). A spinner turn is 700 ms (was 1 s).
+  A neighbor tooltip skips the delay (vendor patch 32).
 - 2026-10-31: No Recent section while searching (owner: "When I'm searching I shouldn't see recent at
   all. I should see what I search for."). The original showed history rows whose title matched the query
   above the other search sections. Phase 1 no longer receives or scores history, and a history change no

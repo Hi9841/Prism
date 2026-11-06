@@ -53,7 +53,7 @@ fn ring<E: Styled>(element: E, color: Rgba) -> E {
 
 /// The `(opacity, scale)` of a drag preview: `reorder-drag-pickup` (from
 /// opacity .72 and `scale(.96)`, 120 ms ease-out-soft) or, once `leaving`,
-/// `reorder-drag-out` (to the same values, 110 ms ease-in). The scale is
+/// `reorder-drag-out` (to the same values, 110 ms ease-out-soft). The scale is
 /// around the center. Reduced motion shows the end frame (`0.01ms`).
 fn preview_motion(picked_at: Option<Instant>, leaving: Option<Instant>, window: &mut Window) -> (f32, f32) {
     let progress = |since: Instant, ms: u64| {
@@ -64,7 +64,7 @@ fn preview_motion(picked_at: Option<Instant>, leaving: Option<Instant>, window: 
     let (t, e) = match (leaving, picked_at) {
         (Some(since), _) => {
             let t = progress(since, PREVIEW_LEAVE_MS);
-            (t, 1.0 - motion::ease_in(t))
+            (t, 1.0 - motion::ease_out_soft(t))
         }
         (None, Some(since)) => {
             let t = progress(since, PREVIEW_PICKUP_MS);
@@ -1147,7 +1147,7 @@ impl Palette {
             });
             let target = if pinned { 1.0 } else { 0.0 };
             if swap.read(cx).target() != target {
-                swap.update(cx, |s, _| s.set(target, motion_ms(300), motion::icon_swap));
+                swap.update(cx, |s, _| s.set(target, motion_ms(motion::BASE_MS), motion::icon_swap));
             }
             let p = swap.read(cx).animate(window);
             let pin_item = item.clone();
@@ -1160,7 +1160,7 @@ impl Palette {
             let background = transition::color(&key, "bg", background, Timing::PRESS, window, cx);
             let opacity = transition::number(&key, "opacity", if show_affordance { 1.0 } else { 0.0 }, Timing::PRESS, window, cx);
             let scaled = |name: &str, visible: f32| {
-                let scale = 0.25 + 0.75 * visible;
+                let scale = 0.93 + 0.07 * visible;
                 icon(name, 16., text).with_transformation(gpui::Transformation::scale(gpui::size(scale, scale)))
             };
             let button = transition::press(square(("pin-toggle", index)), &key, true, window, cx);
@@ -2038,12 +2038,12 @@ fn is_path_subtitle(subtitle: &str) -> bool {
     subtitle.contains('\\') || subtitle.contains('/')
 }
 
-/// `animate-spin`: one turn per second, linear.
+/// `animate-spin`: one turn per `SPIN_MS`, linear.
 pub fn spinning_icon(name: &str, size: f32, color: Rgba) -> gpui::AnimationElement<gpui::Svg> {
     use gpui::{Animation, AnimationExt, Transformation, percentage};
     icon(name, size, color).with_animation(
         gpui::ElementId::Name(format!("spin-{name}").into()),
-        Animation::new(Duration::from_secs(1)).repeat(),
+        Animation::new(Duration::from_millis(motion::SPIN_MS)).repeat(),
         |svg, delta| svg.with_transformation(Transformation::rotate(percentage(delta))),
     )
 }

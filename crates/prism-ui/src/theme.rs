@@ -430,6 +430,8 @@ pub mod motion {
     pub const FAST_MS: u64 = 110;
     pub const BASE_MS: u64 = 170;
     pub const SLOW_MS: u64 = 260;
+    /// One spinner turn: a fast spinner makes the load seem shorter.
+    pub const SPIN_MS: u64 = 700;
 
     /// `cubic-bezier(x1, y1, x2, y2)` evaluated at time `t` in 0..=1.
     pub fn cubic_bezier(x1: f32, y1: f32, x2: f32, y2: f32, t: f32) -> f32 {
@@ -482,11 +484,6 @@ pub mod motion {
         cubic_bezier(0.22, 1.0, 0.36, 1.0, t)
     }
 
-    /// CSS `ease-in`: `cubic-bezier(0.42, 0, 1, 1)`.
-    pub fn ease_in(t: f32) -> f32 {
-        cubic_bezier(0.42, 0.0, 1.0, 1.0, t)
-    }
-
     /// Tailwind `--default-transition-timing-function`: `cubic-bezier(0.4, 0, 0.2, 1)`.
     /// A `transition-*` class without an `ease-*` class uses it.
     pub fn tailwind_default(t: f32) -> f32 {
@@ -496,16 +493,6 @@ pub mod motion {
     /// Tailwind `ease-out` (`--ease-out`): `cubic-bezier(0, 0, 0.2, 1)`.
     pub fn tailwind_ease_out(t: f32) -> f32 {
         cubic_bezier(0.0, 0.0, 0.2, 1.0, t)
-    }
-
-    /// CSS `ease-out`: `cubic-bezier(0, 0, 0.58, 1)`.
-    pub fn ease_out(t: f32) -> f32 {
-        cubic_bezier(0.0, 0.0, 0.58, 1.0, t)
-    }
-
-    /// CSS `ease`: `cubic-bezier(0.25, 0.1, 0.25, 1)`.
-    pub fn ease(t: f32) -> f32 {
-        cubic_bezier(0.25, 0.1, 0.25, 1.0, t)
     }
 
     /// `.icon-swap`: `cubic-bezier(0.2, 0, 0, 1)`.

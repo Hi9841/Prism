@@ -28,7 +28,7 @@ fn motion_state(toast: &crate::state::app::Toast) -> ToastMotion {
     };
     if let Some(start) = toast.closing {
         let t = progress(start, 140.0);
-        let e = motion::ease_in(t);
+        let e = motion::ease_out_soft(t);
         return ToastMotion { opacity: 1.0 - e, offset: 6.0 * e, scale: 1.0 - 0.03 * e, animating: t < 1.0 };
     }
     let t = progress(toast.born, 160.0);
