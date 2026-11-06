@@ -1,6 +1,7 @@
 //! The launcher open/close state machine (`src/lib/launcherMotion.ts`).
 
-pub const LAUNCHER_MOTION_MS: u64 = 110;
+/// The launcher has no open or close animation, so the Closing phase ends at once.
+pub const LAUNCHER_MOTION_MS: u64 = 0;
 pub const POPOVER_MOTION_MS: u64 = 110;
 
 /// Must stay <= PALETTE_HIDE_DELAY in prism-core (125 ms).

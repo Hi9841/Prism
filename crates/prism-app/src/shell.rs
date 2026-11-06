@@ -22,7 +22,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 
 /// Keep this >= the UI's LAUNCHER_MOTION_MS (110 ms) so the view can fade out.
-const PALETTE_HIDE_DELAY: Duration = Duration::from_millis(125);
+const PALETTE_HIDE_DELAY: Duration = Duration::ZERO;
 /// Reassert over ~500 ms, not once: the Explorer bridge grants foreground
 /// asynchronously and an elevated or fullscreen owner can deny the first
 /// SetForegroundWindow.

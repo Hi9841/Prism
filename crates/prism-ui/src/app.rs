@@ -12,7 +12,7 @@ use crate::components::settings_sheet::SettingsSheet;
 use crate::components::toast::render_toast_stack;
 use crate::components::ui::theme;
 use crate::features::palette::palette::Palette;
-use crate::gfx::{Tween, r, reduced_motion};
+use crate::gfx::{Tween, r};
 use crate::lib::bridge::{self, BackendEvent};
 use crate::lib::launcher_motion::{
     HideInvocation, HideOrigin, LAUNCHER_MOTION_MS, LauncherEvent, LauncherPhase, hide_palette_invocation,
@@ -20,7 +20,7 @@ use crate::lib::launcher_motion::{
 };
 use crate::state::app::{AppState, app_state};
 use crate::state::palette::{PaletteState, palette_state};
-use crate::theme::{Theme, fade, hsla, motion, white};
+use crate::theme::{Theme, fade, hsla, white};
 
 /// Chromium on Windows: one wheel line is 100/3 CSS px (Step 2, M3).
 const CHROMIUM_PX_PER_LINE: f32 = 100.0 / 3.0;
@@ -121,15 +121,8 @@ impl Launcher {
             return;
         }
         self.phase = next;
-        // `.launcher-stage`: opacity and scale over 110 ms ease-out-soft;
-        // reduced motion keeps opacity at 100 ms.
-        let duration = if reduced_motion() { 100 } else { LAUNCHER_MOTION_MS };
-        let target = if next == LauncherPhase::Visible { 1.0 } else { 0.0 };
-        if next == LauncherPhase::Hidden {
-            self.stage.jump(0.0);
-        } else {
-            self.stage.set(target, duration, motion::ease_out_soft);
-        }
+        // The launcher opens from a hotkey many times a day: it shows and hides with no animation.
+        self.stage.jump(if next == LauncherPhase::Visible { 1.0 } else { 0.0 });
         if next == LauncherPhase::Preparing {
             self.present(window, cx);
         }
@@ -149,12 +142,7 @@ impl Launcher {
         }
         self.clear_close_timer();
         self.phase = next;
-        let duration = if reduced_motion() { 100 } else { LAUNCHER_MOTION_MS };
-        if next == LauncherPhase::Hidden {
-            self.stage.jump(0.0);
-        } else {
-            self.stage.set(0.0, duration, motion::ease_out_soft);
-        }
+        self.stage.jump(0.0);
         let defer = match hide_palette_invocation(origin, next) {
             HideInvocation::Instant => Some(false),
             HideInvocation::Deferred => Some(true),
@@ -196,8 +184,7 @@ impl Launcher {
         let next = reduce_launcher_phase(self.phase, LauncherEvent::Open);
         if next == LauncherPhase::Visible {
             self.phase = LauncherPhase::Visible;
-            let duration = if reduced_motion() { 100 } else { LAUNCHER_MOTION_MS };
-            self.stage.set(1.0, duration, motion::ease_out_soft);
+            self.stage.jump(1.0);
             match bridge::shell(cx).present_palette(cx) {
                 Ok(true) => self.focus_search(window, cx),
                 _ => {
@@ -223,8 +210,7 @@ impl Launcher {
                         let next = reduce_launcher_phase(this.phase, LauncherEvent::Presented);
                         if next != this.phase {
                             this.phase = next;
-                            let duration = if reduced_motion() { 100 } else { LAUNCHER_MOTION_MS };
-                            this.stage.set(1.0, duration, motion::ease_out_soft);
+                            this.stage.jump(1.0);
                         }
                         this.focus_search(window, cx);
                         cx.notify();
@@ -388,9 +374,6 @@ impl Launcher {
             .line_height(relative(1.45))
             .text_color(hsla(t.fg))
             .opacity(opacity)
-            // `scale(0.98)` to `scale(1)` with the opacity (same duration and easing);
-            // reduced motion drops the transform.
-            .when(!reduced_motion(), |d| d.scale(0.98 + 0.02 * opacity))
             .child(shell(&t, self.palette.clone().into_any_element()))
             .child(self.settings.clone())
             .child(toasts)
