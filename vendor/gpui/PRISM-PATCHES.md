@@ -181,3 +181,7 @@
     the 35 ms file-search delay took 46.9-47.5 ms, and now takes 35.5 ms. The system timer
     resolution does not change (no `timeBeginPeriod`). Without that timer, `Timer` is a
     `smol::Timer` and `dispatch_after` uses the thread pool, as before.
+32. `src/elements/div.rs`, `handle_tooltip_mouse_move`: while a tooltip shows, or for
+    300 ms after it closes, the next tooltip opens with no 500 ms delay
+    (`LAST_TOOLTIP_SEEN`). A row of icon buttons then reads like the Windows tooltip
+    control, which also skips the delay for a neighbor.

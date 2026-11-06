@@ -38,7 +38,7 @@ use std::{
     mem,
     rc::Rc,
     sync::Arc,
-    time::Duration,
+    time::{Duration, Instant},
 };
 use util::ResultExt;
 
@@ -46,6 +46,12 @@ use super::ImageCacheProvider;
 
 const DRAG_THRESHOLD: f64 = 2.;
 const TOOLTIP_SHOW_DELAY: Duration = Duration::from_millis(500);
+/// After a tooltip closes, the next one opens with no delay inside this window.
+const TOOLTIP_SKIP_DELAY_WINDOW: Duration = Duration::from_millis(300);
+
+thread_local! {
+    static LAST_TOOLTIP_SEEN: std::cell::Cell<Option<Instant>> = const { std::cell::Cell::new(None) };
+}
 const HOVERABLE_TOOLTIP_HIDE_DELAY: Duration = Duration::from_millis(500);
 
 /// The styling information for a given group.
@@ -2725,6 +2731,10 @@ fn handle_tooltip_mouse_move(
     window: &mut Window,
     cx: &mut App,
 ) {
+    if window.rendered_frame.tooltip_requests.iter().any(Option::is_some) {
+        LAST_TOOLTIP_SEEN.set(Some(Instant::now()));
+    }
+
     // Separates logic for what mutation should occur from applying it, to avoid overlapping
     // RefCell borrows.
     enum Action {
@@ -2763,12 +2773,16 @@ fn handle_tooltip_mouse_move(
             active_tooltip.borrow_mut().take();
         }
         Action::ScheduleShow => {
+            let show_delay = match LAST_TOOLTIP_SEEN.get() {
+                Some(seen) if seen.elapsed() < TOOLTIP_SKIP_DELAY_WINDOW => Duration::ZERO,
+                _ => TOOLTIP_SHOW_DELAY,
+            };
             let delayed_show_task = window.spawn(cx, {
                 let active_tooltip = active_tooltip.clone();
                 let build_tooltip = build_tooltip.clone();
                 let check_is_hovered_during_prepaint = check_is_hovered_during_prepaint.clone();
                 async move |cx| {
-                    cx.background_executor().timer(TOOLTIP_SHOW_DELAY).await;
+                    cx.background_executor().timer(show_delay).await;
                     cx.update(|window, cx| {
                         let new_tooltip =
                             build_tooltip(window, cx).map(|(view, tooltip_is_hoverable)| {
