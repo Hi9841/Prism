@@ -185,3 +185,11 @@
     300 ms after it closes, the next tooltip opens with no 500 ms delay
     (`LAST_TOOLTIP_SEEN`). A row of icon buttons then reads like the Windows tooltip
     control, which also skips the delay for a neighbor.
+33. `src/platform/windows/vsync.rs` (`notify_window_shown`, `wait_for_window_shown`),
+    `src/platform/windows/platform.rs` `begin_vsync_thread`, and `src/platform/windows/events.rs`
+    (`WM_SHOWWINDOW`, `WM_WINDOWPOSCHANGED` with `SWP_SHOWWINDOW`): while no window is visible, the
+    vsync thread waits for a show signal (1 s timeout as a safety net) and does not call `DwmFlush`
+    and `RedrawWindow` on each vertical blank. A hidden window gets no `WM_PAINT`, so those wakeups
+    did no work. After a show the thread keeps its pace for 1 s before it tests visibility again
+    (`WM_SHOWWINDOW` arrives before the window is visible). Measured in parity mode
+    (`oploop/bench/uiidle.py`): hidden CPU 4.46 -> 0.61 ms/s, context switches 262 -> 67 per second.

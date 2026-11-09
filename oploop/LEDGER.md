@@ -966,3 +966,80 @@ again by hand at 14:58.
 - Bench fix: `close` ends only a process created after the launch began.
 - Product fix: the startup shortcut retries wait for Explorer for as long as it is missing; only attempts made
   while Explorer runs count toward the 480 (`backend.rs` `apply_startup_shortcut`).
+
+## Session 2026-11-09 (E): search, app performance, and resource use
+
+Owner: "optimize the search and the overall app performance and resource usage". Offline only (no desktop
+sessions): parity mode for the UI layer, examples on a catalog copy for the backend, and read-only samples
+of the installed app for the field profile.
+
+- Work: branch `oploop-perf` from `9b591f3f` (release 1.0.20). Baseline binaries: `target/oploop/e/base/`
+  (`prism.exe`, `catalog_bench.exe`, release profile, built at `9b591f3f`).
+- Catalog copy: `target/tmp/bench/data/catalog.db` (SQLite backup API, 2026-11-09, 4.72 GiB), with copies of
+  `apps.json`, `prism.json`, `intent-cache.db` and `icons/`.
+- Build: cargo (blaze fails on this machine, see session C). `TMP`/`TEMP` = `target/tmp`.
+
+### Field profile (installed 1.0.20, read-only samples, `bench/threads.py`, `bench/memmap.py`)
+
+After 31 minutes: 420 MiB private, 392 MiB working set, 134 threads, 1,080 handles, 51.6 s CPU, 4.3 GB read,
+204 MB written. Committed private memory by region: 380.6 MiB in 212 allocations (five blocks of 16 MiB or
+more: 141.6 MiB; 22 blocks of 4-16 MiB: 204.6 MiB).
+
+CPU by thread since the start: mouse hook thread (`audio_hook.rs`, `WH_MOUSE_LL`) 15.0 s (14.3 s kernel), main
+11.5 s, `VSyncProvider` 5.6 s, 103 NVIDIA driver threads 3.2 s, `prism-flush` 1.8 s.
+
+A sample of 393 s, hidden, while cargo builds ran on the machine (`target/tmp/bench/fieldwatch-1.jsonl`): 6.59 s
+CPU (1.7% of one core) = scope repairs on the tokio blocking pool 3.0 s + `prism-flush` 1.6 s + `VSyncProvider`
+0.76 s + mouse hook 0.34 s (all of it in the 26 s with cursor movement: 13 ms/s) + other 0.9 s. Writes: 174 MiB
+in 76,094 operations (writes in 248 of the 393 s). Thread count: 133 at rest, **647** at the peak.
+
+### Correctness floor (at `9b591f3f`)
+
+| Check | Command | Baseline |
+|---|---|---|
+| Typecheck | `cargo check --workspace --all-targets` | pass |
+| Lint | `cargo clippy -p prism-core -p prism-ui -p prism-app` | prism-core 10, prism-ui 24, prism-app 1 warnings |
+| Judge | `cargo build -p prism-judge`, `bun migration/judge/judge.mjs` | 277/277 |
+| Parity journeys | `uv run .agents/skills/verify-prism/scripts/verify.py run <scenario>` | see each iteration |
+
+No unit tests (owner rule): each iteration names its end-to-end check.
+
+### Journeys
+
+| ID | Journey | Harness | Metric | Baseline (median, range, n) |
+|---|---|---|---|---|
+| E1 | UI layer at rest, palette hidden | `uv run oploop/bench/uiidle.py --a <exe>` (parity mode, no backend) | context switches per second (a count), CPU ms per second (cycle counters) | 300 /s (224-334); 2.22 ms/s (1.67-2.67), n=5 |
+| E1b | UI layer at rest, palette open, no input | same | same | 1,366 /s (881-1,418); 10.07 ms/s (6.37-10.24), n=5 |
+
+More journeys follow below as their harnesses are built (file churn, keystroke search, memory).
+
+### E-001 The vsync thread waits while no window is visible (patch 33)
+
+- Journey: E1.
+- Profile: `vendor/gpui/src/platform/windows/platform.rs:240` `begin_vsync_thread`: the loop calls `DwmFlush`
+  and `RedrawWindow` for each window on each vertical blank (144 Hz), also while the palette is hidden. In the
+  E1 baseline the `VSyncProvider` thread uses 1.98 of the 2.22 ms/s (89%) and causes almost all of the 300
+  context switches per second. In the field: 5.6 s of CPU in 31 minutes, 0.76 s in the 393 s sample.
+- Hypothesis: a hidden window gets no `WM_PAINT`, so the loop does no useful work then. If the thread waits
+  on a signal while no window is visible (set by `WM_SHOWWINDOW` and by `WM_WINDOWPOSCHANGED` with
+  `SWP_SHOWWINDOW`; 1 s timeout as a safety net), E1 should drop from 300 to fewer than 10 context switches
+  per second and from 2.2 to about 0.3 ms/s. The first frame after a show does not change: GPUI draws it
+  inside `WM_SHOWWINDOW`. E1b should not change.
+- Test: `uiidle.py` checks the capture after the hidden period (the palette must paint again), and the
+  parity journeys that hide and reopen must pass.
+- Change: `vsync.rs` `notify_window_shown` / `take_window_shown` / `wait_for_window_shown` (a flag and a
+  condition variable); `platform.rs` `begin_vsync_thread` waits there when no window is visible and the 1 s
+  grace after the last show is over; `events.rs` signals from `WM_SHOWWINDOW` (show) and from
+  `WM_WINDOWPOSCHANGED` with `SWP_SHOWWINDOW` (`palette_window::raise` shows that way).
+- Result (`results/raw/e001-uiidle.jsonl`, A B B A x3, n=6 a side; the machine was busier than at the
+  baseline, so both sides are higher): hidden CPU 4.46 ms/s (4.15-4.87) -> 0.61 ms/s (0.50-0.65), -86%,
+  every B below every A; context switches 262 /s (233-307) -> 67 /s (61-70), -74%. `VSyncProvider` 3.89 ->
+  0.014 ms/s. What is left (0.6 ms/s, about 60 switches a second) is the NVIDIA driver's own threads
+  (`nvwgf2umx.dll`). E1b (open, no input): 16.3 (14.8-17.2) -> 15.4 (14.5-16.8) ms/s, ranges overlap.
+- Did the work happen: the capture 120 ms after "open, type `note`" that follows the hidden period shows the
+  query and the Notepad row, and is the same image in all 8 runs of a second A/B (4 a side).
+- Gate: typecheck pass; judge 277/277; parity journeys 23/23 (`target/verify/runs/20261109-235236`).
+- Not checked offline: the real shell's show path (`shell.rs` `present_native`). It calls the same
+  `ShowWindow(SW_SHOW)`, which sends both signals. A desktop smoke run (`bench/probe.py`) before a release
+  covers it.
+- Decision: KEEP.

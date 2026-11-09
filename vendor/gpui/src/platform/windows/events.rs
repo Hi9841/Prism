@@ -38,6 +38,14 @@ impl WindowsWindowInner {
         wparam: WPARAM,
         lparam: LPARAM,
     ) -> LRESULT {
+        // Prism patch 33: `SetWindowPos` with `SWP_SHOWWINDOW` shows a window
+        // without `WM_SHOWWINDOW`; the vsync thread must run for it too.
+        if msg == WM_WINDOWPOSCHANGED {
+            let position = unsafe { &*(lparam.0 as *const WINDOWPOS) };
+            if position.flags.contains(SWP_SHOWWINDOW) {
+                notify_window_shown();
+            }
+        }
         let handled = match msg {
             WM_ACTIVATE => self.handle_activate_msg(wparam),
             WM_CREATE => self.handle_create_msg(handle),
@@ -1179,6 +1187,7 @@ impl WindowsWindowInner {
 
     fn handle_window_visibility_changed(&self, handle: HWND, wparam: WPARAM) -> Option<isize> {
         if wparam.0 == 1 {
+            notify_window_shown();
             self.draw_window(handle, false);
         }
         None
