@@ -978,7 +978,7 @@ impl Palette {
         // Icon cell. The original gives the icon a drag handler, but the row's
         // full-size open button paints above it (z-0 positioned inside the z-[1]
         // cell), so Chromium never routes a press to it: the icon acts as the row.
-        let icon_cell = div().flex_none().child(row_icon(&item.icon, 40., t, zoom));
+        let icon_cell = div().flex_none().child(row_icon(&item.icon, 40., t, zoom, window, cx));
 
         // `transition-colors duration-150`.
         let title_color = if selected { t.fg } else { Rgba { a: t.fg.a * 0.9, ..t.fg } };
@@ -1823,7 +1823,7 @@ impl Palette {
                     .shadow(zoomed(vec![shadow(0., 8., 22., 0., t.shade(0.34))], zoom))
                     .opacity(opacity)
                     .child(crate::components::ui::inset_top_highlight(t.preview_hi(), 14.))
-                    .child(row_icon(&item.icon, 40., t, zoom))
+                    .child(row_icon(&item.icon, 40., t, zoom, window, cx))
                     .child(
                         div()
                             .flex_1()

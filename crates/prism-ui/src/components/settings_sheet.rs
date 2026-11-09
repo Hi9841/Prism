@@ -991,7 +991,7 @@ impl SettingsSheet {
                                 }
                             }))
                         })
-                        .child(row_icon(&icon_value, 26., t, zoom))
+                        .child(row_icon(&icon_value, 26., t, zoom, window, cx))
                         .child(
                             div()
                                 .flex_1()
