@@ -362,6 +362,16 @@ fn flush_file_batch(
     generation: u64,
     batch: &mut Vec<ScannedItem>,
 ) -> Result<(), String> {
+    // The watcher can rename or remove an entry between the listing and this
+    // write. Drop each item that is gone now, or the walk writes a ghost row.
+    // An idle sweep has almost no changed rows, so this test is cheap. It does
+    // not follow links, and any error except "not found" counts as "there".
+    batch.retain(|item| {
+        !matches!(
+            std::fs::symlink_metadata(&item.display_path),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound
+        )
+    });
     if batch.is_empty() {
         return Ok(());
     }
