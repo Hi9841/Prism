@@ -1408,3 +1408,22 @@ Owner: "keep trying to optimize it also in the UX department and UI". Branch `op
   runs. The 150 ms fade of two footer icons no longer plays at the first open: it ends in the hidden frame.
 - Gate: clippy prism-ui 24 (the floor); judge 277/277; parity journeys 23/23.
 - Decision: KEEP. Not checked offline: the real app gets its icons from the backend; the same observer runs.
+
+### F-002 The first key after a pause searches files with no wait (owner decision 2026-11-10)
+
+- Journey: J3 (key to file rows). `state/palette.rs` `run_file_search` waits `FILE_SEARCH_DELAY_MS` (35 ms)
+  before each file search; the search takes about 4 ms. The owner chose: the first key after a pause
+  searches at once, keys that follow within 35 ms still wait.
+- Hypothesis: a key that comes 35 ms or more after the last one starts its file search at once, so the file
+  rows of that key show about 35 ms sooner. Fast typing keeps the wait, so it looks as before.
+- Test: `uiframes.py` (200 ms between keys: each key is a first key): same captures; parity journeys.
+- Change, `state/palette.rs`: `last_file_search`; `run_file_search` skips the wait when 35 ms or more
+  passed since the last request.
+- Result (`results/raw/f002-uiframes.jsonl`, keys 200 ms apart, A B B A x2, n=4 a side, exact counts):
+  `report` 34 -> 29 frames, `zzqx` 8 -> 5 frames: the file reply now lands with the frame of the key's
+  echo. The time from a key to its file rows was not measured offline (the bench has no clock for it): by
+  the code, the 35 ms wait is gone for such a key.
+- Captures: B differs from A by 1 pixel (typed) and 10 pixels (second open), each by one level of 255. The
+  eye cannot see that; the cause is probably the order in which glyphs enter the atlas.
+- Gate: clippy prism-ui 24; judge 277/277; parity journeys 23/23.
+- Decision: KEEP.

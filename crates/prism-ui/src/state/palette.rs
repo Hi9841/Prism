@@ -136,6 +136,8 @@ pub struct PaletteState {
     file_path_browse: bool,
     phase1: Option<Phase1Response>,
     power_plans: Vec<PowerPlanHit>,
+    /// When the last file search was asked for (see `run_file_search`).
+    last_file_search: Option<std::time::Instant>,
     existing_history_paths: HashSet<String>,
     app_icons: HashMap<String, String>,
     pub selected: usize,
@@ -264,6 +266,7 @@ impl PaletteState {
             file_path_browse: false,
             phase1: None,
             power_plans: Vec::new(),
+            last_file_search: None,
             existing_history_paths: HashSet::new(),
             app_icons: HashMap::new(),
             selected: 0,
@@ -667,8 +670,17 @@ impl PaletteState {
         self.files_error = false;
         self.file_error = None;
         let limit = self.file_limit;
+        // The wait spares a search for each key of fast typing. A key that
+        // comes after a pause has no key behind it to wait for: it searches at
+        // once (owner decision, 2026-11-10).
+        let now = std::time::Instant::now();
+        let delay = Duration::from_millis(FILE_SEARCH_DELAY_MS);
+        let after_pause = self.last_file_search.is_none_or(|last| now.duration_since(last) >= delay);
+        self.last_file_search = Some(now);
         self.file_task = Some(cx.spawn(async move |this, cx| {
-            Timer::after(Duration::from_millis(FILE_SEARCH_DELAY_MS)).await;
+            if !after_pause {
+                Timer::after(delay).await;
+            }
             let result = bridge::search_files(search_text, limit).await;
             let _ = this.update(cx, |this, cx| {
                 match result {
