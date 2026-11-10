@@ -1427,3 +1427,29 @@ Owner: "keep trying to optimize it also in the UX department and UI". Branch `op
   eye cannot see that; the cause is probably the order in which glyphs enter the atlas.
 - Gate: clippy prism-ui 24; judge 277/277; parity journeys 23/23.
 - Decision: KEEP.
+
+Owner rule from here on (2026-11-10): the main agent finds and measures; a Sonnet subagent at high effort
+implements each fix.
+
+### F-003 A name-index reload does not send searches to the SQL path
+
+- Journey: S3 (keystroke search) during a reload.
+- Profile: `name_index.rs` `load_rows`: a reload (`reload_requested`, after 730,000 removed rows or a
+  quarter of the rows marked deleted) calls `reset()` first. `loaded` is false for the whole load (2.4-2.8 s),
+  so `candidates` returns `None` and each search uses the SQL stages (no substring stage; about 200 ms for a
+  common name against about 4 ms). The field recording removes 250,000 rows in 10 minutes.
+- Hypothesis: load the new rows into a fresh `Names` beside the live one and swap it in under the write lock.
+  Searches during a reload then keep the index speed (about 4 ms) and the substring results. Cost: both
+  indexes are in memory for the 2.4-2.8 s of the load (about +150 MiB, then back).
+- Test: `catalog_bench` gets a reload phase: request a reload, run the 26 queries while it loads, compare
+  their result lists with the lists before the reload, and report the summed time.
+
+### F-004 One write transaction for each watcher flush
+
+- Journey: E3r (bytes written, CPU of the flusher).
+- Profile: `watcher.rs` `apply_queued_events` commits the removals that go first, then one transaction for
+  each rename (`db.rename_file`; 8,264 renames in the 60 s slice), then the additions, then the removals.
+  Each commit writes its changed pages to the WAL again.
+- Hypothesis: one `Database` call that applies the whole fold in one transaction should cut the bytes
+  written on E3r by 5% or more and the flusher's CPU a little, with 0 differences.
+- Test: `churn_bench` on the replay and on the built-in script: differences 0.
