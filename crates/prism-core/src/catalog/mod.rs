@@ -566,6 +566,17 @@ impl FileIndex {
         self.emit_updated();
     }
 
+    /// Registers `volume` and synchronizes it on the calling thread: its
+    /// watcher starts and its tree is walked. `scan_all_volumes` does both
+    /// for each discovered volume; a bench calls this for a test tree.
+    pub fn sync_volume(&self, volume: &VolumeInfo, fresh_ok: bool) {
+        let db = self.db.read().unwrap_or_else(|e| e.into_inner()).clone();
+        if let Some(db) = db {
+            let _ = db.upsert_volume(volume, VolumeState::Indexing);
+        }
+        self.scan_one_volume_sync(volume, fresh_ok);
+    }
+
     /// The whole per-volume scan is synchronous; the async wrappers only move
     /// it off the runtime threads. Keeping the overflow handler fully sync
     /// (spawn_blocking with no nested future) also avoids the type-level cycle

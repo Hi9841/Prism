@@ -1043,3 +1043,50 @@ More journeys follow below as their harnesses are built (file churn, keystroke s
   `ShowWindow(SW_SHOW)`, which sends both signals. A desktop smoke run (`bench/probe.py`) before a release
   covers it.
 - Decision: KEEP.
+
+### Journey E3: the catalog while files change (`churn_bench`, `bench/churn_ab.py`)
+
+Harness: `crates/prism-core/examples/churn_bench.rs` opens the catalog copy, registers a test tree
+(`target/tmp/bench/churn-tree`) as a volume of its own through the new `FileIndex::sync_volume` (the real
+watcher, flusher and scope repairs; the host reports a hidden palette), and starts a child process that
+changes files: 100 documents and 20 folders; a build of 150 crates (fingerprints, outputs, a temp folder that
+lives 20 ms, a session folder of 20 files that is renamed when the crate is done); a second build of 50
+crates; 100 safe saves (a temp file replaces the document), 100 downloads (a rename at the end), 20 folders
+that are replaced by a renamed folder; an install of 1,200 packages of 24 files with no pause; a clean that
+removes 1,000 packages and the fingerprints. About 80,000 file events in 25 s; 9,300 entries stay. The
+child's own file writes are not in the numbers. The window ends 30 s after the child. A second kind of child
+compares the catalog rows of the tree with the disk once a second (path, folder flag, parent).
+
+| ID | Metric | Baseline (median, range, n=3) |
+|---|---|---|
+| E3 | CPU of the process | 4.13 s (3.47-4.41) |
+| E3 | bytes written (catalog WAL) | 128.8 MiB (127.3-131.9) in 52,862 operations |
+| E3 | threads at the peak (7 before the churn) | 373 (352-375) |
+| E3 | private bytes at the peak (187 MiB after the window) | 1,084 MiB (248-1,180) |
+| E3 | catalog rows that differ from the disk at the end | 1,220 / 1,212 / 1,220: never equal (an error in each run) |
+
+The first form of the generator (no documents, `results/raw/e-churn-base.jsonl`, n=4) gave CPU 3.79 s
+(3.53-4.22), 119.8 MiB (114.3-124.5), 364 threads (351-371), and 991-1,000 differences.
+
+### Defect found by E3: the watcher loses files when a folder is renamed (the floor)
+
+Every baseline run ends with about 1,220 entries of the disk missing from the catalog, for good (only the
+6-hour sweep finds them): the 1,000 files of the second build's session folders, the 100 saved documents,
+and the files of the replaced folders. Cause, `watcher.rs` `apply_queued_events`: one flush folds its events
+into three unordered groups and applies them as renames, then additions, then removals.
+
+- A file added in `a\`, then `a` renamed to `b` in the same flush: the addition still names `a\file`, which
+  no longer exists, so it is dropped. The first build hides this: the parent folder is new too, and a new
+  folder gets a repair walk.
+- A safe save (`Removed(doc)`, `Renamed(tmp -> doc)`): the rename writes the row, and the removal, applied
+  last, deletes it.
+
+### E-002 The watcher's fold follows renames (fix)
+
+- Journey: E3 (correctness floor).
+- Hypothesis: if a rename moves the pending additions and removals under the old name to the new name, and
+  cancels a pending removal of its target (removals below the target go before the renames), then the
+  catalog equals the disk a few seconds after the churn ends: differences about 1,220 -> 0 in every run.
+  The 1,220 rows are then written, so the WAL bytes should rise by a few percent. A rename that fails
+  (a row already has the new path) asks for a repair walk of the target's parent, where it was ignored before.
+- Test: `churn_bench` (differences at the end must be 0; it exits with code 1 if not).
