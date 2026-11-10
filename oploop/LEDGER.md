@@ -1510,3 +1510,17 @@ run), then give the fix to a subagent.
   demand.
 - Gate: typecheck pass; clippy prism-core 10; judge 277/277.
 - Decision: KEEP.
+
+### F-006 Palette rows share their items (no copy of each item on each rebuild and frame)
+
+- Journey: E5 with the owner's app list (`fixture-real.json`): time in frames for the typed keys and for
+  the second open (`uiframes.py`: `type_ms`, `reopen_ms`), same frame counts and same captures.
+- Profile (read-only audit U-04, by reading): `features/palette/sections.rs` builds each `PaletteItem` and
+  clones every item into `flat_items` (`:297-303`, `:406`, `:499`); `features/palette/palette.rs`
+  `render_row` and its callers clone the item 3-4 times for each built row on each frame (`:925`, `:935`,
+  near `:1072`, `:1153`, `:1200`), and the groups are copied each frame (`:1509`). An item holds its icon as
+  a base64 string of about 5 KB.
+- Hypothesis: with the items behind `Rc` (sections and `flat_items` hold the same `Rc<PaletteItem>`; the row
+  closures clone the `Rc`), `type_ms` and `reopen_ms` should drop by 10% or more with the same frame counts
+  and the same images. If the drop is inside the noise, the change goes out.
+- Test: `uiframes.py` with `--fixture target/tmp/bench/fixture-real.json`; parity journeys 23/23.
