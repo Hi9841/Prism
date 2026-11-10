@@ -1090,3 +1090,34 @@ into three unordered groups and applies them as renames, then additions, then re
   The 1,220 rows are then written, so the WAL bytes should rise by a few percent. A rename that fails
   (a row already has the new path) asks for a repair walk of the target's parent, where it was ignored before.
 - Test: `churn_bench` (differences at the end must be 0; it exits with code 1 if not).
+- Change, `watcher.rs`: `EventFold` (ordered sets). `rename(from, to)` moves the pending additions and
+  removals below `from` to below `to`, cancels a pending removal of `to`, sends removals below `to` ahead of
+  the renames, and joins `a -> b`, `b -> c` into `a -> c`. A rename that fails asks for a walk of the
+  target's parent.
+- First result (`results/raw/e002-churn.jsonl`, n=4 a side): differences 1,204-1,222 -> 1, 0, 0, 40. The
+  runs with differences lost one whole session folder: an earlier flush read its files after the rename,
+  under the old name, and dropped them as missing; the rename came in the next flush and moved no rows.
+- Second form: a renamed folder also gets a repair walk (as a new folder does).
+- Result (`results/raw/e002b-churn.jsonl`, A B B A x3, n=6 a side): differences 1,203-1,220 -> 0 in all
+  6 runs; the catalog equals the disk 1.06-1.6 s after the churn ends (before: never). Bytes written 130.6
+  MiB (126.3-133.6) -> 98.1 MiB (91.7-100.2), -25%, p 0.005: the rows come in the flush's one transaction,
+  not from many small repair walks. Read operations -69%. User CPU 1.37 -> 1.74 s (+27%, p 0.005); CPU total
+  4.41 s (3.70-5.27) -> 5.25 s (3.89-5.64), +19%, p 0.23 (not significant). The fix does work that the
+  baseline skipped (it lost those rows). Threads at the peak 312 -> 310 (no change).
+- Gate: typecheck pass; clippy prism-core 10, prism-ui 24, prism-app 1 (the floor); judge 277/277.
+- Decision: KEEP (a fix; E3's floor is now 0 differences, and the next A/B runs use this build as A).
+
+### E-003 At most two repair walks at one time
+
+- Journey: E3.
+- Profile: `catalog/mod.rs` `request_scope_repair`: each new or renamed folder asks for a repair walk, and
+  each walk runs on a blocking-pool thread of its own. When a burst goes quiet (`SCOPE_REPAIR_QUIET`, 2 s),
+  all the waiting walks start together: 7 threads before the churn, 310-373 at the peak (647 in the field
+  sample). Each walk also reserves a batch of 20,000 rows (`scanner.rs:221`, 3.4 MB) before it reads one
+  folder: private bytes reached 1,084-1,241 MiB in 3 of 13 runs. All walks share one reader and one writer
+  connection, so they mostly wait on each other.
+- Hypothesis: a semaphore of two slots for the walks (and one slot for shard-root walks, so that a long
+  walk leaves a slot for the short ones) should hold the peak below 20 threads and remove the private-bytes
+  spikes, with the same rows at the end and no later freshness (about 1.1 s). CPU should drop a little
+  (fewer thread starts, less lock contention).
+- Test: `churn_bench` differences must stay 0; the time until the catalog equals the disk must not rise.
