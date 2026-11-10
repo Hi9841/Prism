@@ -82,6 +82,9 @@ const AUTO_VACUUM_INCREMENTAL: i64 = 2;
 
 /// `PRAGMA cache_size` of the reader connection: 8 MiB (negative means KiB).
 const READER_CACHE_KIB: i64 = -8000;
+/// `PRAGMA cache_size` of the writer connection: 8 MiB. Its cache fills with
+/// the pages that the watcher's flushes and the sweeps change, and stays.
+const WRITER_CACHE_KIB: i64 = -8000;
 
 /// `PRAGMA mmap_size` of both connections: 256 MiB.
 const MMAP_SIZE: i64 = 268_435_456;
@@ -173,6 +176,9 @@ impl Database {
             .execute_batch("PRAGMA auto_vacuum = INCREMENTAL;")
             .map_err(|e| e.to_string())?;
         Self::configure_pragmas(&writer)?;
+        writer
+            .execute_batch(&format!("PRAGMA cache_size = {WRITER_CACHE_KIB};"))
+            .map_err(|e| e.to_string())?;
         Self::init_schema(&writer)?;
         if super::catalog_debug_enabled() {
             writer.profile(Some(Self::slow_statement));

@@ -1248,3 +1248,23 @@ name index reloads in full after 730,000 removals (`name_index.rs` `needs_sync_w
 - Gate: typecheck pass; clippy prism-core 10 (the floor); judge 277/277.
 - Decision: KEEP. In the app the first append comes within minutes of each start, so the steady state is
   16 MiB lower.
+
+### E-007 The writer connection's page cache: 8 MiB, not 32 MiB
+
+- Journey: E3 (private bytes after the churn) and its write and CPU numbers as the guard.
+- Profile: `catalog/db.rs:225` `configure_pragmas` sets `cache_size = -32000` (31 MiB) for both connections;
+  the reader lowers its own to 8 MiB (`:190`), the writer keeps 31 MiB. The watcher's writes fill it: E3's
+  private bytes are 161 MiB before the churn and 187-189 MiB after it (+27 MiB), and they stay.
+- Hypothesis: with 8 MiB for the writer, the private bytes after the churn should drop by about 20 MiB.
+  A flush writes its rows in path order, so few pages are needed twice in one transaction: the bytes
+  written and the CPU should stay inside the noise (a cache that is too small writes a page to the WAL more
+  than once). If they rise, the change goes out.
+- Test: `churn_bench` differences 0; write bytes and CPU not above A beyond noise.
+- Change, `catalog/db.rs`: `WRITER_CACHE_KIB` = -8000, set for the writer after `configure_pragmas`.
+- Result (`results/raw/e007-churn.jsonl`, A = E-006 build, A B B A x3, n=6 a side): private bytes after the
+  churn 193.0 MiB (191.4-194.4) -> 169.4 MiB (167.2-170.6), -23.6 MiB, p 0.005; at the peak 196.9 -> 176.0
+  MiB. Bytes written 94.8 -> 95.4 MiB (p 1.0) and CPU 5.05 -> 5.13 s (p 0.94): no change. Page reads 58.7 ->
+  74.5 MiB (+27%, p 0.005): pages that left the smaller cache come back from the system file cache, with
+  no CPU cost that shows. Fresh after 1.07-1.23 s (A: 1.07-1.10 s); differences 0 in all 12 runs.
+- Gate: typecheck pass; clippy prism-core 10 (the floor); judge 277/277.
+- Decision: KEEP.
