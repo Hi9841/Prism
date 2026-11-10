@@ -1498,3 +1498,15 @@ run), then give the fix to a subagent.
   metadata call for each changed row; an idle sweep has almost none), the stale row is not written. The
   ghost row should not show in 8 replay runs, with CPU and bytes inside the F-004 range.
 - Test: `churn_bench` on the replay, 8 runs: differences 0 in each. A/A rate before: 1 in about 12 runs.
+- Change (Sonnet subagent, commit 574d0ba4 picked): `scanner.rs` `flush_file_batch` drops each item whose
+  path gives "not found" just before the write; another error keeps the item.
+- Result: 8 replay runs of the fix (`results/raw/f005-replay.jsonl`): differences 0 in each. An interleaved
+  A/B against the F-004 build (`results/raw/f005-ab.jsonl`; a server restart stopped it after 3 runs a
+  side): CPU A 23.4 / 21.0 / 23.9 s, B 22.3 / 20.3 / 21.2 s; bytes written A 432 / 429 / 499 MiB, B 434 / 446 /
+  443 MiB; differences 0 in all 6. No cost shows. (Both sides read higher than in the F-004 A/B: the
+  machine was busier.)
+- Limit of the proof: the defect showed once in about 12 runs before, so 11 clean runs make it unlikely,
+  not certain, that it is gone. The cause is from the code and one recording, not from a run that fails on
+  demand.
+- Gate: typecheck pass; clippy prism-core 10; judge 277/277.
+- Decision: KEEP.
