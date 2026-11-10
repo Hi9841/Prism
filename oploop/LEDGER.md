@@ -1330,3 +1330,57 @@ is the repair walks on blocking-pool threads. So one minute of that test suite c
   equal after 1.1-1.2 s, repair walks 3,580 -> about 200, CPU and bytes written inside the earlier range.
 - Gate: typecheck pass; clippy prism-core 10 (the floor); judge 277/277.
 - Decision: KEEP.
+
+### E-008 While the palette is hidden, the watcher flushes after 10 s (or 4,096 events)
+
+- Journey: E3r.
+- Profile: `watcher.rs` `run_flusher_loop` applies the queue each 750 ms. In the field recording 20% of new
+  entries are gone within 5 s; the analysis gives 25% fewer row writes with a 5 s window and 32% with 10 s.
+  Nobody reads the catalog while the palette is hidden.
+- Hypothesis: while the host reports a hidden palette, hold the queue until its oldest event is 10 s old or
+  4,096 events wait (a quarter of the limit where the queue collapses into walks); flush at the next tick
+  when the palette shows. The slice has about 3,200 events a second, so the count limit acts after about
+  1.3 s: bytes written should drop by about 10-15% and CPU a little, with 0 differences. Search freshness
+  at an open stays inside one 750 ms tick, as now.
+- Test: `churn_bench` on the replay (the bench host reports a hidden palette): differences 0.
+- Change, `watcher.rs` `run_flusher_loop`: `HIDDEN_FLUSH_AGE` (10 s) and `HIDDEN_FLUSH_EVENTS` (4,096); the
+  loop keeps its 750 ms tick and flushes at once when the palette is visible, the queue collapsed, or a
+  limit is reached. With no host the palette counts as visible.
+- Result (`results/raw/e008-replay.jsonl`, A = E-009 build, A B B A x2, n=4 a side): bytes written 802.3 MiB
+  (792.5-814.1) -> 702.1 MiB (687.4-711.5), -12.5%, every B below every A, p 0.03; CPU 16.5 s (15.9-17.5) ->
+  15.3 s (14.6-16.1), -7.5%, p 0.06 (not significant); differences 0 in all 8 runs. While hidden, the
+  catalog equals the disk 2.9-12.7 s after the last event (A: 2.9-3.1 s): the hold, as designed.
+- Gate: typecheck pass; clippy prism-core 10; judge 277/277.
+- Decision: KEEP as its own commit. It changes when a hidden Prism writes, not what a search shows: at an
+  open the flush comes inside one 750 ms tick, as before. The owner can remove this one commit.
+
+### Session E summary (2026-11-09 and 2026-11-10)
+
+| Journey | Before | Now | Change | n a side |
+|---|---|---|---|---|
+| E1 UI at rest, hidden: CPU / context switches | 4.46 ms/s / 262 /s | 0.61 ms/s / 67 /s | -86% / -74% | 6 |
+| E3 threads at the peak under file churn | 310 (289-349) | 14 | -95% | 6 |
+| E3 private bytes at the peak / after the churn | up to 1,241 MiB / 193 MiB | 176 MiB / 169 MiB | no spikes / -24 MiB | 6 |
+| E3 catalog rows that differ from the disk | 1,203-1,220, for good | 0 | fixed | 6 |
+| E3r 60 s of real file events: CPU | 33.9 s | 15.3 s | -55% | 4 |
+| E3r bytes written / read | 882 / 807 MiB | 702 / 444 MiB | -20% / -45% | 4 |
+| E4 phase 1, 30 queries | 123.3 ms | 26.9 ms | -78% | 6 |
+| E5 frames for a key with no result | 3 | 2 | -1 frame | 4 |
+| S3 first search after new files | 37.1 ms | 13.2 ms | -64% | 6 |
+| S4 index memory after the first append | 177.2 MiB | 161.1 MiB | -16.1 MiB | 6 |
+
+Kept: E-001 (20bfeec6), E-002 fix (2d12b825), E-003 (ac39df74), E-004 (9bcbc319), E-005 (7b451604), E-006
+(877c2533), E-007 (510c9304), E-009 (ce317d21), E-008 (this commit). Reverted: E-009 first form (creation
+time rule: it lost a file). Floor: typecheck pass, clippy 10 / 24 / 1, judge 277/277 before and after;
+parity journeys 23/23.
+
+Not done, for the owner: the 35 ms file-search debounce; the mouse hook (13 ms of CPU per second of cursor
+movement; a hook only near the taskbar, or one inside Explorer); a slimmer catalog schema (rows are about
+880 bytes: three copies of each path); a name-index snapshot file (each start reads 4.3 GB); the 6-hour sweep
+(no search reads the sizes and times it refreshes); the 150 ms fade of two footer icons at the first open;
+a real-app check of E-001 on the agent screen before a release.
+
+Next hypotheses: (1) the name index reloads in full after 730,000 removed rows and searches use the slow SQL
+path meanwhile: build the new index aside and swap; (2) one transaction for each flush (renames, additions
+and removals are 3 + N transactions now); (3) the first open after a start paints its first frame in 61 ms
+(later opens: 3.7 ms): warm the caches once after the app list loads.

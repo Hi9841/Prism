@@ -35,6 +35,18 @@ const BUFFER_SIZE: usize = 512 * 1024;
 /// transactions per minute instead of one per filesystem event.
 const FLUSH_INTERVAL: Duration = Duration::from_millis(750);
 
+/// While the palette is hidden, queued events wait until the oldest is this
+/// old. An entry that is added and removed in that time (a build's temp
+/// files, a test's sandbox) then costs the catalog no write: the fold drops
+/// it. On a developer's machine a fifth of all new entries live under 5 s.
+/// Nobody reads the catalog while the palette is hidden; when it shows, the
+/// next tick flushes.
+const HIDDEN_FLUSH_AGE: Duration = Duration::from_secs(10);
+/// A hidden flush does not wait past this many queued events: the queue
+/// collapses into repair walks at `MAX_QUEUED_EVENTS`, and a burst must
+/// still fit on top.
+const HIDDEN_FLUSH_EVENTS: usize = MAX_QUEUED_EVENTS / 4;
+
 /// Backoff after a hard read error so a persistently failing handle can
 /// never become a busy loop.
 const READ_ERROR_BACKOFF: Duration = Duration::from_millis(250);
@@ -870,11 +882,28 @@ fn run_flusher_loop(
     on_updated: Arc<dyn Fn() + Send + Sync>,
     on_overflow: Arc<dyn Fn(String, PathBuf) + Send + Sync>,
 ) {
+    // When the flusher first saw the events that wait now.
+    let mut waiting_since: Option<std::time::Instant> = None;
     while !stop.load(Ordering::Relaxed) {
         std::thread::sleep(FLUSH_INTERVAL);
         if buffering.load(Ordering::SeqCst) {
             continue;
         }
+        let (queued, collapsed) = {
+            let queue = event_queue.lock().unwrap();
+            (queue.events.len(), queue.collapsed)
+        };
+        if queued == 0 {
+            waiting_since = None;
+            continue;
+        }
+        let waited = waiting_since.get_or_insert_with(std::time::Instant::now).elapsed();
+        // No host (a tool, not the app) counts as visible: flush at each tick.
+        let hidden = crate::host::get().is_some_and(|host| !host.palette_visible());
+        if hidden && !collapsed && queued < HIDDEN_FLUSH_EVENTS && waited < HIDDEN_FLUSH_AGE {
+            continue;
+        }
+        waiting_since = None;
         let applied = apply_queued_events(&db, &event_queue, &volume_id, &counts, &drive);
         if applied.changed {
             on_updated();
