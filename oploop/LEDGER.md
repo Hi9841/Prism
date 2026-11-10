@@ -1443,6 +1443,17 @@ implements each fix.
   indexes are in memory for the 2.4-2.8 s of the load (about +150 MiB, then back).
 - Test: `catalog_bench` gets a reload phase: request a reload, run the 26 queries while it loads, compare
   their result lists with the lists before the reload, and report the summed time.
+- Change (Sonnet subagent, commit 8ecf9a85 picked as the commit before this entry): `reload()` builds a fresh
+  `Names` with the next generation and swaps it in under the write lock; rewritten ids taken by live
+  searches during the reload are logged and applied again after the swap; `catalog_bench` runs the 26
+  queries in rounds during a reload.
+- Result (A = the old reload code with the same bench phase, A B B A A B, n=3 a side): during the reload
+  (A 3.4-3.6 s, B 2.9-3.1 s) A completes 0 rounds of the 26 queries (one round takes longer than the whole
+  reload: more than 130 ms a query on the SQL path), B completes 6 rounds at 388 ms (349-388) a round, 15 ms
+  a query, with result lists equal to the lists before the reload. After the reload the lists are equal on
+  both sides. Private bytes at the peak 382 MiB -> 530 MiB (+148 MiB for about 3 s, then back).
+- Gate: typecheck pass; clippy prism-core 10; judge 277/277.
+- Decision: KEEP. The memory peak during a reload is the price; a reload comes only after 730,000 removed rows.
 
 ### F-004 One write transaction for each watcher flush
 
