@@ -74,6 +74,10 @@ const NO_ENTRY: u32 = u32::MAX;
 const TABLE_LOAD_NUMERATOR: usize = 5;
 const TABLE_LOAD_DENOMINATOR: usize = 8;
 const MIN_TABLE_SLOTS: usize = 1 << 10;
+/// Headroom of each buffer, as a share of its length: 1/32 is about 4 MiB on
+/// a large catalog and holds about 180,000 new rows. The load leaves that
+/// much free, and a full buffer grows by that much.
+const GROWTH_SHARE: usize = 32;
 
 /// Typo pass (FFF's frizbee matcher), for queries with this many letters or
 /// digits. It runs only when no name is a strong match (see
@@ -394,7 +398,12 @@ impl NameIndex {
             if let Ok((rows, bytes)) = db.file_name_totals() {
                 let mut names = self.names.write().unwrap_or_else(|e| e.into_inner());
                 let (held_rows, held_bytes) = (names.ids.len(), names.text.len());
-                names.reserve(rows.saturating_sub(held_rows), bytes.saturating_sub(held_bytes));
+                // With the headroom: the first appends after the load (new
+                // files, on the next search) then move no buffer.
+                names.reserve(
+                    (rows + rows / GROWTH_SHARE).saturating_sub(held_rows),
+                    bytes.saturating_sub(held_bytes),
+                );
             }
             self.load_spans(db)?;
         }
@@ -638,18 +647,19 @@ impl NameIndex {
 }
 
 impl Names {
-    /// Grows every buffer with 1/8 headroom instead of doubling: the name
-    /// buffer is tens of MB on a large catalog, so doubling would leave up to
-    /// half of it as dead capacity. `rows` and `bytes` are upper bounds: a
-    /// row whose name is already present adds no name.
+    /// Grows every buffer with a small headroom (`GROWTH_SHARE`) instead of
+    /// doubling: the name buffer is tens of MB on a large catalog, so
+    /// doubling would leave up to half of it as dead capacity. `rows` and
+    /// `bytes` are upper bounds: a row whose name is already present adds no
+    /// name.
     fn reserve(&mut self, rows: usize, bytes: usize) {
         fn grow<T>(buffer: &mut Vec<T>, extra: usize) {
             if buffer.capacity() - buffer.len() < extra {
-                buffer.reserve_exact(extra.max(buffer.len() / 8));
+                buffer.reserve_exact(extra.max(buffer.len() / GROWTH_SHARE));
             }
         }
         if self.text.capacity() - self.text.len() < bytes {
-            self.text.reserve_exact(bytes.max(self.text.len() / 8));
+            self.text.reserve_exact(bytes.max(self.text.len() / GROWTH_SHARE));
         }
         grow(&mut self.ends, rows);
         grow(&mut self.masks, rows);
@@ -660,14 +670,17 @@ impl Names {
         grow(&mut self.next, rows);
     }
 
-    /// Gives back the name capacity that `reserve` took for repeated names.
-    /// A full load reserves the text of every row; the distinct names need
-    /// about a third of it.
+    /// Gives back the name capacity that `reserve` took for repeated names,
+    /// down to the headroom. A full load reserves the text of every row; the
+    /// distinct names need about a third of it.
     fn shrink_names(&mut self) {
-        self.text.shrink_to_fit();
-        self.ends.shrink_to_fit();
-        self.masks.shrink_to_fit();
-        self.heads.shrink_to_fit();
+        self.text.shrink_to(self.text.len() + self.text.len() / GROWTH_SHARE);
+        fn fit<T>(buffer: &mut Vec<T>) {
+            buffer.shrink_to(buffer.len() + buffer.len() / GROWTH_SHARE);
+        }
+        fit(&mut self.ends);
+        fit(&mut self.masks);
+        fit(&mut self.heads);
     }
 
     /// Pushes `rows` in order. Most rows repeat a name whose table slot, end

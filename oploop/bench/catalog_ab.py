@@ -68,6 +68,10 @@ def run_once(exe: str, db: str, results: Path) -> dict:
         raise SystemExit(f"{exe} failed with exit code {proc.returncode}")
     summary["index_mib"] = (private["loaded"] - private["start"]) / 1048576
     summary["after_search_mib"] = private["searched"] / 1048576
+    # The first append after the load (the bench adds 1,000 rows and searches once more).
+    if "appended" in private:
+        summary["append_mib"] = (private["appended"] - private["searched"]) / 1048576
+        summary["after_append_mib"] = private["appended"] / 1048576
     return summary
 
 
@@ -142,7 +146,8 @@ def main() -> None:
     def column(side: str, key: str, query: str | None = None) -> list[float]:
         return [run[key][query] if query else run[key] for run in runs[side]]
 
-    rows = [(key, None) for key in ("load_ms", "index_mib", "first_total_ms", "search_total_ms")]
+    rows = [(key, None) for key in ("load_ms", "index_mib", "first_total_ms", "search_total_ms", "append_ms",
+                                    "append_mib", "after_append_mib") if key in runs["A"][0] and key in runs["B"][0]]
     rows += [("per_query_ms", query) for query in runs["A"][0]["per_query_ms"]]
     print(f"{'metric':42} {'A median':>10} {'B median':>10} {'change':>8} {'A range':>17} {'B range':>17} {'p':>7}")
     for key, query in rows:

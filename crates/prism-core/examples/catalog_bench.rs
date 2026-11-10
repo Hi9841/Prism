@@ -7,6 +7,12 @@
 //! line is a JSON summary of the load and search timings. With a results
 //! path, the paths each query returned go there (one line per query), so two
 //! builds can be checked for identical results.
+//!
+//! After the searches it adds 1,000 rows to the catalog copy (a volume id of
+//! its own) and searches once more: the index then appends rows for the first
+//! time after its load, as it does in the app when the watcher writes new
+//! files. `append_ms` is that search; the memory at `MARK appended` shows
+//! what the first append costs. The rows are removed again at the end.
 
 use std::io::{BufRead, Write};
 use std::path::Path;
@@ -16,6 +22,31 @@ use std::time::Instant;
 use prism_core::catalog::db::Database;
 use prism_core::catalog::name_index::NameIndex;
 use prism_core::catalog::search::search_with_generation;
+use prism_core::catalog::types::ScannedItem;
+
+const APPEND_VOLUME: &str = "catalog-bench";
+const APPEND_ROWS: usize = 1_000;
+
+fn append_rows() -> Vec<ScannedItem> {
+    (0..APPEND_ROWS)
+        .map(|number| {
+            let name = format!("Catalog-Bench-Append-{number:04}.txt");
+            let parent = r"C:\catalog-bench\appended".to_string();
+            let display_path = format!(r"{parent}\{name}");
+            ScannedItem {
+                normalized_path: display_path.to_lowercase(),
+                display_path,
+                lower_name: name.to_lowercase(),
+                name,
+                parent,
+                is_directory: false,
+                extension: Some("txt".into()),
+                modified_at: 0,
+                size: 0,
+            }
+        })
+        .collect()
+}
 
 /// The first runs of the session: what a user types right after the index loads.
 const QUERIES: [&str; 26] = [
@@ -114,6 +145,16 @@ fn main() {
     if let Some(results_path) = results_path {
         std::fs::write(results_path, results).expect("write results");
     }
+    // The first append after the load.
+    let rows = append_rows();
+    db.insert_batch(APPEND_VOLUME, 0, &rows).expect("add rows");
+    let started = Instant::now();
+    let appended = search("catalog-bench-append").items.len();
+    let append_ms = started.elapsed().as_secs_f64() * 1000.0;
+    mark("appended");
+    let keys = rows.iter().map(|row| (row.normalized_path.clone(), false)).collect::<Vec<_>>();
+    let removed = db.remove_rows(APPEND_VOLUME, &keys).expect("remove rows");
+    assert_eq!(removed, APPEND_ROWS, "the bench rows were not all removed");
     let total = |timings: &[(&str, f64)]| timings.iter().map(|(_, ms)| ms).sum::<f64>();
     let per_query = |timings: &[(&str, f64)]| {
         timings
@@ -123,7 +164,7 @@ fn main() {
             .join(",")
     };
     println!(
-        "{{\"load_ms\":{load_ms:.0},\"first_total_ms\":{:.2},\"search_total_ms\":{:.2},\"first_ms\":{{{}}},\"per_query_ms\":{{{}}}}}",
+        "{{\"load_ms\":{load_ms:.0},\"append_ms\":{append_ms:.2},\"append_hits\":{appended},\"first_total_ms\":{:.2},\"search_total_ms\":{:.2},\"first_ms\":{{{}}},\"per_query_ms\":{{{}}}}}",
         total(&firsts),
         total(&medians),
         per_query(&firsts),

@@ -1214,3 +1214,37 @@ design, so it is a note for the owner and not a change here.
   settings; `target/tmp/bench/fixture-real.json`, not in the repo): the first open after a start paints its
   first frame in 60.9 ms (55.0-63.3) and 17 frames in 126 ms; a later open paints one frame in 3.7 ms
   (3.1-4.4), n=4. The typed keys cost the same as with the small fixture (38 frames, 50 ms for `report`).
+
+### Field recording of file events (`bench/fsevents.py`)
+
+A read-only watch of `C:\Users\hi` for 600 s on 2026-11-10 (names only, as Prism's watcher sees them; the
+bench's own test tree left out): 563,335 events (257,341 added, 250,946 removed, 27,524 renamed), 98% of them
+from one other project's build folder. Of the added entries, 17.2% are gone again within 0.75 s, 19.6%
+within 2 s, 20.3% within 5 s. Row writes that a watcher with a given flush window applies (additions and
+removals that survive the window): 374,239 at 0.75 s; -13.5% at 2 s; -25.2% at 5 s; -32.0% at 10 s; -36.5%
+at 30 s. So this machine removes about 250,000 rows from the catalog in 10 minutes of such work, and the
+name index reloads in full after 730,000 removals (`name_index.rs` `needs_sync_with`).
+
+### E-006 The name index keeps a small headroom and grows by 1/32
+
+- Journey: S4 (index memory) and S3 (keystroke search), with the new first-append phase of `catalog_bench`
+  (1,000 new rows, then one search; `append_ms`, `append_mib`).
+- Profile: `name_index.rs:645-661` `Names::reserve` grows each of the eight buffers by 1/8 of its length
+  when an append does not fit. The load sizes the buffers exactly, so the first search after any new file
+  moves all of them (about 145 MiB copied) and leaves 1/8 of slack: `append_ms` 39.6-44.2 ms (a usual
+  search takes about 4 ms), `append_mib` +8.2 to +10.8 MiB (n=4). In the installed app the row buffers are
+  24.68 MiB each: 1.125 times their rows.
+- Hypothesis: reserve 1/32 of headroom at the load (about 4 MiB, room for about 180,000 new rows) and grow
+  by 1/32 after that. The first append then moves nothing: `append_ms` should drop from about 40 ms to
+  about 5 ms, and the memory after the append should drop by about 5 MiB, with the same results.
+- Test: `catalog_ab.py` compares the result lists of every run.
+- Change, `name_index.rs`: `GROWTH_SHARE` = 32; `load_rows` reserves the rows plus 1/32; `shrink_names`
+  shrinks the name buffers to their length plus 1/32; `reserve` grows by 1/32.
+- Result (`results/raw/e006-catalog.jsonl`, A B B A x3, n=6 a side): the first search after 1,000 new rows
+  37.1 ms (30.8-52.7) -> 13.2 ms (12.8-15.4), -64%, p 0.005; private bytes after that append 177.2 MiB
+  (175.2-178.4) -> 161.1 MiB (160.3-164.8), -16.1 MiB, p 0.005 (the 1/8 slack of eight buffers: 17.5 MiB by
+  arithmetic). Index memory right after the load 149.8 -> 153.5 MiB (+3.6 MiB: the headroom). Load 2.76 ->
+  2.72 s (p 0.69); the 26 result lists are identical in all 12 runs.
+- Gate: typecheck pass; clippy prism-core 10 (the floor); judge 277/277.
+- Decision: KEEP. In the app the first append comes within minutes of each start, so the steady state is
+  16 MiB lower.
