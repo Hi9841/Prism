@@ -1524,3 +1524,20 @@ run), then give the fix to a subagent.
   closures clone the `Rc`), `type_ms` and `reopen_ms` should drop by 10% or more with the same frame counts
   and the same images. If the drop is inside the noise, the change goes out.
 - Test: `uiframes.py` with `--fixture target/tmp/bench/fixture-real.json`; parity journeys 23/23.
+- Change (Sonnet subagent, commit 370a6e10): items behind `Rc<PaletteItem>` in the sections, `flat_items`,
+  the row closures, the drag states and the context menu; the groups borrowed for each frame.
+- Result (`results/raw/f006-uiframes.jsonl`, real app list, A B B A x4, n=8 a side): time in frames for the
+  typed keys 45.7 ms (36.7-66.1) -> 40.8 ms (34.5-57.0), -11% at the median with fully overlapping ranges;
+  second open 4.12 -> 4.17 ms; first open 17.6 -> 17.0 ms; same frame counts (29) and same captures.
+- Decision: REVERT (picked and reverted on the branch). The gain is inside the noise, and the change
+  touches five files. The copies are not where the frame time goes.
+
+### Session F summary (2026-11-10)
+
+Kept: F-001 hidden warm frame (first open after a start: first frame 48.9 -> 14.8 ms), F-002 first key with
+no file-search wait (owner choice; frames 34 -> 29 for `report`), F-003 name-index reload beside the live
+index (searches during a reload: 15 ms a query, before: slower than the reload), F-004 one transaction for
+each flush (replay: bytes written -36%, CPU -24%), F-005 a walk writes no row for a gone entry (0
+differences in 11 runs). Reverted: F-006. Floor: typecheck pass, clippy 10 / 24 / 1, judge 277/277, parity
+journeys 23/23 on the UI changes. Not done: a real-app check on the agent screen (its tool server was not
+available); the owner decisions listed at the end of session E, except the debounce.
