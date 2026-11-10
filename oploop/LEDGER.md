@@ -1464,3 +1464,22 @@ implements each fix.
 - Hypothesis: one `Database` call that applies the whole fold in one transaction should cut the bytes
   written on E3r by 5% or more and the flusher's CPU a little, with 0 differences.
 - Test: `churn_bench` on the replay and on the built-in script: differences 0.
+- Change (Sonnet subagent, commit 39f8c6e8 picked; its unit test removed after it, owner rule):
+  `Database::apply_flush` runs the removals that go first, the renames (each in a savepoint, so a failed
+  rename is undone alone), the additions and the last removals in one transaction; `apply_queued_events`
+  calls it once.
+- Result on E3r (`results/raw/f004-replay.jsonl`, A B B A x2, n=4 a side): bytes written 701.2 MiB
+  (692.6-713.4) -> 448.5 MiB (442.3-452.4), -36%; CPU 20.9 s (18.8-23.0) -> 15.9 s (14.8-16.9), -24%; every
+  B below every A, p 0.03. Differences 0 in the 4 B runs.
+- Guard on E3 (built-in script, 2 runs): differences 0.
+- Gate: typecheck pass; clippy prism-core 10; judge 277/277.
+- Decision: KEEP.
+
+### Open defect found by the F-004 A/B (not fixed)
+
+One of the 4 A runs (the code of release 1.0.21 plus E-008 and F-003) ended with 1 difference: an EXTRA row
+for a folder that no longer exists (`...\cit\t705\bar\target`). It did not show in 20 earlier replay
+runs. Suspect, not confirmed: a repair walk reads a folder listing, the folder is removed and the flush
+deletes its row, and the walk then writes the row from its old listing (`scanner.rs` `scan_volume_inner`
+lists first and writes later). Next step: make it reproduce (a script that removes folders while walks
+run), then give the fix to a subagent.
