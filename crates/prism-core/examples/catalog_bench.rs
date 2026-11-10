@@ -16,7 +16,7 @@
 
 use std::io::{BufRead, Write};
 use std::path::Path;
-use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Instant;
 
 use prism_core::catalog::db::Database;
@@ -119,6 +119,8 @@ fn main() {
     let mut results = String::new();
     let mut firsts = Vec::new();
     let mut medians = Vec::new();
+    // The paths of each query's first pass, to compare with later passes.
+    let mut first_lists = Vec::new();
     for text in QUERIES {
         let started = Instant::now();
         let response = search(text);
@@ -129,6 +131,7 @@ fn main() {
             results.push_str(&item.path);
         }
         results.push('\n');
+        first_lists.push(response.items.iter().map(|item| item.path.clone()).collect::<Vec<_>>());
     }
     for text in QUERIES {
         let mut runs = (0..RUNS)
@@ -155,6 +158,46 @@ fn main() {
     let keys = rows.iter().map(|row| (row.normalized_path.clone(), false)).collect::<Vec<_>>();
     let removed = db.remove_rows(APPEND_VOLUME, &keys).expect("remove rows");
     assert_eq!(removed, APPEND_ROWS, "the bench rows were not all removed");
+
+    // A reload: the 26 queries run in rounds while `load` rebuilds the index.
+    // A round counts only when it ran fully inside the reload.
+    index.request_reload();
+    let reload_started = Instant::now();
+    let loading = AtomicBool::new(true);
+    let mut reload_rounds = Vec::new();
+    let mut reload_lists_equal = true;
+    let round = || {
+        let mut sum = 0.0;
+        let mut equal = true;
+        for (text, first) in QUERIES.iter().zip(&first_lists) {
+            let started = Instant::now();
+            let response = search(text);
+            sum += started.elapsed().as_secs_f64() * 1000.0;
+            equal &= response.items.iter().map(|item| &item.path).eq(first);
+        }
+        (sum, equal)
+    };
+    let reload_ms = std::thread::scope(|scope| {
+        let loader = scope.spawn(|| {
+            index.load(&db).expect("reload name index");
+            loading.store(false, Ordering::Release);
+            reload_started.elapsed().as_secs_f64() * 1000.0
+        });
+        while loading.load(Ordering::Acquire) {
+            let (sum, equal) = round();
+            // The load can end during the round.
+            if loading.load(Ordering::Acquire) {
+                reload_rounds.push(sum);
+                reload_lists_equal &= equal;
+            }
+        }
+        loader.join().expect("reload thread")
+    });
+    reload_rounds.sort_by(f64::total_cmp);
+    let reload_search_total_ms = reload_rounds.get(reload_rounds.len() / 2).copied().unwrap_or(0.0);
+    let after_reload_lists_equal = round().1;
+    mark("reloaded");
+
     let total = |timings: &[(&str, f64)]| timings.iter().map(|(_, ms)| ms).sum::<f64>();
     let per_query = |timings: &[(&str, f64)]| {
         timings
@@ -164,7 +207,8 @@ fn main() {
             .join(",")
     };
     println!(
-        "{{\"load_ms\":{load_ms:.0},\"append_ms\":{append_ms:.2},\"append_hits\":{appended},\"first_total_ms\":{:.2},\"search_total_ms\":{:.2},\"first_ms\":{{{}}},\"per_query_ms\":{{{}}}}}",
+        "{{\"load_ms\":{load_ms:.0},\"append_ms\":{append_ms:.2},\"append_hits\":{appended},\"reload_ms\":{reload_ms:.0},\"reload_rounds\":{},\"reload_search_total_ms\":{reload_search_total_ms:.2},\"reload_lists_equal\":{reload_lists_equal},\"after_reload_lists_equal\":{after_reload_lists_equal},\"first_total_ms\":{:.2},\"search_total_ms\":{:.2},\"first_ms\":{{{}}},\"per_query_ms\":{{{}}}}}",
+        reload_rounds.len(),
         total(&firsts),
         total(&medians),
         per_query(&firsts),

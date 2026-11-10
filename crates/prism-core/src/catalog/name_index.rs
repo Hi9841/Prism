@@ -21,7 +21,7 @@
 
 use std::cmp::Ordering;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 
 use neo_frizbee::{Config, Matcher, Pattern, PatternConfig, SortStrategy, SIMD_CHUNK_BYTES};
 
@@ -109,6 +109,11 @@ pub struct NameIndex {
     behind: AtomicBool,
     /// `Database::rows_deleted` when the current rows were loaded.
     seen_deleted: AtomicU64,
+    /// `Some` while a reload loads beside the live index. It holds the
+    /// rewritten ids that live catch-ups took from the database meanwhile:
+    /// the new buffers may have read those rows before the rewrite, so the
+    /// swap applies the ids to them again.
+    reload_log: Mutex<Option<Vec<i64>>>,
 }
 
 /// Two levels: distinct names (indexed by a name number) and rows (indexed by
@@ -191,6 +196,7 @@ impl Default for NameIndex {
             reload_requested: AtomicBool::new(false),
             behind: AtomicBool::new(false),
             seen_deleted: AtomicU64::new(0),
+            reload_log: Mutex::new(None),
         }
     }
 }
@@ -383,10 +389,21 @@ impl NameIndex {
         })
     }
 
+    /// Asks the next `load` to rebuild the index from the catalog. For tools
+    /// and tests: the app sets this flag itself.
+    pub fn request_reload(&self) {
+        self.reload_requested.store(true, AtomicOrdering::Release);
+    }
+
+    /// True while a reload loads beside the live index.
+    fn is_reloading(&self) -> bool {
+        self.reload_log.lock().unwrap_or_else(|e| e.into_inner()).is_some()
+    }
+
     fn load_rows(&self, db: &Database, from_empty: bool) -> Result<bool, String> {
         if from_empty {
             if self.is_loaded() {
-                self.reset();
+                return self.reload(db);
             }
             self.seen_deleted.store(db.rows_deleted(), AtomicOrdering::Release);
             // Size the buffers once. Growing them batch by batch copied the
@@ -405,7 +422,7 @@ impl NameIndex {
                     bytes.saturating_sub(held_bytes),
                 );
             }
-            self.load_spans(db)?;
+            Self::load_spans(&self.names, db)?;
         }
         while !self.catch_up(db, LOAD_BATCH, usize::MAX)? {}
         if from_empty {
@@ -419,15 +436,83 @@ impl NameIndex {
         Ok(from_empty)
     }
 
+    /// Full load of an index that is already loaded. The rows go into new
+    /// buffers, so searches keep using the live index meanwhile; the new
+    /// buffers replace it in one swap. Returns false when a reset during the
+    /// load made the new rows obsolete.
+    fn reload(&self, db: &Database) -> Result<bool, String> {
+        let generation = self.names.read().unwrap_or_else(|e| e.into_inner()).generation;
+        self.seen_deleted.store(db.rows_deleted(), AtomicOrdering::Release);
+        *self.reload_log.lock().unwrap_or_else(|e| e.into_inner()) = Some(Vec::new());
+        let result = self.load_beside(db, generation);
+        // The swap stops the log; an abort or an error stops it here.
+        *self.reload_log.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        if result.is_err() {
+            // The live index stays; try again on the next sync.
+            self.reload_requested.store(true, AtomicOrdering::Release);
+        }
+        result
+    }
+
+    /// `reload` after the log starts. `generation` is the live generation at
+    /// the start.
+    fn load_beside(&self, db: &Database, generation: u64) -> Result<bool, String> {
+        // The new generation, so a search that read indexes from the old
+        // buffers cannot apply them to the new ones (see `mark_deleted`).
+        let fresh = RwLock::new(Names {
+            generation: generation.wrapping_add(1),
+            ..Names::default()
+        });
+        // Size the buffers as the first load does (see `load_rows`).
+        if let Ok((rows, bytes)) = db.file_name_totals() {
+            fresh
+                .write()
+                .unwrap_or_else(|e| e.into_inner())
+                .reserve(rows + rows / GROWTH_SHARE, bytes);
+        }
+        Self::load_spans(&fresh, db)?;
+        while !Self::catch_up_in(&fresh, None, db, LOAD_BATCH, usize::MAX)? {}
+        let mut fresh = fresh.into_inner().unwrap_or_else(|e| e.into_inner());
+        fresh.shrink_names();
+
+        let logged = {
+            let mut live = self.names.write().unwrap_or_else(|e| e.into_inner());
+            // A reset in between: the new rows belong to a wiped catalog.
+            if live.generation != generation {
+                return Ok(false);
+            }
+            // Under the write lock: a live catch-up that takes ids after this
+            // point applies them to the new buffers.
+            let logged = self
+                .reload_log
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .take()
+                .unwrap_or_default();
+            *live = fresh;
+            logged
+        };
+        self.behind.store(false, AtomicOrdering::Release);
+        self.loaded.store(true, AtomicOrdering::Release);
+        // Rows that the new load read before a rewrite committed are stale
+        // now, and the live index took their ids. Apply them again (the
+        // apply is idempotent). Ids that the new load's own catch-up took
+        // were applied to the new buffers.
+        // On a read error the ids go back to the database queue, and the next
+        // catch-up applies them: the swap itself succeeded.
+        let _ = Self::apply_rewritten(&self.names, db, logged);
+        Ok(true)
+    }
+
     /// Appends every row up to the highest id at the start, read on several
     /// threads (see `Database::file_names_in_spans`). Rows added later and
     /// rewritten rows are left to `catch_up`.
-    fn load_spans(&self, db: &Database) -> Result<(), String> {
+    fn load_spans(shared: &RwLock<Names>, db: &Database) -> Result<(), String> {
         let Some((first, last)) = db.file_id_bounds()? else {
             return Ok(());
         };
         let (after, generation) = {
-            let names = self.names.read().unwrap_or_else(|e| e.into_inner());
+            let names = shared.read().unwrap_or_else(|e| e.into_inner());
             (names.max_id.max(first - 1), names.generation)
         };
         let spans = (after..last)
@@ -440,7 +525,7 @@ impl NameIndex {
             .min(MAX_LOAD_THREADS);
         let mut reset = false;
         let loaded = db.file_names_in_spans(&spans, threads, |rows| {
-            let mut names = self.names.write().unwrap_or_else(|e| e.into_inner());
+            let mut names = shared.write().unwrap_or_else(|e| e.into_inner());
             // A reset in between: these rows belong to the old buffers, and
             // `catch_up` loads the new ones.
             if names.generation != generation {
@@ -460,17 +545,29 @@ impl NameIndex {
     /// `max_rows` rows above `max_id`. Returns true when the index has caught
     /// up with the catalog.
     fn catch_up(&self, db: &Database, max_rows: usize, max_rewrites: usize) -> Result<bool, String> {
-        if !self.refresh_rewritten(db, max_rewrites)? {
+        Self::catch_up_in(&self.names, Some(&self.reload_log), db, max_rows, max_rewrites)
+    }
+
+    /// `catch_up` on any buffers. `log` is the live index's reload log (see
+    /// `reload_log`); the buffers of a reload pass `None`.
+    fn catch_up_in(
+        shared: &RwLock<Names>,
+        log: Option<&Mutex<Option<Vec<i64>>>>,
+        db: &Database,
+        max_rows: usize,
+        max_rewrites: usize,
+    ) -> Result<bool, String> {
+        if !Self::refresh_rewritten(shared, log, db, max_rewrites)? {
             return Ok(false);
         }
         let (after, generation) = {
-            let names = self.names.read().unwrap_or_else(|e| e.into_inner());
+            let names = shared.read().unwrap_or_else(|e| e.into_inner());
             (names.max_id, names.generation)
         };
         let rows = db.file_names_after(after, max_rows)?;
         let caught_up = rows.len() < max_rows;
         if !rows.is_empty() {
-            let mut names = self.names.write().unwrap_or_else(|e| e.into_inner());
+            let mut names = shared.write().unwrap_or_else(|e| e.into_inner());
             // A reset in between: these rows belong to the old buffers.
             if names.generation != generation {
                 return Ok(false);
@@ -490,7 +587,12 @@ impl NameIndex {
     /// Rows whose path changed in place (a directory rename moved them):
     /// recompute their location penalty, depth, and path length. Applies up
     /// to `max` rows; returns false when more are left.
-    fn refresh_rewritten(&self, db: &Database, max: usize) -> Result<bool, String> {
+    fn refresh_rewritten(
+        shared: &RwLock<Names>,
+        log: Option<&Mutex<Option<Vec<i64>>>>,
+        db: &Database,
+        max: usize,
+    ) -> Result<bool, String> {
         let mut ids = db.take_rewritten_ids(max.saturating_add(1));
         if ids.is_empty() {
             return Ok(true);
@@ -498,6 +600,22 @@ impl NameIndex {
         let more = ids.len() > max;
         if more {
             db.restore_rewritten_ids(ids.split_off(max));
+        }
+        // During a reload the new buffers need these ids too (see `reload`).
+        if let Some(log) = log {
+            if let Some(logged) = log.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
+                logged.extend_from_slice(&ids);
+            }
+        }
+        Self::apply_rewritten(shared, db, ids)?;
+        Ok(!more)
+    }
+
+    /// Reads the rows behind `ids` and applies their new location data. On a
+    /// read error the ids go back to the database for the next call.
+    fn apply_rewritten(shared: &RwLock<Names>, db: &Database, mut ids: Vec<i64>) -> Result<(), String> {
+        if ids.is_empty() {
+            return Ok(());
         }
         ids.sort_unstable();
         ids.dedup();
@@ -510,7 +628,7 @@ impl NameIndex {
                 return Err(error);
             }
         };
-        let mut names = self.names.write().unwrap_or_else(|e| e.into_inner());
+        let mut names = shared.write().unwrap_or_else(|e| e.into_inner());
         for (id, lookup) in ids.iter().zip(lookups) {
             let Ok(id) = u32::try_from(*id) else { continue };
             // Ids are appended in ascending order.
@@ -533,7 +651,7 @@ impl NameIndex {
                 RowLookup::Excluded => {}
             }
         }
-        Ok(!more)
+        Ok(())
     }
 
     /// Fallback-catalog candidates for a query, best first. `None` means the
@@ -639,7 +757,9 @@ impl NameIndex {
                 names.deleted += 1;
             }
         }
-        if names.deleted > (names.ids.len() / 4).max(10_000) {
+        // Not during a reload: the live index keeps its deleted rows until
+        // the swap, and a new request would start another reload at once.
+        if names.deleted > (names.ids.len() / 4).max(10_000) && !self.is_reloading() {
             self.reload_requested.store(true, AtomicOrdering::Release);
         }
     }
