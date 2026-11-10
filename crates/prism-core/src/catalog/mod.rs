@@ -950,10 +950,13 @@ impl FileIndex {
             let Some(watcher) = watchers.get(volume_id) else {
                 return;
             };
-            (
-                watcher.root().to_path_buf(),
-                watcher.ensure_current_shards(),
-            )
+            let volume_root = watcher.root().to_path_buf();
+            // A new top-level folder needs a reader of its own. Only a repair
+            // at the root or one level below it can come from one: a deeper
+            // repair does not list the volume root each time.
+            let near_root = requested_scope == volume_root || requested_scope.parent() == Some(volume_root.as_path());
+            let attached = if near_root { watcher.ensure_current_shards() } else { Vec::new() };
+            (volume_root, attached)
         };
 
         if requested_scope != volume_root && !requested_scope.starts_with(&volume_root) {

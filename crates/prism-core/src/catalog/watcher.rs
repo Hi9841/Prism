@@ -64,6 +64,9 @@ impl ReconnectBackoff {
     }
 }
 
+/// Old names of renames that can wait for their new name in one reader.
+const MAX_PENDING_RENAMES: usize = 32;
+
 /// Bound userspace buffering independently of the kernel's 64 KB change
 /// buffer. Once saturated, individual events are already incomplete, so keep
 /// one overflow marker and let reconciliation restore the authoritative state.
@@ -250,10 +253,12 @@ impl WatcherEventQueue {
         self.root.clone()
     }
 
-    fn take_all(&mut self) -> Vec<WatcherEvent> {
+    /// The queued events, and the time of the take: an entry made later has
+    /// its event in a later take.
+    fn take_all(&mut self) -> (Vec<WatcherEvent>, std::time::SystemTime) {
         self.collapsed = false;
         self.parents.clear();
-        std::mem::take(&mut self.events)
+        (std::mem::take(&mut self.events), std::time::SystemTime::now())
     }
 
 }
@@ -529,7 +534,12 @@ fn run_reader_loop(
                 continue;
             }
         };
-        let mut pending_rename_old: Option<PathBuf> = None;
+        // Old names that wait for their new name. Renames that run at one
+        // time in different folders interleave their halves (old A, old B,
+        // new A, new B), and a rename keeps its folder (a move to another
+        // folder is reported as a removal and an addition): a new name takes
+        // the waiting old name of its own folder.
+        let mut pending_rename_old: Vec<PathBuf> = Vec::new();
 
         while !stop.load(Ordering::Relaxed) {
             let mut bytes_returned = 0u32;
@@ -613,16 +623,23 @@ fn run_reader_loop(
                         FILE_ACTION_ADDED => Some(WatcherEvent::Added(target_path)),
                         FILE_ACTION_REMOVED => Some(WatcherEvent::Removed(target_path)),
                         FILE_ACTION_RENAMED_OLD_NAME => {
-                            pending_rename_old = Some(target_path);
-                            None
+                            pending_rename_old.push(target_path);
+                            // An old name whose new name never came is gone.
+                            (pending_rename_old.len() > MAX_PENDING_RENAMES)
+                                .then(|| WatcherEvent::Removed(pending_rename_old.remove(0)))
                         }
-                        FILE_ACTION_RENAMED_NEW_NAME => match pending_rename_old.take() {
-                            Some(old_path) => Some(WatcherEvent::Renamed {
-                                from: old_path,
-                                to: target_path,
-                            }),
-                            None => Some(WatcherEvent::Added(target_path)),
-                        },
+                        FILE_ACTION_RENAMED_NEW_NAME => {
+                            let waiting = pending_rename_old
+                                .iter()
+                                .position(|old| old.parent() == target_path.parent());
+                            match waiting {
+                                Some(index) => Some(WatcherEvent::Renamed {
+                                    from: pending_rename_old.remove(index),
+                                    to: target_path,
+                                }),
+                                None => Some(WatcherEvent::Added(target_path)),
+                            }
+                        }
                         _ => None,
                     };
                     if let Some(event) = event {
@@ -732,7 +749,7 @@ fn apply_queued_events(
     counts: &IndexCounts,
     drive: &str,
 ) -> AppliedWatcherBatch {
-    let events: Vec<WatcherEvent> = {
+    let (events, taken_at) = {
         let mut q = event_queue.lock().unwrap();
         q.take_all()
     };
@@ -784,8 +801,9 @@ fn apply_queued_events(
                     changed = true;
                     // An earlier flush can have read an entry of this folder
                     // after the rename, under its old name, and dropped it as
-                    // missing. A walk finds it, as for a new folder below.
-                    if item.is_directory {
+                    // missing: then the folder holds an entry with no event
+                    // here, and a walk finds it.
+                    if item.is_directory && holds_unreported_entry(to, &touched, taken_at) {
                         dirty_scopes.insert(to.clone());
                     }
                 }
@@ -808,8 +826,17 @@ fn apply_queued_events(
         .iter()
         .filter_map(|path| inspect_single_path(path))
         .collect();
+    // A folder that arrived with content (moved from another folder, which
+    // is reported as a removal and an addition; restored from the Recycle
+    // Bin) sent no events for its children: a walk finds them. A folder that
+    // was made and filled in place needs no walk: each child has its own
+    // event. Before, every new folder got a walk: a build or a test suite
+    // makes thousands of folders a minute.
     for item in items.iter().filter(|item| item.is_directory) {
-        dirty_scopes.insert(PathBuf::from(&item.display_path));
+        let folder = PathBuf::from(&item.display_path);
+        if holds_unreported_entry(&folder, &touched, taken_at) {
+            dirty_scopes.insert(folder);
+        }
     }
     if let Ok(inserted) = db.insert_batch(volume_id, 0, &items) {
         delta += inserted as i64;
@@ -868,6 +895,27 @@ fn is_unsearchable_top_level(relative_name: &str) -> bool {
         .unwrap_or_default()
         .to_ascii_lowercase();
     matches!(first.as_str(), "$recycle.bin" | "system volume information")
+}
+
+/// True when `folder` holds an entry that this flush has no addition for and
+/// that was there at the take (`taken_at`): the catalog would not get it
+/// without a walk. An entry made after the take has its event in a later
+/// flush. A folder that cannot be listed gets the walk.
+fn holds_unreported_entry(folder: &Path, touched: &BTreeSet<PathBuf>, taken_at: std::time::SystemTime) -> bool {
+    let Ok(children) = std::fs::read_dir(folder) else {
+        return true;
+    };
+    children.into_iter().any(|child| {
+        let Ok(child) = child else { return true };
+        if touched.contains(&child.path()) {
+            return false;
+        }
+        // On Windows the listing carries the times: no call for each entry.
+        child
+            .metadata()
+            .and_then(|metadata| metadata.created())
+            .map_or(true, |created| created < taken_at)
+    })
 }
 
 fn inspect_single_path(path: &Path) -> Option<ScannedItem> {
