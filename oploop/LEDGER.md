@@ -1384,3 +1384,27 @@ Next hypotheses: (1) the name index reloads in full after 730,000 removed rows a
 path meanwhile: build the new index aside and swap; (2) one transaction for each flush (renames, additions
 and removals are 3 + N transactions now); (3) the first open after a start paints its first frame in 61 ms
 (later opens: 3.7 ms): warm the caches once after the app list loads.
+
+## Session 2026-11-10 (F): UX and UI
+
+Owner: "keep trying to optimize it also in the UX department and UI". Branch `oploop-ux` from release 1.0.21
+(9a30019e). Same floor and harnesses as session E. GUI work goes to the agent screen (owner rule of
+2026-11-10); these iterations stay offline.
+
+### F-001 One hidden frame after the app icons load (the first open after a start)
+
+- Journey: E5, first open with the owner's app list (`fixture-real.json`): first frame 60.9 ms (55.0-63.3),
+  17 frames, 126 ms; a later open paints one frame in 3.7 ms.
+- Profile: the first frame shapes each text for the first time, puts each glyph in the atlas, decodes the
+  visible app icons, and rasterizes the SVG icons. A later open finds all of that in the caches.
+- Hypothesis: draw the window once while it is hidden, when the first app icons arrive (`Window::draw`, no
+  present). The first open should then paint its first frame in under 10 ms, with the same image.
+- Test: `uiframes.py` (same captures in all runs) and the parity journeys.
+- Change, `prism-ui/src/app.rs`: `Launcher` observes the palette state; at the first app icons, while the
+  phase is hidden, it draws the window once (`window.defer` + `Window::draw`, no present).
+- Result (`results/raw/f001-uiframes.jsonl`, real app list, A B B A x2, n=4 a side): first frame of the
+  first open 48.9 ms (43.7-99.3) -> 14.8 ms (10.2-22.0); frames 18.5 -> 2; time in frames 109 -> 21 ms. The
+  later open and the typed keys do not change (1 frame, 3.5-3.7 ms; 33 frames). Same captures in all 8
+  runs. The 150 ms fade of two footer icons no longer plays at the first open: it ends in the hidden frame.
+- Gate: clippy prism-ui 24 (the floor); judge 277/277; parity journeys 23/23.
+- Decision: KEEP. Not checked offline: the real app gets its icons from the backend; the same observer runs.
