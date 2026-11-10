@@ -19,7 +19,7 @@ use windows::Win32::Storage::FileSystem::{
 };
 use windows::Win32::System::IO::CancelSynchronousIo;
 
-use super::db::Database;
+use super::db::{Database, FlushRename, FlushWrites};
 use super::types::ScannedItem;
 use super::IndexCounts;
 
@@ -793,46 +793,26 @@ fn apply_queued_events(
     }
     let EventFold { renames, touched, removed, removed_first } = fold;
 
-    let mut delta = 0i64;
-    let mut changed = false;
     let removal_keys = |paths: &mut dyn Iterator<Item = &PathBuf>| {
         paths.map(|path| (path.to_string_lossy().to_lowercase(), true)).collect::<Vec<_>>()
     };
+    let removed_first = removal_keys(&mut removed_first.iter());
+    let removed = removal_keys(&mut removed.iter());
 
-    if let Ok(removed) = db.remove_rows(volume_id, &removal_keys(&mut removed_first.iter())) {
-        delta -= removed as i64;
-        changed |= removed > 0;
-    }
-
-    for (from, to) in &renames {
-        let old_normalized = from.to_string_lossy().to_lowercase();
-        if let Some(item) = inspect_single_path(to) {
-            match db.rename_file(volume_id, &old_normalized, &item) {
-                Ok(rename_delta) => {
-                    delta += rename_delta;
-                    changed = true;
-                    // An earlier flush can have read an entry of this folder
-                    // after the rename, under its old name, and dropped it as
-                    // missing: then the folder holds an entry with no event
-                    // here, and a walk finds it.
-                    if item.is_directory && holds_unreported_entry(to, &touched, taken_at) {
-                        dirty_scopes.insert(to.clone());
-                    }
-                }
-                // A row already has the new path: a walk of the folder that
-                // holds the target settles what the catalog has there.
-                Err(_) => {
-                    dirty_scopes.insert(to.parent().unwrap_or(to).to_path_buf());
-                }
-            }
-        } else {
-            // Target vanished before it could be inspected; treat as removal.
-            if let Ok(removed) = db.remove_file(volume_id, &old_normalized, true) {
-                delta -= removed;
-                changed |= removed > 0;
-            }
-        }
-    }
+    // Each rename moves its rows to the inspected target. A target that
+    // vanished before it could be inspected is a removal.
+    let old_names: Vec<String> =
+        renames.iter().map(|(from, _)| from.to_string_lossy().to_lowercase()).collect();
+    let targets: Vec<Option<ScannedItem>> =
+        renames.iter().map(|(_, to)| inspect_single_path(to)).collect();
+    let rename_writes: Vec<FlushRename<'_>> = old_names
+        .iter()
+        .zip(&targets)
+        .map(|(old_normalized, target)| match target {
+            Some(item) => FlushRename::Move { old_normalized, item },
+            None => FlushRename::Remove { old_normalized },
+        })
+        .collect();
 
     let items: Vec<ScannedItem> = touched
         .iter()
@@ -850,15 +830,37 @@ fn apply_queued_events(
             dirty_scopes.insert(folder);
         }
     }
-    if let Ok(inserted) = db.insert_batch(volume_id, 0, &items) {
-        delta += inserted as i64;
-        changed |= inserted > 0;
-    }
 
-    // One transaction for the whole flush (see `Database::remove_rows`).
-    if let Ok(removed) = db.remove_rows(volume_id, &removal_keys(&mut removed.iter())) {
-        delta -= removed as i64;
-        changed |= removed > 0;
+    // One transaction for the whole flush. If it fails (the database is
+    // busy), nothing is applied and `changed` stays false: the next sweep or
+    // repair walk corrects the catalog.
+    let mut delta = 0i64;
+    let mut changed = false;
+    let writes = FlushWrites {
+        removed_first: &removed_first,
+        renames: &rename_writes,
+        items: &items,
+        removed: &removed,
+    };
+    if let Ok(applied) = db.apply_flush(volume_id, &writes) {
+        delta = applied.delta;
+        changed = applied.changed;
+        for (((_, to), target), kept) in renames.iter().zip(&targets).zip(&applied.renames_kept) {
+            let Some(item) = target else { continue };
+            if *kept {
+                // An earlier flush can have read an entry of this folder
+                // after the rename, under its old name, and dropped it as
+                // missing: then the folder holds an entry with no event
+                // here, and a walk finds it.
+                if item.is_directory && holds_unreported_entry(to, &touched, taken_at) {
+                    dirty_scopes.insert(to.clone());
+                }
+            } else {
+                // A row already has the new path: a walk of the folder that
+                // holds the target settles what the catalog has there.
+                dirty_scopes.insert(to.parent().unwrap_or(to).to_path_buf());
+            }
+        }
     }
 
     counts.adjust(drive, delta);

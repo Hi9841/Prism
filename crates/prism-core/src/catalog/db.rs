@@ -111,6 +111,50 @@ pub struct VolumeUpdate {
     pub previous_mount_path: Option<String>,
 }
 
+/// What `Database::rename_rows` changed, before the caller commits.
+struct RenamedRows {
+    removed: usize,
+    inserted: usize,
+    rewritten: Vec<i64>,
+}
+
+/// One rename of a watcher flush.
+pub enum FlushRename<'a> {
+    /// Move the rows of `old_normalized` to this inspected item.
+    Move { old_normalized: &'a str, item: &'a ScannedItem },
+    /// The target is gone: remove `old_normalized` with its descendants.
+    Remove { old_normalized: &'a str },
+}
+
+/// The writes of one watcher flush (see `Database::apply_flush`). A removal is
+/// (normalized path, with descendants).
+pub struct FlushWrites<'a> {
+    pub removed_first: &'a [(String, bool)],
+    pub renames: &'a [FlushRename<'a>],
+    pub items: &'a [ScannedItem],
+    pub removed: &'a [(String, bool)],
+}
+
+impl FlushWrites<'_> {
+    fn is_empty(&self) -> bool {
+        self.removed_first.is_empty()
+            && self.renames.is_empty()
+            && self.items.is_empty()
+            && self.removed.is_empty()
+    }
+}
+
+/// The result of `Database::apply_flush`.
+#[derive(Debug, Default)]
+pub struct FlushApplied {
+    /// The net change of the row count.
+    pub delta: i64,
+    /// True when a write changed a row.
+    pub changed: bool,
+    /// For each rename, in order: false when it failed and was undone.
+    pub renames_kept: Vec<bool>,
+}
+
 impl Database {
     pub fn open(db_path: &Path) -> Result<Self, String> {
         if let Some(parent) = db_path.parent() {
@@ -1149,6 +1193,18 @@ impl Database {
         }
         let mut conn = self.writer.lock().map_err(|e| e.to_string())?;
         let tx = conn.transaction().map_err(|e| e.to_string())?;
+        let changed = Self::upsert_items(&tx, volume_id, generation, items)?;
+        tx.commit().map_err(|e| e.to_string())?;
+        Ok(changed)
+    }
+
+    /// The upserts of `insert_batch`, inside a transaction of the caller.
+    fn upsert_items(
+        tx: &Connection,
+        volume_id: &str,
+        generation: u64,
+        items: &[ScannedItem],
+    ) -> Result<u64, String> {
         let mut changed = 0u64;
         {
             // A new row, or a changed file whose name, parent text, and kind
@@ -1215,7 +1271,6 @@ impl Database {
                 changed += rows as u64;
             }
         }
-        tx.commit().map_err(|e| e.to_string())?;
         Ok(changed)
     }
 
@@ -1257,12 +1312,22 @@ impl Database {
         }
         let mut conn = self.writer.lock().map_err(|e| e.to_string())?;
         let tx = conn.transaction().map_err(|e| e.to_string())?;
-        let mut removed = 0;
-        for (path, is_dir) in paths {
-            removed += Self::delete_path_rows(&tx, volume_id, path, *is_dir)?;
-        }
+        let removed = Self::delete_paths(&tx, volume_id, paths)?;
         tx.commit().map_err(|e| e.to_string())?;
         self.note_rows_deleted(removed);
+        Ok(removed)
+    }
+
+    /// The deletes of `remove_rows`, inside a transaction of the caller.
+    fn delete_paths(
+        tx: &Connection,
+        volume_id: &str,
+        paths: &[(String, bool)],
+    ) -> Result<usize, String> {
+        let mut removed = 0;
+        for (path, is_dir) in paths {
+            removed += Self::delete_path_rows(tx, volume_id, path, *is_dir)?;
+        }
         Ok(removed)
     }
 
@@ -1432,7 +1497,7 @@ impl Database {
     }
 
     fn delete_path_rows(
-        tx: &rusqlite::Transaction<'_>,
+        tx: &Connection,
         volume_id: &str,
         normalized_path: &str,
         include_descendants: bool,
@@ -1473,6 +1538,21 @@ impl Database {
     ) -> Result<i64, String> {
         let mut conn = self.writer.lock().map_err(|e| e.to_string())?;
         let tx = conn.transaction().map_err(|e| e.to_string())?;
+        let renamed = Self::rename_rows(&tx, volume_id, old_normalized, new_item)?;
+        tx.commit().map_err(|e| e.to_string())?;
+        self.note_rows_deleted(renamed.removed);
+        self.queue_rewritten(renamed.rewritten);
+        Ok(renamed.inserted as i64 - renamed.removed as i64)
+    }
+
+    /// The writes of `rename_file`, inside a transaction (or savepoint) of the
+    /// caller. The caller commits, then reports the result to the counters.
+    fn rename_rows(
+        tx: &Connection,
+        volume_id: &str,
+        old_normalized: &str,
+        new_item: &ScannedItem,
+    ) -> Result<RenamedRows, String> {
         let mut rewritten: Vec<i64> = Vec::new();
 
         if new_item.is_directory {
@@ -1557,20 +1637,92 @@ impl Database {
             )
             .map_err(|e| e.to_string())?;
 
-        tx.commit().map_err(|e| e.to_string())?;
-        self.note_rows_deleted(removed);
-        if !rewritten.is_empty() {
-            const MAX_PENDING_REWRITES: usize = 200_000;
-            if let Ok(mut pending) = self.rewritten_ids.lock() {
-                if pending.len() + rewritten.len() > MAX_PENDING_REWRITES {
-                    pending.clear();
-                    self.index_reload_requested.store(true, Ordering::Release);
-                } else {
-                    pending.extend(rewritten);
+        Ok(RenamedRows { removed, inserted, rewritten })
+    }
+
+    /// Hands the ids that a committed rename rewrote to the name index.
+    fn queue_rewritten(&self, rewritten: Vec<i64>) {
+        if rewritten.is_empty() {
+            return;
+        }
+        const MAX_PENDING_REWRITES: usize = 200_000;
+        if let Ok(mut pending) = self.rewritten_ids.lock() {
+            if pending.len() + rewritten.len() > MAX_PENDING_REWRITES {
+                pending.clear();
+                self.index_reload_requested.store(true, Ordering::Release);
+            } else {
+                pending.extend(rewritten);
+            }
+        }
+    }
+
+    /// Applies the writes of one watcher flush in one transaction, in this
+    /// order: the removals that go first, the renames, the upserts, the last
+    /// removals. One commit writes each changed page to the WAL once; a
+    /// transaction for each step wrote it again for each rename.
+    ///
+    /// A rename that fails (a row already has the new path) is undone alone:
+    /// its savepoint rolls back and `renames_kept` holds `false` for it. If
+    /// anything else fails, nothing of the flush is written.
+    pub fn apply_flush(&self, volume_id: &str, flush: &FlushWrites<'_>) -> Result<FlushApplied, String> {
+        if flush.is_empty() {
+            return Ok(FlushApplied::default());
+        }
+        let mut conn = self.writer.lock().map_err(|e| e.to_string())?;
+        let mut tx = conn.transaction().map_err(|e| e.to_string())?;
+        let mut applied = FlushApplied::default();
+        let mut removed_rows = 0usize;
+        let mut rewritten: Vec<i64> = Vec::new();
+
+        let removed = Self::delete_paths(&tx, volume_id, flush.removed_first)?;
+        removed_rows += removed;
+        applied.delta -= removed as i64;
+        applied.changed |= removed > 0;
+
+        for rename in flush.renames {
+            match rename {
+                FlushRename::Move { old_normalized, item } => {
+                    let savepoint = tx.savepoint().map_err(|e| e.to_string())?;
+                    match Self::rename_rows(&savepoint, volume_id, old_normalized, item) {
+                        Ok(renamed) => {
+                            savepoint.commit().map_err(|e| e.to_string())?;
+                            removed_rows += renamed.removed;
+                            rewritten.extend(renamed.rewritten);
+                            applied.delta += renamed.inserted as i64 - renamed.removed as i64;
+                            applied.changed = true;
+                            applied.renames_kept.push(true);
+                        }
+                        // Dropping the savepoint rolls this rename back.
+                        Err(_) => {
+                            drop(savepoint);
+                            applied.renames_kept.push(false);
+                        }
+                    }
+                }
+                FlushRename::Remove { old_normalized } => {
+                    let removed = Self::delete_path_rows(&tx, volume_id, old_normalized, true)?;
+                    removed_rows += removed;
+                    applied.delta -= removed as i64;
+                    applied.changed |= removed > 0;
+                    applied.renames_kept.push(true);
                 }
             }
         }
-        Ok(inserted as i64 - removed as i64)
+
+        let inserted = Self::upsert_items(&tx, volume_id, 0, flush.items)?;
+        applied.delta += inserted as i64;
+        applied.changed |= inserted > 0;
+
+        let removed = Self::delete_paths(&tx, volume_id, flush.removed)?;
+        removed_rows += removed;
+        applied.delta -= removed as i64;
+        applied.changed |= removed > 0;
+
+        tx.commit().map_err(|e| e.to_string())?;
+        drop(conn);
+        self.note_rows_deleted(removed_rows);
+        self.queue_rewritten(rewritten);
+        Ok(applied)
     }
 
     pub fn get_volume_coverages(&self) -> Result<Vec<VolumeCoverage>, String> {
@@ -2544,4 +2696,76 @@ fn sanitize_fts5_trigram_query(query: &str) -> String {
         .collect();
 
     tokens.join(" AND ")
+}
+
+#[cfg(test)]
+mod flush_tests {
+    use super::*;
+
+    fn item(path: &str, parent: &str, is_directory: bool) -> ScannedItem {
+        let name = path.rsplit('\\').next().unwrap_or(path).to_string();
+        ScannedItem {
+            normalized_path: path.to_lowercase(),
+            display_path: path.to_string(),
+            lower_name: name.to_lowercase(),
+            name,
+            parent: parent.to_string(),
+            is_directory,
+            extension: None,
+            modified_at: 1,
+            size: 1,
+        }
+    }
+
+    fn paths(db: &Database, parent: &str) -> Vec<String> {
+        let mut rows: Vec<String> = db.children_of("v", parent).unwrap().into_keys().collect();
+        rows.sort();
+        rows
+    }
+
+    #[test]
+    fn a_failed_rename_is_undone_alone() {
+        let dir = std::env::temp_dir().join(format!("prism-flush-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = Database::open(&dir.join("catalog.db")).unwrap();
+        db.insert_batch(
+            "v",
+            1,
+            &[
+                item("c:\\a", "c:", true),
+                item("c:\\a\\x", "c:\\a", false),
+                item("c:\\b", "c:", true),
+                item("c:\\b\\x", "c:\\b", false),
+                item("c:\\t", "c:", false),
+                item("c:\\gone", "c:", false),
+            ],
+        )
+        .unwrap();
+        // The move of `c:\a\x` to `c:\b\x` collides with the row of `c:\b\x`.
+        let collide = item("c:\\b", "c:", true);
+        let ok_target = item("c:\\c", "c:", false);
+        let added = item("c:\\new", "c:", false);
+        let renames = [
+            FlushRename::Move { old_normalized: "c:\\a", item: &collide },
+            FlushRename::Move { old_normalized: "c:\\t", item: &ok_target },
+        ];
+        let removed = [("c:\\gone".to_string(), true)];
+        let items = [added];
+        let applied = db
+            .apply_flush(
+                "v",
+                &FlushWrites { removed_first: &[], renames: &renames, items: &items, removed: &removed },
+            )
+            .unwrap();
+        assert_eq!(applied.renames_kept, vec![false, true]);
+        assert!(applied.changed);
+        // t -> c (0), new (+1), gone (-1).
+        assert_eq!(applied.delta, 0);
+        assert_eq!(paths(&db, "c:\\a"), vec!["c:\\a\\x".to_string()]);
+        assert_eq!(
+            paths(&db, "c:"),
+            ["c:\\a", "c:\\b", "c:\\c", "c:\\new"].map(String::from).to_vec()
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
