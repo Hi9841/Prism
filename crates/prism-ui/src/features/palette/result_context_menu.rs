@@ -1,5 +1,6 @@
 //! The result context menu (`src/features/palette/ResultContextMenu.tsx`).
 
+use std::rc::Rc;
 use std::time::Duration;
 
 use gpui::{
@@ -76,7 +77,7 @@ pub enum MenuEvent {
 }
 
 pub struct ResultContextMenu {
-    pub item: PaletteItem,
+    pub item: Rc<PaletteItem>,
     position: ContextMenuPosition,
     focus: FocusHandle,
     focused_index: usize,
@@ -96,7 +97,7 @@ fn presence_ms() -> u64 {
 }
 
 impl ResultContextMenu {
-    pub fn new(item: PaletteItem, position: ContextMenuPosition, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(item: Rc<PaletteItem>, position: ContextMenuPosition, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let focus = cx.focus_handle();
         // Focus the first menu item, after the right-button press finished
         // dispatching (the row under the cursor is focusable).

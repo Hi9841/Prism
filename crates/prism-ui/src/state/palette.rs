@@ -156,7 +156,7 @@ pub struct PaletteState {
     quick_items: Vec<PaletteItem>,
     /// Shared with the view, which reads it on every frame without a copy.
     pub sections: Rc<[Section]>,
-    pub flat_items: Vec<PaletteItem>,
+    pub flat_items: Vec<Rc<PaletteItem>>,
     // In-flight requests: replacing a task drops (cancels) the older one, as the
     // request counters in the original ignore stale replies.
     phase1_task: Option<Task<()>>,
@@ -861,12 +861,12 @@ impl PaletteState {
     }
 
     pub fn run_selected(&mut self, cx: &mut Context<Self>) {
-        if let Some(item) = self.flat_items.get(self.selected).cloned() {
+        if let Some(item) = self.flat_items.get(self.selected).map(Rc::clone) {
             self.run_item(item, cx);
         }
     }
 
-    pub fn run_item(&mut self, item: PaletteItem, cx: &mut Context<Self>) {
+    pub fn run_item(&mut self, item: Rc<PaletteItem>, cx: &mut Context<Self>) {
         let Some(ticket) = self.launch_gate.try_begin() else { return };
         let submitted_query = js::trim(&self.query).to_owned();
         let query = self.query.clone();
@@ -951,7 +951,7 @@ impl PaletteState {
         .detach();
     }
 
-    pub fn run_item_as_admin(&mut self, item: PaletteItem, cx: &mut Context<Self>) {
+    pub fn run_item_as_admin(&mut self, item: Rc<PaletteItem>, cx: &mut Context<Self>) {
         let Some(action) = item.run_as_admin.clone() else { return };
         let Some(ticket) = self.launch_gate.try_begin() else { return };
         let app = self.app.clone();

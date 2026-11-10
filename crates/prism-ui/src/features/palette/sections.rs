@@ -6,6 +6,7 @@
 //! `PaletteSources` snapshot and renders whatever sections come back.
 
 use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
 
 use serde_json::json;
 
@@ -26,7 +27,7 @@ use crate::lib::types::{
 pub struct Section {
     pub id: String,
     pub label: String,
-    pub items: Vec<PaletteItem>,
+    pub items: Vec<Rc<PaletteItem>>,
     pub collapsible: Option<bool>,
     pub collapsed: Option<bool>,
     pub groups: Option<Vec<AppGroupSection>>,
@@ -34,7 +35,7 @@ pub struct Section {
 
 impl Section {
     fn new(id: &str, label: &str, items: Vec<PaletteItem>) -> Self {
-        Self { id: id.into(), label: label.into(), items, collapsible: None, collapsed: None, groups: None }
+        Self { id: id.into(), label: label.into(), items: shared(items), collapsible: None, collapsed: None, groups: None }
     }
 }
 
@@ -44,7 +45,7 @@ pub struct AppGroupSection {
     pub group_id: String,
     pub id: String,
     pub label: String,
-    pub items: Vec<PaletteItem>,
+    pub items: Vec<Rc<PaletteItem>>,
     pub collapsed: bool,
 }
 
@@ -80,7 +81,7 @@ pub struct PaletteSources<'a> {
 
 pub struct BuiltSections {
     pub sections: Vec<Section>,
-    pub flat_items: Vec<PaletteItem>,
+    pub flat_items: Vec<Rc<PaletteItem>>,
 }
 
 /// Caps on the displayed rows, not the data limits. The idle view lists every
@@ -98,6 +99,11 @@ impl Searchable for PaletteItem {
     fn keywords(&self) -> Option<&[String]> {
         self.keywords.as_deref()
     }
+}
+
+/// Moves built items behind `Rc`, so the sections and the flat list share each one.
+fn shared(items: Vec<PaletteItem>) -> Vec<Rc<PaletteItem>> {
+    items.into_iter().map(Rc::new).collect()
 }
 
 fn truthy(s: Option<&str>) -> Option<&str> {
@@ -299,7 +305,7 @@ pub fn build_sections(sources: &PaletteSources) -> BuiltSections {
         .flat_map(|section| {
             section.groups.iter().flatten().flat_map(|group| group.items.iter()).chain(section.items.iter())
         })
-        .cloned()
+        .map(Rc::clone)
         .collect();
     BuiltSections { sections, flat_items }
 }
@@ -358,7 +364,7 @@ fn build_apps_section(
             group_id: group.id.clone(),
             id: format!("apps-group-{}", group.id),
             label: group.name.clone(),
-            items: if group.collapsed { Vec::new() } else { items },
+            items: if group.collapsed { Vec::new() } else { shared(items) },
             collapsed: group.collapsed,
         });
     }

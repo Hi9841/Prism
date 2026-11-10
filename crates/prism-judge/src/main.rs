@@ -407,7 +407,7 @@ fn item_json(item: &PaletteItem, replies: &Map<String, Value>) -> Value {
     Value::Object(out)
 }
 
-fn items_json(items: &[PaletteItem], replies: &Map<String, Value>) -> Vec<Value> {
+fn items_json(items: &[std::rc::Rc<PaletteItem>], replies: &Map<String, Value>) -> Vec<Value> {
     items.iter().map(|item| item_json(item, replies)).collect()
 }
 
