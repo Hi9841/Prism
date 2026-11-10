@@ -13,7 +13,9 @@ handle count and the private bytes from outside (ten times a second).
     uv run oploop/bench/churn_ab.py --a target/oploop/e/base/churn_bench.exe \
         --b target/release/examples/churn_bench.exe --rounds 2 [--out results.jsonl]
 
-A run with catalog rows that differ from the disk at the end counts as an error.
+A run with catalog rows that differ from the disk at the end counts as an error. With
+`--recording`, the child replays recorded file events (a real workload) and not the built-in
+script.
 """
 
 from __future__ import annotations
@@ -35,9 +37,10 @@ from catalog_ab import rank_sum_p  # noqa: E402
 REPO = Path(__file__).resolve().parents[2]
 
 
-def run_once(exe: str, generator: str, data: str, tree: str, settle: float) -> dict:
+def run_once(exe: str, generator: str, data: str, tree: str, settle: float, recording: str | None = None) -> dict:
     proc = subprocess.Popen(
-        [exe, data, tree, "--settle", str(settle), "--generator", generator],
+        [exe, data, tree, "--settle", str(settle), "--generator", generator]
+        + (["--recording", recording] if recording else []),
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
     )
     handle = psutil.Process(proc.pid)
@@ -100,6 +103,7 @@ def main() -> None:
     parser.add_argument("--data", default=str(REPO / "target/tmp/bench/data"))
     parser.add_argument("--tree", default=str(REPO / "target/tmp/bench/churn-tree"))
     parser.add_argument("--settle", type=float, default=30.0)
+    parser.add_argument("--recording", help="replay this slice of an `fsevents.py record` file, not the built-in script")
     parser.add_argument("--rounds", type=int, default=2, help="A B B A rounds (2 runs per side each)")
     parser.add_argument("--out", help="append the raw runs as JSON lines")
     args = parser.parse_args()
@@ -110,7 +114,7 @@ def main() -> None:
     for round_number in range(args.rounds):
         for side in order:
             exe = str(Path(args.a if side == "A" else args.b).resolve())
-            summary = run_once(exe, generator, args.data, args.tree, args.settle)
+            summary = run_once(exe, generator, args.data, args.tree, args.settle, args.recording)
             runs[side].append(summary)
             converged = summary["converged_ms"]
             print(

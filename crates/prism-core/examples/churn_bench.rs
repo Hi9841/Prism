@@ -13,6 +13,13 @@
 //! with the disk once a second: the time to the first match is the freshness,
 //! and a difference at the end is an error (exit code 1).
 //!
+//! With `--recording <file>` the child replays recorded events instead (the
+//! output of `oploop/bench/fsevents.py record`, cut to the slice to replay):
+//! each added, removed and renamed entry at its recorded time, below
+//! `<tree>\work`. The entries that the slice removes or renames but does not
+//! add are made before the watcher starts. A path counts as a folder when
+//! another recorded path lies below it.
+//!
 //! The last line is a JSON summary. At `MARK <phase>` lines the process waits
 //! for one line on stdin, so a runner can sample it from outside.
 
@@ -233,6 +240,115 @@ fn generate(tree: &Path) {
     std::fs::remove_dir_all(debug.join(".fingerprint")).expect("remove the fingerprints");
 }
 
+/// One recorded event: milliseconds from the start, the action, and the path below the watched folder.
+struct Recorded {
+    at_ms: f64,
+    action: String,
+    path: PathBuf,
+}
+
+fn read_recording(recording: &Path) -> Vec<Recorded> {
+    std::fs::read_to_string(recording)
+        .expect("read the recording")
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .filter_map(|event| {
+            Some(Recorded {
+                at_ms: event.get("t")?.as_f64()?,
+                action: event.get("a")?.as_str()?.to_owned(),
+                path: PathBuf::from(event.get("p")?.as_str()?),
+            })
+        })
+        .collect()
+}
+
+/// The recorded paths that have another recorded path below them.
+fn recorded_folders(events: &[Recorded]) -> std::collections::HashSet<PathBuf> {
+    let mut folders = std::collections::HashSet::new();
+    for event in events {
+        let mut parent = event.path.parent();
+        while let Some(folder) = parent.filter(|folder| !folder.as_os_str().is_empty()) {
+            if !folders.insert(folder.to_path_buf()) {
+                break;
+            }
+            parent = folder.parent();
+        }
+    }
+    folders
+}
+
+/// Makes what the slice needs before its first event: each entry that it
+/// removes or renames but does not add, and each parent folder that it does
+/// not add.
+fn replay_setup(tree: &Path, recording: &Path) {
+    let events = read_recording(recording);
+    let folders = recorded_folders(&events);
+    let work = tree.join("work");
+    let mut made_in_slice = std::collections::HashSet::new();
+    let mut needed: Vec<&Path> = Vec::new();
+    for event in &events {
+        match event.action.as_str() {
+            "added" | "renamed_new" => {
+                made_in_slice.insert(event.path.as_path());
+            }
+            _ if !made_in_slice.contains(event.path.as_path()) => needed.push(&event.path),
+            _ => {}
+        }
+    }
+    for folder in folders.iter().filter(|folder| !made_in_slice.contains(folder.as_path())) {
+        make_dir(&work.join(folder));
+    }
+    for path in needed {
+        let target = work.join(path);
+        if folders.contains(path) {
+            make_dir(&target);
+        } else if !target.exists() {
+            if let Some(parent) = target.parent() {
+                make_dir(parent);
+            }
+            let _ = std::fs::File::create(&target);
+        }
+    }
+}
+
+/// Replays the recorded events at their recorded times. An operation that
+/// fails (its parent is not there yet, the entry is already gone) is skipped,
+/// as the event of an entry that the recording did not see whole.
+fn replay(tree: &Path, recording: &Path) {
+    let events = read_recording(recording);
+    let folders = recorded_folders(&events);
+    let work = tree.join("work");
+    let started = Instant::now();
+    let mut renamed_from: Option<PathBuf> = None;
+    for event in &events {
+        let due = Duration::from_secs_f64(event.at_ms / 1000.0);
+        if let Some(wait) = due.checked_sub(started.elapsed()) {
+            std::thread::sleep(wait);
+        }
+        let target = work.join(&event.path);
+        match event.action.as_str() {
+            "added" if folders.contains(&event.path) => {
+                let _ = std::fs::create_dir(&target);
+            }
+            "added" => {
+                let _ = std::fs::File::create(&target);
+            }
+            "removed" => {
+                if std::fs::remove_file(&target).is_err() {
+                    let _ = std::fs::remove_dir_all(&target);
+                }
+            }
+            "renamed_old" => renamed_from = Some(target),
+            "renamed_new" => {
+                if let Some(from) = renamed_from.take() {
+                    let _ = std::fs::rename(from, &target);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 /// Folder flag and lowercase parent of every entry under `root`, by lowercase path.
 fn walk(root: &Path, entries: &mut BTreeMap<String, (bool, String)>) {
     let Ok(children) = std::fs::read_dir(root) else {
@@ -321,10 +437,13 @@ fn verify_in_child(data_dir: &Path, tree: &Path) -> (usize, usize, Vec<String>) 
 }
 
 fn main() {
-    let usage = "usage: churn_bench <data folder> <test tree> [--settle SECONDS] [--generator EXE]";
+    let usage = "usage: churn_bench <data folder> <test tree> [--settle SECONDS] [--generator EXE] [--recording FILE]";
     let mut args = std::env::args().skip(1).collect::<Vec<_>>();
     match args.first().map(String::as_str) {
         Some("--generate") => return generate(Path::new(args.get(1).expect(usage))),
+        Some("--replay") => {
+            return replay(Path::new(args.get(1).expect(usage)), Path::new(args.get(2).expect(usage)))
+        }
         Some("--verify") => {
             let differences = verify(Path::new(args.get(1).expect(usage)), Path::new(args.get(2).expect(usage)));
             std::process::exit(i32::from(differences > 0));
@@ -333,11 +452,13 @@ fn main() {
     }
     let mut settle = 30.0;
     let mut generator = std::env::current_exe().expect("own path");
+    let mut recording: Option<PathBuf> = None;
     while args.len() > 2 {
         let value = args.pop().expect(usage);
         match args.pop().expect(usage).as_str() {
             "--settle" => settle = value.parse().expect(usage),
             "--generator" => generator = PathBuf::from(value),
+            "--recording" => recording = Some(std::fs::canonicalize(&value).expect("recording")),
             _ => panic!("{usage}"),
         }
     }
@@ -353,6 +474,9 @@ fn main() {
     }
     // The watcher gives each top-level folder a recursive reader at its start.
     make_dir(&work);
+    if let Some(recording) = &recording {
+        replay_setup(&tree, recording);
+    }
 
     let host = Arc::new(BenchHost { data_dir: data_dir.clone(), events: AtomicU64::new(0) });
     prism_core::host::install(host.clone());
@@ -378,7 +502,12 @@ fn main() {
 
     let (cpu_before, io_before, events_before) = (cpu_ms(), io(), host.events.load(Ordering::Relaxed));
     let started = Instant::now();
-    let status = Command::new(&generator).arg("--generate").arg(&tree).status().expect("run the generator");
+    let mut child = Command::new(&generator);
+    match &recording {
+        Some(recording) => child.arg("--replay").arg(&tree).arg(recording),
+        None => child.arg("--generate").arg(&tree),
+    };
+    let status = child.status().expect("run the generator");
     assert!(status.success(), "the generator failed");
     let generated = Instant::now();
     let generator_ms = (generated - started).as_secs_f64() * 1000.0;
