@@ -74,6 +74,12 @@ const SCOPE_REPAIR_MIN_GAP: Duration = Duration::from_secs(10);
 /// a long build or install costs one walk at its end.
 const SHARD_REPAIR_QUIET: Duration = Duration::from_secs(30);
 const SHARD_REPAIR_MAX_DELAY: Duration = Duration::from_secs(5 * 60);
+/// Repair walks that run at one time. A build makes hundreds of folders, and
+/// each one asks for a walk: with no limit they all started when the burst
+/// went quiet, each on a blocking-pool thread of its own (hundreds of threads).
+/// The walks share two database connections, so more of them at one time
+/// only wait on each other.
+const SCOPE_REPAIR_SLOTS: usize = 2;
 
 pub fn catalog_debug_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
@@ -224,6 +230,10 @@ pub struct FileIndex {
     scope_repairs: Arc<Mutex<ScopeRepairCoordinator>>,
     source_workers: Arc<Mutex<SourceWorkerCoordinator>>,
     scan_slots: Arc<tokio::sync::Semaphore>,
+    repair_slots: Arc<tokio::sync::Semaphore>,
+    /// One shard-root walk (minutes) at a time: the other repair slot stays
+    /// free for the short walks.
+    shard_repair_slot: Arc<tokio::sync::Semaphore>,
 }
 
 impl Default for FileIndex {
@@ -243,6 +253,8 @@ impl Default for FileIndex {
             scope_repairs: Arc::new(Mutex::new(ScopeRepairCoordinator::default())),
             source_workers: Arc::new(Mutex::new(SourceWorkerCoordinator::default())),
             scan_slots: Arc::new(tokio::sync::Semaphore::new(2)),
+            repair_slots: Arc::new(tokio::sync::Semaphore::new(SCOPE_REPAIR_SLOTS)),
+            shard_repair_slot: Arc::new(tokio::sync::Semaphore::new(1)),
         }
     }
 }
@@ -876,6 +888,14 @@ impl FileIndex {
         crate::runtime::spawn(async move {
             loop {
                 index.wait_for_quiet_scope(&key, broad).await;
+                // The semaphores are never closed, so a permit always comes.
+                let _shard_slot = match broad {
+                    true => index.shard_repair_slot.clone().acquire_owned().await.ok(),
+                    false => None,
+                };
+                let _slot = index.repair_slots.clone().acquire_owned().await.ok();
+                // The pass starts here: it covers the requests that came
+                // while this scope waited for its slot.
                 index
                     .scope_repairs
                     .lock()
@@ -883,6 +903,7 @@ impl FileIndex {
                     .start_pass(&key);
                 let (walker, volume_id, scope) = (index.clone(), volume_id.clone(), scope.clone());
                 let _ = crate::runtime::spawn_blocking(move || walker.reconcile_scope_sync(&volume_id, &scope)).await;
+                drop((_slot, _shard_slot));
                 if !index
                     .scope_repairs
                     .lock()
