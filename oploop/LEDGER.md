@@ -1121,3 +1121,96 @@ into three unordered groups and applies them as renames, then additions, then re
   spikes, with the same rows at the end and no later freshness (about 1.1 s). CPU should drop a little
   (fewer thread starts, less lock contention).
 - Test: `churn_bench` differences must stay 0; the time until the catalog equals the disk must not rise.
+- Change, `catalog/mod.rs`: `repair_slots` (a semaphore of `SCOPE_REPAIR_SLOTS` = 2) and `shard_repair_slot`
+  (1, for shard-root walks); a repair takes its slot after its quiet wait and marks the pass start then, so
+  the pass covers the requests that came while it waited.
+- Result (`results/raw/e003-churn.jsonl`, A = E-002 build, A B B A x3, n=6 a side): threads at the peak 310
+  (289-349) -> 14 (14-14), p 0.003; handles at the peak 403 -> 107; private bytes at the peak 213.5 MiB
+  (204.3-760.6: two runs above 500 MiB) -> 190.0 MiB (188.7-194.0), p 0.005; user CPU 1.79 -> 1.59 s (-11%,
+  p 0.013); CPU total 4.98 s (4.72-5.49) -> 4.45 s (4.28-5.67), -10.5%, p 0.30 (not significant); bytes
+  written 100.9 -> 93.4 MiB (ranges overlap). The catalog equals the disk 1.07-1.13 s after the churn in A
+  and 1.07-1.10 s in B; differences 0 in all 12 runs.
+- Gate: typecheck pass; clippy at the floor (10 / 24 / 1); judge 277/277.
+- Decision: KEEP.
+
+### Journey E4: phase 1 of a keystroke (`query_bench`)
+
+Harness: `crates/prism-core/examples/query_bench.rs` loads the app list from the `apps.json` copy (409
+apps), builds the settings index (1,028 entries) and the tools index (92) of this PC, and runs
+`query::phase1` for 30 queries with no open windows (two words typed a key at a time, the J3 queries,
+settings, tools, a phrase, a query with no match). It writes the hits of each query (kind, id, score) for an
+identity check between builds. `--verify` compares the scorer with a copy of the original algorithm for
+every target of the three indexes and every prefix of every query.
+
+| ID | Metric | Baseline |
+|---|---|---|
+| E4 | `query::phase1`, median of 21 runs per query, summed over 30 queries | 69.1 ms (2.3 ms a keystroke), first reading |
+
+Phase 1 runs on a runtime thread, not on the UI thread; its reply paints the app, settings and action rows.
+
+### E-004 The phase-1 scorer allocates nothing for an ASCII target
+
+- Journey: E4.
+- Profile (by reading; the bench confirms the total): `query/score.rs:7-8` `score_text` makes a lowercase
+  `String` of the query and of the target on every call, and `fuzzy_subsequence` (`:40-41`) makes two
+  `Vec<char>`. One keystroke calls it for about 11,000 targets (each app, tool, setting and action title
+  and each keyword): about 25,000-45,000 allocations. The callers also build a `Vec<&str>` of the keywords
+  of each entry (`query/mod.rs:137`, `:149`, `:187`).
+- Hypothesis: prepare the query once for each keystroke (lowercase text, characters, count of letters and
+  digits). For an ASCII target, compare bytes with ASCII lowercase on the fly (the same result as
+  `to_lowercase`, with no allocation); a target with other characters keeps the present path. Pass the
+  keywords as an iterator. E4 should drop from 69 ms to about 10-15 ms (2.3 -> under 0.5 ms a keystroke)
+  with identical hits and scores.
+- Test: `query_bench --verify` (0 mismatches against the original algorithm) and identical hit lists.
+- Change: `query/score.rs` `Query` (`new`, `score`, `score_with_keywords`); `query/mod.rs`, `query/catalog.rs`
+  and `query/open_windows.rs` prepare one `Query` for each keystroke and pass the keywords as they are stored.
+  `score_text` and `score_with_keywords` stay for single calls (`power.rs`).
+- Did the result stay the same: `query_bench --verify` compared the scorer with a copy of the original
+  algorithm for 2,098,698 pairs (every title and keyword of the three indexes, plus text with other
+  scripts, a final sigma, a dotted capital I and full-width letters, against every prefix of 42 queries): 0
+  mismatches. The hit lists of the 30 bench queries are identical in all 12 runs.
+- Result (A B B A x3, n=6 a side; the machine was busier than at the first reading): 123.3 ms (113.2-128.0)
+  -> 26.9 ms (20.3-29.5) for the 30 queries, -78%, p 0.005: 4.1 -> 0.9 ms a keystroke. The slowest query
+  left is one letter (`e`, 2.2 ms): many hits to build and sort.
+- Gate: typecheck pass (all targets); clippy at the floor (10 / 24 / 1); judge 277/277.
+- Decision: KEEP.
+
+### Journey E5: frames for a typed query (`bench/uiframes.py`)
+
+Harness: `prism.exe --parity` with `ZED_MEASUREMENTS=1` (GPUI prints one `frame duration` line for each frame
+it builds and paints). The scenario opens the palette, types the query one key at a time with 200 ms between
+the keys, and captures the palette. The frame count is exact: the same in every run.
+
+| ID | Query (keys) | Frames at open | Frames for the keys | Time in frames for the keys |
+|---|---|---|---|---|
+| E5 | `report` (6; 6 file rows) | 23 | 39 (6.5 a key) | 49.6 ms (46.0-54.1), n=3 |
+| E5 | `power` (5; power plans) | 22 | 77 (15.4 a key) | 71.4 ms (68.8-73.9), n=2 |
+| E5 | `zzqx` (4; no result) | 22-23 | 12 (3.0 a key) | 10.7 ms (9.7-11.6), n=2 |
+
+A key with no result costs three frames: the echo, the file reply (35 ms later) and the power-plan reply
+(50 ms later). The 22-23 frames at open paint a 150 ms fade of two footer icons (the only pixels that change
+after the first frame, x 520-570, y 590-602): a state of the footer changes at each open. That is motion
+design, so it is a note for the owner and not a change here.
+
+### E-005 A power-plan reply that changes nothing draws no frame
+
+- Journey: E5.
+- Profile: `prism-ui/src/state/palette.rs:583-589` `query_power_plans`: 50 ms after each key the reply sets
+  `power_plans` and calls `rebuild`, which builds every section again and paints a frame. `set_query`
+  emptied the list before, and most queries match no plan, so the reply changes nothing: one of the three
+  frames of a key with no result.
+- Hypothesis: rebuild only when the reply differs from the list. `zzqx` should drop from 12 to 8 frames
+  (3 -> 2 a key) and `report` from 39 to 33 (one frame less a key), with the same final image; `power`
+  keeps its rows.
+- Test: `uiframes.py` (same capture in all runs of both builds) and the parity journey `power-plan-switch`.
+- Result (`results/raw/e005-uiframes.jsonl`, A B B A x2, n=4 a side; the counts are exact, the same in each
+  run): `zzqx` 12 -> 8 frames (3 -> 2 a key; time in frames 11.5 -> 8.9 ms); `report` 39 -> 34 frames (6.5
+  -> 5.67 a key; 52.1 -> 47.9 ms); `power` 77 -> 75. The captures after the typed query and after the second
+  open are the same images in all 24 runs.
+- Gate: typecheck pass; clippy at the floor; judge 277/277; parity journeys 23/23
+  (`target/verify/runs/20261110-114351`), `power-plan-switch` with `--expect set_power_plan`.
+- Decision: KEEP.
+- Also measured with the frame harness and the owner's real app list (409 apps with icons, the owner's
+  settings; `target/tmp/bench/fixture-real.json`, not in the repo): the first open after a start paints its
+  first frame in 60.9 ms (55.0-63.3) and 17 frames in 126 ms; a later open paints one frame in 3.7 ms
+  (3.1-4.4), n=4. The typed keys cost the same as with the small fixture (38 frames, 50 ms for `report`).
