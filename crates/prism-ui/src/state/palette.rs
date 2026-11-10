@@ -584,8 +584,13 @@ impl PaletteState {
             Timer::after(Duration::from_millis(POWER_PLAN_QUERY_DELAY_MS)).await;
             let result = bridge::query_power_plans(search_text).await;
             let _ = this.update(cx, |this, cx| {
-                this.power_plans = result.unwrap_or_default();
-                this.rebuild(cx);
+                // Most queries match no plan: the list is as `set_query` left
+                // it, and a rebuild would paint the same frame again.
+                let plans = result.unwrap_or_default();
+                if this.power_plans != plans {
+                    this.power_plans = plans;
+                    this.rebuild(cx);
+                }
             });
         }));
     }
