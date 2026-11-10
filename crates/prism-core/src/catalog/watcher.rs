@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::ffi::OsString;
 use std::os::windows::ffi::OsStringExt;
 use std::os::windows::io::AsRawHandle;
@@ -671,6 +671,58 @@ impl<F: FnMut()> Drop for TraceOnDrop<F> {
     }
 }
 
+/// The events of one flush as the writes that apply them: the removals that
+/// a rename needs, the renames in order, the additions, the other removals.
+/// The paths order by component, so the entries below a folder are one range.
+#[derive(Default)]
+struct EventFold {
+    renames: Vec<(PathBuf, PathBuf)>,
+    touched: BTreeSet<PathBuf>,
+    removed: BTreeSet<PathBuf>,
+    /// Removed entries below a path that a later rename took: their rows go
+    /// before the renames, or the renamed rows collide with them.
+    removed_first: Vec<PathBuf>,
+}
+
+impl EventFold {
+    /// The events before a rename name paths as they were before it. An entry
+    /// added below `from` is now below `to` (a session folder gets its name
+    /// when its files are written): under the old name it would be dropped as
+    /// missing. An entry removed below `from` has its row below `to` after
+    /// the rename. A removal of `to` itself is over: the name exists again (a
+    /// safe save removes the document and renames a temp file to it).
+    fn rename(&mut self, from: PathBuf, to: PathBuf) {
+        self.removed.remove(&to);
+        self.removed_first.extend(take_below(&mut self.removed, &to));
+        self.touched.remove(&from);
+        for paths in [&mut self.touched, &mut self.removed] {
+            for path in take_below(paths, &from) {
+                if let Ok(rest) = path.strip_prefix(&from) {
+                    paths.insert(to.join(rest));
+                }
+            }
+        }
+        // `a -> b`, then `b -> c`: `b` is gone when the flush applies them.
+        match self.renames.iter_mut().rev().find(|(_, target)| *target == from) {
+            Some(earlier) => earlier.1 = to,
+            None => self.renames.push((from, to)),
+        }
+    }
+}
+
+/// Removes and returns the paths below `folder` (not `folder` itself).
+fn take_below(paths: &mut BTreeSet<PathBuf>, folder: &Path) -> Vec<PathBuf> {
+    let below = paths
+        .range::<Path, _>((std::ops::Bound::Excluded(folder), std::ops::Bound::Unbounded))
+        .take_while(|path| path.starts_with(folder))
+        .cloned()
+        .collect::<Vec<_>>();
+    for path in &below {
+        paths.remove(path);
+    }
+    below
+}
+
 /// Folds queued events to a final state per path and applies them as a
 /// handful of batched writes.
 fn apply_queued_events(
@@ -693,36 +745,55 @@ fn apply_queued_events(
     });
 
     let mut dirty_scopes: HashSet<PathBuf> = HashSet::new();
-    let mut renames: Vec<(PathBuf, PathBuf)> = Vec::new();
-    let mut touched: HashSet<PathBuf> = HashSet::new();
-    let mut removed: HashSet<PathBuf> = HashSet::new();
-
+    let mut fold = EventFold::default();
     for event in events {
         match event {
             WatcherEvent::Overflow(scope) => {
                 dirty_scopes.insert(scope);
             }
-            WatcherEvent::Renamed { from, to } => renames.push((from, to)),
+            WatcherEvent::Renamed { from, to } => fold.rename(from, to),
             WatcherEvent::Removed(path) => {
-                touched.remove(&path);
-                removed.insert(path);
+                fold.touched.remove(&path);
+                fold.removed.insert(path);
             }
             WatcherEvent::Added(path) => {
-                removed.remove(&path);
-                touched.insert(path);
+                fold.removed.remove(&path);
+                fold.touched.insert(path);
             }
         }
     }
+    let EventFold { renames, touched, removed, removed_first } = fold;
 
     let mut delta = 0i64;
     let mut changed = false;
+    let removal_keys = |paths: &mut dyn Iterator<Item = &PathBuf>| {
+        paths.map(|path| (path.to_string_lossy().to_lowercase(), true)).collect::<Vec<_>>()
+    };
+
+    if let Ok(removed) = db.remove_rows(volume_id, &removal_keys(&mut removed_first.iter())) {
+        delta -= removed as i64;
+        changed |= removed > 0;
+    }
 
     for (from, to) in &renames {
         let old_normalized = from.to_string_lossy().to_lowercase();
         if let Some(item) = inspect_single_path(to) {
-            if let Ok(rename_delta) = db.rename_file(volume_id, &old_normalized, &item) {
-                delta += rename_delta;
-                changed = true;
+            match db.rename_file(volume_id, &old_normalized, &item) {
+                Ok(rename_delta) => {
+                    delta += rename_delta;
+                    changed = true;
+                    // An earlier flush can have read an entry of this folder
+                    // after the rename, under its old name, and dropped it as
+                    // missing. A walk finds it, as for a new folder below.
+                    if item.is_directory {
+                        dirty_scopes.insert(to.clone());
+                    }
+                }
+                // A row already has the new path: a walk of the folder that
+                // holds the target settles what the catalog has there.
+                Err(_) => {
+                    dirty_scopes.insert(to.parent().unwrap_or(to).to_path_buf());
+                }
             }
         } else {
             // Target vanished before it could be inspected; treat as removal.
@@ -746,11 +817,7 @@ fn apply_queued_events(
     }
 
     // One transaction for the whole flush (see `Database::remove_rows`).
-    let removed = removed
-        .iter()
-        .map(|path| (path.to_string_lossy().to_lowercase(), true))
-        .collect::<Vec<_>>();
-    if let Ok(removed) = db.remove_rows(volume_id, &removed) {
+    if let Ok(removed) = db.remove_rows(volume_id, &removal_keys(&mut removed.iter())) {
         delta -= removed as i64;
         changed |= removed > 0;
     }
