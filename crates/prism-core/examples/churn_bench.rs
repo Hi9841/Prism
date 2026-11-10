@@ -219,6 +219,25 @@ fn generate(tree: &Path) {
         pause(5);
     }
     pause(1_000);
+    // Four jobs at one time, each in a folder of its own: a job makes a temp
+    // folder with a file and gives it its name (what parallel builds do). The
+    // file system then reports the halves of different renames interleaved.
+    let jobs = work.join("jobs");
+    std::thread::scope(|scope| {
+        for job in 0..4u64 {
+            let root = jobs.join(format!("job{job}"));
+            make_dir(&root);
+            scope.spawn(move || {
+                for number in 0..150u64 {
+                    let temp = root.join(format!("out-{number:03}.tmp{:06x}", tag(job * 1_000 + number) as u32 & 0xff_ffff));
+                    make_dir(&temp);
+                    write_file(&temp.join("CACHEDIR.TAG"));
+                    std::fs::rename(&temp, root.join(format!("out-{number:03}"))).expect("name the job folder");
+                }
+            });
+        }
+    });
+    pause(1_000);
     // A package install: 1,200 packages of 24 files, as fast as the disk allows.
     let modules = work.join("node_modules");
     for package in 0..1_200u64 {
@@ -319,34 +338,46 @@ fn replay(tree: &Path, recording: &Path) {
     let folders = recorded_folders(&events);
     let work = tree.join("work");
     let started = Instant::now();
-    let mut renamed_from: Option<PathBuf> = None;
+    // Renames that run at one time interleave their halves in the recording
+    // (old A, old B, new A, new B): a new name takes the waiting old name of
+    // its own folder, else the oldest one.
+    let mut renamed_from: Vec<PathBuf> = Vec::new();
+    let (mut done, mut failed) = (0u32, 0u32);
     for event in &events {
         let due = Duration::from_secs_f64(event.at_ms / 1000.0);
         if let Some(wait) = due.checked_sub(started.elapsed()) {
             std::thread::sleep(wait);
         }
         let target = work.join(&event.path);
-        match event.action.as_str() {
-            "added" if folders.contains(&event.path) => {
-                let _ = std::fs::create_dir(&target);
+        let result = match event.action.as_str() {
+            "added" if folders.contains(&event.path) => std::fs::create_dir(&target),
+            "added" => std::fs::File::create(&target).map(|_| ()),
+            "removed" => std::fs::remove_file(&target).or_else(|_| std::fs::remove_dir_all(&target)),
+            "renamed_old" => {
+                renamed_from.push(target);
+                continue;
             }
-            "added" => {
-                let _ = std::fs::File::create(&target);
-            }
-            "removed" => {
-                if std::fs::remove_file(&target).is_err() {
-                    let _ = std::fs::remove_dir_all(&target);
-                }
-            }
-            "renamed_old" => renamed_from = Some(target),
             "renamed_new" => {
-                if let Some(from) = renamed_from.take() {
-                    let _ = std::fs::rename(from, &target);
+                if renamed_from.is_empty() {
+                    continue;
+                }
+                let same_folder = renamed_from.iter().position(|from| from.parent() == target.parent());
+                std::fs::rename(renamed_from.remove(same_folder.unwrap_or(0)), &target)
+            }
+            _ => continue,
+        };
+        match result {
+            Ok(()) => done += 1,
+            Err(error) => {
+                failed += 1;
+                if failed <= 5 {
+                    eprintln!("replay: {} {} failed: {error}", event.action, event.path.display());
                 }
             }
-            _ => {}
         }
     }
+    // The share of the recorded work that happened: a replay with many failures measures less.
+    println!("REPLAY {done} operations done, {failed} failed");
 }
 
 /// Folder flag and lowercase parent of every entry under `root`, by lowercase path.

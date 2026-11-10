@@ -1268,3 +1268,65 @@ name index reloads in full after 730,000 removals (`name_index.rs` `needs_sync_w
   no CPU cost that shows. Fresh after 1.07-1.23 s (A: 1.07-1.10 s); differences 0 in all 12 runs.
 - Gate: typecheck pass; clippy prism-core 10 (the floor); judge 277/277.
 - Decision: KEEP.
+
+### Journey E3r: a replay of 60 s of real file events (`churn_bench --recording`)
+
+The built-in script of E3 has 1,400 folders in 35,000 entries. The field recording has one folder for each
+2.8 entries (a test suite that makes a sandbox for each test). `churn_bench --recording
+target/tmp/bench/replay-60s.jsonl` replays the slice 430-490 s of the recording below the test tree, each
+event at its recorded time: 193,093 events (88,295 added, 88,270 removed, 8,264 renamed; 96,109 paths, 34,323
+of them folders). The 67,586 entries that the slice removes or renames but does not add are made before the
+watcher starts.
+
+| ID | Metric | Baseline (E-007 build, 2 runs) |
+|---|---|---|
+| E3r | CPU of the process for the 60 s of events | 28.9 s / 25.5 s (kernel 22.2 / 19.1, user 6.7 / 6.3) |
+| E3r | bytes written | 858 / 845 MiB in about 355,000 operations |
+| E3r | bytes read | 791 / 733 MiB |
+| E3r | repair walks (`file-index-updated` events) | 27,413 / 27,442 |
+| E3r | catalog equal to the disk | 3.1 s after the last event; 0 differences |
+
+By thread (cycle counters, one run): the flusher 8.4 s, the watcher's readers 1.9 s; the rest (about 15 s)
+is the repair walks on blocking-pool threads. So one minute of that test suite costs Prism half a core and
+850 MiB of writes. The E-002 fix holds on the real pattern (0 differences).
+
+### E-009 A new folder gets a repair walk only when it holds an entry without an event
+
+- Journey: E3r (and E3 as the guard).
+- Profile: `watcher.rs` `apply_queued_events`: every added folder asks for a repair walk
+  (`dirty_scopes.insert`), 27,400 walks for the slice. A walk costs a task, two timers, a blocking-pool run,
+  a listing of the volume root (`ensure_current_shards`), a folder listing, a catalog query, and a
+  `file-index-updated` event: about 15 s of the 26-29 s. The walk exists for a folder that arrives with
+  content: its children send no events.
+- First hypothesis (wrong, logged as it was written): "a folder whose creation time is inside the current
+  flush window cannot hold an entry without an event, so it needs no walk". Result of that form: CPU 28.9 ->
+  11.0 s, but 1 file missing from the catalog in each run, the same file. Cause: a move between two folders
+  is reported as a removal and an addition, not as a rename. A temp folder that is made, filled and moved
+  inside one window is new by its creation time and still arrives with content. REVERTED in that form.
+- The trace also showed a defect in the reader (and in the bench's first replay): renames that run at one
+  time in different folders interleave their halves (old A, old B, new A, new B: 14 cases in the 60 s
+  slice, 180 pairs with other events between them). `run_reader_loop` kept one waiting old name, so it
+  paired old B with new A: the wrong folder is renamed in the catalog, and the rows of A stay as ghosts.
+  The repair walks hid most of that.
+- Second hypothesis: list each added or renamed folder at the flush (the listing carries the creation times)
+  and ask for a walk only when it holds an entry that this flush has no addition for and that was there at
+  the take. A folder made and filled in place needs no walk. With the reader's rename halves paired by
+  folder, and the volume root listed only for a repair at the root or one level below it, walks should drop
+  from 27,400 to a few thousand (moved folders, renamed folders with rows), CPU from about 27 s to about
+  17 s, and bytes read by a third, with 0 differences in E3r and E3.
+- Test: `churn_bench` on the replay (now faithful: the bench pairs rename halves by folder too, and prints
+  how many replayed operations failed) and on the built-in script, which has a new phase: four threads that
+  each make a temp folder with a file and rename it, 150 times, in a folder of their own. Differences must
+  be 0, and the time until the catalog equals the disk must not rise.
+- Change: `watcher.rs` `holds_unreported_entry` (one listing of the folder; an entry counts when this flush
+  has no addition for it and it was made before the take), used for added and for renamed folders;
+  `run_reader_loop` keeps up to `MAX_PENDING_RENAMES` old names and pairs a new name with the old name of
+  its folder; `catalog/mod.rs` `reconcile_scope_sync` lists the volume root only near the root.
+- Result on E3r (`results/raw/e009-replay.jsonl`, A = E-007 build, A B B A x2, n=4 a side; the replay did
+  184,829 operations with 0 failures): CPU 33.9 s (33.6-34.3) -> 17.1 s (15.1-18.0), -50%, every B below
+  every A, p 0.03; bytes read 807 -> 487 MiB (-40%); bytes written 882 -> 786 MiB (-11%); the catalog equals
+  the disk after 3.4-5.6 s in A and 3.0-3.7 s in B; differences 0 in all 8 runs. Walks about 27,400 -> 2,970.
+- Guard on E3 (built-in script with the new phase of renames on four threads, 3 runs): differences 0,
+  equal after 1.1-1.2 s, repair walks 3,580 -> about 200, CPU and bytes written inside the earlier range.
+- Gate: typecheck pass; clippy prism-core 10 (the floor); judge 277/277.
+- Decision: KEEP.
