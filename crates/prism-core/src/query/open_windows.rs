@@ -41,12 +41,17 @@ pub fn list() -> Vec<OpenWindow> {
     windows
 }
 
-pub fn search(query: &str, windows: &[OpenWindow], limit: usize) -> Vec<(OpenWindow, i32)> {
+pub fn search(
+    query: &super::score::Query,
+    windows: &[OpenWindow],
+    limit: usize,
+) -> Vec<(OpenWindow, i32)> {
     let mut ranked: Vec<(OpenWindow, i32)> = windows
         .iter()
         .filter_map(|window| {
-            let title_score = super::score::score_text(query, &window.title);
-            let process_score = super::score::score_text(query, &window.process_name)
+            let title_score = query.score(&window.title);
+            let process_score = query
+                .score(&window.process_name)
                 .map(|score| (score - 40).max(0));
             match (title_score, process_score) {
                 (Some(title), Some(process)) => Some(title.max(process)),

@@ -647,11 +647,12 @@ pub fn get(id: &str) -> Option<&'static TypedAction> {
     ACTIONS.iter().find(|action| action.id == id)
 }
 
-pub fn search(query: &str, limit: usize) -> Vec<(&'static TypedAction, i32)> {
+pub fn search(query: &super::score::Query, limit: usize) -> Vec<(&'static TypedAction, i32)> {
     let mut ranked: Vec<(&'static TypedAction, i32)> = ACTIONS
         .iter()
         .filter_map(|action| {
-            super::score::score_with_keywords(query, action.title, action.keywords)
+            query
+                .score_with_keywords(action.title, action.keywords)
                 .map(|score| (action, score))
         })
         .collect();

@@ -92,12 +92,14 @@ pub fn phase1(
     let query_lower = trimmed.to_lowercase();
     let intent_action_id = jev::resolve(&query_lower, intent).map(str::to_string);
 
-    let window_hits = open_windows::search(&query_lower, windows, WINDOW_LIMIT)
+    // Prepared once: one keystroke scores it against every title and keyword.
+    let prepared = score::Query::new(&query_lower);
+    let window_hits = open_windows::search(&prepared, windows, WINDOW_LIMIT)
         .into_iter()
         .map(|(window, score)| window_hit(&window, score))
         .collect();
-    let app_hits = search_apps(&query_lower, apps);
-    let actions = search_actions(&query_lower, intent_action_id.as_deref());
+    let app_hits = search_apps(&prepared, apps);
+    let actions = search_actions(&prepared, intent_action_id.as_deref());
 
     Phase1Response {
         query: trimmed.to_string(),
@@ -126,7 +128,7 @@ pub fn focus_window(hwnd: i64) -> Result<(), String> {
     open_windows::focus(hwnd)
 }
 
-fn search_actions(query: &str, intent_id: Option<&str>) -> Vec<Phase1Hit> {
+fn search_actions(query: &score::Query, intent_id: Option<&str>) -> Vec<Phase1Hit> {
     let mut hits: Vec<Phase1Hit> = catalog::search(query, ACTION_LIMIT)
         .into_iter()
         .map(|(action, score)| action_hit(action, score, false))
@@ -134,25 +136,16 @@ fn search_actions(query: &str, intent_id: Option<&str>) -> Vec<Phase1Hit> {
 
     if let Some(tools) = crate::windows_tools::cached() {
         for tool in tools.iter() {
-            let keyword_refs = tool
-                .keywords
-                .iter()
-                .map(|keyword| keyword.as_str())
-                .collect::<Vec<_>>();
-            if let Some(score) = score::score_with_keywords(query, &tool.title, &keyword_refs) {
+            if let Some(score) = query.score_with_keywords(&tool.title, &tool.keywords) {
                 hits.push(tool_hit(tool, score));
             }
         }
     }
     if let Some(settings) = crate::settings_index::cached() {
         for setting in settings.iter() {
-            let keyword_refs = setting
-                .keywords
-                .iter()
-                .map(|keyword| keyword.as_str())
-                .collect::<Vec<_>>();
-            let title = score::score_text(query, &setting.title);
-            let keyword = score::score_with_keywords(query, "", &keyword_refs)
+            let title = query.score(&setting.title);
+            let keyword = query
+                .score_with_keywords("", &setting.keywords)
                 .map(|score| score.min(SETTING_KEYWORD_CAP));
             if let Some(score) = title.max(keyword) {
                 hits.push(setting_hit(setting, score));
@@ -181,11 +174,10 @@ fn search_actions(query: &str, intent_id: Option<&str>) -> Vec<Phase1Hit> {
     hits
 }
 
-fn search_apps(query: &str, apps: &[AppEntry]) -> Vec<Phase1Hit> {
+fn search_apps(query: &score::Query, apps: &[AppEntry]) -> Vec<Phase1Hit> {
     let mut ranked: Vec<(&AppEntry, i32, i32)> = Vec::new();
     for app in apps {
-        let keyword_refs: Vec<&str> = app.keywords.iter().map(String::as_str).collect();
-        let Some(score) = score::score_with_keywords(query, &app.name, &keyword_refs) else {
+        let Some(score) = query.score_with_keywords(&app.name, &app.keywords) else {
             continue;
         };
         ranked.push((app, score, source_rank(&app.source)));
