@@ -1483,3 +1483,18 @@ runs. Suspect, not confirmed: a repair walk reads a folder listing, the folder i
 deletes its row, and the walk then writes the row from its old listing (`scanner.rs` `scan_volume_inner`
 lists first and writes later). Next step: make it reproduce (a script that removes folders while walks
 run), then give the fix to a subagent.
+
+### F-005 A repair walk does not write a row for an entry that is gone (fix for the open defect)
+
+- Evidence: the recording for the ghost row. `t705` is removed and made again (NTFS gives the new folder the
+  old creation time, so it gets a recursive repair walk, 2-20 s later); `t705\bar\target` gets its name by
+  a rename at 39.19 s; `t705\bar` is renamed to `bar2` at 40.97 s. The EXTRA row is `t705\bar\target`.
+- Cause (from the code, `scanner.rs` `scan_volume_inner`): the walk lists a folder, puts the rows that
+  differ in `batch`, and writes the batch at the end of the walk (or at 20,000 rows). When the watcher
+  applies a rename or a removal between the listing and that write, the walk then writes rows with the
+  old paths. The folder row of `target` differs (its write time moved), so it is in the batch; the rename
+  of `bar` moves the catalog's row to `bar2\target`; the walk writes `bar\target` again.
+- Hypothesis: if the walk tests that each entry of its batch still exists just before it writes (one
+  metadata call for each changed row; an idle sweep has almost none), the stale row is not written. The
+  ghost row should not show in 8 replay runs, with CPU and bytes inside the F-004 range.
+- Test: `churn_bench` on the replay, 8 runs: differences 0 in each. A/A rate before: 1 in about 12 runs.
