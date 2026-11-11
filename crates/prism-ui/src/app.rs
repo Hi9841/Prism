@@ -35,8 +35,6 @@ pub struct Launcher {
     close_timer: Option<Task<()>>,
     blur_check: Option<Task<()>>,
     present_task: Option<Task<()>>,
-    /// The hidden frame that fills the text, glyph, and icon caches was drawn.
-    warmed: bool,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -54,18 +52,6 @@ impl Launcher {
             _ => {}
         });
         let app_obs = cx.observe(&app, |_, _, cx| cx.notify());
-        // The first frame after a start shapes every text, fills the glyph
-        // atlas, and decodes the visible icons: about 60 ms with a real app
-        // list, against 4 ms for a later open. Draw one frame while the
-        // window is still hidden, when the first icons are there, so that
-        // the first open is as fast as the others.
-        let warm_obs = cx.observe_in(&palette_state, window, |this, state, window, cx| {
-            if this.warmed || this.phase != LauncherPhase::Hidden || state.read(cx).app_icons().is_empty() {
-                return;
-            }
-            this.warmed = true;
-            window.defer(cx, |window, cx| window.draw(cx).clear());
-        });
         // The native focus events: the shell runs its click-away logic, then the
         // UI hears `onFocusChanged`.
         let activation = cx.observe_window_activation(window, |_, window, cx| {
@@ -91,8 +77,7 @@ impl Launcher {
             close_timer: None,
             blur_check: None,
             present_task: None,
-            warmed: false,
-            _subscriptions: vec![hub_sub, app_obs, warm_obs, activation, intercept],
+            _subscriptions: vec![hub_sub, app_obs, activation, intercept],
         };
         // Cold-start sync: reflect a window that is already shown.
         if bridge::shell(cx).is_window_visible(cx) {
