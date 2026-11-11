@@ -247,28 +247,9 @@ impl WindowsPlatform {
             .name("VSyncProvider".to_owned())
             .spawn(move || {
                 let vsync_provider = VSyncProvider::new();
-                // Prism patch 33: no vsync wakeups while no window is visible.
-                let mut awake_until = std::time::Instant::now() + WINDOW_SHOWN_GRACE;
                 // Prism patch 34: a device-lost recovery that has not finished.
                 let mut recovery_pending = false;
                 loop {
-                    let Some(windows) = all_windows.upgrade() else {
-                        break;
-                    };
-                    let visible = windows
-                        .read()
-                        .iter()
-                        .any(|hwnd| unsafe { IsWindowVisible(hwnd.as_raw()) }.as_bool());
-                    drop(windows);
-                    if take_window_shown() {
-                        awake_until = std::time::Instant::now() + WINDOW_SHOWN_GRACE;
-                    }
-                    if !visible && std::time::Instant::now() >= awake_until {
-                        if wait_for_window_shown() {
-                            awake_until = std::time::Instant::now() + WINDOW_SHOWN_GRACE;
-                        }
-                        continue;
-                    }
                     vsync_provider.wait_for_vsync();
                     if recovery_pending || check_device_lost(&directx_device.device) {
                         recovery_pending = !handle_gpu_device_lost(

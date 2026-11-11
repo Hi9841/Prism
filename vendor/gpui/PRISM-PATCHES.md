@@ -185,7 +185,9 @@
     300 ms after it closes, the next tooltip opens with no 500 ms delay
     (`LAST_TOOLTIP_SEEN`). A row of icon buttons then reads like the Windows tooltip
     control, which also skips the delay for a neighbor.
-33. `src/platform/windows/vsync.rs` (`notify_window_shown`, `wait_for_window_shown`),
+33. (Reverted 2026-11-11, release 1.0.24: the owner sees a rare palette freeze since 1.0.20, and the
+    render-path changes of 1.0.20-1.0.22 come out together to find it.)
+    `src/platform/windows/vsync.rs` (`notify_window_shown`, `wait_for_window_shown`),
     `src/platform/windows/platform.rs` `begin_vsync_thread`, and `src/platform/windows/events.rs`
     (`WM_SHOWWINDOW`, `WM_WINDOWPOSCHANGED` with `SWP_SHOWWINDOW`): while no window is visible, the
     vsync thread waits for a show signal (1 s timeout as a safety net) and does not call `DwmFlush`
