@@ -193,3 +193,18 @@
     did no work. After a show the thread keeps its pace for 1 s before it tests visibility again
     (`WM_SHOWWINDOW` arrives before the window is visible). Measured in parity mode
     (`oploop/bench/uiidle.py`): hidden CPU 4.46 -> 0.61 ms/s, context switches 262 -> 67 per second.
+34. `src/platform/windows/directx_renderer.rs` `handle_device_lost`, `src/platform/windows/platform.rs`
+    `handle_gpu_device_lost` and the vsync loop, `src/platform/windows/direct_write.rs` `handle_gpu_lost`,
+    `src/platform/windows/events.rs`: a GPU device-lost recovery (a driver reset; the owner's machine logged
+    nvlddmkm event 153 three times in two weeks) that fails is tried again, and a failed attempt leaves the
+    renderer whole. Before, the renderer released its GPU objects first and then made new ones. When an
+    attempt failed, the retry released the same objects again (a double free: in parity mode the process
+    ended with 0xC000041D), and with the composition gone, the retry made a window swap chain for a composed
+    window. A failed device recreation was only logged: the windows still got the lost device, and nothing
+    tried again. Now the renderer makes every new object first (only the window's composition target goes
+    before its replacement) and reports the result. The vsync thread tries again at each wakeup until the
+    devices, the text system and every window recovered. It also no longer holds the window-list lock while
+    it waits in `SendMessageW` for the main thread. Without composition (`GPUI_DISABLE_DIRECT_COMPOSITION`,
+    which Prism does not use), the new swap chain is made while the lost one exists; if DXGI refuses that,
+    each attempt fails. Test hook, debug builds only: `PRISM_TEST_GPU_LOSS=<ms>,<failures>`
+    (`directx_devices.rs` `test_gpu_loss`), driven by the verify-prism journey `gpu-loss-recovery`.

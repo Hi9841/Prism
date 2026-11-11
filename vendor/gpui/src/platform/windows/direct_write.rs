@@ -211,8 +211,9 @@ impl DirectWriteTextSystem {
         })))
     }
 
-    pub(crate) fn handle_gpu_lost(&self, directx_devices: &DirectXDevices) {
-        self.0.write().handle_gpu_lost(directx_devices);
+    /// PRISM PATCH 34: false when the GPU state could not be recreated.
+    pub(crate) fn handle_gpu_lost(&self, directx_devices: &DirectXDevices) -> bool {
+        self.0.write().handle_gpu_lost(directx_devices)
     }
 }
 
@@ -1229,18 +1230,17 @@ impl DirectWriteState {
         result
     }
 
-    fn handle_gpu_lost(&mut self, directx_devices: &DirectXDevices) {
+    fn handle_gpu_lost(&mut self, directx_devices: &DirectXDevices) -> bool {
+        let mut recovered = false;
         try_to_recover_from_device_lost(
             || GPUState::new(directx_devices).context("Recreating GPU state for DirectWrite"),
-            |gpu_state| self.components.gpu_state = gpu_state,
-            || {
-                log::error!(
-                    "Failed to recreate GPU state for DirectWrite after multiple attempts."
-                );
-                // Do something here?
-                // At this point, the device loss is considered unrecoverable.
+            |gpu_state| {
+                self.components.gpu_state = gpu_state;
+                recovered = true;
             },
+            || log::error!("Failed to recreate GPU state for DirectWrite; trying again later."),
         );
+        recovered
     }
 }
 

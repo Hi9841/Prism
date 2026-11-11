@@ -1197,8 +1197,8 @@ impl WindowsWindowInner {
         let mut lock = self.state.borrow_mut();
         let devices = lparam.0 as *const DirectXDevices;
         let devices = unsafe { &*devices };
-        lock.renderer.handle_device_lost(&devices);
-        Some(0)
+        // PRISM PATCH 34: 1 tells the vsync thread to send the devices again.
+        Some(if lock.renderer.handle_device_lost(&devices) { 0 } else { 1 })
     }
 
     #[inline]

@@ -38,6 +38,9 @@ pub(crate) struct FontInfo {
 
 pub(crate) struct DirectXRenderer {
     hwnd: HWND,
+    /// The window shows its swap chain through DirectComposition. Fixed at
+    /// creation: `direct_composition` is `None` during a device-lost recovery.
+    composes: bool,
     atlas: Arc<DirectXAtlas>,
     devices: ManuallyDrop<DirectXRendererDevices>,
     resources: ManuallyDrop<DirectXResources>,
@@ -157,6 +160,7 @@ impl DirectXRenderer {
 
         Ok(DirectXRenderer {
             hwnd,
+            composes: !disable_direct_composition,
             atlas,
             devices,
             resources,
@@ -206,25 +210,60 @@ impl DirectXRenderer {
         result.ok().context("Presenting swap chain failed")
     }
 
-    pub(crate) fn handle_device_lost(&mut self, directx_devices: &DirectXDevices) {
-        try_to_recover_from_device_lost(
-            || {
-                self.handle_device_lost_impl(directx_devices)
-                    .context("DirectXRenderer handling device lost")
-            },
-            |_| {},
-            || {
-                log::error!(
-                    "DirectXRenderer failed to recover from device lost after multiple attempts"
-                );
-                // Do something here?
-                // At this point, the device loss is considered unrecoverable.
-            },
-        );
+    /// PRISM PATCH 34: one recovery attempt. False when it failed; the renderer
+    /// is then unchanged, and the caller tries again later.
+    pub(crate) fn handle_device_lost(&mut self, directx_devices: &DirectXDevices) -> bool {
+        match self.handle_device_lost_impl(directx_devices) {
+            Ok(()) => true,
+            Err(error) => {
+                log::error!("DirectXRenderer could not recover from a lost device: {error:#}");
+                false
+            }
+        }
     }
 
+    /// Makes every new GPU object before it releases a lost one. Before, the
+    /// lost objects were released first: a failed attempt left the renderer
+    /// holding released objects (the next attempt released them again), and
+    /// with no composition left, the next attempt made a window swap chain
+    /// for a composed window.
     fn handle_device_lost_impl(&mut self, directx_devices: &DirectXDevices) -> Result<()> {
-        let disable_direct_composition = self.direct_composition.is_none();
+        let disable_direct_composition = !self.composes;
+        let devices = DirectXRendererDevices::new(directx_devices, disable_direct_composition)
+            .context("Recreating DirectX devices")?;
+        // Without composition, the swap chain is made for the window while the
+        // lost one still exists. Prism always composes.
+        let resources = DirectXResources::new(
+            &devices,
+            self.resources.width,
+            self.resources.height,
+            self.hwnd,
+            disable_direct_composition,
+        )
+        .context("Recreating DirectX resources")?;
+        let globals = DirectXGlobalElements::new(&devices.device)
+            .context("Recreating DirectX global elements")?;
+        let pipelines = DirectXRenderPipelines::new(&devices.device)
+            .context("Recreating DirectX render pipelines")?;
+
+        let direct_composition = if disable_direct_composition {
+            None
+        } else {
+            // A window has one composition target: the lost one goes first. If
+            // the new one fails, the next attempt makes it.
+            drop(self.direct_composition.take());
+            #[cfg(debug_assertions)]
+            if test_gpu_loss::fail_recovery() {
+                anyhow::bail!("simulated recovery failure (PRISM_TEST_GPU_LOSS)");
+            }
+            let composition =
+                DirectComposition::new(devices.dxgi_device.as_ref().unwrap(), self.hwnd)
+                    .context("Recreating DirectComposition")?;
+            composition
+                .set_swap_chain(&resources.swap_chain)
+                .context("Setting the recreated swap chain")?;
+            Some(composition)
+        };
 
         unsafe {
             #[cfg(debug_assertions)]
@@ -232,45 +271,16 @@ impl DirectXRenderer {
                 .context("Failed to report live objects after device lost")
                 .log_err();
 
-            ManuallyDrop::drop(&mut self.resources);
             self.devices.device_context.OMSetRenderTargets(None, None);
             self.devices.device_context.ClearState();
             self.devices.device_context.Flush();
-
-            #[cfg(debug_assertions)]
-            report_live_objects(&self.devices.device)
-                .context("Failed to report live objects after device lost")
-                .log_err();
-
-            drop(self.direct_composition.take());
-            ManuallyDrop::drop(&mut self.devices);
+            let lost_resources = std::mem::replace(&mut self.resources, resources);
+            drop(ManuallyDrop::into_inner(lost_resources));
+            let lost_devices = std::mem::replace(&mut self.devices, devices);
+            drop(ManuallyDrop::into_inner(lost_devices));
         }
-
-        let devices = DirectXRendererDevices::new(directx_devices, disable_direct_composition)
-            .context("Recreating DirectX devices")?;
-        let resources = DirectXResources::new(
-            &devices,
-            self.resources.width,
-            self.resources.height,
-            self.hwnd,
-            disable_direct_composition,
-        )?;
-        let globals = DirectXGlobalElements::new(&devices.device)?;
-        let pipelines = DirectXRenderPipelines::new(&devices.device)?;
-
-        let direct_composition = if disable_direct_composition {
-            None
-        } else {
-            let composition =
-                DirectComposition::new(devices.dxgi_device.as_ref().unwrap(), self.hwnd)?;
-            composition.set_swap_chain(&resources.swap_chain)?;
-            Some(composition)
-        };
-
         self.atlas
-            .handle_device_lost(&devices.device, &devices.device_context);
-        self.devices = devices;
-        self.resources = resources;
+            .handle_device_lost(&self.devices.device, &self.devices.device_context);
         self.globals = globals;
         self.pipelines = pipelines;
         self.direct_composition = direct_composition;

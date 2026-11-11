@@ -249,6 +249,8 @@ impl WindowsPlatform {
                 let vsync_provider = VSyncProvider::new();
                 // Prism patch 33: no vsync wakeups while no window is visible.
                 let mut awake_until = std::time::Instant::now() + WINDOW_SHOWN_GRACE;
+                // Prism patch 34: a device-lost recovery that has not finished.
+                let mut recovery_pending = false;
                 loop {
                     let Some(windows) = all_windows.upgrade() else {
                         break;
@@ -268,8 +270,8 @@ impl WindowsPlatform {
                         continue;
                     }
                     vsync_provider.wait_for_vsync();
-                    if check_device_lost(&directx_device.device) {
-                        handle_gpu_device_lost(
+                    if recovery_pending || check_device_lost(&directx_device.device) {
+                        recovery_pending = !handle_gpu_device_lost(
                             &mut directx_device,
                             platform_window.as_raw(),
                             validation_number,
@@ -1039,6 +1041,10 @@ fn should_auto_hide_scrollbars() -> Result<bool> {
 }
 
 fn check_device_lost(device: &ID3D11Device) -> bool {
+    #[cfg(debug_assertions)]
+    if test_gpu_loss::device_lost() {
+        return true;
+    }
     let device_state = unsafe { device.GetDeviceRemovedReason() };
     match device_state {
         Ok(_) => false,
@@ -1049,67 +1055,82 @@ fn check_device_lost(device: &ID3D11Device) -> bool {
     }
 }
 
+/// PRISM PATCH 34: true when the devices, the text system and every window
+/// recovered. Until then the vsync thread calls it again at each wakeup. Before,
+/// a failed step only logged: the windows got the lost devices, or a renderer
+/// stayed on them, and no window drew again until a restart.
 fn handle_gpu_device_lost(
     directx_devices: &mut DirectXDevices,
     platform_window: HWND,
     validation_number: usize,
     all_windows: &std::sync::Weak<RwLock<SmallVec<[SafeHwnd; 4]>>>,
     text_system: &std::sync::Weak<DirectWriteTextSystem>,
-) {
-    // Here we wait a bit to ensure the system has time to recover from the device lost state.
-    // If we don't wait, the final drawing result will be blank.
-    std::thread::sleep(std::time::Duration::from_millis(350));
+) -> bool {
+    if check_device_lost(&directx_devices.device) {
+        // Here we wait a bit to ensure the system has time to recover from the device lost state.
+        // If we don't wait, the final drawing result will be blank.
+        std::thread::sleep(std::time::Duration::from_millis(350));
 
-    try_to_recover_from_device_lost(
-        || {
-            DirectXDevices::new()
-                .context("Failed to recreate new DirectX devices after device lost")
-        },
-        |new_devices| *directx_devices = new_devices,
-        || {
-            log::error!("Failed to recover DirectX devices after multiple attempts.");
-            // Do something here?
-            // At this point, the device loss is considered unrecoverable.
-            // std::process::exit(1);
-        },
-    );
-    log::info!("DirectX devices successfully recreated.");
-
-    unsafe {
-        SendMessageW(
-            platform_window,
-            WM_GPUI_GPU_DEVICE_LOST,
-            Some(WPARAM(validation_number)),
-            Some(LPARAM(directx_devices as *const _ as _)),
+        let mut recreated = None;
+        try_to_recover_from_device_lost(
+            || {
+                DirectXDevices::new()
+                    .context("Failed to recreate new DirectX devices after device lost")
+            },
+            |new_devices| recreated = Some(new_devices),
+            || log::error!("Failed to recover DirectX devices; trying again later."),
         );
+        let Some(new_devices) = recreated else {
+            return false;
+        };
+        *directx_devices = new_devices;
+        log::info!("DirectX devices successfully recreated.");
+        #[cfg(debug_assertions)]
+        test_gpu_loss::devices_recreated();
+
+        unsafe {
+            SendMessageW(
+                platform_window,
+                WM_GPUI_GPU_DEVICE_LOST,
+                Some(WPARAM(validation_number)),
+                Some(LPARAM(directx_devices as *const _ as _)),
+            );
+        }
     }
 
+    let mut recovered = true;
     if let Some(text_system) = text_system.upgrade() {
-        text_system.handle_gpu_lost(&directx_devices);
+        recovered &= text_system.handle_gpu_lost(&directx_devices);
     }
-    if let Some(all_windows) = all_windows.upgrade() {
-        for window in all_windows.read().iter() {
-            unsafe {
-                SendMessageW(
-                    window.as_raw(),
-                    WM_GPUI_GPU_DEVICE_LOST,
-                    Some(WPARAM(validation_number)),
-                    Some(LPARAM(directx_devices as *const _ as _)),
-                );
-            }
-        }
-        std::thread::sleep(std::time::Duration::from_millis(200));
-        for window in all_windows.read().iter() {
-            unsafe {
-                SendMessageW(
-                    window.as_raw(),
-                    WM_GPUI_FORCE_UPDATE_WINDOW,
-                    Some(WPARAM(validation_number)),
-                    None,
-                );
-            }
+    // Copy the handles: the window procedure runs on the main thread, which
+    // takes this lock to add or remove a window.
+    let windows: Vec<HWND> = match all_windows.upgrade() {
+        Some(all_windows) => all_windows.read().iter().map(|window| window.as_raw()).collect(),
+        None => Vec::new(),
+    };
+    for &window in &windows {
+        let result = unsafe {
+            SendMessageW(
+                window,
+                WM_GPUI_GPU_DEVICE_LOST,
+                Some(WPARAM(validation_number)),
+                Some(LPARAM(directx_devices as *const _ as _)),
+            )
+        };
+        recovered &= result.0 == 0;
+    }
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    for &window in &windows {
+        unsafe {
+            SendMessageW(
+                window,
+                WM_GPUI_FORCE_UPDATE_WINDOW,
+                Some(WPARAM(validation_number)),
+                None,
+            );
         }
     }
+    recovered
 }
 
 const PLATFORM_WINDOW_CLASS_NAME: PCWSTR = w!("Zed::PlatformWindow");

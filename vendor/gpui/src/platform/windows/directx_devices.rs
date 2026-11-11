@@ -195,3 +195,64 @@ fn get_device(
         ))
     }
 }
+
+/// PRISM PATCH 34 test hook, debug builds only: `PRISM_TEST_GPU_LOSS=<ms>,<failures>`
+/// reports the device as lost once, <ms> after the first check, until the devices
+/// are made again, and makes the first <failures> renderer recoveries fail where
+/// they make the composition target (the old one is already released there).
+#[cfg(debug_assertions)]
+pub(crate) mod test_gpu_loss {
+    use std::sync::LazyLock;
+    use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+    use std::time::{Duration, Instant};
+
+    struct Plan {
+        at: Instant,
+        failures: AtomicU32,
+        fired: AtomicBool,
+        lost: AtomicBool,
+    }
+
+    static PLAN: LazyLock<Option<Plan>> = LazyLock::new(|| {
+        let value = std::env::var("PRISM_TEST_GPU_LOSS").ok()?;
+        let (ms, failures) = value.split_once(',')?;
+        Some(Plan {
+            at: Instant::now() + Duration::from_millis(ms.trim().parse().ok()?),
+            failures: AtomicU32::new(failures.trim().parse().ok()?),
+            fired: AtomicBool::new(false),
+            lost: AtomicBool::new(false),
+        })
+    });
+
+    /// True from the planned time until `devices_recreated`.
+    pub(crate) fn device_lost() -> bool {
+        let Some(plan) = PLAN.as_ref() else { return false };
+        if Instant::now() >= plan.at && !plan.fired.swap(true, Ordering::AcqRel) {
+            plan.lost.store(true, Ordering::Release);
+            eprintln!("gpu-loss-test: device lost");
+        }
+        plan.lost.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn devices_recreated() {
+        if let Some(plan) = PLAN.as_ref()
+            && plan.lost.swap(false, Ordering::AcqRel)
+        {
+            eprintln!("gpu-loss-test: devices recreated");
+        }
+    }
+
+    /// True when this recovery attempt must fail.
+    pub(crate) fn fail_recovery() -> bool {
+        let Some(plan) = PLAN.as_ref() else { return false };
+        let failed = plan
+            .failures
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |left| left.checked_sub(1))
+            .is_ok();
+        eprintln!(
+            "gpu-loss-test: renderer recovery attempt {}",
+            if failed { "fails" } else { "runs" }
+        );
+        failed
+    }
+}
