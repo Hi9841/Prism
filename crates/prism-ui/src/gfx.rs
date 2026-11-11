@@ -10,8 +10,7 @@ use std::time::{Duration, Instant};
 use base64::Engine;
 use gpui::{
     AnyElement, App, AssetSource, Bounds, BoxShadow, Element, ElementId, GlobalElementId, Hsla, Image, ImageFormat,
-    InspectorElementId, IntoElement, LayoutId, Pixels, RenderImage, Rems, Rgba, SharedString, Styled, Svg,
-    Transformation, Window,
+    InspectorElementId, IntoElement, LayoutId, Pixels, Rems, Rgba, SharedString, Styled, Svg, Transformation, Window,
     point, rems, svg,
 };
 
@@ -97,34 +96,24 @@ pub fn parity() -> Option<ParityOptions> {
     PARITY.get().copied()
 }
 
-/// `data:image/...;base64,` URLs (icons and thumbnails), decoded to pixels and
-/// cached by URL. `None` marks a URL that does not decode.
-static DATA_IMAGES: LazyLock<Mutex<HashMap<String, Option<Arc<RenderImage>>>>> = LazyLock::new(Mutex::default);
+/// Decoded `data:image/...;base64,` URLs, cached by URL (icons and thumbnails).
+static DATA_IMAGES: LazyLock<Mutex<HashMap<String, Option<Arc<Image>>>>> = LazyLock::new(Mutex::default);
 const DATA_IMAGE_CACHE_LIMIT: usize = 1024;
 
-/// The pixels of a data URL image, ready to paint in this frame.
-///
-/// The decode is synchronous on purpose (a 64 px PNG takes microseconds). An
-/// `img` of an `Arc<Image>` decodes on a background task and paints nothing
-/// until the task ends, so every row that a search brought on screen showed an
-/// empty icon box for a frame or more: the icons flickered while typing.
-pub fn data_url_image(url: &str, window: &mut Window, cx: &App) -> Option<Arc<RenderImage>> {
+pub fn data_url_image(url: &str) -> Option<Arc<Image>> {
     let mut cache = DATA_IMAGES.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(image) = cache.get(url) {
         return image.clone();
     }
-    let image = decode_data_url(url).and_then(|image| image.to_image_data(cx.svg_renderer()).ok());
+    let image = decode_data_url(url);
     if cache.len() >= DATA_IMAGE_CACHE_LIMIT {
-        // Free the evicted images from the sprite atlas too, or it grows forever.
-        for evicted in cache.drain().filter_map(|(_, image)| image) {
-            let _ = window.drop_image(evicted);
-        }
+        cache.clear();
     }
     cache.insert(url.to_owned(), image.clone());
     image
 }
 
-fn decode_data_url(url: &str) -> Option<Image> {
+fn decode_data_url(url: &str) -> Option<Arc<Image>> {
     let rest = url.strip_prefix("data:")?;
     let (meta, data) = rest.split_once(',')?;
     let mime = meta.split(';').next().unwrap_or("");
@@ -142,7 +131,7 @@ fn decode_data_url(url: &str) -> Option<Image> {
         "image/svg+xml" => ImageFormat::Svg,
         _ => ImageFormat::Png,
     };
-    Some(Image::from_bytes(format, bytes))
+    Some(Arc::new(Image::from_bytes(format, bytes)))
 }
 
 /// PNG bytes as an image (custom Start icon previews).
