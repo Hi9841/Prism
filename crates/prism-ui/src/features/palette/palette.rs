@@ -80,7 +80,7 @@ fn preview_motion(picked_at: Option<Instant>, leaving: Option<Instant>, window: 
 
 #[derive(Clone, Debug)]
 struct ReorderDragState {
-    item: Rc<PaletteItem>,
+    item: PaletteItem,
     start: Point<Pixels>,
     pos: Point<Pixels>,
     active: bool,
@@ -91,7 +91,7 @@ struct ReorderDragState {
 
 #[derive(Clone, Debug)]
 struct FileDragState {
-    item: Rc<PaletteItem>,
+    item: PaletteItem,
     start: Point<Pixels>,
     active: bool,
 }
@@ -447,7 +447,7 @@ impl Palette {
 
     fn open_result_menu(
         &mut self,
-        item: Rc<PaletteItem>,
+        item: PaletteItem,
         index: usize,
         position: Point<Pixels>,
         window: &mut Window,
@@ -485,7 +485,7 @@ impl Palette {
         cx.notify();
     }
 
-    fn choose_menu_action(&mut self, choice: MenuChoice, item: Rc<PaletteItem>, _window: &mut Window, cx: &mut Context<Self>) {
+    fn choose_menu_action(&mut self, choice: MenuChoice, item: PaletteItem, _window: &mut Window, cx: &mut Context<Self>) {
         let app = self.app.clone();
         match choice {
             MenuChoice::Open => self.palette.update(cx, |p, cx| p.run_item(item, cx)),
@@ -626,13 +626,13 @@ impl Palette {
 
     /* ---------------- pointer drags (A6) ---------------- */
 
-    fn start_reorder_drag(&mut self, item: Rc<PaletteItem>, position: Point<Pixels>, cx: &mut Context<Self>) {
+    fn start_reorder_drag(&mut self, item: PaletteItem, position: Point<Pixels>, cx: &mut Context<Self>) {
         self.reorder_drag = Some(ReorderDragState { item, start: position, pos: position, active: false, picked_at: None, target_item_id: None });
         self.active_drag = Some(ActiveDrag::Reorder);
         cx.notify();
     }
 
-    fn start_file_drag(&mut self, item: Rc<PaletteItem>, position: Point<Pixels>, cx: &mut Context<Self>) {
+    fn start_file_drag(&mut self, item: PaletteItem, position: Point<Pixels>, cx: &mut Context<Self>) {
         self.file_drag = Some(FileDragState { item, start: position, active: false });
         self.active_drag = Some(ActiveDrag::File);
         cx.notify();
@@ -858,7 +858,7 @@ struct RowFlags {
 
 impl Palette {
     #[allow(clippy::too_many_arguments)]
-    fn render_row(&self, item: &Rc<PaletteItem>, scope: &str, flags: RowFlags, t: &Theme, zoom: f32, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    fn render_row(&self, item: &PaletteItem, scope: &str, flags: RowFlags, t: &Theme, zoom: f32, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let RowFlags { index, selected, pinned, reorderable, removable, dragged, drop_target } = flags;
         let item_reorder_id = reorder_item_id(item);
         let can_reorder = reorderable && item_reorder_id.is_some();
@@ -922,22 +922,22 @@ impl Palette {
             // The selected/drop ring is an inset shadow in CSS; compensate the 1px border.
             row = row.py(r(6.)).px(r(9.));
         }
-        let run_item = Rc::clone(item);
+        let run_item = item.clone();
         row = row
             .on_click(cx.listener(move |this, _, _, cx| {
                 if std::mem::take(&mut this.suppress_click) {
                     return;
                 }
-                let item = Rc::clone(&run_item);
+                let item = run_item.clone();
                 this.palette.update(cx, |p, cx| p.run_item(item, cx));
             }))
             .on_mouse_down(MouseButton::Right, {
-                let item = Rc::clone(item);
+                let item = item.clone();
                 cx.listener(move |this, event: &MouseDownEvent, window, cx| {
                     // The menu takes focus; the row must not take it back on
                     // this press (Escape then reaches the menu).
                     window.prevent_default();
-                    this.open_result_menu(Rc::clone(&item), index, event.position, window, cx);
+                    this.open_result_menu(item.clone(), index, event.position, window, cx);
                 })
             });
 
@@ -1040,7 +1040,7 @@ impl Palette {
     #[allow(clippy::too_many_arguments)]
     fn render_trailing(
         &self,
-        item: &Rc<PaletteItem>,
+        item: &PaletteItem,
         row_key: &str,
         index: usize,
         selected: bool,
@@ -1069,8 +1069,8 @@ impl Palette {
             div().id(id).flex().flex_none().items_center().justify_center().size(r(32.)).rounded(r(8.))
         };
         if can_reorder {
-            let drag_item = Rc::clone(item);
-            let key_item = Rc::clone(item);
+            let drag_item = item.clone();
+            let key_item = item.clone();
             let grabbing = dragged;
             // Keyed by item, so focus follows the item when it moves.
             let key = gpui::ElementId::Name(format!("reorder-grip-{row_key}").into());
@@ -1150,7 +1150,7 @@ impl Palette {
                 swap.update(cx, |s, _| s.set(target, motion_ms(motion::BASE_MS), motion::icon_swap));
             }
             let p = swap.read(cx).animate(window);
-            let pin_item = Rc::clone(item);
+            let pin_item = item.clone();
             // `.press`: color, background-color, opacity, and scale.
             let key = gpui::ElementId::Name(format!("pin-{row_key}").into());
             let (hovered, hover) = transition::hover(&key, window, cx);
@@ -1197,7 +1197,7 @@ impl Palette {
                     .child("Enter to copy"),
             );
         } else if can_drag_file {
-            let drag_item = Rc::clone(item);
+            let drag_item = item.clone();
             // `transition-[color,background-color,opacity] duration-100`.
             let key = gpui::ElementId::Name(format!("file-grip-{row_key}").into());
             let (hovered, hover) = transition::hover(&key, window, cx);
@@ -1506,9 +1506,9 @@ impl Palette {
             }
 
             // App collections inside the Apps section.
-            let groups = section.groups.as_deref().unwrap_or_default();
+            let groups = section.groups.clone().unwrap_or_default();
             let groups_present = !groups.is_empty();
-            for (group_index, group) in groups.iter().enumerate() {
+            for (group_index, group) in groups.into_iter().enumerate() {
                 let group_drop = category.as_ref().is_some_and(|c| {
                     c.active && c.kind == CategoryKind::Group && c.target_id.as_deref() == Some(&group.group_id)
                 });
