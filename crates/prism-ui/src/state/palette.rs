@@ -15,7 +15,6 @@ use crate::features::palette::sections::{
 };
 use crate::js;
 use crate::lib::bridge::{self, BackendEvent};
-use crate::lib::icon_loading::{AppIconRequestState, app_icon_retry_delay, select_app_icon_request_ids};
 use crate::lib::launch_gate::LaunchGate;
 use crate::lib::query::{Phase1Response, PowerPlanHit};
 use crate::lib::search::dedupe_apps;
@@ -36,6 +35,9 @@ const FILE_PAGE: usize = 50;
 const LOAD_MORE_ROWS: usize = 5;
 const POWER_PLAN_QUERY_DELAY_MS: u64 = 50;
 const FILE_SEARCH_DELAY_MS: u64 = 35;
+/// How long the list of the last query stays while the Phase 1 reply of a new
+/// query is on its way. The reply takes a few ms; this bounds a slow backend.
+const PHASE1_WAIT_MS: u64 = 150;
 const THUMBNAIL_EXTENSIONS: [&str; 6] = ["png", "jpg", "jpeg", "gif", "bmp", "webp"];
 
 /// Insertion-ordered thumbnail cache; a cached `None` marks a known-iconless file.
@@ -114,7 +116,14 @@ pub struct PaletteState {
     app: Entity<AppState>,
     /// A file-index update arrived while the palette was hidden.
     index_update_pending: bool,
+    /// The text in the search field.
     pub query: String,
+    /// The query that `sections` show. It trails `query` while the Phase 1
+    /// reply of a new query is on its way (see `set_query`).
+    list_query: String,
+    /// Set while the list waits for that reply: shows the list without it
+    /// after `PHASE1_WAIT_MS`.
+    list_wait: Option<Task<()>>,
     apps: Vec<AppEntry>,
     apps_revision: u64,
     pub apps_loaded: bool,
@@ -139,7 +148,6 @@ pub struct PaletteState {
     /// When the last file search was asked for (see `run_file_search`).
     last_file_search: Option<std::time::Instant>,
     existing_history_paths: HashSet<String>,
-    app_icons: HashMap<String, String>,
     pub selected: usize,
     selection_target: Option<String>,
     thumbnails: ThumbnailCache,
@@ -147,10 +155,6 @@ pub struct PaletteState {
     thumbnail_epoch: u64,
     file_status_known: bool,
     index_status: (bool, bool),
-    icon_settled: HashSet<String>,
-    icon_in_flight: HashSet<String>,
-    icon_attempts: HashMap<String, u32>,
-    icon_retry: Option<Task<()>>,
     // Derived (the useMemo values).
     visible_apps: Vec<AppEntry>,
     quick_items: Vec<PaletteItem>,
@@ -246,6 +250,8 @@ impl PaletteState {
         let mut this = Self {
             app,
             query: String::new(),
+            list_query: String::new(),
+            list_wait: None,
             apps: Vec::new(),
             apps_revision: 0,
             apps_loaded: false,
@@ -268,7 +274,6 @@ impl PaletteState {
             power_plans: Vec::new(),
             last_file_search: None,
             existing_history_paths: HashSet::new(),
-            app_icons: HashMap::new(),
             selected: 0,
             selection_target: None,
             thumbnails: ThumbnailCache::default(),
@@ -276,10 +281,6 @@ impl PaletteState {
             thumbnail_epoch: 0,
             file_status_known: false,
             index_status: (false, true),
-            icon_settled: HashSet::new(),
-            icon_in_flight: HashSet::new(),
-            icon_attempts: HashMap::new(),
-            icon_retry: None,
             visible_apps: Vec::new(),
             quick_items: Vec::new(),
             sections: Rc::from(Vec::new()),
@@ -352,8 +353,9 @@ impl PaletteState {
         &self.visible_apps
     }
 
-    pub fn app_icons(&self) -> &HashMap<String, String> {
-        &self.app_icons
+    /// The query of the shown list. It can trail the search field for a few ms.
+    pub fn list_query(&self) -> &str {
+        &self.list_query
     }
 
     pub fn files_busy(&self) -> bool {
@@ -366,7 +368,23 @@ impl PaletteState {
 
     /// Rebuilds the sections (the `buildSections` memo) and runs the effects
     /// that depend on the flat list.
+    ///
+    /// While the list waits for the Phase 1 reply of a new query, the list of
+    /// the last query stays as it is: `show_query` rebuilds when the reply
+    /// comes. A list built before it lacks the Phase 1 rows (settings, tools,
+    /// windows, ranked apps), and they would vanish and come back on each key.
     pub fn rebuild(&mut self, cx: &mut Context<Self>) {
+        if self.list_wait.is_some() {
+            return;
+        }
+        self.list_query.clone_from(&self.query);
+        // While the next file search runs, the rows of the last one stay, for
+        // the same reason.
+        let file_result_query = if self.files_searching {
+            js::lower(js::trim(&self.query))
+        } else {
+            self.file_result_query.clone()
+        };
         let app = self.app.read(cx);
         let settings = &app.settings;
         let apps_by_id: HashMap<&str, &AppEntry> =
@@ -385,9 +403,8 @@ impl PaletteState {
             history: &app.history,
             existing_history_paths: &self.existing_history_paths,
             file_thumbnails: &self.thumbnails.map,
-            app_icons: &self.app_icons,
             file_results: &self.file_results,
-            file_result_query: &self.file_result_query,
+            file_result_query: &file_result_query,
             file_path_browse: self.file_path_browse,
             files_busy: self.files_busy(),
             files_error: self.files_error,
@@ -397,7 +414,6 @@ impl PaletteState {
             power_plans: &self.power_plans,
         };
         let BuiltSections { sections, flat_items } = build_sections(&sources);
-        let pinned_ids = settings.pinned_apps.clone();
         self.sections = sections.into();
         self.flat_items = flat_items;
 
@@ -414,72 +430,13 @@ impl PaletteState {
             self.selected = index;
             cx.emit(PaletteEvent::SelectionChanged);
         }
-        self.request_icons(pinned_ids, cx);
         cx.notify();
     }
 
-    /// Lazily fills app icons for the rows that are actually rendered.
-    fn request_icons(&mut self, pinned_ids: Vec<String>, cx: &mut Context<Self>) {
-        let mut seen = HashSet::new();
-        let mut ids = Vec::new();
-        for id in self.flat_items.iter().filter_map(|item| item.app_id.clone()).chain(pinned_ids) {
-            if seen.insert(id.clone()) {
-                ids.push(id);
-            }
-        }
-        let missing = select_app_icon_request_ids(
-            &ids,
-            &AppIconRequestState {
-                apps_loaded: self.apps_loaded,
-                icons: &self.app_icons,
-                settled: &self.icon_settled,
-                in_flight: &self.icon_in_flight,
-                attempts: &self.icon_attempts,
-            },
-        );
-        if missing.is_empty() {
-            return;
-        }
-        for id in &missing {
-            self.icon_in_flight.insert(id.clone());
-            *self.icon_attempts.entry(id.clone()).or_insert(0) += 1;
-        }
-        cx.spawn(async move |this, cx| {
-            let result = bridge::get_app_icons(missing.clone()).await;
-            let _ = this.update(cx, |this, cx| {
-                for id in &missing {
-                    this.icon_in_flight.remove(id);
-                }
-                match result {
-                    Ok(icons) => {
-                        // The app cache is ready at this point, so omitted ids are
-                        // genuinely iconless and should not issue another request.
-                        this.icon_settled.extend(missing.iter().cloned());
-                        if !icons.is_empty() {
-                            this.app_icons.extend(icons);
-                            this.rebuild(cx);
-                        }
-                    }
-                    Err(_) => {
-                        let attempt =
-                            missing.iter().map(|id| this.icon_attempts.get(id).copied().unwrap_or(1)).max().unwrap_or(1);
-                        if let Some(delay) = app_icon_retry_delay(attempt as f64)
-                            && this.icon_retry.is_none()
-                        {
-                            this.icon_retry = Some(cx.spawn(async move |this, cx| {
-                                Timer::after(Duration::from_millis(delay as u64)).await;
-                                let _ = this.update(cx, |this, cx| {
-                                    this.icon_retry = None;
-                                    let pinned = this.app.read(cx).settings.pinned_apps.clone();
-                                    this.request_icons(pinned, cx);
-                                });
-                            }));
-                        }
-                    }
-                }
-            });
-        })
-        .detach();
+    /// Shows the list of the typed query, with what has arrived for it.
+    fn show_query(&mut self, cx: &mut Context<Self>) {
+        self.list_wait = None;
+        self.rebuild(cx);
     }
 
     fn validate_history_paths(&mut self, cx: &mut Context<Self>) {
@@ -571,7 +528,7 @@ impl PaletteState {
             let result = bridge::query_phase1(search_text).await;
             let _ = this.update(cx, |this, cx| {
                 this.phase1 = result.ok().filter(|response| !response.query.is_empty());
-                this.rebuild(cx);
+                this.show_query(cx);
             });
         }));
     }
@@ -814,6 +771,19 @@ impl PaletteState {
             self.query_phase1(cx);
             self.query_power_plans(cx);
             self.search_files(cx);
+            if js::trim(next).is_empty() {
+                // The idle list has no Phase 1 part: show it now.
+                self.list_wait = None;
+            } else if self.list_wait.is_none() {
+                // The Phase 1 reply shows the new list. The wait starts at the
+                // first key of a burst, so fast typing still updates the list.
+                self.list_wait = Some(cx.spawn(async move |this, cx| {
+                    Timer::after(Duration::from_millis(PHASE1_WAIT_MS)).await;
+                    let _ = this.update(cx, |this, cx| this.show_query(cx));
+                }));
+            }
+            // The selection moved to the first row.
+            cx.notify();
         }
         self.rebuild(cx);
     }
@@ -861,6 +831,10 @@ impl PaletteState {
     }
 
     pub fn run_selected(&mut self, cx: &mut Context<Self>) {
+        // Enter runs a result of the typed query, not of the list it replaces.
+        if self.list_wait.is_some() {
+            self.show_query(cx);
+        }
         if let Some(item) = self.flat_items.get(self.selected).cloned() {
             self.run_item(item, cx);
         }
@@ -1008,12 +982,6 @@ impl PaletteState {
             let _ = this.update(cx, |this, cx| {
                 match result {
                     Ok(list) => {
-                        this.icon_retry = None;
-                        this.icon_settled.clear();
-                        this.icon_attempts.clear();
-                        // Icons captured before the rescan can outlive their apps on disk;
-                        // dropping them lets the icon effect re-request the visible set.
-                        this.app_icons.clear();
                         this.set_apps(list, cx);
                         this.apps_error = false;
                     }

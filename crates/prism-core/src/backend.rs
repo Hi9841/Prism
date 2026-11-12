@@ -3,7 +3,6 @@
 //! thin wrappers and the GPUI app calls the methods directly. Effects that
 //! need the window or the event loop go through [`crate::host`].
 
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
@@ -99,16 +98,6 @@ pub fn autostart_disabled_by_user() -> bool {
 
 fn apps_cache_path() -> PathBuf {
     crate::host::app_data_dir_or_cwd().join("apps.json")
-}
-
-/// The full icon payload is several MB of base64. Results only need icons for
-/// the rows that are actually rendered, so the metadata list stays lean and
-/// `get_app_icons` delivers the pixels lazily in one batched call.
-fn strip_icons(mut list: Vec<apps::AppEntry>) -> Vec<apps::AppEntry> {
-    for entry in &mut list {
-        entry.icon = None;
-    }
-    list
 }
 
 fn join_error(context: &str, error: tokio::task::JoinError) -> String {
@@ -229,7 +218,7 @@ impl Backend {
         // Fast path: already scanned this session.
         if let Some(list) = self.apps_cache.lock().map_err(|e| e.to_string())?.clone() {
             perf::finish(timer, "get_apps_cache", || format!("count={}", list.len()));
-            return Ok(strip_icons(list));
+            return Ok(list);
         }
         // Fast repeated opens can overlap the initial request. Only one scan
         // should touch the filesystem and icon cache; waiters recheck the
@@ -239,7 +228,7 @@ impl Backend {
             perf::finish(timer, "get_apps_cache_after_wait", || {
                 format!("count={}", list.len())
             });
-            return Ok(strip_icons(list));
+            return Ok(list);
         }
         // Off the UI thread: scanning walks the shell and extracts icons.
         let cache_path = apps_cache_path();
@@ -248,30 +237,7 @@ impl Backend {
             .map_err(|e| join_error("app scan task failed", e))??;
         let list = self.publish_app_index(index);
         perf::finish(timer, "get_apps_scan", || format!("count={}", list.len()));
-        Ok(strip_icons(list))
-    }
-
-    pub fn get_app_icons(&self, ids: Vec<String>) -> Result<HashMap<String, String>, String> {
-        let mut icons = HashMap::new();
-        let apps = self.apps_cache.lock().map_err(|error| error.to_string())?;
-        let apps = apps
-            .as_ref()
-            .ok_or_else(|| "application index is not ready".to_string())?;
-        // Index by app id once instead of scanning the whole list per requested
-        // id (O(n·m) worst case, with m up to 512).
-        let by_id: HashMap<&str, &apps::AppEntry> = apps
-            .iter()
-            .map(|entry| (entry.app_id.as_str(), entry))
-            .collect();
-        for id in ids.into_iter().take(512) {
-            let Some(entry) = by_id.get(id.as_str()) else {
-                continue;
-            };
-            if let Some(icon) = entry.icon.as_deref() {
-                icons.insert(id, icon.to_string());
-            }
-        }
-        Ok(icons)
+        Ok(list)
     }
 
     pub async fn refresh_apps(&self) -> Result<Vec<apps::AppEntry>, String> {
@@ -284,7 +250,7 @@ impl Backend {
         .await
         .map_err(|e| join_error("app scan task failed", e))??;
         let list = self.publish_app_index(index);
-        Ok(strip_icons(list))
+        Ok(list)
     }
 
     fn cached_app(&self, id: &str) -> Result<apps::AppEntry, String> {

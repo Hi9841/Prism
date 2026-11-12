@@ -629,63 +629,6 @@ export const scenarios = [
     },
     { kind: "eq", value: { ids: ["developer", "creative"], inputIds: ["creative", "developer"] } },
   ),
-  row(
-    "icons.wait.blocked",
-    "b",
-    "src/lib/iconLoading.test.ts:15",
-    { op: "icons.select", ids: ["app-a"], state: { appsLoaded: false } },
-    { kind: "eq", value: { ids: [] } },
-  ),
-  row(
-    "icons.wait.ready",
-    "b",
-    "src/lib/iconLoading.test.ts:16",
-    { op: "icons.select", ids: ["app-a"], state: { appsLoaded: true } },
-    { kind: "eq", value: { ids: ["app-a"] } },
-  ),
-  row(
-    "icons.skip",
-    "b",
-    "src/lib/iconLoading.test.ts:19-29",
-    {
-      op: "icons.select",
-      ids: ["loaded", "iconless", "loading", "missing"],
-      state: {
-        appsLoaded: true,
-        icons: { loaded: "data:image/png;base64,icon" },
-        settled: ["iconless"],
-        inFlight: ["loading"],
-      },
-    },
-    { kind: "eq", value: { ids: ["missing"] } },
-  ),
-  row("icons.delay.1", "b", "src/lib/iconLoading.test.ts:33", { op: "icons.delay", attempt: 1 }, {
-    kind: "eq",
-    value: { delay: 200 },
-  }),
-  row("icons.delay.2", "b", "src/lib/iconLoading.test.ts:34", { op: "icons.delay", attempt: 2 }, {
-    kind: "eq",
-    value: { delay: 800 },
-  }),
-  row("icons.delay.3", "b", "src/lib/iconLoading.test.ts:35", { op: "icons.delay", attempt: 3 }, {
-    kind: "eq",
-    value: { delay: null },
-  }),
-  row(
-    "icons.retry.continue",
-    "b",
-    "src/lib/iconLoading.test.ts:36-38",
-    { op: "icons.select", ids: ["app-a"], state: { appsLoaded: true, attempts: [["app-a", 2]] } },
-    { kind: "eq", value: { ids: ["app-a"] } },
-  ),
-  row(
-    "icons.retry.stop",
-    "b",
-    "src/lib/iconLoading.test.ts:39",
-    { op: "icons.select", ids: ["app-a"], state: { appsLoaded: true, attempts: [["app-a", 3]] } },
-    { kind: "eq", value: { ids: [] } },
-  ),
-
   // Absolute times pin the intervals themselves (update-policy.ts:1, :7):
   // 5 min in the background, 1 min when forced. The adapter does not derive
   // `now` from its own constants here.

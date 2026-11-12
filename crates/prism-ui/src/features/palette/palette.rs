@@ -978,7 +978,7 @@ impl Palette {
         // Icon cell. The original gives the icon a drag handler, but the row's
         // full-size open button paints above it (z-0 positioned inside the z-[1]
         // cell), so Chromium never routes a press to it: the icon acts as the row.
-        let icon_cell = div().flex_none().child(row_icon(&item.icon, 40., t, zoom));
+        let icon_cell = div().flex_none().child(row_icon(&item.icon, 40., t, zoom, window, cx));
 
         // `transition-colors duration-150`.
         let title_color = if selected { t.fg } else { Rgba { a: t.fg.a * 0.9, ..t.fg } };
@@ -1278,7 +1278,7 @@ impl Palette {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, event: &MouseDownEvent, window, cx| {
-                    if !js::trim(&this.palette.read(cx).query).is_empty() {
+                    if !js::trim(this.palette.read(cx).list_query()).is_empty() {
                         return;
                     }
                     window.prevent_default();
@@ -1339,7 +1339,7 @@ impl Palette {
         let palette = self.palette.read(cx);
         let sections = Rc::clone(&palette.sections);
         let selected = palette.selected;
-        let query = palette.query.clone();
+        let query = palette.list_query().to_owned();
         let file_error = palette.file_error.clone();
         let sections_empty = sections.is_empty();
         let pinned_apps = self.app.read(cx).settings.pinned_apps.clone();
@@ -1686,7 +1686,7 @@ impl Palette {
 
     fn empty_state(&self, t: &Theme, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let palette = self.palette.read(cx);
-        let query = palette.query.clone();
+        let query = palette.list_query().to_owned();
         let loading = if query.is_empty() { !palette.apps_loaded } else { palette.files_busy() };
         let show_loading = loading && self.announce_loading;
         let path_browsing = palette.path_browsing();
@@ -1823,7 +1823,7 @@ impl Palette {
                     .shadow(zoomed(vec![shadow(0., 8., 22., 0., t.shade(0.34))], zoom))
                     .opacity(opacity)
                     .child(crate::components::ui::inset_top_highlight(t.preview_hi(), 14.))
-                    .child(row_icon(&item.icon, 40., t, zoom))
+                    .child(row_icon(&item.icon, 40., t, zoom, window, cx))
                     .child(
                         div()
                             .flex_1()

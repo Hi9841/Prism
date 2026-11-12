@@ -65,7 +65,6 @@ pub struct PaletteSources<'a> {
     pub history: &'a [HistoryEntry],
     pub existing_history_paths: &'a HashSet<String>,
     pub file_thumbnails: &'a HashMap<String, Option<String>>,
-    pub app_icons: &'a HashMap<String, String>,
     pub file_results: &'a [FileEntry],
     pub file_result_query: &'a str,
     pub file_path_browse: bool,
@@ -117,7 +116,6 @@ pub fn build_sections(sources: &PaletteSources) -> BuiltSections {
         history,
         existing_history_paths,
         file_thumbnails,
-        app_icons,
         file_results,
         file_result_query,
         file_path_browse,
@@ -137,7 +135,7 @@ pub fn build_sections(sources: &PaletteSources) -> BuiltSections {
         // Only needed for the idle (empty query) view; sorting every app is
         // wasted work while the user is typing.
         let sorted_apps = sort_apps(apps);
-        let pinned_items: Vec<PaletteItem> = pinned_apps.iter().map(|entry| app_palette_item(entry, app_icons)).collect();
+        let pinned_items: Vec<PaletteItem> = pinned_apps.iter().map(|entry| app_palette_item(entry)).collect();
         let pinned_item_ids: HashSet<String> = pinned_items.iter().map(|item| item.id.clone()).collect();
         if !pinned_items.is_empty() {
             out.push(Section::new("pinned", "Pinned", pinned_items));
@@ -148,7 +146,7 @@ pub fn build_sections(sources: &PaletteSources) -> BuiltSections {
         let pinned_app_id_set: HashSet<&str> = pinned_app_ids.iter().map(String::as_str).collect();
         let mut recent_items: Vec<PaletteItem> = Vec::new();
         for entry in history.iter() {
-            let item = rehydrate(entry, &apps_by_id, existing_history_paths, app_icons, file_thumbnails);
+            let item = rehydrate(entry, &apps_by_id, existing_history_paths, file_thumbnails);
             if let Some(item) = item {
                 if pinned_item_ids.contains(&item.id) {
                     continue;
@@ -178,7 +176,7 @@ pub fn build_sections(sources: &PaletteSources) -> BuiltSections {
 
         let unpinned: Vec<&AppEntry> =
             sorted_apps.into_iter().filter(|entry| !pinned_app_id_set.contains(entry.app_id.as_str())).collect();
-        if let Some(apps_section) = build_apps_section(&unpinned, app_icons, app_groups, usize::MAX) {
+        if let Some(apps_section) = build_apps_section(&unpinned, app_groups, usize::MAX) {
             out.push(apps_section);
         }
     } else {
@@ -196,7 +194,7 @@ pub fn build_sections(sources: &PaletteSources) -> BuiltSections {
                 p.apps
                     .iter()
                     .filter_map(|hit| {
-                        app_hit_palette_item(hit, &apps_by_id, app_icons, |entry| app_palette_item(entry, app_icons))
+                        app_hit_palette_item(hit, &apps_by_id, app_palette_item)
                     })
                     .collect()
             })
@@ -262,7 +260,7 @@ pub fn build_sections(sources: &PaletteSources) -> BuiltSections {
         let settings_items = actions(|hit| hit.source.as_deref() != Some("windows-tool") && !is_command_action(hit));
         let tool_items = actions(is_tool);
         let command_items = actions(|hit| hit.source.as_deref() != Some("windows-tool") && is_command_action(hit));
-        if let Some(apps_section) = build_apps_section(&app_hits, app_icons, app_groups, SEARCH_APPS_LIMIT) {
+        if let Some(apps_section) = build_apps_section(&app_hits, app_groups, SEARCH_APPS_LIMIT) {
             out.push(apps_section);
         } else if !phase1_app_items.is_empty() {
             out.push(Section::new(
@@ -326,7 +324,6 @@ fn order_sections(sections: Vec<Section>, requested_order: Option<&[String]>) ->
 
 fn build_apps_section(
     entries: &[&AppEntry],
-    icons: &HashMap<String, String>,
     groups: &[AppGroup],
     limit: usize,
 ) -> Option<Section> {
@@ -344,7 +341,7 @@ fn build_apps_section(
             .filter(|app_id| !grouped_ids.contains(*app_id))
             .filter_map(|app_id| entry_by_id.get(app_id.as_str()))
             .take(limit)
-            .map(|entry| app_palette_item(entry, icons))
+            .map(|entry| app_palette_item(entry))
             .collect();
         if items.is_empty() {
             continue;
@@ -367,7 +364,7 @@ fn build_apps_section(
         .iter()
         .filter(|entry| !grouped_ids.contains(&entry.app_id))
         .take(limit)
-        .map(|entry| app_palette_item(entry, icons))
+        .map(|entry| app_palette_item(entry))
         .collect();
     if ungrouped.is_empty() && group_sections.is_empty() {
         return None;
@@ -394,7 +391,7 @@ fn path_call(cmd: &'static str, path: &str) -> RowAction {
     RowAction::call(cmd, json!({ "path": path }))
 }
 
-pub fn app_palette_item(app: &AppEntry, icons: &HashMap<String, String>) -> PaletteItem {
+pub fn app_palette_item(app: &AppEntry) -> PaletteItem {
     // `app.location ?? (...)`: an empty location is kept (it is not nullish).
     let local_target: Option<&str> = app.location.as_deref().or_else(|| {
         truthy(app.path.as_deref()).filter(|path| path.contains(':') || path.starts_with("\\\\"))
@@ -403,7 +400,7 @@ pub fn app_palette_item(app: &AppEntry, icons: &HashMap<String, String>) -> Pale
     let mut item = PaletteItem::new(
         format!("app::{}", app.app_id),
         app.name.clone(),
-        PaletteIcon::App { name: app.name.clone(), icon: icons.get(&app.app_id).cloned().or_else(|| app.icon.clone()) },
+        PaletteIcon::App { name: app.name.clone(), icon: app.icon.clone() },
         app.name.clone(),
         RowAction::call("launch_app", json!({ "id": app.app_id })),
     );
@@ -572,11 +569,10 @@ fn rehydrate(
     history: &HistoryEntry,
     apps_by_id: &HashMap<&str, &AppEntry>,
     existing_history_paths: &HashSet<String>,
-    icons: &HashMap<String, String>,
     file_thumbnails: &HashMap<String, Option<String>>,
 ) -> Option<PaletteItem> {
     if let Some(app_id) = history.id.strip_prefix("app::") {
-        return apps_by_id.get(app_id).map(|entry| app_palette_item(entry, icons));
+        return apps_by_id.get(app_id).map(|entry| app_palette_item(entry));
     }
     let is_directory = history.id.starts_with(DIRECTORY_PREFIX);
     let path = history.id.strip_prefix(if is_directory { DIRECTORY_PREFIX } else { FILE_PREFIX })?;

@@ -3,7 +3,6 @@
 //! blocking work never touches the UI thread (A7). Window operations go to the
 //! [`Shell`] that `prism-app` installs as a GPUI global.
 
-use std::collections::HashMap;
 use std::future::Future;
 use std::rc::Rc;
 
@@ -237,14 +236,11 @@ fn command(cmd: &str, args: serde_json::Value, live: impl Future<Output = Bridge
     answer(|_| Ok(()), live)
 }
 
+/// The app list with its icons (about 1.3 MB of data URLs for 400 apps). It is
+/// read once per scan, off the UI thread, so each row has its icon in its
+/// first frame.
 pub fn get_apps() -> Reply<Vec<AppEntry>> {
-    answer(|f| reshape(f.apps_without_icons()), async { reshape(backend().get_apps().await?) })
-}
-
-/// Batched lazy icon payload: only the rows actually rendered request icons.
-pub fn get_app_icons(ids: Vec<String>) -> Reply<HashMap<String, String>> {
-    let canned_ids = ids.clone();
-    answer(move |f| Ok(f.app_icons(&canned_ids)), async move { backend().get_app_icons(ids) })
+    answer(|f| reshape(&f.apps), async { reshape(backend().get_apps().await?) })
 }
 
 pub fn refresh_apps() -> Reply<Vec<AppEntry>> {
@@ -252,7 +248,7 @@ pub fn refresh_apps() -> Reply<Vec<AppEntry>> {
     answer(
         |f| {
             fixture::record("refresh_apps", serde_json::json!({}));
-            reshape(f.apps_without_icons())
+            reshape(&f.apps)
         },
         async { reshape(backend().refresh_apps().await?) },
     )

@@ -173,22 +173,6 @@ fn main() {
     .unwrap_or_default();
 
     let find = |needle: &str| apps.iter().find(|app| app.normalized_name.contains(needle));
-    let mut icon_ids: Vec<String> = apps.iter().take(3).map(|app| app.app_id.clone()).collect();
-    icon_ids.extend(find("chrome").map(|app| app.app_id.clone()));
-    icon_ids.push("no-such-app-id".into());
-    let icon_input = json!(icon_ids);
-    report(
-        "get_app_icons",
-        icon_input,
-        || core.get_app_icons(icon_ids),
-        |icons| {
-            json!({
-                "n": icons.len(),
-                "allPng": icons.values().all(|icon| icon.starts_with("data:image/png;base64,")),
-                "bytes": icons.values().map(String::len).sum::<usize>(),
-            })
-        },
-    );
 
     // `start()` warms these two catalogs; Phase 1 reads only the warm copies.
     report(

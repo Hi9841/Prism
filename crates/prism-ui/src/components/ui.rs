@@ -152,7 +152,7 @@ pub fn inset_top_highlight(color: Rgba, radius: f32) -> gpui::Div {
 
 /* ---------------- Row icon ---------------- */
 
-pub fn row_icon(icon_value: &PaletteIcon, size: f32, t: &Theme, zoom: f32) -> AnyElement {
+pub fn row_icon(icon_value: &PaletteIcon, size: f32, t: &Theme, zoom: f32, window: &mut Window, cx: &App) -> AnyElement {
     match icon_value {
         PaletteIcon::Tile { icon: lucide, tint } => tile(t.tile(tint).background(), size, t, zoom)
             .child(icon(&lucide_file(lucide.0), size * 19.0 / 40.0, white(0.95)))
@@ -175,12 +175,12 @@ pub fn row_icon(icon_value: &PaletteIcon, size: f32, t: &Theme, zoom: f32) -> An
                 .rounded(r(10.))
                 .bg(hsla(t.surface))
                 .size(r(size));
-            if let Some(image) = data_url_image(src) {
+            if let Some(image) = data_url_image(src, window, cx) {
                 frame = frame.child(img(image).size_full().object_fit(ObjectFit::Cover).rounded(r(10.)));
             }
             frame.into_any_element()
         }
-        PaletteIcon::App { name, icon: src } => match src.as_deref().and_then(data_url_image) {
+        PaletteIcon::App { name, icon: src } => match src.as_deref().and_then(|src| data_url_image(src, window, cx)) {
             Some(image) => div()
                 .flex()
                 .flex_none()

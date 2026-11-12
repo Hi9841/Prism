@@ -104,8 +104,6 @@ pub struct SettingsSheet {
     group_names: HashMap<String, Entity<TextInput>>,
     open_group_id: Option<String>,
     app_query: Entity<TextInput>,
-    picker_icons: HashMap<String, String>,
-    requested_picker_icons: HashSet<String>,
     picker_scroll: ScrollHandle,
     picker_wheel: std::rc::Rc<std::cell::RefCell<crate::gfx::WheelScroll>>,
     _subscriptions: Vec<gpui::Subscription>,
@@ -141,10 +139,7 @@ impl SettingsSheet {
             }
             cx.notify();
         });
-        let query_sub = cx.subscribe(&app_query, |this, _, _: &Changed, cx| {
-            this.request_picker_icons(cx);
-            cx.notify();
-        });
+        let query_sub = cx.subscribe(&app_query, |_, _, _: &Changed, cx| cx.notify());
         let palette_obs = cx.observe(&palette, |_, _, cx| cx.notify());
         let taskbar = cx.new(TaskbarCustomization::new);
         Self {
@@ -169,8 +164,6 @@ impl SettingsSheet {
             group_names: HashMap::new(),
             open_group_id: None,
             app_query,
-            picker_icons: HashMap::new(),
-            requested_picker_icons: HashSet::new(),
             picker_scroll: ScrollHandle::new(),
             picker_wheel: Default::default(),
             _subscriptions: vec![app_sub, query_sub, palette_obs],
@@ -383,7 +376,6 @@ impl SettingsSheet {
         self.app_query.update(cx, |input, cx| input.set_text("", cx));
         if self.open_group_id.is_some() {
             self.app_query.read(cx).focus(window);
-            self.request_picker_icons(cx);
         }
         cx.notify();
     }
@@ -401,40 +393,6 @@ impl SettingsSheet {
             return apps;
         }
         apps.into_iter().filter(|entry| crate::js::lower(&entry.name).contains(&normalized)).collect()
-    }
-
-    fn request_picker_icons(&mut self, cx: &mut Context<Self>) {
-        if self.open_group_id.is_none() {
-            return;
-        }
-        let missing: Vec<String> = self
-            .filtered_apps(cx)
-            .into_iter()
-            .take(512)
-            .map(|entry| entry.app_id)
-            .filter(|id| !self.picker_icons.contains_key(id) && !self.requested_picker_icons.contains(id))
-            .collect();
-        if missing.is_empty() {
-            return;
-        }
-        self.requested_picker_icons.extend(missing.iter().cloned());
-        cx.spawn(async move |this, cx| {
-            let result = bridge::get_app_icons(missing.clone()).await;
-            let _ = this.update(cx, |this, cx| match result {
-                Ok(icons) => {
-                    if !icons.is_empty() {
-                        this.picker_icons.extend(icons);
-                        cx.notify();
-                    }
-                }
-                Err(_) => {
-                    for id in &missing {
-                        this.requested_picker_icons.remove(id);
-                    }
-                }
-            });
-        })
-        .detach();
     }
 
     fn group_name_input(&mut self, group: &AppGroup, focused: bool, t: &Theme, cx: &mut Context<Self>) -> Entity<TextInput> {
@@ -961,7 +919,7 @@ impl SettingsSheet {
                     let selected = assigned_ids.contains(&entry.app_id);
                     let disabled = !selected && full;
                     let (gid, app_id) = (gid.clone(), entry.app_id.clone());
-                    let icon_value = PaletteIcon::App { name: entry.name.clone(), icon: self.picker_icons.get(&entry.app_id).cloned() };
+                    let icon_value = PaletteIcon::App { name: entry.name.clone(), icon: entry.icon.clone() };
                     // `transition-colors duration-100`.
                     let key = gpui::ElementId::Name(format!("picker-app-{}", entry.app_id).into());
                     let paint = if selected {
@@ -991,7 +949,7 @@ impl SettingsSheet {
                                 }
                             }))
                         })
-                        .child(row_icon(&icon_value, 26., t, zoom))
+                        .child(row_icon(&icon_value, 26., t, zoom, window, cx))
                         .child(
                             div()
                                 .flex_1()
@@ -1072,7 +1030,6 @@ impl SettingsSheet {
                                 .on_click(cx.listener(|this, _, window, cx| {
                                     this.app_query.update(cx, |input, cx| input.set_text("", cx));
                                     this.app_query.read(cx).focus(window);
-                                    this.request_picker_icons(cx);
                                     cx.notify();
                                 }))
                                 .child(icon("x", 14., t.fg_quiet).group_hover("clear-filter", |s| s.text_color(hsla(t.fg)))),

@@ -53,35 +53,6 @@ pub fn get() -> Option<&'static Fixture> {
 }
 
 impl Fixture {
-    /// `get_apps`: the list without icon payloads.
-    pub fn apps_without_icons(&self) -> Value {
-        Value::Array(
-            self.apps
-                .iter()
-                .map(|app| {
-                    let mut app = app.clone();
-                    if let Some(map) = app.as_object_mut() {
-                        map.remove("icon");
-                    }
-                    app
-                })
-                .collect(),
-        )
-    }
-
-    pub fn app_icons(&self, ids: &[String]) -> HashMap<String, String> {
-        let mut out = HashMap::new();
-        for app in &self.apps {
-            let id = app.get("appId").and_then(Value::as_str).unwrap_or_default();
-            if ids.iter().any(|candidate| candidate == id)
-                && let Some(icon) = app.get("icon").and_then(Value::as_str)
-            {
-                out.insert(id.to_owned(), icon.to_owned());
-            }
-        }
-        out
-    }
-
     fn status(&self) -> Value {
         if self.file_status.is_null() {
             json!({"ready": true, "indexing": false, "volumes": [{"drive": "C:\\", "state": "ready", "indexedCount": 1}], "totalIndexed": 1})

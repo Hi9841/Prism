@@ -46,7 +46,7 @@ pub fn action_palette_item(hit: &Phase1Hit) -> PaletteItem {
         None => hit.id.strip_prefix("action::").unwrap_or(&hit.id).to_owned(),
     };
     let icon = match hit.icon.as_deref().filter(|icon| !icon.is_empty()) {
-        Some(src) => PaletteIcon::App { name: hit.title.clone(), icon: Some(src.to_owned()) },
+        Some(src) => PaletteIcon::App { name: hit.title.clone(), icon: Some(src.to_owned().into()) },
         None => PaletteIcon::Tile { icon, tint },
     };
     let mut item = PaletteItem::new(
@@ -89,7 +89,6 @@ pub fn window_palette_item(hit: &Phase1Hit) -> PaletteItem {
 pub fn app_hit_palette_item(
     hit: &Phase1Hit,
     apps_by_id: &HashMap<&str, &AppEntry>,
-    icons: &HashMap<String, String>,
     to_item: impl Fn(&AppEntry) -> PaletteItem,
 ) -> Option<PaletteItem> {
     let app_id = hit.app_id.as_deref().filter(|id| !id.is_empty())?;
@@ -99,7 +98,7 @@ pub fn app_hit_palette_item(
     let mut item = PaletteItem::new(
         hit.id.clone(),
         hit.title.clone(),
-        PaletteIcon::App { name: hit.title.clone(), icon: icons.get(app_id).cloned() },
+        PaletteIcon::App { name: hit.title.clone(), icon: hit.icon.as_deref().filter(|icon| !icon.is_empty()).map(|icon| icon.to_owned().into()) },
         hit.title.clone(),
         RowAction::call("launch_app", json!({ "id": app_id })),
     );

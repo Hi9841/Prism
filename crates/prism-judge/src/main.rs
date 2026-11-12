@@ -14,7 +14,6 @@ use prism_ui::features::updater::update_policy::{
 };
 use prism_ui::features::updater::update_progress::update_percent;
 use prism_ui::js;
-use prism_ui::lib::icon_loading::{AppIconRequestState, app_icon_retry_delay, select_app_icon_request_ids};
 use prism_ui::lib::launcher_motion::{
     HideOrigin, LauncherEvent, LauncherPhase, hide_palette_invocation, reduce_launcher_phase,
 };
@@ -194,24 +193,6 @@ fn run(call: &Value) -> Result<Value, Failure> {
             let phase = LauncherPhase::parse(string(call, "phase")?).ok_or("unknown phase")?;
             json!({ "invocation": hide_palette_invocation(origin, phase).as_str() })
         }
-        "icons.select" => {
-            let ids: Vec<String> = field(call, "ids")?;
-            let raw = call.get("state").ok_or("state: missing")?;
-            let icons: HashMap<String, String> = field_or_default(raw, "icons")?;
-            let settled: HashSet<String> = field_or_default(raw, "settled")?;
-            let in_flight: HashSet<String> = field_or_default(raw, "inFlight")?;
-            let attempts: Vec<(String, u32)> = field_or_default(raw, "attempts")?;
-            let attempts: HashMap<String, u32> = attempts.into_iter().collect();
-            let state = AppIconRequestState {
-                apps_loaded: truthy(raw, "appsLoaded"),
-                icons: &icons,
-                settled: &settled,
-                in_flight: &in_flight,
-                attempts: &attempts,
-            };
-            json!({ "ids": select_app_icon_request_ids(&ids, &state) })
-        }
-        "icons.delay" => json!({ "delay": opt_num(app_icon_retry_delay(number(call, "attempt")?)) }),
         "update.shouldCheck" => {
             let force = truthy(call, "force");
             let last = number(call, "last")?;
@@ -248,7 +229,16 @@ fn run(call: &Value) -> Result<Value, Failure> {
 /// Mirrors the provider (src/state/palette.tsx), as `paletteSources` in adapter.mjs does.
 fn palette_sections(raw: &Value) -> Result<Value, Failure> {
     let settings = sanitize_settings(raw.get("settings"));
-    let apps = dedupe_apps(&field::<Vec<AppEntry>>(raw, "apps")?);
+    // The original fetched icons per rendered row (`appIcons`). The port's app
+    // list carries them (RULEBOOK deviation log, 2026-11-12).
+    let app_icons: HashMap<String, String> = field(raw, "appIcons")?;
+    let mut apps: Vec<AppEntry> = field(raw, "apps")?;
+    for app in &mut apps {
+        if let Some(icon) = app_icons.get(&app.app_id) {
+            app.icon = Some(icon.clone().into());
+        }
+    }
+    let apps = dedupe_apps(&apps);
     let apps_by_id: HashMap<&str, &AppEntry> = apps.iter().map(|entry| (entry.app_id.as_str(), entry)).collect();
     let quick_access: Vec<QuickAccessEntry> = field(raw, "quickAccess")?;
     let entries_by_kind: HashMap<&str, &QuickAccessEntry> =
@@ -291,7 +281,6 @@ fn palette_sections(raw: &Value) -> Result<Value, Failure> {
         .collect();
     let history: Vec<HistoryEntry> = field(raw, "history")?;
     let existing_history_paths: HashSet<String> = field(raw, "existingHistoryPaths")?;
-    let app_icons: HashMap<String, String> = field(raw, "appIcons")?;
     let file_result_query = if short { normalized.clone() } else { string(raw, "fileResultQuery")?.to_owned() };
     let phase1: Option<Phase1Response> = field(raw, "phase1")?;
     let power_plans: Vec<PowerPlanHit> = field(raw, "powerPlans")?;
@@ -309,7 +298,6 @@ fn palette_sections(raw: &Value) -> Result<Value, Failure> {
         history: &history,
         existing_history_paths: &existing_history_paths,
         file_thumbnails: &thumbnails,
-        app_icons: &app_icons,
         file_results: &file_results,
         file_result_query: &file_result_query,
         file_path_browse,

@@ -162,6 +162,16 @@ another app, Esc cancels, a click works after the drag, and a release over the p
 
 ## Deviation log
 
+- 2026-11-12: No icon or row flash while typing (owner: "windows logos and icons randomly flash ...
+  when i hold backspace"). (1) The app list carries its icons: the original fetched them per rendered row
+  (`iconLoading.ts`, a Tauri IPC saving), so a new row showed its monogram, then an empty box, then the
+  icon. `get_app_icons`, `icon_loading.rs` and the judge rows `icons.wait.*`, `icons.skip`,
+  `icons.delay.*` and `icons.retry.*` are gone; the sections adapter puts `appIcons` into the app list.
+  (2) Data URL images decode in the frame that first shows them (as 1.0.20). (3) A new query keeps the
+  list of the last one until its Phase 1 reply comes (at most 150 ms) instead of showing a list without
+  the Phase 1 rows (settings, tools, windows, ranked apps) for a frame. Enter shows the new list first.
+  (4) The file rows of the last search stay while the next file search runs.
+
 - 2026-11-06: Motion audit (owner: "do the recommended stuff"). The launcher opens and closes with no
   animation: a hotkey action repeats many times a day (`LAUNCHER_MOTION_MS` and `PALETTE_HIDE_DELAY` are 0,
   the stage jumps, the 0.98 scale is gone). Exits use ease-out-soft, not ease-in. The icon swap runs 170 ms
