@@ -36,6 +36,13 @@ static ACTIVATION_FOCUS_PENDING: AtomicBool = AtomicBool::new(false);
 /// This open has already put Prism in the foreground; a later raise retry
 /// would steal Alt-Tab and launches back.
 static PALETTE_TOOK_FOREGROUND: AtomicBool = AtomicBool::new(false);
+/// When this open first held the foreground (`now_ms`); 0 while it has not.
+static FOREGROUND_AT_MS: AtomicU64 = AtomicU64::new(0);
+/// Explorer bridge requests posted in this open.
+static EXPLORER_REQUESTS: AtomicU32 = AtomicU32::new(0);
+/// After the last raise retry: an open still without the foreground here is
+/// the "opened but takes no keys" state, and the focus log records it.
+const FOCUS_VERDICT_MS: u64 = 800;
 static PRESENTATION_ANCHOR: Mutex<Option<PresentationAnchor>> = Mutex::new(None);
 /// When the last open started (`now_ms`).
 static LAST_OPEN_MS: AtomicU64 = AtomicU64::new(0);
@@ -224,16 +231,41 @@ impl GpuiShell {
                     return;
                 }
                 if is_prism_foreground() {
-                    PALETTE_TOOK_FOREGROUND.store(true, Ordering::Release);
+                    mark_took_foreground();
                     return;
                 }
                 let _ = palette_window::raise(HWND(hwnd as *mut _));
                 if is_prism_foreground() {
-                    PALETTE_TOOK_FOREGROUND.store(true, Ordering::Release);
+                    mark_took_foreground();
+                    return;
                 }
+                // Prism's own request is refused in the background. Explorer's
+                // first answer can come too late; ask it again.
+                ask_explorer_for_foreground(hwnd);
             });
             self.keep(task);
         }
+        let verdict = cx.spawn(async move |cx: &mut AsyncApp| {
+            Timer::after(Duration::from_millis(FOCUS_VERDICT_MS)).await;
+            if !PALETTE_OPEN.load(Ordering::Acquire) || PALETTE_TRANSITION.load(Ordering::Acquire) != transition {
+                return;
+            }
+            if is_prism_foreground() {
+                mark_took_foreground();
+            }
+            let at = FOREGROUND_AT_MS.load(Ordering::Acquire);
+            let open = prism_core::focus_log::OpenFocus {
+                foreground_after_ms: (at != 0).then(|| at.saturating_sub(LAST_OPEN_MS.load(Ordering::Acquire))),
+                explorer_requests: EXPLORER_REQUESTS.load(Ordering::Acquire),
+                explorer_granted: win_key::foreground_ack(),
+            };
+            let owner = prism_core::focus_log::foreground_owner();
+            cx.background_spawn(async move {
+                prism_core::focus_log::record(open, owner, env!("PRISM_VERSION"));
+            })
+            .detach();
+        });
+        self.keep(verdict);
     }
 
     fn schedule_palette_hide(&self, transition: u64, cx: &mut App) {
@@ -293,6 +325,8 @@ impl GpuiShell {
         let _ = source;
         if opening {
             PALETTE_TOOK_FOREGROUND.store(false, Ordering::Release);
+            FOREGROUND_AT_MS.store(0, Ordering::Release);
+            EXPLORER_REQUESTS.store(0, Ordering::Release);
             backend().schedule_installed_apps_refresh();
             self.arm_focus_grace(transition, cx);
             PRESENTATION_ANCHOR.lock().map(|mut value| *value = anchor).ok();
@@ -379,15 +413,30 @@ impl GpuiShell {
             let _ = self.apply_topmost();
         }
         if !is_prism_foreground() {
-            let granted = win_key::request_foreground(self.hwnd.get());
-            win_key::debug_trace(&format!("explorer-fg granted={granted} self={}", is_prism_foreground()));
+            ask_explorer_for_foreground(self.hwnd.get());
+            win_key::debug_trace(&format!("explorer-fg self={}", is_prism_foreground()));
         }
         if is_prism_foreground() {
-            PALETTE_TOOK_FOREGROUND.store(true, Ordering::Release);
+            mark_took_foreground();
         }
         self.schedule_palette_raise_retry(PALETTE_TRANSITION.load(Ordering::Acquire), cx);
         log_foreground("present-after");
         prism_core::perf::finish(timer, "palette_present", || "window=main".to_string());
+    }
+}
+
+fn mark_took_foreground() {
+    if !PALETTE_TOOK_FOREGROUND.swap(true, Ordering::AcqRel) {
+        FOREGROUND_AT_MS.store(now_ms(), Ordering::Release);
+    }
+}
+
+/// Explorer holds the foreground permission of the Win key only until the
+/// next input. Under load it can handle the request after the user's first
+/// typed key went to the old window, and Windows then refuses it.
+fn ask_explorer_for_foreground(hwnd: isize) {
+    if win_key::request_foreground(hwnd) {
+        EXPLORER_REQUESTS.fetch_add(1, Ordering::AcqRel);
     }
 }
 
@@ -520,7 +569,7 @@ impl bridge::Shell for GpuiShell {
                 win_key::debug_trace("activate-without-foreground");
                 return;
             }
-            PALETTE_TOOK_FOREGROUND.store(true, Ordering::Release);
+            mark_took_foreground();
             // Windows ignores z-order requests from a process without
             // foreground rights. Apply the stored band now that Prism holds
             // the foreground. `raise` asked for the topmost band first.

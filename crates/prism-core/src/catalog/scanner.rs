@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use windows::core::PCWSTR;
-use windows::Win32::Foundation::{CloseHandle, ERROR_NO_MORE_FILES};
+use windows::Win32::Foundation::{CloseHandle, ERROR_FILE_NOT_FOUND, ERROR_NO_MORE_FILES, ERROR_PATH_NOT_FOUND};
 use windows::Win32::Storage::FileSystem::{
     CreateFileW, FileFullDirectoryInfo, GetFileInformationByHandleEx, FILE_ATTRIBUTE_DIRECTORY,
     FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS, FILE_FULL_DIR_INFO,
@@ -29,6 +29,15 @@ struct ScanPlan {
     generation: u64,
     finish_volume: bool,
     descend_directories: bool,
+}
+
+/// What a walk did. `complete` is false when a folder could not be read in
+/// full (access denied, a listing that stalled under churn): the rows of that
+/// folder were not pruned, so the walk may have left deleted entries behind.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ScanOutcome {
+    pub scanned: u64,
+    pub complete: bool,
 }
 
 #[allow(dead_code)]
@@ -88,7 +97,9 @@ pub fn scan_volume(
         app_data_dir,
         &cancel,
         &progress_callback,
+        &mut disk_lister(),
     )
+    .map(|outcome| outcome.scanned)
 }
 
 /// Reconciles one directory subtree without completing or pruning a
@@ -107,6 +118,20 @@ pub fn reconcile_scope(
     app_data_dir: &Path,
     cancel: Arc<AtomicBool>,
 ) -> Result<u64, String> {
+    repair_scope(root, volume_id, generation, db, app_data_dir, cancel).map(|outcome| outcome.scanned)
+}
+
+/// `reconcile_scope`, with the report of whether every folder was read in
+/// full. A repair that is not complete has not applied the deletions it
+/// found, so its caller must not count it as done.
+pub fn repair_scope(
+    root: &Path,
+    volume_id: &str,
+    generation: u64,
+    db: Arc<Database>,
+    app_data_dir: &Path,
+    cancel: Arc<AtomicBool>,
+) -> Result<ScanOutcome, String> {
     let _priority = ScanEfficiencyGuard::new();
     scan_volume_inner(
         root,
@@ -120,6 +145,7 @@ pub fn reconcile_scope(
         app_data_dir,
         &cancel,
         &|_| {},
+        &mut disk_lister(),
     )
 }
 
@@ -132,7 +158,7 @@ pub fn reconcile_directory(
     db: Arc<Database>,
     app_data_dir: &Path,
     cancel: Arc<AtomicBool>,
-) -> Result<u64, String> {
+) -> Result<ScanOutcome, String> {
     // One directory's children: the FTS triggers stay (see reconcile_scope).
     let _priority = ScanEfficiencyGuard::new();
     scan_volume_inner(
@@ -147,6 +173,7 @@ pub fn reconcile_directory(
         app_data_dir,
         &cancel,
         &|_| {},
+        &mut disk_lister(),
     )
 }
 
@@ -201,6 +228,17 @@ impl Drop for ScanEfficiencyGuard {
     }
 }
 
+/// Lists a folder for a walk. The walk takes it as a parameter so that a test
+/// can make a folder unreadable.
+type FolderLister<'a> = dyn FnMut(&Path) -> FolderRead + 'a;
+
+/// The lister of the real file system. It reuses one buffer.
+fn disk_lister() -> impl FnMut(&Path) -> FolderRead {
+    let mut buffer = vec![0u64; READ_BUFFER_BYTES / 8];
+    move |dir| read_folder(dir, &mut buffer)
+}
+
+#[allow(clippy::too_many_arguments)]
 fn scan_volume_inner(
     root: &Path,
     volume_id: &str,
@@ -209,20 +247,28 @@ fn scan_volume_inner(
     app_data_dir: &Path,
     cancel: &AtomicBool,
     progress_callback: &impl Fn(u64),
-) -> Result<u64, String> {
+    list: &mut FolderLister<'_>,
+) -> Result<ScanOutcome, String> {
     let app_data_normalized = app_data_dir
         .to_string_lossy()
         .trim_end_matches(['\\', '/'])
         .to_lowercase();
 
-    let mut queue: VecDeque<PathBuf> = VecDeque::new();
-    queue.push_back(root.to_path_buf());
+    // The folder and whether its rows may keep another letter case of its
+    // path. The root is tested by its own row; below it, a folder whose row
+    // has other letters than the listing was renamed in case only.
+    let mut queue: VecDeque<(PathBuf, bool)> = VecDeque::new();
+    let root_text = root.to_string_lossy().into_owned();
+    let root_renamed = db
+        .display_path_of(volume_id, &root_text.to_lowercase())?
+        .is_some_and(|stored| stored != root_text);
+    queue.push_back((root.to_path_buf(), root_renamed));
 
     let mut batch = Vec::with_capacity(BATCH_SIZE);
     let mut total_scanned = 0u64;
-    let mut read_buffer = vec![0u64; READ_BUFFER_BYTES / 8];
+    let mut complete = true;
 
-    while let Some(dir) = queue.pop_front() {
+    while let Some((dir, any_case)) = queue.pop_front() {
         if cancel.load(Ordering::Relaxed) {
             return Err("scan cancelled".to_string());
         }
@@ -233,9 +279,16 @@ fn scan_volume_inner(
             continue;
         }
 
-        let Some(listing) = read_folder(&dir, &mut read_buffer) else {
-            // Access denied or unreadable directory; continue with remaining queue
-            continue;
+        let listing = match list(&dir) {
+            FolderRead::Listed(listing) => listing,
+            // Removed since its parent was listed: its removal has its own
+            // event, so nothing is left to repair here.
+            FolderRead::Gone => continue,
+            // Access denied or unreadable directory; continue with the queue.
+            FolderRead::Denied => {
+                complete = false;
+                continue;
+            }
         };
 
         let parent_display = dir.to_string_lossy().into_owned();
@@ -243,9 +296,10 @@ fn scan_volume_inner(
         // enumeration finds leaves the map; an entry whose write time, size,
         // and kind match its row is not written again. The rows left at the
         // end were removed from disk. A row whose `parent` text differs (a
-        // case-only rename of this folder) is not in the map, so its entry is
-        // written again with the current parent.
-        let mut stored = db.children_of(volume_id, &parent_display)?;
+        // case-only rename of this folder) is written again with the current
+        // parent. NTFS paths are not case sensitive, so the rows of a folder
+        // that was renamed in case are found by their normalized path.
+        let mut stored = db.children_of(volume_id, &parent_display, any_case)?;
 
         for FolderEntry {
             name: filename,
@@ -270,8 +324,21 @@ fn scan_volume_inner(
             // never silent exclusion. Offline cloud placeholders stay
             // searchable: opening one hydrates it through the provider.
 
-            let unchanged = stored.remove(&child_normalized)
-                == Some((filetime_ticks as i64, size as i64, is_dir));
+            let stored_row = stored.remove(&child_normalized);
+            // A folder whose row has other letters than the listing was
+            // renamed in case: the rows below it keep the old text.
+            let renamed = is_dir
+                && stored_row
+                    .as_ref()
+                    .and_then(|row| row.display_path.as_deref())
+                    .is_some_and(|text| text != child_display);
+            let unchanged = !renamed
+                && stored_row.is_some_and(|row| {
+                    row.same_parent
+                        && row.modified_at == filetime_ticks as i64
+                        && row.size == size as i64
+                        && row.is_directory == is_dir
+                });
             total_scanned += 1;
 
             if is_dir {
@@ -304,7 +371,7 @@ fn scan_volume_inner(
                     !is_excluded_dir(&lower_name)
                 };
                 if descend && plan.descend_directories {
-                    queue.push_back(child_path);
+                    queue.push_back((child_path, renamed));
                 }
             } else if !unchanged {
                 let extension = Path::new(&filename)
@@ -332,12 +399,20 @@ fn scan_volume_inner(
 
         // Children that disappeared since the last scan are removed here - the
         // directory was walked, so every current entry left `stored`. Skipped
-        // when the enumeration stalled (the rest of `stored` may be live).
-        if listing.complete {
-            let removed = stored
+        // when the enumeration stalled (the rest of `stored` may be live); the
+        // walk then reports that it is not complete.
+        if !listing.complete {
+            complete = false;
+        } else {
+            let mut removed = stored
                 .into_iter()
-                .map(|(path, (_, _, is_dir))| (path, is_dir))
+                .map(|(path, row)| (path, row.is_directory))
                 .collect::<Vec<_>>();
+            // In path order the deletes walk the index once. In the order of
+            // the map they hit pages at random: tens of thousands of stale
+            // rows (a repair of a folder under churn) then read the 4 GB
+            // catalog several times over.
+            removed.sort_unstable();
             db.remove_rows(volume_id, &removed)?;
         }
     }
@@ -353,7 +428,10 @@ fn scan_volume_inner(
     }
     progress_callback(total_scanned);
 
-    Ok(total_scanned)
+    Ok(ScanOutcome {
+        scanned: total_scanned,
+        complete,
+    })
 }
 
 fn flush_file_batch(
@@ -398,14 +476,22 @@ struct FolderListing {
     complete: bool,
 }
 
+/// The result of opening and listing one folder.
+enum FolderRead {
+    Listed(FolderListing),
+    /// The folder does not exist (any more).
+    Gone,
+    /// The folder exists and cannot be opened.
+    Denied,
+}
+
 /// Bytes of the reused listing buffer: one read returns about 600 entries.
 const READ_BUFFER_BYTES: usize = 64 * 1024;
 
 /// Lists `dir` with `GetFileInformationByHandleEx(FileFullDirectoryInfo)`
 /// into `buffer`. `FindFirstFileExW`/`FindNextFileW` added about 1.5 s of
-/// CPU to a walk of 155,000 folders for the same entries. `None` when the
-/// folder cannot be opened (access denied, removed).
-fn read_folder(dir: &Path, buffer: &mut [u64]) -> Option<FolderListing> {
+/// CPU to a walk of 155,000 folders for the same entries.
+fn read_folder(dir: &Path, buffer: &mut [u64]) -> FolderRead {
     let wide: Vec<u16> = win32_long_path(dir).encode_utf16().chain(Some(0)).collect();
     // SAFETY: `wide` is NUL-terminated and outlives the call.
     let handle = unsafe {
@@ -418,8 +504,18 @@ fn read_folder(dir: &Path, buffer: &mut [u64]) -> Option<FolderListing> {
             FILE_FLAG_BACKUP_SEMANTICS,
             None,
         )
-    }
-    .ok()?;
+    };
+    let handle = match handle {
+        Ok(handle) => handle,
+        Err(error) => {
+            let code = error.code();
+            return if code == ERROR_FILE_NOT_FOUND.to_hresult() || code == ERROR_PATH_NOT_FOUND.to_hresult() {
+                FolderRead::Gone
+            } else {
+                FolderRead::Denied
+            };
+        }
+    };
     let mut listing = FolderListing {
         entries: Vec::new(),
         complete: true,
@@ -517,7 +613,7 @@ fn read_folder(dir: &Path, buffer: &mut [u64]) -> Option<FolderListing> {
     }
     // SAFETY: `handle` was opened above and is closed once.
     let _ = unsafe { CloseHandle(handle) };
-    Some(listing)
+    FolderRead::Listed(listing)
 }
 
 /// `dir` as a `\\?\` path that ends with a separator (a bare `\\?\C:` would
@@ -531,5 +627,152 @@ fn win32_long_path(dir: &Path) -> String {
         format!(r"\\?\UNC\{stripped}\")
     } else {
         format!(r"\\?\{trimmed}\")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A test folder with a catalog, a tree to walk, and an app data folder.
+    struct Fixture {
+        base: PathBuf,
+        tree: PathBuf,
+        data: PathBuf,
+        db: Arc<Database>,
+    }
+
+    const VOLUME: &str = "vol-scan-test";
+
+    impl Fixture {
+        fn new(label: &str) -> Self {
+            let base = std::env::temp_dir().join(format!("prism-scan-test-{}-{label}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&base);
+            let tree = base.join("tree");
+            let data = base.join("data");
+            std::fs::create_dir_all(&tree).unwrap();
+            std::fs::create_dir_all(&data).unwrap();
+            let db = Arc::new(Database::open(&data.join("catalog.db")).unwrap());
+            Self { base, tree, data, db }
+        }
+
+        fn file(&self, relative: &str) {
+            let path = self.tree.join(relative);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, b"x").unwrap();
+        }
+
+        /// A walk of the tree with a lister that can change what the disk shows.
+        fn walk(&self, mut change: impl FnMut(&Path, FolderRead) -> FolderRead) -> ScanOutcome {
+            let mut real = disk_lister();
+            let mut list = |dir: &Path| change(dir, real(dir));
+            let plan = ScanPlan { generation: 1, finish_volume: false, descend_directories: true };
+            scan_volume_inner(
+                &self.tree,
+                VOLUME,
+                plan,
+                &self.db,
+                &self.data,
+                &AtomicBool::new(false),
+                &|_| {},
+                &mut list,
+            )
+            .unwrap()
+        }
+
+        fn rows_below(&self, folder: &str) -> Vec<String> {
+            let text = self.tree.join(folder).to_string_lossy().into_owned();
+            let mut rows: Vec<String> = self.db.children_of(VOLUME, &text, true).unwrap().into_keys().collect();
+            rows.sort();
+            rows
+        }
+    }
+
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.base);
+        }
+    }
+
+    fn as_is(_: &Path, read: FolderRead) -> FolderRead {
+        read
+    }
+
+    #[test]
+    fn a_walk_of_a_readable_tree_is_complete() {
+        let fixture = Fixture::new("complete");
+        fixture.file("a\\one.txt");
+        fixture.file("b.txt");
+        let outcome = fixture.walk(as_is);
+        assert!(outcome.complete);
+        assert_eq!(outcome.scanned, 3);
+    }
+
+    #[test]
+    fn a_folder_that_cannot_be_read_makes_the_walk_incomplete() {
+        let fixture = Fixture::new("denied");
+        fixture.file("ok\\one.txt");
+        fixture.file("locked\\two.txt");
+        let outcome = fixture.walk(|dir, read| {
+            if dir.ends_with("locked") {
+                FolderRead::Denied
+            } else {
+                read
+            }
+        });
+        assert!(!outcome.complete);
+        // A folder that is gone is not a failure: its removal has its own event.
+        let gone = fixture.walk(|dir, read| if dir.ends_with("locked") { FolderRead::Gone } else { read });
+        assert!(gone.complete);
+    }
+
+    #[test]
+    fn a_stalled_listing_keeps_its_rows_and_reports_it_then_a_full_listing_prunes_them() {
+        let fixture = Fixture::new("stalled");
+        fixture.file("busy\\keep.txt");
+        fixture.file("busy\\gone.txt");
+        assert!(fixture.walk(as_is).complete);
+        assert_eq!(fixture.rows_below("busy").len(), 2);
+
+        std::fs::remove_file(fixture.tree.join("busy\\gone.txt")).unwrap();
+        let stalled = fixture.walk(|dir, read| match read {
+            FolderRead::Listed(mut listing) if dir.ends_with("busy") => {
+                listing.complete = false;
+                FolderRead::Listed(listing)
+            }
+            other => other,
+        });
+        assert!(!stalled.complete);
+        assert_eq!(fixture.rows_below("busy").len(), 2, "no pruning from a partial listing");
+
+        assert!(fixture.walk(as_is).complete);
+        assert_eq!(fixture.rows_below("busy").len(), 1);
+    }
+
+    #[test]
+    fn a_case_only_rename_does_not_leave_the_old_children_behind() {
+        let fixture = Fixture::new("case");
+        fixture.file("Old\\a.txt");
+        fixture.file("Old\\b.txt");
+        fixture.file("Old\\Sub\\c.txt");
+        fixture.file("Old\\Sub\\d.txt");
+        assert!(fixture.walk(as_is).complete);
+        assert_eq!(fixture.rows_below("Old").len(), 3);
+
+        // The rename event was dropped; a file went away after it.
+        std::fs::rename(fixture.tree.join("Old"), fixture.tree.join("old")).unwrap();
+        std::fs::remove_file(fixture.tree.join("old\\b.txt")).unwrap();
+        std::fs::remove_file(fixture.tree.join("old\\Sub\\d.txt")).unwrap();
+        assert!(fixture.walk(as_is).complete);
+
+        let old = fixture.tree.join("old").to_string_lossy().to_lowercase();
+        assert_eq!(fixture.rows_below("old"), vec![format!("{old}\\a.txt"), format!("{old}\\sub")]);
+        let sub = fixture.tree.join("old\\Sub").to_string_lossy().to_lowercase();
+        assert_eq!(fixture.rows_below("old\\Sub"), vec![format!("{sub}\\c.txt")]);
+        // The survivors carry the new spelling, so the next walk finds them by their parent.
+        let text = fixture.tree.join("old").to_string_lossy().into_owned();
+        assert_eq!(fixture.db.children_of(VOLUME, &text, false).unwrap().len(), 2);
+        let sub_text = fixture.tree.join("old\\Sub").to_string_lossy().into_owned();
+        assert_eq!(fixture.db.children_of(VOLUME, &sub_text, false).unwrap().len(), 1);
     }
 }

@@ -5,6 +5,10 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use rusqlite::{params, params_from_iter, Connection, OpenFlags, OptionalExtension};
+use windows::Win32::System::Threading::{
+    GetCurrentThread, SetThreadInformation, ThreadMemoryPriority, MEMORY_PRIORITY,
+    MEMORY_PRIORITY_INFORMATION, MEMORY_PRIORITY_LOW, MEMORY_PRIORITY_NORMAL,
+};
 
 use super::ntfs::{resolve_path, PathNode, PathResolution};
 use super::types::{
@@ -60,15 +64,61 @@ pub struct Database {
     db_path: PathBuf,
     writer: Arc<Mutex<Connection>>,
     reader: Arc<Mutex<Connection>>,
-    /// Rows deleted since the process started. The name index reloads once
-    /// deletions it has not seen pass a share of its rows (bulk deletes leave
-    /// dead rows it would otherwise only find one search at a time).
+    /// Rows deleted since the process started that the name index did not
+    /// get by id (see `deleted_ids`): whole-volume clears, and deletions
+    /// that did not fit in the queue. The name index reloads once deletions
+    /// it has not seen pass a share of its rows (bulk deletes leave dead
+    /// rows it would otherwise only find one search at a time).
     rows_deleted: AtomicU64,
+    /// Ids of rows that an incremental write deleted (a watcher flush, a
+    /// scope sweep). The name index marks them deleted by id, so file churn
+    /// never forces a reload from the catalog.
+    deleted_ids: Mutex<Vec<i64>>,
     /// Ids whose `display_path` changed in place (a directory rename moves
     /// its descendants). The name index refreshes their ranking inputs.
     rewritten_ids: Mutex<Vec<i64>>,
     /// A change too large to refresh row by row: the name index reloads.
     index_reload_requested: AtomicBool,
+}
+
+/// Deleted ids that wait for the name index (8 bytes each). A larger backlog
+/// means that no search or sync drained the queue for a long time: the index
+/// then reloads instead (see `Database::queue_deleted`).
+const MAX_PENDING_DELETIONS: usize = 2_000_000;
+
+/// Lowers the memory priority of the calling thread while it lives. Pages
+/// that a low-priority thread touches sit at the front of the standby list,
+/// so a bulk read of the catalog (a name index reload, the cache prefetch)
+/// does not push the pages of the running app out of memory. CPU and I/O
+/// priority stay as they are: these threads hold the shared `reader`
+/// connection, and a starved holder would block searches.
+pub(super) struct LowMemoryPriorityGuard;
+
+impl LowMemoryPriorityGuard {
+    pub(super) fn new() -> Self {
+        Self::set(MEMORY_PRIORITY_LOW);
+        Self
+    }
+
+    fn set(priority: MEMORY_PRIORITY) {
+        let information = MEMORY_PRIORITY_INFORMATION { MemoryPriority: priority };
+        // SAFETY: the pointer and size describe `information`, which lives
+        // for the call. A failure keeps the normal priority.
+        unsafe {
+            let _ = SetThreadInformation(
+                GetCurrentThread(),
+                ThreadMemoryPriority,
+                &information as *const _ as *const core::ffi::c_void,
+                std::mem::size_of::<MEMORY_PRIORITY_INFORMATION>() as u32,
+            );
+        }
+    }
+}
+
+impl Drop for LowMemoryPriorityGuard {
+    fn drop(&mut self) {
+        Self::set(MEMORY_PRIORITY_NORMAL);
+    }
 }
 
 /// Removes the trigram index over `files` (schema v7) and its triggers.
@@ -113,7 +163,8 @@ pub struct VolumeUpdate {
 
 /// What `Database::rename_rows` changed, before the caller commits.
 struct RenamedRows {
-    removed: usize,
+    /// Ids of the rows it deleted (the old entry).
+    deleted: Vec<i64>,
     inserted: usize,
     rewritten: Vec<i64>,
 }
@@ -124,6 +175,18 @@ pub enum FlushRename<'a> {
     Move { old_normalized: &'a str, item: &'a ScannedItem },
     /// The target is gone: remove `old_normalized` with its descendants.
     Remove { old_normalized: &'a str },
+}
+
+/// A catalog row as a walk of its folder needs it (see `Database::children_of`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StoredChild {
+    pub modified_at: i64,
+    pub size: i64,
+    pub is_directory: bool,
+    /// False when the row keeps another letter case of the folder's path.
+    pub same_parent: bool,
+    /// The row's display text; folders only (files: `None`).
+    pub display_path: Option<String>,
 }
 
 /// The writes of one watcher flush (see `Database::apply_flush`). A removal is
@@ -248,6 +311,7 @@ impl Database {
             writer: Arc::new(Mutex::new(writer)),
             reader: Arc::new(Mutex::new(reader)),
             rows_deleted: AtomicU64::new(0),
+            deleted_ids: Mutex::new(Vec::new()),
             rewritten_ids: Mutex::new(Vec::new()),
             index_reload_requested: AtomicBool::new(false),
         };
@@ -322,6 +386,16 @@ impl Database {
 
              CREATE INDEX IF NOT EXISTS idx_files_lower_name ON files(lower_name, is_directory);
              CREATE INDEX IF NOT EXISTS idx_files_vol_parent ON files(volume_id, parent);
+
+             -- Folders whose watcher events were dropped for a repair walk
+             -- that has not finished. A restart reads them back.
+             CREATE TABLE IF NOT EXISTS deferred_scopes (
+                volume_id TEXT NOT NULL,
+                normalized_path TEXT NOT NULL,
+                display_path TEXT NOT NULL,
+                stamp INTEGER NOT NULL,
+                PRIMARY KEY(volume_id, normalized_path)
+             ) WITHOUT ROWID;
 
              CREATE TABLE IF NOT EXISTS ntfs_nodes (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -543,6 +617,46 @@ impl Database {
 
     pub fn rows_deleted(&self) -> u64 {
         self.rows_deleted.load(Ordering::Relaxed)
+    }
+
+    /// Hands the ids that a committed write deleted to the name index. A
+    /// full queue falls back to the count and a reload request: the index
+    /// then reads the catalog again.
+    fn queue_deleted(&self, deleted: Vec<i64>) {
+        if deleted.is_empty() {
+            return;
+        }
+        if let Ok(mut pending) = self.deleted_ids.lock() {
+            if pending.len() + deleted.len() <= MAX_PENDING_DELETIONS {
+                pending.extend(deleted);
+                return;
+            }
+        }
+        self.note_rows_deleted(deleted.len());
+        self.index_reload_requested.store(true, Ordering::Release);
+    }
+
+    /// Up to `max` deleted ids since the last call (see `deleted_ids`).
+    pub fn take_deleted_ids(&self, max: usize) -> Vec<i64> {
+        self.deleted_ids
+            .lock()
+            .map(|mut ids| {
+                let keep = ids.len().saturating_sub(max);
+                ids.split_off(keep)
+            })
+            .unwrap_or_default()
+    }
+
+    /// Returns taken ids that could not be applied, for a later call.
+    pub fn restore_deleted_ids(&self, ids: Vec<i64>) {
+        if let Ok(mut pending) = self.deleted_ids.lock() {
+            pending.extend(ids);
+        }
+    }
+
+    /// How many deleted ids wait for the name index.
+    pub fn pending_deleted_ids(&self) -> usize {
+        self.deleted_ids.lock().map(|ids| ids.len()).unwrap_or(0)
     }
 
     /// Up to `max` ids rewritten in place since the last call (see
@@ -1274,32 +1388,140 @@ impl Database {
         Ok(changed)
     }
 
-    /// The rows whose `parent` is `dir_display`: normalized path -> (write
-    /// time, size, folder flag). One query per walked folder, through the
-    /// `(volume_id, parent)` index, serves both the sweep's change test and
-    /// its removal of entries that left the disk.
+    /// The children of the folder `dir_display`: normalized path -> row
+    /// state. One query per walked folder serves both the sweep's change test
+    /// and its removal of entries that left the disk.
+    ///
+    /// Normally the `(volume_id, parent)` index finds the rows by the exact
+    /// `parent` text. `any_case` matches the children by their normalized
+    /// path instead: after a case-only rename of the folder (or of a folder
+    /// above it) the rows keep the old `parent` text, and the exact match
+    /// finds none of them. That match reads the index entries of the whole
+    /// subtree, so a caller asks for it only for a folder that needs it.
     pub fn children_of(
         &self,
         volume_id: &str,
         dir_display: &str,
-    ) -> Result<HashMap<String, (i64, i64, bool)>, String> {
+        any_case: bool,
+    ) -> Result<HashMap<String, StoredChild>, String> {
         let conn = self.reader.lock().map_err(|e| e.to_string())?;
+        let read = |row: &rusqlite::Row<'_>| -> rusqlite::Result<(String, StoredChild)> {
+            Ok((
+                row.get::<_, String>(0)?,
+                StoredChild {
+                    modified_at: row.get(1)?,
+                    size: row.get(2)?,
+                    is_directory: row.get::<_, i32>(3)? != 0,
+                    same_parent: row.get::<_, i32>(4)? != 0,
+                    display_path: row.get(5)?,
+                },
+            ))
+        };
+        if !any_case {
+            let mut stmt = conn
+                .prepare_cached(
+                    "SELECT normalized_path, modified_at, size, is_directory, 1,
+                            CASE WHEN is_directory THEN display_path END
+                     FROM files WHERE volume_id = ?1 AND parent = ?2;",
+                )
+                .map_err(|e| e.to_string())?;
+            let rows = stmt
+                .query_map(params![volume_id, dir_display], read)
+                .map_err(|e| e.to_string())?;
+            return rows.collect::<Result<HashMap<_, _>, _>>().map_err(|e| e.to_string());
+        }
+        // `prefix` ends with a backslash; the next character after it bounds
+        // the range of the whole subtree. The `instr` test keeps the direct
+        // children.
+        let mut prefix = dir_display.to_lowercase();
+        if !prefix.ends_with('\\') {
+            prefix.push('\\');
+        }
+        let upper = format!("{}]", &prefix[..prefix.len() - 1]);
+        let name_start = prefix.chars().count() as i64 + 1;
         let mut stmt = conn
             .prepare_cached(
-                "SELECT normalized_path, modified_at, size, is_directory FROM files
-                 WHERE volume_id = ?1 AND parent = ?2;",
+                "SELECT normalized_path, modified_at, size, is_directory, parent = ?5,
+                        CASE WHEN is_directory THEN display_path END
+                 FROM files
+                 WHERE volume_id = ?1 AND normalized_path > ?2 AND normalized_path < ?3
+                   AND instr(substr(normalized_path, ?4), '\\') = 0;",
             )
             .map_err(|e| e.to_string())?;
         let rows = stmt
-            .query_map(params![volume_id, dir_display], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    (row.get(1)?, row.get(2)?, row.get::<_, i32>(3)? != 0),
-                ))
-            })
+            .query_map(params![volume_id, prefix, upper, name_start, dir_display], read)
             .map_err(|e| e.to_string())?;
-        rows.collect::<Result<HashMap<_, _>, _>>()
-            .map_err(|e| e.to_string())
+        rows.collect::<Result<HashMap<_, _>, _>>().map_err(|e| e.to_string())
+    }
+
+    /// The stored display text of one row, by normalized path.
+    pub fn display_path_of(&self, volume_id: &str, normalized_path: &str) -> Result<Option<String>, String> {
+        let conn = self.reader.lock().map_err(|e| e.to_string())?;
+        conn.query_row(
+            "SELECT display_path FROM files WHERE volume_id = ?1 AND normalized_path = ?2;",
+            params![volume_id, normalized_path],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|e| e.to_string())
+    }
+
+    /// Records or forgets deferred scopes: `(path, true)` records the scope
+    /// with the time of this call, `(path, false)` forgets it. One
+    /// transaction; the last entry of a path wins.
+    pub fn update_deferred_scopes(&self, volume_id: &str, changes: &[(String, bool)]) -> Result<(), String> {
+        if changes.is_empty() {
+            return Ok(());
+        }
+        let mut conn = self.writer.lock().map_err(|e| e.to_string())?;
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
+        let stamp = unix_millis();
+        for (path, wanted) in changes {
+            let normalized = path.to_lowercase();
+            if *wanted {
+                tx.execute(
+                    "INSERT INTO deferred_scopes(volume_id, normalized_path, display_path, stamp)
+                     VALUES (?1, ?2, ?3, ?4)
+                     ON CONFLICT(volume_id, normalized_path) DO UPDATE SET
+                        display_path = excluded.display_path, stamp = excluded.stamp;",
+                    params![volume_id, normalized, path, stamp],
+                )
+            } else {
+                tx.execute(
+                    "DELETE FROM deferred_scopes WHERE volume_id = ?1 AND normalized_path = ?2;",
+                    params![volume_id, normalized],
+                )
+            }
+            .map_err(|e| e.to_string())?;
+        }
+        tx.commit().map_err(|e| e.to_string())
+    }
+
+    /// The scopes of `volume_id` that wait for a repair walk.
+    pub fn deferred_scopes(&self, volume_id: &str) -> Result<Vec<String>, String> {
+        let conn = self.reader.lock().map_err(|e| e.to_string())?;
+        let mut stmt = conn
+            .prepare_cached(
+                "SELECT display_path FROM deferred_scopes WHERE volume_id = ?1 ORDER BY normalized_path;",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(params![volume_id], |row| row.get::<_, String>(0))
+            .map_err(|e| e.to_string())?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
+    }
+
+    /// Forgets a scope after its repair walk, unless the scope was recorded
+    /// again since `walk_started` (the time from `unix_millis`): events that
+    /// came after the walk began are not covered by it.
+    pub fn clear_deferred_scope(&self, volume_id: &str, path: &str, walk_started: i64) -> Result<(), String> {
+        let conn = self.writer.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "DELETE FROM deferred_scopes WHERE volume_id = ?1 AND normalized_path = ?2 AND stamp < ?3;",
+            params![volume_id, path.to_lowercase(), walk_started],
+        )
+        .map(|_| ())
+        .map_err(|e| e.to_string())
     }
 
     /// Removes the rows of `paths` (normalized path, folder flag) that left
@@ -1312,23 +1534,25 @@ impl Database {
         }
         let mut conn = self.writer.lock().map_err(|e| e.to_string())?;
         let tx = conn.transaction().map_err(|e| e.to_string())?;
-        let removed = Self::delete_paths(&tx, volume_id, paths)?;
+        let deleted = Self::delete_paths(&tx, volume_id, paths)?;
         tx.commit().map_err(|e| e.to_string())?;
-        self.note_rows_deleted(removed);
+        let removed = deleted.len();
+        self.queue_deleted(deleted);
         Ok(removed)
     }
 
     /// The deletes of `remove_rows`, inside a transaction of the caller.
+    /// Returns the ids of the deleted rows.
     fn delete_paths(
         tx: &Connection,
         volume_id: &str,
         paths: &[(String, bool)],
-    ) -> Result<usize, String> {
-        let mut removed = 0;
+    ) -> Result<Vec<i64>, String> {
+        let mut deleted = Vec::new();
         for (path, is_dir) in paths {
-            removed += Self::delete_path_rows(tx, volume_id, path, *is_dir)?;
+            deleted.extend(Self::delete_path_rows(tx, volume_id, path, *is_dir)?);
         }
-        Ok(removed)
+        Ok(deleted)
     }
 
     /// Marks a volume scan complete. Removed entries are handled incrementally
@@ -1471,6 +1695,11 @@ impl Database {
         )
         .map_err(|e| e.to_string())?;
         tx.execute(
+            "DELETE FROM deferred_scopes WHERE volume_id = ?1;",
+            params![volume_id],
+        )
+        .map_err(|e| e.to_string())?;
+        tx.execute(
             "DELETE FROM volumes WHERE volume_id = ?1;",
             params![volume_id],
         )
@@ -1489,43 +1718,61 @@ impl Database {
     ) -> Result<i64, String> {
         let mut conn = self.writer.lock().map_err(|e| e.to_string())?;
         let tx = conn.transaction().map_err(|e| e.to_string())?;
-        let removed = Self::delete_path_rows(&tx, volume_id, normalized_path, is_dir)?;
+        let deleted = Self::delete_path_rows(&tx, volume_id, normalized_path, is_dir)?;
 
         tx.commit().map_err(|e| e.to_string())?;
-        self.note_rows_deleted(removed);
+        let removed = deleted.len();
+        self.queue_deleted(deleted);
         Ok(removed as i64)
     }
 
+    /// Deletes the row of `normalized_path` (and its subtree when
+    /// `include_descendants`). Returns the ids of the deleted rows.
     fn delete_path_rows(
         tx: &Connection,
         volume_id: &str,
         normalized_path: &str,
         include_descendants: bool,
-    ) -> Result<usize, String> {
-        let mut removed = tx
-            .execute(
-                "DELETE FROM files WHERE volume_id = ?1 AND normalized_path = ?2;",
-                params![volume_id, normalized_path],
-            )
-            .map_err(|e| e.to_string())?;
+    ) -> Result<Vec<i64>, String> {
+        let mut deleted = Self::delete_returning_ids(
+            tx,
+            "DELETE FROM files WHERE volume_id = ?1 AND normalized_path = ?2 RETURNING id;",
+            params![volume_id, normalized_path],
+        )?;
 
         if include_descendants {
             let descendant_start = format!("{normalized_path}\\");
             // Backslash is immediately before ']' in SQLite's binary text order,
             // so this bounds every descendant while keeping the composite index usable.
             let descendant_end = format!("{normalized_path}]");
-            removed += tx
-                .execute(
-                    "DELETE FROM files
-                     WHERE volume_id = ?1
-                       AND normalized_path >= ?2
-                       AND normalized_path < ?3;",
-                    params![volume_id, descendant_start, descendant_end],
-                )
-                .map_err(|e| e.to_string())?;
+            deleted.extend(Self::delete_returning_ids(
+                tx,
+                "DELETE FROM files
+                 WHERE volume_id = ?1
+                   AND normalized_path >= ?2
+                   AND normalized_path < ?3
+                 RETURNING id;",
+                params![volume_id, descendant_start, descendant_end],
+            )?);
         }
 
-        Ok(removed)
+        Ok(deleted)
+    }
+
+    /// Runs a `DELETE ... RETURNING id` and returns the ids. The statement
+    /// runs to its end before this returns, so the deletes are complete.
+    fn delete_returning_ids(
+        tx: &Connection,
+        sql: &str,
+        params: impl rusqlite::Params,
+    ) -> Result<Vec<i64>, String> {
+        let mut stmt = tx.prepare_cached(sql).map_err(|e| e.to_string())?;
+        let ids = stmt
+            .query_map(params, |row| row.get::<_, i64>(0))
+            .map_err(|e| e.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?;
+        Ok(ids)
     }
 
     /// Renames a file or directory subtree (watcher path). Returns the net row
@@ -1540,9 +1787,10 @@ impl Database {
         let tx = conn.transaction().map_err(|e| e.to_string())?;
         let renamed = Self::rename_rows(&tx, volume_id, old_normalized, new_item)?;
         tx.commit().map_err(|e| e.to_string())?;
-        self.note_rows_deleted(renamed.removed);
+        let removed = renamed.deleted.len();
+        self.queue_deleted(renamed.deleted);
         self.queue_rewritten(renamed.rewritten);
-        Ok(renamed.inserted as i64 - renamed.removed as i64)
+        Ok(renamed.inserted as i64 - removed as i64)
     }
 
     /// The writes of `rename_file`, inside a transaction (or savepoint) of the
@@ -1599,12 +1847,11 @@ impl Database {
         }
 
         // Delete old entry
-        let removed = tx
-            .execute(
-                "DELETE FROM files WHERE volume_id = ?1 AND normalized_path = ?2;",
-                params![volume_id, old_normalized],
-            )
-            .map_err(|e| e.to_string())?;
+        let deleted = Self::delete_returning_ids(
+            tx,
+            "DELETE FROM files WHERE volume_id = ?1 AND normalized_path = ?2 RETURNING id;",
+            params![volume_id, old_normalized],
+        )?;
 
         // Insert new entry
         let inserted = tx
@@ -1637,7 +1884,7 @@ impl Database {
             )
             .map_err(|e| e.to_string())?;
 
-        Ok(RenamedRows { removed, inserted, rewritten })
+        Ok(RenamedRows { deleted, inserted, rewritten })
     }
 
     /// Hands the ids that a committed rename rewrote to the name index.
@@ -1671,13 +1918,13 @@ impl Database {
         let mut conn = self.writer.lock().map_err(|e| e.to_string())?;
         let mut tx = conn.transaction().map_err(|e| e.to_string())?;
         let mut applied = FlushApplied::default();
-        let mut removed_rows = 0usize;
+        let mut deleted: Vec<i64> = Vec::new();
         let mut rewritten: Vec<i64> = Vec::new();
 
         let removed = Self::delete_paths(&tx, volume_id, flush.removed_first)?;
-        removed_rows += removed;
-        applied.delta -= removed as i64;
-        applied.changed |= removed > 0;
+        applied.delta -= removed.len() as i64;
+        applied.changed |= !removed.is_empty();
+        deleted.extend(removed);
 
         for rename in flush.renames {
             match rename {
@@ -1686,9 +1933,9 @@ impl Database {
                     match Self::rename_rows(&savepoint, volume_id, old_normalized, item) {
                         Ok(renamed) => {
                             savepoint.commit().map_err(|e| e.to_string())?;
-                            removed_rows += renamed.removed;
+                            applied.delta += renamed.inserted as i64 - renamed.deleted.len() as i64;
+                            deleted.extend(renamed.deleted);
                             rewritten.extend(renamed.rewritten);
-                            applied.delta += renamed.inserted as i64 - renamed.removed as i64;
                             applied.changed = true;
                             applied.renames_kept.push(true);
                         }
@@ -1701,9 +1948,9 @@ impl Database {
                 }
                 FlushRename::Remove { old_normalized } => {
                     let removed = Self::delete_path_rows(&tx, volume_id, old_normalized, true)?;
-                    removed_rows += removed;
-                    applied.delta -= removed as i64;
-                    applied.changed |= removed > 0;
+                    applied.delta -= removed.len() as i64;
+                    applied.changed |= !removed.is_empty();
+                    deleted.extend(removed);
                     applied.renames_kept.push(true);
                 }
             }
@@ -1714,13 +1961,13 @@ impl Database {
         applied.changed |= inserted > 0;
 
         let removed = Self::delete_paths(&tx, volume_id, flush.removed)?;
-        removed_rows += removed;
-        applied.delta -= removed as i64;
-        applied.changed |= removed > 0;
+        applied.delta -= removed.len() as i64;
+        applied.changed |= !removed.is_empty();
+        deleted.extend(removed);
 
         tx.commit().map_err(|e| e.to_string())?;
         drop(conn);
-        self.note_rows_deleted(removed_rows);
+        self.queue_deleted(deleted);
         self.queue_rewritten(rewritten);
         Ok(applied)
     }
@@ -1834,6 +2081,7 @@ impl Database {
         };
         use windows::Win32::System::Threading::GetCurrentProcess;
 
+        let _memory = LowMemoryPriorityGuard::new();
         let Ok(file) = std::fs::File::open(&self.db_path) else {
             return;
         };
@@ -1924,6 +2172,7 @@ impl Database {
         std::thread::scope(|scope| {
             for (worker, sender) in senders.into_iter().enumerate() {
                 scope.spawn(move || {
+                    let _memory = LowMemoryPriorityGuard::new();
                     let conn = match self.open_bulk_reader() {
                         Ok(conn) => conn,
                         Err(error) => {
@@ -2675,6 +2924,14 @@ fn blob_frn(blob: &[u8]) -> Option<u64> {
     Some(u64::from_le_bytes(blob.try_into().ok()?))
 }
 
+/// Milliseconds since the Unix epoch.
+pub fn unix_millis() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as i64
+}
+
 fn unix_timestamp() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -2696,4 +2953,179 @@ fn sanitize_fts5_trigram_query(query: &str) -> String {
         .collect();
 
     tokens.join(" AND ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const VOLUME: &str = "vol-test";
+
+    fn open_catalog(label: &str) -> (PathBuf, Database) {
+        let dir = std::env::temp_dir().join(format!("prism-db-test-{}-{label}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("create the test folder");
+        let db = Database::open(&dir.join("catalog.db")).expect("open the test catalog");
+        (dir, db)
+    }
+
+    fn item(folder: &str, name: &str) -> ScannedItem {
+        ScannedItem {
+            normalized_path: format!("c:\\{folder}\\{name}"),
+            display_path: format!("C:\\{folder}\\{name}"),
+            name: name.to_string(),
+            lower_name: name.to_string(),
+            parent: format!("C:\\{folder}"),
+            is_directory: false,
+            extension: None,
+            modified_at: 1,
+            size: 1,
+        }
+    }
+
+    fn ids_in(db: &Database) -> Vec<i64> {
+        db.file_names_after(0, usize::MAX).unwrap().iter().map(|row| row.id).collect()
+    }
+
+    #[test]
+    fn a_flush_reports_the_ids_of_every_row_it_deletes() {
+        let (dir, db) = open_catalog("flush");
+        let rows = ["a", "b", "c", "d", "e", "f"].map(|name| item("x", name));
+        db.insert_batch(VOLUME, 0, &rows).unwrap();
+        db.insert_batch(VOLUME, 0, &[item("x\\sub", "g"), item("x\\sub", "h")]).unwrap();
+        let before = ids_in(&db);
+        assert_eq!(before.len(), 8);
+
+        let removed_first = [("c:\\x\\a".to_string(), false)];
+        let removed = [("c:\\x\\sub".to_string(), true), ("c:\\x\\missing".to_string(), false)];
+        let moved = item("x", "b2");
+        let renames = [
+            FlushRename::Move { old_normalized: "c:\\x\\b", item: &moved },
+            FlushRename::Remove { old_normalized: "c:\\x\\c" },
+        ];
+        let applied = db
+            .apply_flush(
+                VOLUME,
+                &FlushWrites { removed_first: &removed_first, renames: &renames, items: &[], removed: &removed },
+            )
+            .unwrap();
+        // a, b (replaced by b2), c, and the folder "sub" with its two files:
+        // "sub" itself has no row, so g and h go with it.
+        let after = ids_in(&db);
+        let mut gone = before.iter().copied().filter(|id| !after.contains(id)).collect::<Vec<_>>();
+        let mut reported = db.take_deleted_ids(usize::MAX);
+        gone.sort_unstable();
+        reported.sort_unstable();
+        assert_eq!(gone.len(), 5);
+        assert_eq!(reported, gone);
+        assert_eq!(applied.delta, 1 - 5);
+        // The count that forces a reload stays at zero.
+        assert_eq!(db.rows_deleted(), 0);
+        drop(db);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn deferred_scopes_survive_a_restart_and_clear_only_after_the_walk_that_covers_them() {
+        let (dir, db) = open_catalog("deferred");
+        let scopes = |db: &Database, volume: &str| db.deferred_scopes(volume).unwrap();
+        db.update_deferred_scopes(VOLUME, &[("C:\\Work\\Cit".to_string(), true), ("C:\\Work\\Old".to_string(), true)])
+            .unwrap();
+        db.update_deferred_scopes("other", &[("D:\\Build".to_string(), true)]).unwrap();
+        // The last entry of a path wins, and case does not matter.
+        db.update_deferred_scopes(VOLUME, &[("C:\\Work\\Old".to_string(), false), ("c:\\work\\old".to_string(), true)])
+            .unwrap();
+        db.update_deferred_scopes(VOLUME, &[("C:\\WORK\\OLD".to_string(), false)]).unwrap();
+        drop(db);
+
+        // A restart: a new connection reads the same scopes.
+        let db = Database::open(&dir.join("catalog.db")).unwrap();
+        assert_eq!(scopes(&db, VOLUME), vec!["C:\\Work\\Cit".to_string()]);
+        assert_eq!(scopes(&db, "other"), vec!["D:\\Build".to_string()]);
+
+        // Events that came after the walk began are not covered: the record stays.
+        std::thread::sleep(Duration::from_millis(5));
+        let started = unix_millis();
+        std::thread::sleep(Duration::from_millis(5));
+        db.update_deferred_scopes(VOLUME, &[("C:\\Work\\Cit".to_string(), true)]).unwrap();
+        db.clear_deferred_scope(VOLUME, "c:\\work\\cit", started).unwrap();
+        assert_eq!(scopes(&db, VOLUME).len(), 1);
+        // A walk that began after the record covers it.
+        std::thread::sleep(Duration::from_millis(5));
+        db.clear_deferred_scope(VOLUME, "C:\\Work\\Cit", unix_millis()).unwrap();
+        assert!(scopes(&db, VOLUME).is_empty());
+        assert_eq!(scopes(&db, "other").len(), 1);
+        // A removed volume takes its scopes along.
+        db.remove_volume("other").unwrap();
+        assert!(scopes(&db, "other").is_empty());
+        drop(db);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn children_are_found_by_normalized_path_after_a_case_only_rename() {
+        let (dir, db) = open_catalog("any-case");
+        let lowered = |mut row: ScannedItem| {
+            row.normalized_path = row.normalized_path.to_lowercase();
+            row
+        };
+        let rows = [item("x\\Old", "a"), item("x\\Old\\sub", "b"), item("x\\Older", "c"), item("x", "d")].map(lowered);
+        db.insert_batch(VOLUME, 0, &rows).unwrap();
+        // The exact match misses the rows of the old spelling.
+        assert!(db.children_of(VOLUME, "C:\\x\\old", false).unwrap().is_empty());
+        let found = db.children_of(VOLUME, "C:\\x\\old", true).unwrap();
+        assert_eq!(found.keys().collect::<Vec<_>>(), vec!["c:\\x\\old\\a"]);
+        assert!(!found["c:\\x\\old\\a"].same_parent);
+        let exact = db.children_of(VOLUME, "C:\\x\\Old", true).unwrap();
+        assert!(exact["c:\\x\\old\\a"].same_parent);
+        drop(db);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_full_queue_falls_back_to_the_count_and_a_reload_request() {
+        let (dir, db) = open_catalog("queue");
+        db.queue_deleted((0..MAX_PENDING_DELETIONS as i64).collect());
+        assert_eq!(db.pending_deleted_ids(), MAX_PENDING_DELETIONS);
+        assert_eq!(db.rows_deleted(), 0);
+        assert!(!db.take_index_reload_request());
+        // One more id does not fit: it counts, and the index reloads.
+        db.queue_deleted(vec![-1, -2]);
+        assert_eq!(db.pending_deleted_ids(), MAX_PENDING_DELETIONS);
+        assert_eq!(db.rows_deleted(), 2);
+        assert!(db.take_index_reload_request());
+        // A taken part makes room again.
+        assert_eq!(db.take_deleted_ids(10).len(), 10);
+        db.queue_deleted(vec![-3]);
+        assert_eq!(db.pending_deleted_ids(), MAX_PENDING_DELETIONS - 9);
+        drop(db);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn the_memory_priority_guard_lowers_and_restores_the_thread() {
+        fn current() -> u32 {
+            let mut information = MEMORY_PRIORITY_INFORMATION::default();
+            // SAFETY: the pointer and size describe `information`.
+            unsafe {
+                windows::Win32::System::Threading::GetThreadInformation(
+                    GetCurrentThread(),
+                    ThreadMemoryPriority,
+                    &mut information as *mut _ as *mut core::ffi::c_void,
+                    std::mem::size_of::<MEMORY_PRIORITY_INFORMATION>() as u32,
+                )
+                .expect("read the memory priority");
+            }
+            information.MemoryPriority.0
+        }
+        std::thread::spawn(|| {
+            assert_eq!(current(), MEMORY_PRIORITY_NORMAL.0);
+            {
+                let _guard = LowMemoryPriorityGuard::new();
+                assert_eq!(current(), MEMORY_PRIORITY_LOW.0);
+            }
+            assert_eq!(current(), MEMORY_PRIORITY_NORMAL.0);
+        })
+        .join()
+        .unwrap();
+    }
 }

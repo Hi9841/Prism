@@ -84,6 +84,8 @@ fn main() {
     }
     let Some(activate_event) = claim_single_instance(!autostart) else { return };
     let startup_timer = prism_core::perf::start();
+    // This is the thread that runs the GPUI app below.
+    prism_core::ui_stall::init(env!("PRISM_VERSION"));
     let show_on_start = !autostart;
 
     let (sender, mut receiver) = futures::channel::mpsc::unbounded::<HostMessage>();
@@ -181,9 +183,18 @@ fn main() {
                             bridge::emit_event(event, cx);
                         }
                     }
-                    HostMessage::ToggleFromWin(rect) => shell.toggle_palette_from_win(rect, cx),
-                    HostMessage::ToggleFromTaskbar(point, rect) => shell.toggle_palette_from_taskbar(point, rect, cx),
-                    HostMessage::ToggleShortcut => shell.toggle_palette(cx),
+                    HostMessage::ToggleFromWin(rect) => {
+                        prism_core::ui_stall::input_handled();
+                        shell.toggle_palette_from_win(rect, cx)
+                    }
+                    HostMessage::ToggleFromTaskbar(point, rect) => {
+                        prism_core::ui_stall::input_handled();
+                        shell.toggle_palette_from_taskbar(point, rect, cx)
+                    }
+                    HostMessage::ToggleShortcut => {
+                        prism_core::ui_stall::input_handled();
+                        shell.toggle_palette(cx)
+                    }
                     HostMessage::Activate => shell.activate_palette(cx),
                 });
             }

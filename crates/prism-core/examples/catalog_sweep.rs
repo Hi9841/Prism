@@ -225,7 +225,8 @@ fn main() {
         cpu_after.1 - cpu_before.1,
         (io_after.ReadTransferCount - io_before.ReadTransferCount) as f64 / 1_048_576.0,
         (io_after.WriteTransferCount - io_before.WriteTransferCount) as f64 / 1_048_576.0,
-        db.rows_deleted()
+        // Incremental deletes wait in the queue for the name index.
+        db.rows_deleted() + db.pending_deleted_ids() as u64
     );
     if check && verify(&path, &root) > 0 {
         std::process::exit(1);

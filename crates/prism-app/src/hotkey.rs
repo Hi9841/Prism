@@ -73,6 +73,7 @@ impl Hotkeys {
                     }
                     match msg.message {
                         WM_HOTKEY => {
+                            prism_core::ui_stall::input_sent("shortcut");
                             let _ = sender.unbounded_send(HostMessage::ToggleShortcut);
                         }
                         WM_REGISTER | WM_UNREGISTER => {

@@ -634,6 +634,16 @@ pub fn request_foreground(hwnd: isize) -> bool {
     }
 }
 
+/// Explorer's answer to the last [`request_foreground`]: `None` until it
+/// replies, then whether its `SetForegroundWindow` succeeded.
+pub fn foreground_ack() -> Option<bool> {
+    match SHELL_FOREGROUND_ACK.load(Ordering::Acquire) {
+        1 => Some(false),
+        2 => Some(true),
+        _ => None,
+    }
+}
+
 /// Asks the observation pump to re-query the Start button rectangle now.
 /// Taskbar moves (alignment repair, density changes) should reposition the
 /// glyph overlay immediately rather than on the next interval tick.

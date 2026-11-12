@@ -427,18 +427,27 @@ fn verify(data_dir: &Path, tree: &Path) -> usize {
         .expect("query")
         .collect::<Result<BTreeMap<String, (bool, String)>, _>>()
         .expect("rows");
+    // The parent reads this output through a pipe, and reads count in its I/O
+    // and CPU: only the first lines print. A catalog that still holds
+    // 200,000 deleted entries would otherwise cost the parent more than the
+    // watcher under test.
+    const PRINTED_DIFFERENCES: usize = 8;
     let mut differences = 0;
-    for (path, entry) in &disk {
-        match catalog.get(path) {
-            None => println!("MISSING {path}"),
-            Some(stored) if stored != entry => println!("STALE {path}: catalog {stored:?}, disk {entry:?}"),
-            Some(_) => continue,
+    let mut report = |line: String| {
+        if differences < PRINTED_DIFFERENCES {
+            println!("{line}");
         }
         differences += 1;
+    };
+    for (path, entry) in &disk {
+        match catalog.get(path) {
+            None => report(format!("MISSING {path}")),
+            Some(stored) if stored != entry => report(format!("STALE {path}: catalog {stored:?}, disk {entry:?}")),
+            Some(_) => continue,
+        }
     }
     for path in catalog.keys().filter(|path| !disk.contains_key(*path)) {
-        println!("EXTRA {path}");
-        differences += 1;
+        report(format!("EXTRA {path}"));
     }
     println!("VERIFY {} {} {differences}", disk.len(), catalog.len());
     differences

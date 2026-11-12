@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use std::time::UNIX_EPOCH;
 
 use windows::core::PCWSTR;
@@ -90,6 +90,34 @@ const MAX_QUEUED_EVENTS: usize = 16 * 1024;
 /// merge into their parents.
 const MAX_DIRTY_SCOPES: usize = 32;
 
+/// A folder that holds this many events of one flush is under heavy churn (a
+/// test suite's sandboxes, a build's output). Its events then cost the
+/// catalog nothing until it is quiet: one repair walk settles the folder.
+/// A per-event write costs more than the share of a walk that one event
+/// causes, and the churn makes most of those rows short-lived. 512 events in
+/// one flush are 700 a second at the visible tick; a normal save, download,
+/// or small unpack stays far below that.
+const HOT_SCOPE_EVENTS: usize = 512;
+
+/// A deferred scope waits for this long without an event before its repair
+/// walk. Visible: the user can search now, and a build rarely pauses for
+/// 5 s inside one folder (a walk in a pause costs once; the folder defers
+/// again if the churn goes on). Hidden: nobody reads the catalog, so wait
+/// for a real end of the churn (a test suite pauses between its binaries);
+/// 30 s is also the quiet time of a repair at a shard root.
+const DEFERRED_QUIET_VISIBLE: Duration = Duration::from_secs(5);
+const DEFERRED_QUIET_HIDDEN: Duration = Duration::from_secs(30);
+
+/// A scope that never gets quiet (a log folder that always grows) still
+/// repairs after this long, so the catalog is never stale for hours. It
+/// defers again at the next hot flush. The same limit as a repair at a shard
+/// root.
+const DEFERRED_MAX_AGE: Duration = Duration::from_secs(5 * 60);
+
+/// Deferred scopes at one time. Past the limit a hot folder is written per
+/// event as before: no scope is ever dropped.
+const MAX_DEFERRED_SCOPES: usize = 32;
+
 #[derive(Clone, Debug)]
 pub enum WatcherEvent {
     Added(PathBuf),
@@ -139,6 +167,19 @@ struct WatcherEventQueue {
     /// `existing_parent` results while collapsed: a burst repeats the same
     /// few parents, and each lookup is a file system call under the lock.
     parents: HashMap<PathBuf, PathBuf>,
+    /// Folders under heavy churn. What happens below them never enters the
+    /// queue; a repair walk settles them once they are quiet.
+    deferred: Vec<DeferredScope>,
+    /// Changes of the deferred set that the catalog does not have yet:
+    /// normalized path -> (path, recorded). The flusher writes them in one
+    /// transaction, so a write follows a change of the set, never an event.
+    unrecorded: HashMap<String, (PathBuf, bool)>,
+}
+
+struct DeferredScope {
+    path: PathBuf,
+    since: Instant,
+    last_event: Instant,
 }
 
 /// Parents remembered while collapsed, before the memo starts over.
@@ -157,6 +198,8 @@ impl WatcherEventQueue {
             root,
             collapsed: false,
             parents: HashMap::new(),
+            deferred: Vec::new(),
+            unrecorded: HashMap::new(),
         }
     }
 
@@ -165,6 +208,9 @@ impl WatcherEventQueue {
             self.push_dirty_scope(scope.clone());
             return;
         }
+        let Some(event) = self.apply_deferral(event, Instant::now()) else {
+            return;
+        };
         if self.collapsed {
             for scope in self.scopes_for_event(&event) {
                 self.push_dirty_scope(scope);
@@ -267,12 +313,204 @@ impl WatcherEventQueue {
 
     /// The queued events, and the time of the take: an entry made later has
     /// its event in a later take.
+    /// Folders that this take finds under heavy churn become deferred first,
+    /// and their events leave the batch.
     fn take_all(&mut self) -> (Vec<WatcherEvent>, std::time::SystemTime) {
         self.collapsed = false;
         self.parents.clear();
-        (std::mem::take(&mut self.events), std::time::SystemTime::now())
+        let mut events = std::mem::take(&mut self.events);
+        if events.len() >= HOT_SCOPE_EVENTS {
+            self.defer_hot_scopes(&mut events, Instant::now());
+        }
+        (events, std::time::SystemTime::now())
     }
 
+    fn defer_hot_scopes(&mut self, events: &mut Vec<WatcherEvent>, now: Instant) {
+        // The volume root and the shard roots (its folders) never defer: a
+        // walk of one is a walk of a whole shard.
+        let min_depth = self.root.components().count() + 2;
+        let hot = hot_scopes(events, min_depth);
+        if hot.is_empty() {
+            return;
+        }
+        for scope in hot {
+            self.defer(scope, now);
+        }
+        let taken = std::mem::take(events);
+        *events = taken.into_iter().filter_map(|event| self.apply_deferral(event, now)).collect();
+    }
+
+    fn defer(&mut self, scope: PathBuf, now: Instant) {
+        if self.deferred.iter().any(|deferred| scope.starts_with(&deferred.path)) {
+            return;
+        }
+        // The new scope takes over the ones below it, and their age.
+        let takes_over = self.deferred.iter().any(|deferred| deferred.path.starts_with(&scope));
+        if !takes_over && self.deferred.len() >= MAX_DEFERRED_SCOPES {
+            return;
+        }
+        let mut since = now;
+        let mut taken = Vec::new();
+        self.deferred.retain(|deferred| {
+            let below = deferred.path.starts_with(&scope);
+            if below {
+                since = since.min(deferred.since);
+                taken.push(deferred.path.clone());
+            }
+            !below
+        });
+        for path in taken {
+            self.note_unrecorded(path, false);
+        }
+        self.note_unrecorded(scope.clone(), true);
+        self.deferred.push(DeferredScope { path: scope, since, last_event: now });
+    }
+
+    fn note_unrecorded(&mut self, path: PathBuf, recorded: bool) {
+        self.unrecorded.insert(path.to_string_lossy().to_lowercase(), (path, recorded));
+    }
+
+    /// The changes of the deferred set that the catalog does not have yet.
+    fn take_unrecorded(&mut self) -> Vec<(String, bool)> {
+        self.unrecorded
+            .drain()
+            .map(|(_, (path, recorded))| (path.to_string_lossy().into_owned(), recorded))
+            .collect()
+    }
+
+    /// Puts back changes whose write failed. A newer change of the same path wins.
+    fn restore_unrecorded(&mut self, changes: Vec<(String, bool)>) {
+        for (path, recorded) in changes {
+            self.unrecorded.entry(path.to_lowercase()).or_insert((PathBuf::from(path), recorded));
+        }
+    }
+
+    /// The event as the catalog should see it, or `None` when it happens below
+    /// a deferred scope (the scope's walk covers it; its time moves). Only the
+    /// entries below a scope are covered, not the scope itself: a walk of a
+    /// folder that is gone repairs nothing. A rename across the boundary keeps
+    /// its outside half: the entry that left is added, the entry that came in
+    /// is removed.
+    fn apply_deferral(&mut self, event: WatcherEvent, now: Instant) -> Option<WatcherEvent> {
+        if self.deferred.is_empty() {
+            return Some(event);
+        }
+        match event {
+            WatcherEvent::Overflow(_) => Some(event),
+            WatcherEvent::Added(ref path) | WatcherEvent::Removed(ref path) => {
+                (!self.touch_deferred(path, now)).then_some(event)
+            }
+            WatcherEvent::Renamed { from, to } => {
+                // A scope inside a renamed folder moves with it.
+                let mut moved = Vec::new();
+                for deferred in &mut self.deferred {
+                    if let Ok(rest) = deferred.path.strip_prefix(&from) {
+                        let new_path = if rest.as_os_str().is_empty() { to.clone() } else { to.join(rest) };
+                        moved.push((std::mem::replace(&mut deferred.path, new_path.clone()), new_path));
+                    }
+                }
+                for (old_path, new_path) in moved {
+                    self.note_unrecorded(old_path, false);
+                    self.note_unrecorded(new_path, true);
+                }
+                match (self.touch_deferred(&from, now), self.touch_deferred(&to, now)) {
+                    (true, true) => None,
+                    (true, false) => Some(WatcherEvent::Added(to)),
+                    (false, true) => Some(WatcherEvent::Removed(from)),
+                    (false, false) => Some(WatcherEvent::Renamed { from, to }),
+                }
+            }
+        }
+    }
+
+    /// True when `path` is below a deferred scope; that scope has an event now.
+    fn touch_deferred(&mut self, path: &Path, now: Instant) -> bool {
+        let Some(parent) = path.parent() else { return false };
+        match self.deferred.iter_mut().find(|deferred| parent.starts_with(&deferred.path)) {
+            Some(deferred) => {
+                deferred.last_event = now;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// The deferred scopes that had no event for `quiet`, or that wait longer
+    /// than `DEFERRED_MAX_AGE`. Each leaves the queue: events below it count
+    /// again, and a hot flush defers it anew.
+    fn take_quiet_scopes(&mut self, now: Instant, quiet: Duration) -> Vec<PathBuf> {
+        let mut due = Vec::new();
+        self.deferred.retain(|deferred| {
+            let is_due = now.saturating_duration_since(deferred.last_event) >= quiet
+                || now.saturating_duration_since(deferred.since) >= DEFERRED_MAX_AGE;
+            if is_due {
+                due.push(deferred.path.clone());
+            }
+            !is_due
+        });
+        due
+    }
+
+    /// Every deferred scope, for a watcher that stops.
+    fn take_deferred_scopes(&mut self) -> Vec<PathBuf> {
+        self.deferred.drain(..).map(|deferred| deferred.path).collect()
+    }
+}
+
+/// Writes the changes of the deferred set to the catalog. A failed write is
+/// tried again at the next call. The scopes leave the catalog only when their
+/// repair walk is done (`FileIndex::settle_scope_repair`), so a process that
+/// ends before the walk leaves them for the next start.
+fn record_deferred_scopes(db: &Database, queue: &Mutex<WatcherEventQueue>, volume_id: &str) {
+    let changes = queue.lock().unwrap().take_unrecorded();
+    if changes.is_empty() {
+        return;
+    }
+    if let Err(error) = db.update_deferred_scopes(volume_id, &changes) {
+        eprintln!("[Prism Catalog] Cannot record the deferred scopes of {volume_id}: {error}");
+        queue.lock().unwrap().restore_unrecorded(changes);
+    }
+}
+
+/// The folders that hold `HOT_SCOPE_EVENTS` events or more, deepest first. A
+/// folder counts only the events that no deeper chosen folder holds: a build
+/// folder with one stray file in it does not take the folders below it. A
+/// folder with fewer than `min_depth` path components never qualifies.
+fn hot_scopes(events: &[WatcherEvent], min_depth: usize) -> Vec<PathBuf> {
+    let mut counts: HashMap<&Path, usize> = HashMap::new();
+    for event in events {
+        let (first, second) = match event {
+            WatcherEvent::Added(path) | WatcherEvent::Removed(path) => (path, None),
+            WatcherEvent::Renamed { from, to } => (from, Some(to)),
+            WatcherEvent::Overflow(_) => continue,
+        };
+        for path in std::iter::once(first).chain(second) {
+            let depth = path.components().count();
+            // Deepest folder first: stop at the first one that is too high.
+            for (up, folder) in path.ancestors().enumerate().skip(1) {
+                if depth - up < min_depth {
+                    break;
+                }
+                *counts.entry(folder).or_default() += 1;
+            }
+        }
+    }
+    let mut folders: Vec<(&Path, usize)> =
+        counts.into_iter().filter(|(_, count)| *count >= HOT_SCOPE_EVENTS).collect();
+    folders.sort_by_key(|(folder, _)| std::cmp::Reverse(folder.components().count()));
+    let mut claimed: HashMap<&Path, usize> = HashMap::new();
+    let mut hot = Vec::new();
+    for (folder, count) in folders {
+        let own = count - claimed.get(folder).copied().unwrap_or(0);
+        if own < HOT_SCOPE_EVENTS {
+            continue;
+        }
+        for above in folder.ancestors().skip(1) {
+            *claimed.entry(above).or_default() += own;
+        }
+        hot.push(folder.to_path_buf());
+    }
+    hot
 }
 
 pub struct VolumeWatcher {
@@ -765,6 +1003,8 @@ fn apply_queued_events(
         let mut q = event_queue.lock().unwrap();
         q.take_all()
     };
+    // The events below a new scope are gone now: record the scope first.
+    record_deferred_scopes(db, event_queue, volume_id);
     let started = std::time::Instant::now();
     let event_count = events.len();
     let _trace = TraceOnDrop(move || {
@@ -891,6 +1131,15 @@ fn run_flusher_loop(
         if buffering.load(Ordering::SeqCst) {
             continue;
         }
+        // No host (a tool, not the app) counts as visible: flush at each tick.
+        let hidden = crate::host::get().is_some_and(|host| !host.palette_visible());
+        let quiet = if hidden { DEFERRED_QUIET_HIDDEN } else { DEFERRED_QUIET_VISIBLE };
+        // A rename can move a scope with no flush.
+        record_deferred_scopes(&db, &event_queue, &volume_id);
+        let repairs = event_queue.lock().unwrap().take_quiet_scopes(Instant::now(), quiet);
+        for scope in repairs {
+            on_overflow(volume_id.clone(), scope);
+        }
         let (queued, collapsed) = {
             let queue = event_queue.lock().unwrap();
             (queue.events.len(), queue.collapsed)
@@ -900,8 +1149,6 @@ fn run_flusher_loop(
             continue;
         }
         let waited = waiting_since.get_or_insert_with(std::time::Instant::now).elapsed();
-        // No host (a tool, not the app) counts as visible: flush at each tick.
-        let hidden = crate::host::get().is_some_and(|host| !host.palette_visible());
         if hidden && !collapsed && queued < HIDDEN_FLUSH_EVENTS && waited < HIDDEN_FLUSH_AGE {
             continue;
         }
@@ -913,6 +1160,14 @@ fn run_flusher_loop(
         for scope in applied.dirty_scopes {
             on_overflow(volume_id.clone(), scope);
         }
+    }
+    // The events below a deferred scope are gone: the scope still needs its
+    // repair. (Queued events are lost at a stop as well; the scan of a new
+    // watcher covers them. The repair does nothing when no watcher is left.)
+    record_deferred_scopes(&db, &event_queue, &volume_id);
+    let deferred = event_queue.lock().unwrap().take_deferred_scopes();
+    for scope in deferred {
+        on_overflow(volume_id.clone(), scope);
     }
 }
 
@@ -988,4 +1243,264 @@ fn inspect_single_path(path: &Path) -> Option<ScannedItem> {
         modified_at,
         size,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn queue() -> WatcherEventQueue {
+        WatcherEventQueue::new(PathBuf::from(r"C:\v"))
+    }
+
+    fn path(text: &str) -> PathBuf {
+        PathBuf::from(format!(r"C:\v\work\{text}"))
+    }
+
+    fn add_files(queue: &mut WatcherEventQueue, folder: &str, count: usize) {
+        for number in 0..count {
+            queue.push(WatcherEvent::Added(path(&format!(r"{folder}\f{number}"))));
+        }
+    }
+
+    fn scopes(queue: &WatcherEventQueue) -> Vec<PathBuf> {
+        let mut scopes: Vec<PathBuf> = queue.deferred.iter().map(|scope| scope.path.clone()).collect();
+        scopes.sort();
+        scopes
+    }
+
+    #[test]
+    fn a_burst_under_one_folder_becomes_one_deferred_scope() {
+        let mut queue = queue();
+        for number in 0..HOT_SCOPE_EVENTS {
+            queue.push(WatcherEvent::Added(path(&format!(r"cit\box{number}"))));
+            queue.push(WatcherEvent::Added(path(&format!(r"cit\box{number}\file"))));
+        }
+        let (events, _) = queue.take_all();
+        assert!(events.is_empty(), "no event reaches the writes: {events:?}");
+        assert_eq!(scopes(&queue), vec![path("cit")]);
+        // Later events below the scope never enter the queue.
+        add_files(&mut queue, r"cit\box1", 10);
+        queue.push(WatcherEvent::Removed(path(r"cit\box2")));
+        assert!(queue.events.is_empty());
+    }
+
+    #[test]
+    fn a_quiet_scope_is_repaired_once() {
+        let mut queue = queue();
+        add_files(&mut queue, "cit", HOT_SCOPE_EVENTS);
+        queue.take_all();
+        let quiet = Duration::from_secs(5);
+        assert!(queue.take_quiet_scopes(Instant::now() + Duration::from_secs(4), quiet).is_empty());
+        // An event below the scope moves its time.
+        queue.push(WatcherEvent::Added(path(r"cit\late")));
+        let after = Instant::now() + Duration::from_secs(5);
+        assert_eq!(queue.take_quiet_scopes(after, quiet), vec![path("cit")]);
+        assert!(queue.take_quiet_scopes(after + quiet, quiet).is_empty());
+        assert!(queue.deferred.is_empty());
+        // The scope can defer again.
+        add_files(&mut queue, "cit", HOT_SCOPE_EVENTS);
+        queue.take_all();
+        assert_eq!(scopes(&queue), vec![path("cit")]);
+    }
+
+    #[test]
+    fn a_scope_that_never_gets_quiet_repairs_after_the_maximum_age() {
+        let mut queue = queue();
+        add_files(&mut queue, "cit", HOT_SCOPE_EVENTS);
+        queue.take_all();
+        let hour = Duration::from_secs(3600);
+        assert!(queue.take_quiet_scopes(Instant::now() + DEFERRED_MAX_AGE - Duration::from_secs(5), hour).is_empty());
+        let due = queue.take_quiet_scopes(Instant::now() + DEFERRED_MAX_AGE + Duration::from_secs(5), hour);
+        assert_eq!(due, vec![path("cit")]);
+    }
+
+    #[test]
+    fn events_outside_stay_per_event() {
+        let mut queue = queue();
+        add_files(&mut queue, "cit", HOT_SCOPE_EVENTS);
+        add_files(&mut queue, "docs", 3);
+        queue.push(WatcherEvent::Removed(path("old.txt")));
+        let (events, _) = queue.take_all();
+        assert_eq!(events.len(), 4);
+        assert!(events.iter().all(|event| matches!(event, WatcherEvent::Added(p) if p.starts_with(path("docs")))
+            || matches!(event, WatcherEvent::Removed(p) if *p == path("old.txt"))));
+        assert_eq!(scopes(&queue), vec![path("cit")]);
+    }
+
+    #[test]
+    fn fewer_events_than_the_threshold_defer_nothing() {
+        let mut queue = queue();
+        add_files(&mut queue, "cit", HOT_SCOPE_EVENTS - 1);
+        let (events, _) = queue.take_all();
+        assert_eq!(events.len(), HOT_SCOPE_EVENTS - 1);
+        assert!(queue.deferred.is_empty());
+    }
+
+    #[test]
+    fn the_scope_itself_and_overflows_stay_in_the_queue() {
+        let mut queue = queue();
+        add_files(&mut queue, "cit", HOT_SCOPE_EVENTS);
+        queue.take_all();
+        // The folder itself: a walk of a folder that is gone repairs nothing.
+        queue.push(WatcherEvent::Removed(path("cit")));
+        queue.push(WatcherEvent::Overflow(path(r"cit\sub")));
+        let (events, _) = queue.take_all();
+        assert_eq!(events.len(), 2, "{events:?}");
+    }
+
+    #[test]
+    fn a_rename_across_the_boundary_keeps_its_outside_half() {
+        let mut queue = queue();
+        add_files(&mut queue, "cit", HOT_SCOPE_EVENTS);
+        queue.take_all();
+        queue.push(WatcherEvent::Renamed { from: path(r"cit\a"), to: path("out") });
+        queue.push(WatcherEvent::Renamed { from: path("in"), to: path(r"cit\b") });
+        queue.push(WatcherEvent::Renamed { from: path(r"cit\c"), to: path(r"cit\sub\d") });
+        queue.push(WatcherEvent::Renamed { from: path("x"), to: path("y") });
+        let (events, _) = queue.take_all();
+        assert_eq!(events.len(), 3, "{events:?}");
+        assert!(matches!(&events[0], WatcherEvent::Added(p) if *p == path("out")));
+        assert!(matches!(&events[1], WatcherEvent::Removed(p) if *p == path("in")));
+        assert!(matches!(&events[2], WatcherEvent::Renamed { from, .. } if *from == path("x")));
+    }
+
+    #[test]
+    fn a_rename_of_the_folder_or_a_parent_moves_the_scope() {
+        let mut queue = queue();
+        add_files(&mut queue, r"a\cit", HOT_SCOPE_EVENTS);
+        queue.take_all();
+        queue.push(WatcherEvent::Renamed { from: path("a"), to: path("b") });
+        queue.push(WatcherEvent::Renamed { from: path(r"b\cit"), to: path(r"b\cit2") });
+        let (events, _) = queue.take_all();
+        assert_eq!(events.len(), 2, "both renames reach the writes");
+        assert_eq!(scopes(&queue), vec![path(r"b\cit2")]);
+    }
+
+    #[test]
+    fn the_deepest_folder_with_enough_events_defers() {
+        let mut queue = queue();
+        // Two hot folders below a parent that holds a few events of its own.
+        add_files(&mut queue, r"a\b\c", HOT_SCOPE_EVENTS);
+        add_files(&mut queue, r"a\b\d", HOT_SCOPE_EVENTS);
+        add_files(&mut queue, r"a\b", 5);
+        let (events, _) = queue.take_all();
+        assert_eq!(scopes(&queue), vec![path(r"a\b\c"), path(r"a\b\d")]);
+        assert_eq!(events.len(), 5);
+        // Folders that are cool alone and hot together: their parent.
+        let mut queue = self::queue();
+        for folder in 0..8 {
+            add_files(&mut queue, &format!(r"a\b\f{folder}"), HOT_SCOPE_EVENTS / 8);
+        }
+        let (events, _) = queue.take_all();
+        assert_eq!(scopes(&queue), vec![path(r"a\b")]);
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn the_volume_root_and_the_shard_roots_never_defer() {
+        let mut queue = queue();
+        for number in 0..HOT_SCOPE_EVENTS * 2 {
+            queue.push(WatcherEvent::Added(PathBuf::from(format!(r"C:\v\f{number}"))));
+            queue.push(WatcherEvent::Added(path(&format!("f{number}"))));
+        }
+        let (events, _) = queue.take_all();
+        assert_eq!(events.len(), HOT_SCOPE_EVENTS * 4);
+        assert!(queue.deferred.is_empty());
+    }
+
+    #[test]
+    fn a_hot_parent_takes_over_the_scopes_below_it() {
+        let mut queue = queue();
+        add_files(&mut queue, r"a\b\c", HOT_SCOPE_EVENTS);
+        queue.take_all();
+        assert_eq!(scopes(&queue), vec![path(r"a\b\c")]);
+        for folder in 0..8 {
+            add_files(&mut queue, &format!(r"a\x{folder}"), HOT_SCOPE_EVENTS / 8);
+        }
+        queue.take_all();
+        assert_eq!(scopes(&queue), vec![path("a")]);
+    }
+
+    #[test]
+    fn deferred_scopes_have_a_limit_and_none_is_lost() {
+        let mut queue = queue();
+        let mut written = 0;
+        for number in 0..MAX_DEFERRED_SCOPES + 3 {
+            add_files(&mut queue, &format!(r"cit{number}\x"), HOT_SCOPE_EVENTS);
+            written += queue.take_all().0.len();
+        }
+        // The folders past the limit are written per event.
+        assert_eq!(written, 3 * HOT_SCOPE_EVENTS);
+        assert_eq!(queue.take_deferred_scopes().len(), MAX_DEFERRED_SCOPES);
+        assert!(queue.deferred.is_empty());
+    }
+
+    fn changes(queue: &mut WatcherEventQueue) -> Vec<(PathBuf, bool)> {
+        let mut changes: Vec<(PathBuf, bool)> =
+            queue.take_unrecorded().into_iter().map(|(path, recorded)| (PathBuf::from(path), recorded)).collect();
+        changes.sort();
+        changes
+    }
+
+    #[test]
+    fn a_change_of_the_deferred_set_is_recorded_once_not_per_event() {
+        let mut queue = queue();
+        add_files(&mut queue, r"a\b\c", HOT_SCOPE_EVENTS);
+        queue.take_all();
+        assert_eq!(changes(&mut queue), vec![(path(r"a\b\c"), true)]);
+        // Many events below the scope change nothing.
+        add_files(&mut queue, r"a\b\c\x", 100);
+        queue.take_all();
+        assert!(changes(&mut queue).is_empty());
+        // A parent takes the scope over: the child leaves the record.
+        for folder in 0..8 {
+            add_files(&mut queue, &format!(r"a\x{folder}"), HOT_SCOPE_EVENTS / 8);
+        }
+        queue.take_all();
+        assert_eq!(changes(&mut queue), vec![(path("a"), true), (path(r"a\b\c"), false)]);
+        // A rename moves the record.
+        queue.push(WatcherEvent::Renamed { from: path("a"), to: path("z") });
+        assert_eq!(changes(&mut queue), vec![(path("a"), false), (path("z"), true)]);
+    }
+
+    #[test]
+    fn a_failed_write_keeps_the_changes_and_a_newer_change_wins() {
+        let mut queue = queue();
+        add_files(&mut queue, "cit", HOT_SCOPE_EVENTS);
+        queue.take_all();
+        let failed = queue.take_unrecorded();
+        queue.restore_unrecorded(failed);
+        assert_eq!(changes(&mut queue), vec![(path("cit"), true)]);
+        // The scope moved while the write ran: the new state stays.
+        let failed = vec![(path("cit").to_string_lossy().into_owned(), true)];
+        queue.note_unrecorded(path("cit"), false);
+        queue.restore_unrecorded(failed);
+        assert_eq!(changes(&mut queue), vec![(path("cit"), false)]);
+    }
+
+    #[test]
+    fn deferred_scopes_reach_the_catalog_and_a_restart_reads_them_back() {
+        let dir = std::env::temp_dir().join(format!("prism-watch-test-{}-record", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let db_path = dir.join("catalog.db");
+        let mut queue = queue();
+        add_files(&mut queue, "cit", HOT_SCOPE_EVENTS);
+        add_files(&mut queue, "build", HOT_SCOPE_EVENTS);
+        queue.take_all();
+        let queue = Mutex::new(queue);
+
+        let db = Database::open(&db_path).unwrap();
+        record_deferred_scopes(&db, &queue, "vol");
+        assert!(queue.lock().unwrap().unrecorded.is_empty(), "the set is written once");
+        // The process ends here: the flusher never hands the scopes over.
+        drop(db);
+
+        let db = Database::open(&db_path).unwrap();
+        let mut found = db.deferred_scopes("vol").unwrap();
+        found.sort();
+        assert_eq!(found, vec![path("build").to_string_lossy().into_owned(), path("cit").to_string_lossy().into_owned()]);
+        drop(db);
+        let _ = std::fs::remove_dir_all(dir);
+    }
 }

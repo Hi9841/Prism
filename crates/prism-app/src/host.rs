@@ -37,10 +37,12 @@ impl prism_core::host::Host for GpuiHost {
     }
 
     fn toggle_from_win(&self, start_button: Option<RECT>) {
+        prism_core::ui_stall::input_sent("win");
         let _ = self.sender.unbounded_send(HostMessage::ToggleFromWin(start_button));
     }
 
     fn toggle_from_taskbar(&self, click: POINT, start_button: Option<RECT>) {
+        prism_core::ui_stall::input_sent("taskbar");
         let _ = self.sender.unbounded_send(HostMessage::ToggleFromTaskbar(click, start_button));
     }
 
