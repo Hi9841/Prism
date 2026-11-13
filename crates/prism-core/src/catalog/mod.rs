@@ -80,33 +80,60 @@ const SHARD_REPAIR_MAX_DELAY: Duration = Duration::from_secs(5 * 60);
 /// The walks share two database connections, so more of them at one time
 /// only wait on each other.
 const SCOPE_REPAIR_SLOTS: usize = 2;
-/// A repair walk that could not read every folder (access denied, a listing
-/// that stalls under churn) has not applied the deletions it found. It runs
-/// again after a wait that grows with each try. After this many incomplete
-/// walks the scope is left to the periodic sweep, so a folder that never
-/// reads cannot make a walk loop.
-const SCOPE_REPAIR_MAX_INCOMPLETE: u32 = 4;
-const SCOPE_REPAIR_RETRY_FIRST: Duration = Duration::from_secs(30);
+
+/// A walk that takes less than this is not logged: the log would fill with
+/// small repairs, and the slow walks are the ones to read.
+const WALK_LOG_MIN: Duration = Duration::from_secs(1);
+
+/// One line of the always-on walk log (`catalog-walks`).
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WalkRecord<'a> {
+    unix_ms: u128,
+    /// `repair` (a scope repair walk) or `sweep` (a full volume sweep).
+    kind: &'static str,
+    scope: &'a str,
+    entries: u64,
+    ms: u64,
+    /// For a repair: the scope is a volume root or a top-level folder.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    broad: Option<bool>,
+}
+
+/// Appends a record for a walk that took `WALK_LOG_MIN` or more. File I/O: call
+/// it off the UI thread.
+fn log_walk(kind: &'static str, scope: &Path, entries: u64, elapsed: Duration, broad: Option<bool>) {
+    if elapsed < WALK_LOG_MIN {
+        return;
+    }
+    let Some(dir) = crate::logs::dir() else { return };
+    let scope = scope.to_string_lossy();
+    let record = WalkRecord {
+        unix_ms: crate::logs::unix_ms(),
+        kind,
+        scope: &scope,
+        entries,
+        ms: elapsed.as_millis() as u64,
+        broad,
+    };
+    crate::logs::append(&dir, "catalog-walks", &record);
+}
+
+/// The volume roots and top-level folders (C:\, C:\Users) are shard roots.
+fn is_broad_scope(scope: &Path) -> bool {
+    scope.components().count() <= 3
+}
 
 /// How a scope repair ended.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ScopeRepairResult {
-    /// Every folder was read in full.
-    Done,
-    /// A folder was not read in full, or a walk failed.
-    Incomplete,
-    /// The repair could not run (no watcher, or the scope is not under its
-    /// root). The scope stays recorded for the next start.
+    /// The walk ran. A folder that could not be read (access denied, a
+    /// listing that stalls under churn) keeps its rows; the periodic sweep
+    /// takes it. A walk that ran again would meet the same folder.
+    Walked,
+    /// The repair could not run (no watcher, the scope is not under its
+    /// root) or a walk failed. The scope stays recorded for the next start.
     Skipped,
-}
-
-/// The wait before the next walk after the `incomplete_walks`-th incomplete
-/// one (1, 2, ...), or `None` when the scope is left to the periodic sweep.
-fn scope_repair_retry_delay(incomplete_walks: u32) -> Option<Duration> {
-    if incomplete_walks >= SCOPE_REPAIR_MAX_INCOMPLETE {
-        return None;
-    }
-    Some(SCOPE_REPAIR_RETRY_FIRST * 4u32.pow(incomplete_walks.saturating_sub(1)))
 }
 
 pub fn catalog_debug_enabled() -> bool {
@@ -806,6 +833,9 @@ impl FileIndex {
         let index_for_progress = self.clone();
         let drive_progress = drive.clone();
 
+        // Events that come after this point are not covered by the sweep.
+        let sweep_started = db::unix_millis();
+        let sweep_clock = std::time::Instant::now();
         let scan_result = scanner::scan_volume(
             &mount_path,
             &volume_id,
@@ -819,7 +849,8 @@ impl FileIndex {
         );
 
         match &scan_result {
-            Ok(_) => {
+            Ok(entries) => {
+                log_walk("sweep", &mount_path, *entries, sweep_clock.elapsed(), None);
                 self.update_volume_coverage(&drive, VolumeState::Ready);
             }
             Err(e) => {
@@ -853,9 +884,18 @@ impl FileIndex {
                 w.flush_queue(&db);
             }
         }
-        // A scope from the last run is walked again, though the sweep found
-        // it: the sweep does not report whether it read every folder, and a
-        // walk with no change is short. The walk also settles the record.
+        // The sweep walked every folder of the volume. It covers the scopes
+        // that were recorded before it began, so forget them. A scope
+        // recorded after it began is walked again. A failed sweep covers
+        // nothing.
+        if scan_result.is_ok() {
+            match db.clear_deferred_scope(&volume_id, &drive, sweep_started) {
+                Ok(()) => self.rerecord_deferred_scopes(&volume_id, Path::new(&drive)),
+                Err(error) => {
+                    eprintln!("[Prism Catalog] Cannot forget the scopes of the sweep of {volume_id}: {error}");
+                }
+            }
+        }
         self.requeue_deferred_scopes(&db, &volume_id);
 
         if let Ok(mut vols) = self.volumes.write() {
@@ -929,12 +969,10 @@ impl FileIndex {
         }
 
         let index = self.clone();
-        // The volume root and top-level folders (C:\, C:\Users) are shard roots.
-        let broad = scope.components().count() <= 3;
+        let broad = is_broad_scope(&scope);
         // The waits are async: a burst can request hundreds of scopes, and
         // only the walk itself may hold a blocking-pool thread.
         crate::runtime::spawn(async move {
-            let mut incomplete_walks = 0u32;
             loop {
                 index.wait_for_quiet_scope(&key, broad).await;
                 // The semaphores are never closed, so a permit always comes.
@@ -956,16 +994,9 @@ impl FileIndex {
                 let result =
                     crate::runtime::spawn_blocking(move || walker.reconcile_scope_sync(&walk_volume, &walk_scope))
                         .await
-                        .unwrap_or(ScopeRepairResult::Incomplete);
+                        .unwrap_or(ScopeRepairResult::Skipped);
                 drop((_slot, _shard_slot));
-                if let Some(delay) =
-                    index.settle_scope_repair(&volume_id, &scope, walk_started, result, &mut incomplete_walks)
-                {
-                    // The key stays owned meanwhile: requests that arrive now
-                    // join the next walk.
-                    tokio::time::sleep(delay).await;
-                    continue;
-                }
+                index.settle_scope_repair(&volume_id, &scope, walk_started, result);
                 if !index
                     .scope_repairs
                     .lock()
@@ -979,55 +1010,39 @@ impl FileIndex {
         });
     }
 
-    /// Settles the record of a scope after a repair walk. A complete walk
-    /// forgets the scope. An incomplete one returns the wait before the next
-    /// walk; after `SCOPE_REPAIR_MAX_INCOMPLETE` of them the scope is
-    /// forgotten and left to the periodic sweep. A walk that was skipped keeps
-    /// the record.
-    fn settle_scope_repair(
-        &self,
-        volume_id: &str,
-        scope: &Path,
-        walk_started: i64,
-        result: ScopeRepairResult,
-        incomplete_walks: &mut u32,
-    ) -> Option<Duration> {
-        let forget = |reason: &str| {
-            let db = self.db.read().unwrap_or_else(|e| e.into_inner()).clone();
-            if let Some(db) = db {
-                if let Err(error) = db.clear_deferred_scope(volume_id, &scope.to_string_lossy(), walk_started) {
-                    eprintln!("[Prism Catalog] Cannot forget the repaired scope {} ({reason}): {error}", scope.display());
+    /// Settles the record of a scope after a repair walk. A walk that ran
+    /// forgets the scope. A walk that was skipped keeps the record.
+    fn settle_scope_repair(&self, volume_id: &str, scope: &Path, walk_started: i64, result: ScopeRepairResult) {
+        if result != ScopeRepairResult::Walked {
+            return;
+        }
+        let db = self.db.read().unwrap_or_else(|e| e.into_inner()).clone();
+        if let Some(db) = db {
+            match db.clear_deferred_scope(volume_id, &scope.to_string_lossy(), walk_started) {
+                Ok(()) => self.rerecord_deferred_scopes(volume_id, scope),
+                Err(error) => {
+                    eprintln!("[Prism Catalog] Cannot forget the repaired scope {}: {error}", scope.display());
                 }
             }
-        };
-        match result {
-            ScopeRepairResult::Done => {
-                *incomplete_walks = 0;
-                forget("done");
-                None
-            }
-            ScopeRepairResult::Skipped => None,
-            ScopeRepairResult::Incomplete => {
-                *incomplete_walks += 1;
-                let delay = scope_repair_retry_delay(*incomplete_walks);
-                if delay.is_none() {
-                    eprintln!(
-                        "[Prism Catalog] Repair of {} stays incomplete after {} walks; the periodic sweep takes it",
-                        scope.display(),
-                        incomplete_walks
-                    );
-                    *incomplete_walks = 0;
-                    forget("given up");
-                }
-                delay
-            }
+        }
+    }
+
+    /// The clear of a scope removes the records below it, also those of scopes
+    /// that the watcher still holds deferred. Records them again.
+    fn rerecord_deferred_scopes(&self, volume_id: &str, scope: &Path) {
+        let watchers = self.watchers.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(watcher) = watchers.get(volume_id) {
+            watcher.rerecord_deferred_below(scope);
         }
     }
 
     /// Queues a repair for every scope that an earlier run deferred and did
     /// not repair: the watcher dropped the events below those folders, and a
     /// process that ended first never walked them. Called when the volume's
-    /// watcher is live, so events from now on are not missed.
+    /// watcher is live, so events from now on are not missed. A scope below
+    /// another recorded scope gets no request of its own: the walk of the
+    /// outer scope covers it and forgets its record. Returns the number of
+    /// repairs requested.
     fn requeue_deferred_scopes(&self, db: &Database, volume_id: &str) -> usize {
         let scopes = match db.deferred_scopes(volume_id) {
             Ok(scopes) => scopes,
@@ -1036,10 +1051,19 @@ impl FileIndex {
                 return 0;
             }
         };
-        for scope in &scopes {
+        let lowered: Vec<PathBuf> = scopes.iter().map(|scope| PathBuf::from(scope.to_lowercase())).collect();
+        let mut requested = 0;
+        for (scope, lower) in scopes.iter().zip(&lowered) {
+            let covered = lowered
+                .iter()
+                .any(|outer| outer != lower && lower.starts_with(outer));
+            if covered {
+                continue;
+            }
             self.request_scope_repair(volume_id.to_string(), PathBuf::from(scope));
+            requested += 1;
         }
-        scopes.len()
+        requested
     }
 
     /// Waits until no repair request for `key` arrived for the quiet period,
@@ -1095,7 +1119,7 @@ impl FileIndex {
             .read()
             .unwrap_or_else(|e| e.into_inner())
             .clone();
-        let mut complete = true;
+        let mut walked = true;
         for scope in scopes {
             let started = std::time::Instant::now();
             let generation = self.scan_generation.fetch_add(1, Ordering::SeqCst);
@@ -1110,7 +1134,7 @@ impl FileIndex {
                     cancel,
                 )
             } else {
-                scanner::repair_scope(
+                scanner::reconcile_scope(
                     &scope,
                     volume_id,
                     generation,
@@ -1127,27 +1151,22 @@ impl FileIndex {
                     started.elapsed().as_millis()
                 );
             }
-            match result {
-                Ok(outcome) if outcome.complete => {}
-                Ok(_) => complete = false,
-                Err(error) => {
-                    complete = false;
-                    eprintln!(
-                        "[Prism Catalog] Scoped repair for {} failed: {}",
-                        scope.display(),
-                        error
-                    );
-                }
+            if let Ok(entries) = &result {
+                log_walk("repair", &scope, *entries, started.elapsed(), Some(is_broad_scope(&scope)));
+            }
+            if let Err(error) = result {
+                walked = false;
+                eprintln!("[Prism Catalog] Scoped repair for {} failed: {}", scope.display(), error);
             }
         }
         // No forced checkpoint: a scoped repair writes little, and SQLite's
         // automatic checkpoint bounds the WAL. A truncating checkpoint after
         // every small repair cost up to 2 s each during bursts.
         self.emit_updated();
-        if complete {
-            ScopeRepairResult::Done
+        if walked {
+            ScopeRepairResult::Walked
         } else {
-            ScopeRepairResult::Incomplete
+            ScopeRepairResult::Skipped
         }
     }
 
@@ -1648,6 +1667,8 @@ mod tests {
         let first = FileIndex::new(&dir);
         record(&first, r"C:\Work\Cit");
         record(&first, r"C:\Work\Build");
+        // A scope below a recorded scope waits for the walk of the outer one.
+        record(&first, r"C:\WORK\Cit\Sub");
         drop(first);
 
         // The new process has no memory of the scopes except the catalog.
@@ -1659,9 +1680,10 @@ mod tests {
             let repairs = second.scope_repairs.lock().unwrap();
             assert!(repairs.running.contains_key(&format!("{VOLUME}|c:\\work\\cit")));
             assert!(repairs.running.contains_key(&format!("{VOLUME}|c:\\work\\build")));
+            assert!(!repairs.running.contains_key(&format!("{VOLUME}|c:\\work\\cit\\sub")));
         }
         // The records stay until a walk has finished.
-        assert_eq!(recorded(&second).len(), 2);
+        assert_eq!(recorded(&second).len(), 3);
         drop((db, second));
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -1672,59 +1694,17 @@ mod tests {
         let index = FileIndex::new(&dir);
         let scope = Path::new(r"C:\Work\Cit");
         record(&index, r"C:\Work\Cit");
-        let mut incomplete = 0;
         let later = db::unix_millis() + 60_000;
 
         // The repair could not run (no watcher): the record stays.
-        let skipped = index.settle_scope_repair(VOLUME, scope, later, ScopeRepairResult::Skipped, &mut incomplete);
-        assert_eq!(skipped, None);
+        index.settle_scope_repair(VOLUME, scope, later, ScopeRepairResult::Skipped);
         assert_eq!(recorded(&index).len(), 1);
         // Events came after the walk began: the record stays.
         let walk_began = 0;
-        index.settle_scope_repair(VOLUME, scope, walk_began, ScopeRepairResult::Done, &mut incomplete);
+        index.settle_scope_repair(VOLUME, scope, walk_began, ScopeRepairResult::Walked);
         assert_eq!(recorded(&index).len(), 1);
-        // A complete walk that began after the record clears it.
-        let next = index.settle_scope_repair(VOLUME, scope, later, ScopeRepairResult::Done, &mut incomplete);
-        assert_eq!(next, None);
-        assert!(recorded(&index).is_empty());
-        drop(index);
-        let _ = std::fs::remove_dir_all(dir);
-    }
-
-    #[test]
-    fn an_incomplete_repair_runs_again_with_growing_waits_and_then_is_left_to_the_sweep() {
-        let dir = data_dir("retry");
-        let index = FileIndex::new(&dir);
-        let scope = Path::new(r"C:\Work\Cit");
-        record(&index, r"C:\Work\Cit");
-        let later = db::unix_millis() + 60_000;
-        let mut incomplete = 0;
-        let mut delays = Vec::new();
-        for _ in 0..SCOPE_REPAIR_MAX_INCOMPLETE {
-            delays.push(index.settle_scope_repair(VOLUME, scope, later, ScopeRepairResult::Incomplete, &mut incomplete));
-            if delays.last().unwrap().is_some() {
-                assert_eq!(recorded(&index).len(), 1, "the scope stays recorded while it is retried");
-            }
-        }
-        assert_eq!(
-            delays,
-            vec![
-                Some(Duration::from_secs(30)),
-                Some(Duration::from_secs(120)),
-                Some(Duration::from_secs(480)),
-                None
-            ]
-        );
-        // The last try gave up: no loop, and the record is gone.
-        assert!(recorded(&index).is_empty());
-        assert_eq!(incomplete, 0);
-
-        // A walk that is complete after incomplete ones resets the count.
-        record(&index, r"C:\Work\Cit");
-        index.settle_scope_repair(VOLUME, scope, later, ScopeRepairResult::Incomplete, &mut incomplete);
-        assert_eq!(incomplete, 1);
-        index.settle_scope_repair(VOLUME, scope, later, ScopeRepairResult::Done, &mut incomplete);
-        assert_eq!(incomplete, 0);
+        // A walk that began after the record clears it.
+        index.settle_scope_repair(VOLUME, scope, later, ScopeRepairResult::Walked);
         assert!(recorded(&index).is_empty());
         drop(index);
         let _ = std::fs::remove_dir_all(dir);

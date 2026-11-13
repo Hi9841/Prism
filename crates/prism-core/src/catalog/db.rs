@@ -1466,6 +1466,27 @@ impl Database {
         .map_err(|e| e.to_string())
     }
 
+    /// The number of rows strictly below the folder `normalized_path`, counted
+    /// up to `limit`. A bigger tree costs no more than `limit` index steps.
+    pub fn rows_below_at_most(&self, volume_id: &str, normalized_path: &str, limit: usize) -> Result<usize, String> {
+        let conn = self.reader.lock().map_err(|e| e.to_string())?;
+        // Backslash is immediately before ']' in SQLite's binary text order,
+        // so these bounds hold every descendant and use the composite index.
+        let start = format!("{normalized_path}\\");
+        let end = format!("{normalized_path}]");
+        conn.query_row(
+            "SELECT count(*) FROM (
+                SELECT 1 FROM files
+                WHERE volume_id = ?1 AND normalized_path >= ?2 AND normalized_path < ?3
+                LIMIT ?4
+             );",
+            params![volume_id, start, end, limit as i64],
+            |row| row.get::<_, i64>(0),
+        )
+        .map(|count| count as usize)
+        .map_err(|e| e.to_string())
+    }
+
     /// Records or forgets deferred scopes: `(path, true)` records the scope
     /// with the time of this call, `(path, false)` forgets it. One
     /// transaction; the last entry of a path wins.
@@ -1511,14 +1532,29 @@ impl Database {
         rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
     }
 
-    /// Forgets a scope after its repair walk, unless the scope was recorded
-    /// again since `walk_started` (the time from `unix_millis`): events that
-    /// came after the walk began are not covered by it.
+    /// Forgets a scope and the scopes below it after a walk of `path`, unless
+    /// a scope was recorded again since `walk_started` (the time from
+    /// `unix_millis`): events that came after the walk began are not covered
+    /// by it. The walk is recursive, so it covers the scopes below `path`. A
+    /// volume root (`c:\`) covers the whole volume.
     pub fn clear_deferred_scope(&self, volume_id: &str, path: &str, walk_started: i64) -> Result<(), String> {
         let conn = self.writer.lock().map_err(|e| e.to_string())?;
+        let normalized = path.to_lowercase();
+        let prefix = normalized.trim_end_matches('\\');
+        // Backslash is immediately before ']' in SQLite's binary text order,
+        // so this range bounds every path below `prefix`.
         conn.execute(
-            "DELETE FROM deferred_scopes WHERE volume_id = ?1 AND normalized_path = ?2 AND stamp < ?3;",
-            params![volume_id, path.to_lowercase(), walk_started],
+            "DELETE FROM deferred_scopes
+             WHERE volume_id = ?1
+               AND (normalized_path = ?2 OR (normalized_path >= ?3 AND normalized_path < ?4))
+               AND stamp < ?5;",
+            params![
+                volume_id,
+                normalized,
+                format!("{prefix}\\"),
+                format!("{prefix}]"),
+                walk_started
+            ],
         )
         .map(|_| ())
         .map_err(|e| e.to_string())
@@ -3053,6 +3089,22 @@ mod tests {
         std::thread::sleep(Duration::from_millis(5));
         db.clear_deferred_scope(VOLUME, "C:\\Work\\Cit", unix_millis()).unwrap();
         assert!(scopes(&db, VOLUME).is_empty());
+        assert_eq!(scopes(&db, "other").len(), 1);
+        // A walk covers the scopes below its path, not a sibling with the same
+        // name start, and a volume root covers the whole volume.
+        let nested = ["C:\\Work\\Cit", "C:\\Work\\Cit\\Deep\\Er", "C:\\Work\\Cit2", "C:\\Other"];
+        let changes: Vec<_> = nested.iter().map(|path| (path.to_string(), true)).collect();
+        db.update_deferred_scopes(VOLUME, &changes).unwrap();
+        std::thread::sleep(Duration::from_millis(5));
+        db.clear_deferred_scope(VOLUME, "C:\\Work\\Cit", unix_millis()).unwrap();
+        assert_eq!(scopes(&db, VOLUME), vec!["C:\\Other".to_string(), "C:\\Work\\Cit2".to_string()]);
+        // A nested record newer than the walk stays.
+        std::thread::sleep(Duration::from_millis(5));
+        let started = unix_millis();
+        std::thread::sleep(Duration::from_millis(5));
+        db.update_deferred_scopes(VOLUME, &[("C:\\Other\\New".to_string(), true)]).unwrap();
+        db.clear_deferred_scope(VOLUME, "C:\\", started).unwrap();
+        assert_eq!(scopes(&db, VOLUME), vec!["C:\\Other\\New".to_string()]);
         assert_eq!(scopes(&db, "other").len(), 1);
         // A removed volume takes its scopes along.
         db.remove_volume("other").unwrap();
