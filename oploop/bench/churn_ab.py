@@ -37,10 +37,12 @@ from catalog_ab import rank_sum_p  # noqa: E402
 REPO = Path(__file__).resolve().parents[2]
 
 
-def run_once(exe: str, generator: str, data: str, tree: str, settle: float, recording: str | None = None) -> dict:
+def run_once(exe: str, generator: str, data: str, tree: str, settle: float, recording: str | None = None,
+             ballast: int = 0) -> dict:
     proc = subprocess.Popen(
         [exe, data, tree, "--settle", str(settle), "--generator", generator]
-        + (["--recording", recording] if recording else []),
+        + (["--recording", recording] if recording else [])
+        + (["--ballast", str(ballast)] if ballast else []),
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
     )
     handle = psutil.Process(proc.pid)
@@ -104,6 +106,7 @@ def main() -> None:
     parser.add_argument("--tree", default=str(REPO / "target/tmp/bench/churn-tree"))
     parser.add_argument("--settle", type=float, default=30.0)
     parser.add_argument("--recording", help="replay this slice of an `fsevents.py record` file, not the built-in script")
+    parser.add_argument("--ballast", type=int, default=0, help="static files below work\\hi\\ballast (a home folder)")
     parser.add_argument("--rounds", type=int, default=2, help="A B B A rounds (2 runs per side each)")
     parser.add_argument("--out", help="append the raw runs as JSON lines")
     args = parser.parse_args()
@@ -114,7 +117,7 @@ def main() -> None:
     for round_number in range(args.rounds):
         for side in order:
             exe = str(Path(args.a if side == "A" else args.b).resolve())
-            summary = run_once(exe, generator, args.data, args.tree, args.settle, args.recording)
+            summary = run_once(exe, generator, args.data, args.tree, args.settle, args.recording, args.ballast)
             runs[side].append(summary)
             converged = summary["converged_ms"]
             print(

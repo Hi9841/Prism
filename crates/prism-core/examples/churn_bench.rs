@@ -20,6 +20,15 @@
 //! add are made before the watcher starts. A path counts as a folder when
 //! another recorded path lies below it.
 //!
+//! With `--ballast <files>` the run first makes that many files (100 per folder) below
+//! `<tree>\work\hi\ballast`: a large static subtree, as a home folder is, so that a
+//! repair walk of `work\hi` costs what a walk of `C:\Users\hi` costs. Replay a recording
+//! whose paths start with `hi\` to put the churn below it.
+//!
+//! With `--sweep-at <seconds>` a thread starts with the child, waits that long, and runs
+//! a full sweep of the tree (`sync_volume`) while the replay goes on. The watcher buffers
+//! its events during the sweep.
+//!
 //! The last line is a JSON summary. At `MARK <phase>` lines the process waits
 //! for one line on stdin, so a runner can sample it from outside.
 
@@ -477,7 +486,7 @@ fn verify_in_child(data_dir: &Path, tree: &Path) -> (usize, usize, Vec<String>) 
 }
 
 fn main() {
-    let usage = "usage: churn_bench <data folder> <test tree> [--settle SECONDS] [--generator EXE] [--recording FILE]";
+    let usage = "usage: churn_bench <data folder> <test tree> [--settle SECONDS] [--generator EXE] [--recording FILE] [--ballast FILES] [--sweep-at SECONDS]";
     let mut args = std::env::args().skip(1).collect::<Vec<_>>();
     match args.first().map(String::as_str) {
         Some("--generate") => return generate(Path::new(args.get(1).expect(usage))),
@@ -490,6 +499,8 @@ fn main() {
         }
         _ => {}
     }
+    let mut ballast = 0u64;
+    let mut sweep_at: Option<f64> = None;
     let mut settle = 30.0;
     let mut generator = std::env::current_exe().expect("own path");
     let mut recording: Option<PathBuf> = None;
@@ -497,6 +508,8 @@ fn main() {
         let value = args.pop().expect(usage);
         match args.pop().expect(usage).as_str() {
             "--settle" => settle = value.parse().expect(usage),
+            "--ballast" => ballast = value.parse().expect(usage),
+            "--sweep-at" => sweep_at = Some(value.parse().expect(usage)),
             "--generator" => generator = PathBuf::from(value),
             "--recording" => recording = Some(std::fs::canonicalize(&value).expect("recording")),
             _ => panic!("{usage}"),
@@ -516,6 +529,13 @@ fn main() {
     make_dir(&work);
     if let Some(recording) = &recording {
         replay_setup(&tree, recording);
+    }
+    for number in 0..ballast {
+        let folder = work.join("hi").join("ballast").join(format!("d{:05}", number / 100));
+        if number % 100 == 0 {
+            make_dir(&folder);
+        }
+        write_file(&folder.join(format!("f{number:07}.bin")));
     }
 
     let host = Arc::new(BenchHost { data_dir: data_dir.clone(), events: AtomicU64::new(0) });
@@ -547,6 +567,13 @@ fn main() {
         Some(recording) => child.arg("--replay").arg(&tree).arg(recording),
         None => child.arg("--generate").arg(&tree),
     };
+    if let Some(seconds) = sweep_at {
+        let (index, volume) = (index.clone(), volume.clone());
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_secs_f64(seconds));
+            index.sync_volume(&volume, false);
+        });
+    }
     let status = child.status().expect("run the generator");
     assert!(status.success(), "the generator failed");
     let generated = Instant::now();
