@@ -1541,3 +1541,156 @@ each flush (replay: bytes written -36%, CPU -24%), F-005 a walk writes no row fo
 differences in 11 runs). Reverted: F-006. Floor: typecheck pass, clippy 10 / 24 / 1, judge 277/277, parity
 journeys 23/23 on the UI changes. Not done: a real-app check on the agent screen (its tool server was not
 available); the owner decisions listed at the end of session E, except the debounce.
+
+
+## Session 2026-11-12 (G): background disk and CPU spikes
+
+Owner report: hidden Prism at 183.7 MB/s disk, 4.9% CPU, "Very high" power (normal 0.9 MB/s, 0.3%).
+Plan, findings and raw-data paths: `oploop/io-spike/` (task_plan.md, findings.md, progress.md).
+
+- Journey G1: catalog cost while files change, hidden app (`churn_bench` replay of a real 180 s slice of
+  `C:\Users\hi` events, `--ballast N` static files below `work\hi` as the home folder; driver
+  `C:\Users\hi\prism-scratch\io\run_ab.sh`). Metrics: CPU ms, read MiB, largest repair walk; gate:
+  0 catalog differences at the end.
+- Floor: `cargo test -p prism-core` 44/44 (after the change; 45 before, one retry test deleted with the
+  retry). Judge: cannot build at HEAD (89d02ea3 put `use gpui::SharedString` in prism-ui pure types);
+  pre-existing, not in this loop; the judge adapter does not link prism-core.
+
+### G-001 Bound deferral by catalog rows; remove the incomplete-walk retry
+
+- Profile (live, owner's 1.0.25, `io\mon.log` + stack dump): `FileIndex::request_scope_repair` ->
+  `scanner::repair_scope` on `C:\Users\hi` (4,582,780 of ~4.7 M rows): ~3 min at 35-65% of a core,
+  50-150 MiB/s reads, then again 30 s later (Incomplete retry; 4 folders always deny access).
+- Cause: `watcher.rs` `hot_scopes` defers the lowest ancestor with >= 512 unclaimed events in one flush;
+  diffuse churn climbs to the home folder (simulated on real events: 5 of the hidden windows in 142 s).
+  Nothing bounds the walk it schedules. `mod.rs` retried Incomplete walks (30 s, 2 min, 8 min).
+- Hypothesis: defer only scopes with <= 50,000 catalog rows below (useful scopes: 0-3,829 rows; harmful:
+  185 k-4.58 M) and drop the retry; G1 reads and CPU should fall when the home subtree is large, with no
+  walk of `work\hi`.
+- Change (Sonnet subagent, uncommitted): `MAX_DEFERRED_SCOPE_ROWS`, `Database::rows_below_at_most` (count
+  outside the queue lock), `take_all` no longer defers; retry, `ScanOutcome.complete`, `repair_scope`
+  removed (mod.rs +30/-135).
+- Result: ballast 100 k, A B B A n=2/side: CPU 4969/4875 -> 5531/5922 ms, read 257.6/257.4 ->
+  270.1/233.7 MiB; A walks work\hi (126 k entries) once a run, B never (largest walk 8,980).
+  Ballast 1 M, n=1/side: CPU 7906 -> 7078 ms, read 735 -> 500 MiB; A walk 1,035,400 entries.
+  0 differences in all runs. Capped count on the real catalog: 250-270 ms cold, 3-12 ms warm.
+- Repeat at 1 M (A C C A, C = G-001 + G-002; raw `io\result-big2-*.txt`): A CPU 5407/7281 ms, read
+  728.1/750.1 MiB; C CPU 4000/4235 ms, read 483.9/488.8 MiB. All 1 M runs: A n=3 CPU 5.4-7.9 s (median
+  7.3), read 728-750 MiB; fix n=3 CPU 4.0-7.1 s (median 4.2), read 484-500 MiB (-34%, ranges do not
+  overlap). n is too small for a rank-sum p < 0.05; the read drop is the same in every pair.
+- Decision: KEEP. At the owner's real size (4.58 M rows, 4 walks) the cost removed is minutes of disk and
+  CPU per deferral; at a 126 k home the fix costs +0.8 s CPU per 180 s (near break-even).
+
+### G-002 A walk covers the deferred records below it (pattern check of G-001)
+
+- Found by the pattern check: nested records (`C:\Users\hi` and `...\AppData\Local` in the owner's catalog)
+  are requeued as two walks; `clear_deferred_scope` deletes only the exact path; a full startup sweep is
+  followed by walks of every recorded scope.
+- Change (Sonnet subagent, uncommitted): clear records at and below the walked scope; requeue only
+  top-most records (`PathBuf::starts_with`); after a full sweep, clear the records older than the sweep.
+- Test (end to end, ballast 100 k, catalog copy seeded with `work\hi` and `work\hi\ballast`, stamp 1):
+  G-001 only walked both after the startup sweep (101,000 + 119,512 entries), read 380 MiB; with G-002 no
+  walk, read 242 MiB. Records left: none in both; 0 differences.
+- Decision: KEEP.
+- Residual instances, not changed: a failed folder rename walks `to.parent()` recursively (watcher.rs
+  ~1124; needs a folder rename onto existing rows, rare); queue collapse merges dirty scopes upward (only
+  above ~21 k events/s, and those events are lost, so a walk is required).
+
+### Session G summary (2026-11-12)
+
+Kept (uncommitted on main, owner go-ahead needed): G-001, G-002. Floor: prism-core tests 44/44, release
+build of prism-app and all prism-core examples, clippy no new warnings; judge blocked at HEAD (pre-existing
+prism-ui break). Next hypotheses: (1) an always-on log line for each repair walk over 1 s (scope, entries,
+ms, reason) next to `ui-stall.log`; (2) remember a rejected scope for its deferral period, so the capped
+count does not run at each hot flush (3-12 ms warm, 250 ms cold, on the shared reader); (3) a failed folder
+rename walks `to.parent()` recursively: walk `to` plus the parent's direct children only.
+
+### G, wide metrics (owner: "lower on all metrics, disk read, GPU, power")
+
+Driver `C:\Users\hi\prism-scratch\io\abrun.py` (raw `io\wide-wide2.jsonl`), ballast 1 M, C A A C C A.
+Between the ready and settled marks: bench CPU and I/O, process cycles, peak private bytes / threads /
+handles (100 ms), GPU engine running time of the bench pid, RAPL package energy (system-wide).
+
+| metric | A (HEAD) n=3 | C (G-001+G-002) n=3 |
+|---|---|---|
+| read MiB | 723.2 / 722.5 / 713.5 | 492.3 / 492.2 / 512.3 |
+| Gcycles | 20.04 / 25.86 / 24.58 | 18.84 / 18.07 / 18.81 |
+| write MiB | 175.2 / 175.3 / 162.5 | 162.4 / 162.4 / 183.4 |
+| converged s | 41.1 / 41.7 / 40.7 | 39.5 / 39.2 / 33.8 |
+| GPU ms | 0 / 0 / 0 | 0 / 0 / 0 |
+| peak private MiB | 182.1 / 181.3 / 181.5 | 262.7 / 230.3 / 240.2 |
+| peak threads / handles | 9-10 / 107-108 | 11 / 109 |
+| package Wh (system) | 5.25 / 5.23 / 6.01 | 5.23 / 5.53 / 6.21 |
+
+Reads -32% and cycles -24% (ranges apart); writes inside the noise; GPU 0 on both (the live 1.0.25 app
+also showed 0 ms GPU in 60 s while it read 5.18 GB); package energy shows no signal (the bench is a small
+part of ~70 W). Peak private memory is +50-80 MiB with C: a regression, under investigation (timeline run).
+
+### G, memory question resolved; review round 1 (Opus 5.5 high)
+
+- 1 M memory maps at settle (`io\memmap-mm1m-1-C.txt`, `io\memmap-mm1mA-1-A.txt`): C 199.2 MiB, A 164.6 MiB.
+  Every large C buffer is x1.19-1.22 of A's (18.64 -> 22.18, 47.55 -> 58.11 MiB) = the 1 M ballast rows on a
+  ~4.8 M-row name index. In A all replay events are deferred, so no flush calls `sync_names`: A's name
+  index never takes the ballast rows in the window (stale index, not a saving). Not a regression of G-001.
+  Peak above settle (+10-60 MiB): `Names::reserve` grows by max(extra, len/32), so a big append leaves no
+  headroom and the next small append reallocates every buffer (pre-existing).
+- Review round 1: no blocker. Taken: (1) memo rejected scopes + reject ancestors without a count (reader
+  mutex shared with search); (2) re-record in-memory deferred scopes after a clear; (3) filter queued
+  events in `defer_scopes`; (4) collapse during sweep buffering can merge dirty scopes up to the home
+  (reproduce first: harness `--sweep-at`); always-on `catalog-walks.log`. Not taken: Err/stall retry
+  (6 h sweep covers; subtract), ratio bound (fixed cap separates the observed scopes by >10x).
+- Round 2 implementation delegated (Sonnet 5.5 high), with the name-index headroom fix (extra + len/32).
+
+### G-003 (in progress) Broad repair after a full sweep under dense churn (review finding 4)
+
+- Harness: `churn_bench --sweep-at S` (full sweep while the replay runs; the watcher buffers).
+- Reproduced (D = G-001+G-002+round 2, 1 M ballast, dense Better-Cargo slice prefixed `hi\`, 222 k events
+  in 60 s, `--sweep-at 10`): repair walk of `\tree\work` (shard root) 1,073,943 entries, 23 s; run read
+  4.75 GB, 162 G cycles; 0 differences. Control without `--sweep-at`: largest walk 95 entries, read 921 MiB,
+  46 G cycles. 180 s slice (~477 ev/s) with `--sweep-at 60`: no broad walk.
+- Review round 2 (Opus 5.5 high): no blocker in round 2. The walked scope equals the reader's shard root,
+  so the cause may be a kernel-buffer overflow of the reader (collapsed pushes do `is_dir` under the queue
+  lock on the reader thread) rather than the dirty-scope merge. Debug lines added (temporary) at the reader
+  overflow and the collapse; rerun in progress. Design pick (agreed): Candidate A, run the bounded deferral
+  on the queue while buffering; only when the volume had a complete sweep before (first index: counts are 0).
+- Debug runs (`catalog_debug` lines at the reader overflow and the collapse, kept; a temporary line at
+  each name-index load, removed): 2 runs of the same `--sweep-at 10` case: 0 reader overflows; one collapse (6 ms) merged to
+  `...\cit` -> walk 153-157 k entries, 8-9 s; no walk of `\tree\work`. Name index: catch-ups only
+  (0-858 ms), no full reload. The extra reads (~5 GB vs ~1 GB) come from the mid-churn sweep itself
+  (t=10-33 s in the read timeline), not from walks. The one `\tree\work` walk is not reproduced.
+- Decision so far: no G-003 code. Candidate A would defer `cit` and walk it after quiet: the same walk as
+  the collapse gives now, so no proven gain. A third repro run and a final C vs D check are running.
+- Third repro run: 1 reader overflow -> repair walk of `\tree\work` 1,160,685 entries, 10 s, run read
+  6.23 GB; the collapse merged only to `...\cit`. Cause confirmed (review round 2 theory): collapsed pushes
+  do `is_dir` under the queue lock on the reader thread; with new sandbox folders per event and a busy
+  disk the reader falls behind and the 512 KB kernel buffer overflows -> `Overflow(shard root)`.
+  2 of 4 sweep-under-churn runs. Fix (round 3, Sonnet): lexical parents on the reader, existing-folder
+  resolution on the flusher; deletes the reader's parent memo.
+- Round 2 vs round 1 (standard slice, 1 M, C D D C): read 517/518 -> 501/507 MiB; Gcycles 18.6/20.4 ->
+  22.4/25.8; converged 32/33 -> 42/37 s; peak private 210/210 -> 212/219 MiB; 0 differences. The
+  name-index headroom change did not lower the peak: REVERTED (OpLoop rule). The memo, re-record and
+  queued-event filter are correctness/latency fixes from the review (not visible in this bench); kept.
+- Review round 3 (Opus 5.5 high, final diff): no blocking defect. Taken: F1 keep only top-most dirty
+  scopes after the flusher resolves them (a gone `cit\box7` resolves to `cit` while `cit\keep` stays:
+  two walks); F3 a scope outside the root stays as is (Skipped), not a whole-volume walk. Gate F2: the
+  round-2 cycle rise must not show in the final check. Accepted: F4 (a gone folder resolves to a large
+  parent: correct, as before), F5 (debug lines stay).
+- Round 4 (Sonnet): `dirty_scopes.dedup_by(starts_with)` after the path sort; `nearest_existing_folder`
+  returns an outside scope unchanged. Gates: build, prism-app build, tests 44/44, clippy no new warnings.
+- Final gate on the final tree (F), sweep under dense churn, 4 runs (raw `io\ab-sweepF.log`): 0 reader
+  overflows, 0 shard-root walks (before: 2 of 4 runs, 1.07-1.16 M entries); largest walk 153-162 k
+  entries (`cit`, from the queue collapse); read 4.75-5.02 GB (the mid-churn sweep itself), 101.5-125.8
+  Gcycles; 0 differences. Tests 44/44; clippy 13 warnings, all old.
+- NOT RUN: the F C C F check on the standard slice (review gate F2: round 2 showed 22.4/25.8 Gcycles
+  against 18.6/20.4, n=2, unexplained; A alone ranged 20.0-28.3). The owner asked to release now. Next
+  session: run `abrun.py finalF 1000000 F C C F`; if F is above C's range, bisect memo / re-record /
+  queued-event filter.
+
+### Session G summary, final (2026-11-13)
+
+Kept and released as 1.0.26: G-001 (row-bounded deferral, no incomplete-walk retry), G-002 (a walk covers
+the records below it), review fixes (rejected-scope memo, re-record after a clear, queued-event filter,
+top-most dirty scopes, outside-root guard), G-003 (no file system call on the reader thread),
+`catalog-walks.log`. Reverted: name-index headroom. Open: F2 check above; first index during buffering
+is not row-bounded (no code added); a record can be lost if the process ends between an outer clear and
+an inner walk (low).
