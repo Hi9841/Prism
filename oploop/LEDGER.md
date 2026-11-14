@@ -1840,3 +1840,31 @@ H5 new file to catalog: owner's 1.0.26 (directory backend) 11.0 s with the palet
 - Gates: check pass; prism-core tests 44/44; `churn_bench` (driver `prism-scratch/io/run_h004.sh`, ballast
   100 k): `rec-hi-180s` 0 differences; `rec-bc-hi-60s --sweep-at 10` twice: 0 differences (exit 0 all).
 - Decision: KEEP.
+
+### Session H summary (2026-11-14)
+
+| Journey | Before | Now | Change | n, noise |
+|---|---|---|---|---|
+| Clean Windows (no VC++ runtime): Prism starts | no ("VCRUNTIME140.dll was not found") | yes | fixed | sandbox |
+| Clean Windows / Remote Desktop: Win-key mode | fails (2 toasts) | works | fixed | sandbox, real Win key |
+| H1 Win key to first frame, warm (sandbox) | 71.5 ms (p95 73.8) | 37.9 ms (p95 39.3) | -47% | 38 a build, p 3e-12 |
+| H2c Win key to closed | 35.6 ms (p95 49.1) | 6.5 ms (p95 8.1) | -82% | 38 a build |
+| H1 first open after a start | 71.0 ms (58-77) | 73.7 ms (62-77) | none | 6 a build |
+| H3 first index, 90,767 entries | 6.2 s (5.8-6.6), kernel 5.1 s | 1.8 s (1.73-1.84), kernel 1.1 s | -70% | 3 a side |
+| H4 functest (agent desktop) | 22/30 | 26/30 (4 environment) | harness fixed | 1 run |
+
+Kept: beedd8aa, d7772ca9, 81ea4b73 (fixes), b30dd2ab (H-001), 0cb56711 (H-002), 841eca6e (H-004); bench
+0107d70e, 2ce58c44. Reverted: H-003. Floor before and after: `cargo check --workspace --all-targets` pass,
+`cargo test -p prism-core` 44/44; judge not run (it does not build at HEAD since 89d02ea3, session G).
+Final build (`target/oploop-h-builds/final`): `winchord.py` 8 cases ALL SAME.
+
+Open for the owner: I3 (the fallback shortcut after a Win-mode failure is Win itself); I5 (the rare
+"palette does not show typing" freeze behind the 1.0.24 revert of the hidden warm frame); I6 (show the real
+error of "Couldn't open item"); P1 slim catalog rows (offline estimate on 90,767 rows: files + indexes
+602 -> 122 bytes a row, -80%; the owner's catalog.db is 5.9 GB; a format change with a migration).
+
+Next hypotheses: (1) the field Win-key stalls (1.5-3.2 s, `WrPageIn`, 2-14 hard faults, little own I/O, right
+after an update) are first-touch page-ins of new code: prefetch the image at startup with low I/O priority
+(harness: cold file cache plus a busy disk); (2) `ShowWindow` is 6.5 ms of `palette_present` and raise 1.4 ms
+in the sandbox: measure on a GPU desktop before any change; (3) the MFT backend reads the journal every
+5 s (3-5 s new-file latency in the sandbox): wait on the journal instead of a timer.
