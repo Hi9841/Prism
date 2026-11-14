@@ -1694,3 +1694,73 @@ top-most dirty scopes, outside-root guard), G-003 (no file system call on the re
 `catalog-walks.log`. Reverted: name-index headroom. Open: F2 check above; first index during buffering
 is not row-bounded (no code added); a record can be lost if the process ends between an outer clear and
 an inner walk (low).
+
+## Session 2026-11-14 (H): Win key to result, every state, indexing
+
+Owner: "fix all the issues within Prism, test every state, every button, every app, indexing speed;
+optimize; improve the time from the Windows key to when you chose or have it closed". Branch `oploop-h`
+from release 1.0.26 (ac41e6cc) in `C:\Users\hi\Prism`.
+
+Rules new in this session:
+- GUI work runs only on the agent desktop (Windows Sandbox, `C:\Users\hi\.t3\scratch\agent-desktop`):
+  the owner's desktop, cursor, focus and installed Prism are never touched. The old bench (`bench.py`,
+  `functest.py`) opens the palette on the owner's desktop; in this session it runs inside the guest, where
+  the guest's `%LOCALAPPDATA%\Prism\prism.exe` is the "owner" launcher and every real effect is discarded.
+- Headless benches (`catalog_sweep`, `catalog_bench`, `churn_bench`) run on the host.
+- Builds: toolchain 1.99.1 (`RUSTUP_TOOLCHAIN=1.99.1-x86_64-pc-windows-msvc`); the host `stable` toolchain
+  lost `rustc.exe` on 2026-11-12. Script: `target/tmp/h-build.sh`.
+
+Field data at the start (owner's 1.0.26, `%LOCALAPPDATA%\Prism\logs`):
+- `ui-stall.log`: 4 Win-key opens on 2026-11-13, about 1 min after a start: 1537, 3207, 533, 257 ms. UI thread
+  `Waiting/WrPageIn` in every sample (2-14 hard faults, 776-4,119 page faults); the start loads the name
+  index (about 4.3 GB of reads, session E).
+- `palette-focus.log`: foreground 2-9 ms after the open in normal use (one 47 ms with an Explorer request).
+- `catalog-walks.log`: full sweep of C:\ 5,037,020 entries in 244.7 s; repair walks 0-67 k entries.
+- `catalog.db` 5.9 GB (+16 MB WAL).
+
+Issues found before the loop (to fix or to ask about):
+- I1 On a clean Windows 11 24H2 (the sandbox) Win-key mode fails: "Explorer Start-command bridge
+  installation failed", shown in TWO identical toasts. Release builds drop the real cause (`debug_trace`
+  is a no-op without debug assertions).
+- I2 Prism does not start on a Windows without the VC++ Redistributable: `prism.exe` imports
+  `VCRUNTIME140.dll`, the NSIS installer ships only `prism.exe` (the WebView2 section is gone; no redist).
+  Seen in the sandbox (clean 24H2): "The code execution cannot proceed because VCRUNTIME140.dll was not
+  found". The owner's PC has the runtime from other software. Candidate fix: static CRT.
+
+Fixes before the loop (kept, gates: `cargo check --workspace --all-targets` pass, `cargo test -p prism-core`
+44/44 = floor): beedd8aa static C runtime for prism.exe and the hook DLL (I2, and I1 cause 1); d7772ca9
+Win-key mode in Remote Desktop sessions (UIA process id 0 for the taskbar's XAML elements, I1 cause 2) and
+`win-key.log`; 81ea4b73 an identical toast shows once. Proof: in the sandbox, a real Win key now opens the
+palette (before: Start menu, error toast twice).
+- I3 (owner decision): when Win-key mode fails, the fallback shortcut is the default, which is "Win" itself,
+  so the user has no working shortcut.
+- I4 (low): a permanent install error is retried every 250 ms for 2 minutes at startup (each attempt writes
+  the hook DLL to %TEMP%).
+
+Baseline H1 (`winkey.py open`, build h-fix = beedd8aa..81ea4b73, sandbox, 2 sessions x 20): Win key to first
+painted frame 71.9 ms median (p95 73.8, n=38 warm; first open 78.4); window visible at 38.0 ms; settled =
+first; close (second Win key to hidden) 35.5 ms (p95 48.5); foreground 40/40. App events in the window:
+`palette_toggle` 0.04 ms, `palette_present` 6.1 ms. The sandbox renders with WARP (no vGPU), so the
+visible-to-first-frame part (34 ms) is larger than on the owner's GPU.
+
+### H-001 Toggle a plain Win tap as soon as no raw input is queued
+
+- Journey: H1.
+- Profile: key to visible 38 ms; of it, `WIN_TOGGLE_RELEASE_GRACE` (win_key.rs:68) waits 30 ms after every
+  Win-up before the toggle is queued; toggle + present are 6 ms.
+- Hypothesis: the grace exists for a chord key-up that is queued after Win-up while `GetAsyncKeyState`
+  already shows the key up (a key still down is caught by `blocked_keys`). Such a key-up is already in the
+  thread's raw-input queue when the toggle is due. Toggling when `GetQueueStatus(QS_RAWINPUT)` shows no
+  queued raw input, 3 ms after Win-up, keeps the chord rule and should save about 25-27 ms of H1.
+- Test: `winchord.py` (end to end, guest): tap, Win+E, Win released 0/5/15/40 ms before E, Ctrl+Win, a key
+  typed 5 ms after a tap: same outcome (palette toggled or not, Explorer opened or not) on A and B.
+- Change: `WIN_TOGGLE_QUIET_MIN` 3 ms; `take_if_ready(now, input_queued)` fires at the quiet time when
+  `GetQueueStatus(QS_RAWINPUT)` is empty; a key-down after Win-up clears the quiet time (full grace as
+  before); the pump wait rounds up to whole ms.
+- Test: `winchord.py`, 8 cases x 3 reps, A and B: ALL SAME (tap: palette; Win+E and Win released 0/5/15/40 ms
+  before E: Explorer, no palette; Ctrl+Win: nothing; a key 5 ms after a tap: palette).
+- Result (raw `results/raw/20261114-155251-winkey-open`, interleaved, 2 x 20 a build): H1 first frame
+  71.5 -> 53.5 ms median (p95 73.8 -> 56.8, n=38, rank-sum p 3e-12); close 35.6 -> 20.6 ms (p 6e-14);
+  foreground 38/38 both. Less than the 27 ms estimate: frames land on the display cycle (~16.7 ms).
+- Gates: check pass, prism-core tests 44/44.
+- Decision: KEEP.

@@ -56,9 +56,9 @@ use windows::Win32::UI::Input::{
 use windows::Win32::UI::WindowsAndMessaging::{
     ChangeWindowMessageFilterEx, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW,
     EnumChildWindows, FindWindowW, GetClassNameW, GetShellWindow, GetWindowRect,
-    GetWindowThreadProcessId, IsWindowVisible, MsgWaitForMultipleObjectsEx, PeekMessageW,
+    GetQueueStatus, GetWindowThreadProcessId, IsWindowVisible, MsgWaitForMultipleObjectsEx, PeekMessageW,
     PostThreadMessageW, RegisterClassW, RegisterWindowMessageW, SetWindowsHookExW,
-    TranslateMessage, UnhookWindowsHookEx, HHOOK, MSG, MSGFLT_ALLOW, PM_REMOVE, QS_ALLINPUT,
+    TranslateMessage, UnhookWindowsHookEx, HHOOK, MSG, MSGFLT_ALLOW, PM_REMOVE, QS_ALLINPUT, QS_RAWINPUT,
     RI_KEY_BREAK, WH_GETMESSAGE, WH_MOUSE, WM_APP, WM_INPUT, WM_KEYDOWN, WM_KEYUP, WM_SYSKEYDOWN,
     WM_SYSKEYUP, WM_WTSSESSION_CHANGE, WNDCLASSW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_POPUP,
 };
@@ -66,6 +66,10 @@ use windows::Win32::UI::WindowsAndMessaging::{
 const ACTION_MESSAGE: u32 = WM_APP + 1;
 const TOGGLE_DEBOUNCE_MS: u64 = 80;
 const WIN_TOGGLE_RELEASE_GRACE: Duration = Duration::from_millis(30);
+/// A chord key released just before the Win-key snapshot already has its key-up queued as raw
+/// input. With no raw input queued, a plain Win tap toggles after this short margin instead of
+/// the full release grace (Win key to palette: about -27 ms, session H).
+const WIN_TOGGLE_QUIET_MIN: Duration = Duration::from_millis(3);
 /// The Start button rect only needs refreshing occasionally; the UIA query is
 /// expensive and runs on Explorer's side.
 const START_RECT_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
@@ -437,6 +441,8 @@ struct PendingWinToggle {
     blocked_keys: [bool; 256],
     post_release_keys: [bool; 256],
     deadline: Option<Instant>,
+    /// Earliest toggle when no raw input is queued (`WIN_TOGGLE_QUIET_MIN` after the arm).
+    quiet_at: Option<Instant>,
 }
 
 impl PendingWinToggle {
@@ -445,6 +451,7 @@ impl PendingWinToggle {
         blocked_keys: [false; 256],
         post_release_keys: [false; 256],
         deadline: None,
+        quiet_at: None,
     };
 
     fn arm(&mut self, side: WinSide, blocked_keys: [bool; 256], now: Instant) {
@@ -452,6 +459,7 @@ impl PendingWinToggle {
         self.blocked_keys = blocked_keys;
         self.post_release_keys.fill(false);
         self.deadline = Some(now + WIN_TOGGLE_RELEASE_GRACE);
+        self.quiet_at = Some(now + WIN_TOGGLE_QUIET_MIN);
     }
 
     fn cancel(&mut self) {
@@ -459,6 +467,7 @@ impl PendingWinToggle {
         self.blocked_keys.fill(false);
         self.post_release_keys.fill(false);
         self.deadline = None;
+        self.quiet_at = None;
     }
 
     fn observe_key(&mut self, key: u16, is_down: bool, now: Instant) {
@@ -475,6 +484,8 @@ impl PendingWinToggle {
             if self.deadline.is_none() {
                 self.deadline = Some(now + WIN_TOGGLE_RELEASE_GRACE);
             }
+            // New typing after Win-up: wait for its key-up order, never the quiet shortcut.
+            self.quiet_at = None;
             return;
         }
         if self.post_release_keys[key] {
@@ -485,9 +496,11 @@ impl PendingWinToggle {
         self.cancel();
     }
 
-    fn take_if_ready(&mut self, now: Instant) -> Option<WinSide> {
+    /// `input_queued`: raw input waits in this thread's queue (it may hold a chord key-up).
+    fn take_if_ready(&mut self, now: Instant, input_queued: bool) -> Option<WinSide> {
         let deadline = self.deadline?;
-        if now < deadline {
+        let quiet = !input_queued && self.quiet_at.is_some_and(|at| now >= at);
+        if now < deadline && !quiet {
             return None;
         }
         if self.blocked_keys.iter().any(|down| *down) {
@@ -498,13 +511,16 @@ impl PendingWinToggle {
         }
         let side = self.side.take();
         self.deadline = None;
+        self.quiet_at = None;
         side
     }
 
     fn wait_duration(&self, now: Instant) -> Option<Duration> {
-        self.side
-            .and(self.deadline)
-            .map(|deadline| deadline.saturating_duration_since(now))
+        let next = match (self.deadline, self.quiet_at) {
+            (Some(deadline), Some(quiet)) => Some(deadline.min(quiet)),
+            (deadline, _) => deadline,
+        };
+        self.side.and(next).map(|at| at.saturating_duration_since(now))
     }
 }
 
@@ -862,7 +878,7 @@ unsafe fn run_pump(ready: HookReady) {
             .min(START_RECT_REFRESH_INTERVAL);
         let _ = MsgWaitForMultipleObjectsEx(
             None,
-            wait.as_millis().min(u128::from(u32::MAX)) as u32,
+            wait.as_micros().div_ceil(1000).min(u128::from(u32::MAX)) as u32,
             QS_ALLINPUT,
             Default::default(),
         );
@@ -2083,7 +2099,8 @@ fn shell_start_fallback_wait() -> Option<Duration> {
 
 fn flush_pending_win_toggle() {
     if let Ok(mut pending) = PENDING_WIN_TOGGLE.lock() {
-        let side = pending.take_if_ready(Instant::now());
+        let input_queued = unsafe { GetQueueStatus(QS_RAWINPUT) } >> 16 != 0;
+        let side = pending.take_if_ready(Instant::now(), input_queued);
         if let Some(side) = side {
             // Keep the pending lock through enqueueing. Disable/reset paths
             // take this same lock after clearing ACTIVE, so a candidate either
