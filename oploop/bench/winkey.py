@@ -108,6 +108,15 @@ def purge_standby() -> None:
         raise OSError(f"purge standby list: NTSTATUS 0x{status & 0xFFFFFFFF:08X}")
 
 
+def memory_pressure(mib: int, hold_s: float = 2.0) -> None:
+    """A separate process takes `mib` of RAM and touches every page, then exits: Windows trims and
+    pages out the hidden app, as when a game or a build uses the memory."""
+    import subprocess
+    code = (f"import time; n={mib}*1048576; b=bytearray(n); b[::4096]=b'\\x01'*len(range(0,n,4096)); "
+            f"time.sleep({hold_s})")
+    subprocess.run([sys.executable, "-c", code], check=False)
+
+
 def wait_gone(hwnd: int, t0: float, timeout_ms: float = 3000) -> float | None:
     while bench.now_ms() - t0 < timeout_ms:
         if not winapi.is_visible(hwnd):
@@ -125,7 +134,7 @@ def open_once(app: apps.TestApp, cap: winapi.Capturer, run: int, label: str) -> 
     win_key()
     first, settled, visible, frames, _ = bench.watch(cap, t0, None, quiet_ms=700, timeout_ms=6000)
     fg = winapi.foreground() == app.palette
-    row = {"journey": "h1", "app": app.kind, "label": label, "run": run, "visible_ms": visible, "first_ms": first,
+    row = {"journey": "h1", "app": app.kind, "label": label, "run": run, "unix0": unix0, "visible_ms": visible, "first_ms": first,
            "settled_ms": settled, "frames": frames, "foreground": fg,
            "perf": bench.perf_window(app, unix0, unix0 + (settled or 0) + 50)}
     if first is not None:
@@ -171,10 +180,15 @@ def cmd_tail(args, out: Path, rows: list) -> None:
                         if delay == args.delays[-1]:
                             bench.wait_ready(app, min_s=5)
                             trim(app.pid)
+                            label = "after-trim"
                             if args.purge:
                                 purge_standby()
+                                label += "-purge"
+                            if args.pressure:
+                                memory_pressure(args.pressure)
+                                label += f"-pressure{args.pressure}"
                             time.sleep(1.0)
-                            row = open_once(app, cap, 1, "after-trim-purge" if args.purge else "after-trim")
+                            row = open_once(app, cap, 1, label)
                             row["block"] = block
                             rows.append(row)
                             apps.log(f"{kind} after trim: first {row['first_ms']}")
@@ -269,6 +283,7 @@ def main() -> None:
     parser.add_argument("--delays", type=float, nargs="+", default=[2, 5, 10, 20, 40])
     parser.add_argument("--rows", help="rows.json for summary")
     parser.add_argument("--purge", action="store_true", help="tail: also drop the standby list after the trim")
+    parser.add_argument("--pressure", type=int, default=0, help="tail: MiB another process takes after the trim")
     args = parser.parse_args()
     if args.mode == "summary":
         print(summarize(json.loads(Path(args.rows).read_text(encoding="utf8"))))

@@ -411,7 +411,13 @@ user32.UnregisterHotKey.argtypes = [W.HWND, C.c_int]
 # Context menu rows (x, y) in the window, with the first result row right-clicked at (150, 147).
 MENU = {"open": (260, 169), "admin": (260, 201), "location": (260, 242), "copy_path": (260, 274),
         "pin": (260, 315), "properties": (260, 347)}
-FOOTER = {"updates": (408, 596), "rebuild_index": (447, 596), "refresh_apps": (484, 596), "power": (522, 596)}
+# Footer icons, right-aligned: distance from the window's right edge (measured on a 560 px window).
+FOOTER_FROM_RIGHT = {"updates": 152, "rebuild_index": 113, "refresh_apps": 76, "power": 38}
+
+
+def footer(app: "App", name: str) -> tuple[int, int]:
+    left, top, right, bottom = app.rect()
+    return (right - left) - FOOTER_FROM_RIGHT[name], 596
 
 
 def pids(name: str) -> set[int]:
@@ -647,7 +653,7 @@ def file_search_open(app: App) -> str:
 @test
 def power_menu_opens(app: App) -> str:
     app.open()
-    app.click(*FOOTER["power"], settle=0.8)
+    app.click(*footer(app, "power"), settle=0.8)
     app.shot("power-menu")
     app.key(winapi.VK_ESCAPE, 0.5)
     app.key(winapi.VK_ESCAPE, 0.5)
@@ -659,7 +665,7 @@ def refresh_apps(app: App) -> str:
     apps_json = DATA / "apps.json"
     before = apps_json.stat().st_mtime
     app.open()
-    app.click(*FOOTER["refresh_apps"], settle=1.0)
+    app.click(*footer(app, "refresh_apps"), settle=1.0)
     app.shot("refresh-apps")
     wait_true(lambda: apps_json.stat().st_mtime > before, 30, "Refresh applications did not rewrite apps.json")
     app.key(winapi.VK_ESCAPE, 0.5)
@@ -918,9 +924,10 @@ def check_for_updates(app: App) -> str:
     app.open()
     app.move(300, 300)
     time.sleep(0.6)
-    box = (390, 580, 426, 612)
+    ux, uy = footer(app, "updates")
+    box = (ux - 18, uy - 16, ux + 18, uy + 16)
     before = Image.open(app.shot("updates-before")).convert("L").crop(box)
-    app.click(*FOOTER["updates"], settle=0.3)
+    app.click(*footer(app, "updates"), settle=0.3)
     app.move(300, 300)
     time.sleep(8)
     after = Image.open(app.shot("updates-after")).convert("L").crop(box)
