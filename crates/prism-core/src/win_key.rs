@@ -745,8 +745,9 @@ unsafe fn run_pump(ready: HookReady) {
     let raw_input_window = match create_raw_input_window() {
         Ok(window) => window,
         Err(error) => {
+            let detail = error.clone();
             let _ = ready.send(Err(error));
-            disable_observation("raw keyboard observer registration failed");
+            disable_observation("raw keyboard observer registration failed", &detail);
             return;
         }
     };
@@ -761,8 +762,9 @@ unsafe fn run_pump(ready: HookReady) {
             debug_trace(&format!("bridge-install-error {error}"));
             RAW_OBSERVER_ACTIVE.store(false, Ordering::Release);
             destroy_raw_input_window(raw_input_window);
+            let detail = error.clone();
             let _ = ready.send(Err(error));
-            disable_observation("Explorer Start-command bridge installation failed");
+            disable_observation("Explorer Start-command bridge installation failed", &detail);
             if com_initialized {
                 CoUninitialize();
             }
@@ -905,8 +907,31 @@ pub fn debug_trace(message: &str) {
 #[cfg(not(debug_assertions))]
 pub fn debug_trace(_message: &str) {}
 
-fn disable_observation(reason: &str) {
-    debug_trace(&format!("observation-disabled {reason}"));
+/// `detail` is the underlying error; release builds have no `debug_trace`, so it goes to the
+/// always-on `%LOCALAPPDATA%\Prism\logs\win-key.log` too (this runs on the hook thread).
+fn disable_observation(reason: &str, detail: &str) {
+    debug_trace(&format!("observation-disabled {reason}: {detail}"));
+    // Startup retries the install every 250 ms for up to 2 minutes: log each cause once.
+    static LAST_LOGGED: Mutex<String> = Mutex::new(String::new());
+    let key = format!("{reason}: {detail}");
+    let fresh = LAST_LOGGED.lock().map(|mut last| std::mem::replace(&mut *last, key.clone()) != key).unwrap_or(true);
+    if let Some(dir) = crate::logs::dir().filter(|_| fresh) {
+        #[derive(serde::Serialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Disabled<'a> {
+            unix_ms: u128,
+            version: &'a str,
+            reason: &'a str,
+            detail: &'a str,
+        }
+        let record = Disabled {
+            unix_ms: crate::logs::unix_ms(),
+            version: env!("CARGO_PKG_VERSION"),
+            reason,
+            detail,
+        };
+        crate::logs::append(&dir, "win-key", &record);
+    }
     ACTIVE.store(false, Ordering::SeqCst);
     SHELL_BRIDGE_ACTIVE.store(false, Ordering::Release);
     RAW_MACHINE.lock().map(|mut m| m.reset()).ok();
@@ -1344,6 +1369,25 @@ impl StartButtonLocator {
     }
 }
 
+/// Elements of Explorer's taskbar: its process id, or 0. In a Remote Desktop session (Windows
+/// Sandbox is one) the taskbar's XAML elements report process id 0; every search starts at
+/// Explorer's own taskbar window, so 0 there is Explorer too.
+unsafe fn explorer_process_condition(
+    uia: &IUIAutomation,
+    taskbar_process_id: u32,
+) -> Result<IUIAutomationCondition, String> {
+    let process_id: VARIANT = (taskbar_process_id as i32).into();
+    let explorer = uia
+        .CreatePropertyCondition(UIA_ProcessIdPropertyId, &process_id)
+        .map_err(|error| format!("match Explorer process: {error}"))?;
+    let unreported: VARIANT = 0i32.into();
+    let unreported = uia
+        .CreatePropertyCondition(UIA_ProcessIdPropertyId, &unreported)
+        .map_err(|error| format!("match unreported process: {error}"))?;
+    uia.CreateOrCondition(&explorer, &unreported)
+        .map_err(|error| format!("combine Explorer process conditions: {error}"))
+}
+
 unsafe fn create_automation_start_button(
     taskbar_window: HWND,
     taskbar_process_id: u32,
@@ -1357,10 +1401,7 @@ unsafe fn create_automation_start_button(
     let automation_id_condition = uia
         .CreatePropertyCondition(UIA_AutomationIdPropertyId, &automation_id)
         .map_err(|error| format!("match StartButton AutomationId: {error}"))?;
-    let process_id: VARIANT = (taskbar_process_id as i32).into();
-    let process_condition = uia
-        .CreatePropertyCondition(UIA_ProcessIdPropertyId, &process_id)
-        .map_err(|error| format!("match Explorer process: {error}"))?;
+    let process_condition = explorer_process_condition(&uia, taskbar_process_id)?;
     let condition = uia
         .CreateAndCondition(&automation_id_condition, &process_condition)
         .map_err(|error| format!("combine StartButton identity conditions: {error}"))?;
@@ -1567,10 +1608,7 @@ unsafe fn create_automation_search_button(
         .CreateOrCondition(&id_or4, &cond_taskbar_search)
         .map_err(|error| format!("combine Search conditions: {error}"))?;
 
-    let process_id: VARIANT = (taskbar_process_id as i32).into();
-    let process_condition = uia
-        .CreatePropertyCondition(UIA_ProcessIdPropertyId, &process_id)
-        .map_err(|error| format!("match Explorer process: {error}"))?;
+    let process_condition = explorer_process_condition(&uia, taskbar_process_id)?;
     let condition = uia
         .CreateAndCondition(&id_condition, &process_condition)
         .map_err(|error| format!("combine SearchButton identity conditions: {error}"))?;
