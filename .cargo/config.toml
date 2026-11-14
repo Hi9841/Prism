@@ -1,0 +1,5 @@
+# Link the C runtime statically, so prism.exe starts on a Windows without the VC++ Redistributable
+# (the installer ships only prism.exe). Before 1.0.27 a clean Windows failed with
+# "VCRUNTIME140.dll was not found".
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

@@ -27,6 +27,9 @@ fn build_shell_hook() {
         .arg(target)
         .arg("-Cpanic=abort")
         .arg("-Copt-level=s")
+        // Static C runtime: Explorer loads this DLL, and a PC without the VC++ Redistributable
+        // has no VCRUNTIME140.dll ("The specified module could not be found").
+        .arg("-Ctarget-feature=+crt-static")
         .arg("-o")
         .arg(&output)
         .arg(source)
