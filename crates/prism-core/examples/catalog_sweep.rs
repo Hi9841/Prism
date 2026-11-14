@@ -9,7 +9,8 @@
 //! bytes the process read and wrote. With `--verify`, the catalog rows under
 //! the root are then compared with a fresh walk of the disk (path, folder
 //! flag, write time, size, and parent), and the differences are printed.
-//! With `--rename <old> <new>`, it applies a folder rename that already
+//! With `--fresh`, an empty catalog file gets the root's volume first, so the sweep is a first
+//! index of the root (session H, indexing speed). With `--rename <old> <new>`, it applies a folder rename that already
 //! happened on disk as the watcher does (`Database::rename_file`), instead
 //! of the sweep, and times it.
 
@@ -173,19 +174,27 @@ fn watcher_item(path: &Path) -> ScannedItem {
 
 fn main() {
     let mut args = std::env::args().skip(1);
-    let usage = "usage: catalog_sweep <catalog.db> <root> [--verify] [--rename <old path> <new path>]";
+    let usage = "usage: catalog_sweep <catalog.db> <root> [--verify] [--fresh] [--rename <old path> <new path>]";
     let path = args.next().expect(usage);
     let root = PathBuf::from(args.next().expect(usage));
-    let (mut check, mut rename) = (false, None);
+    let (mut check, mut rename, mut fresh) = (false, None, false);
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--verify" => check = true,
+            "--fresh" => fresh = true,
             "--rename" => rename = Some((args.next().expect(usage), PathBuf::from(args.next().expect(usage)))),
             _ => panic!("{usage}"),
         }
     }
     let db = Arc::new(Database::open(Path::new(&path)).expect("open catalog"));
     let root_text = root.to_string_lossy().to_lowercase();
+    if fresh {
+        let volume = prism_core::catalog::volume::discover_volumes()
+            .into_iter()
+            .find(|v| v.mount_paths.iter().any(|m| root_text.starts_with(&m.to_string_lossy().to_lowercase())))
+            .expect("no volume holds the root");
+        db.upsert_volume(&volume, prism_core::catalog::types::VolumeState::Indexing).expect("add the volume");
+    }
     let volume_id = db
         .get_volume_ids()
         .expect("read volumes")

@@ -198,11 +198,22 @@ def start_installed() -> int:
     return pid
 
 
+# A fresh profile (the agent desktop) has no prism.json until Prism first saves settings:
+# the backup is then this marker, and a restore removes the file again.
+PRISM_JSON_ABSENT = PRISM_JSON_BACKUP.with_name("prism.json.absent")
+
+
 def backup_prism_json() -> None:
     """Saves the owner's current prism.json as the backup for this session."""
     PRISM_JSON_BACKUP.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(PRISM_JSON, PRISM_JSON_BACKUP)
-    log("prism.json backed up")
+    PRISM_JSON_BACKUP.unlink(missing_ok=True)
+    PRISM_JSON_ABSENT.unlink(missing_ok=True)
+    if PRISM_JSON.exists():
+        shutil.copy2(PRISM_JSON, PRISM_JSON_BACKUP)
+        log("prism.json backed up")
+    else:
+        PRISM_JSON_ABSENT.touch()
+        log("prism.json absent (fresh profile)")
 
 
 def check_prism_json() -> bool:
@@ -210,6 +221,12 @@ def check_prism_json() -> bool:
 
     Call it only after `backup_prism_json` in the same session: an older backup would
     overwrite the owner's newer settings."""
+    if PRISM_JSON_ABSENT.exists():
+        if not PRISM_JSON.exists():
+            return True
+        log("prism.json CREATED: removing it (it was absent)")
+        PRISM_JSON.unlink()
+        return False
     if sha256(PRISM_JSON) == sha256(PRISM_JSON_BACKUP):
         return True
     log("prism.json CHANGED: restoring the backup")

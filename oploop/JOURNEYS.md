@@ -112,3 +112,14 @@ The visible result rows of each J3 query, in the two apps.
 - The apps share the owner's app data. Dynamic sections (open windows, recent items) can change between sessions.
 - The GPUI palette did not take the foreground on this activation path (see the results). Typed keys still arrive, because the bench posts them to the window.
 - PrintWindow sees the frame that DWM has. It does not see the time that the monitor shows the frame (no display latency).
+
+## Session H journeys (2026-11-14), on the agent desktop
+
+| ID | Journey | Start | End | Where |
+|---|---|---|---|---|
+| H1 | Win key to palette | `SendInput` VK_LWIN down+up in the guest | first non-blank `PrintWindow` frame of the palette; also "settled" as J2 | guest |
+| H1t | Win key tail | as H1, at 2, 5, 10, 20, 40 s after a start, and after `EmptyWorkingSet` of the hidden app | as H1 | guest |
+| H2 | Win key to choice | Win key, type a query, Enter | palette hidden and the target window shown | guest |
+| H2c | Close | Escape or a second Win key with the palette open | palette hidden (not visible, not cloaked) | guest |
+| H3 | First index of a tree | `catalog_sweep` on an empty catalog, fixed root | JSON summary: wall ms, CPU ms, entries, bytes read/written | host, headless |
+| H4 | Every state | `functest.py` + a screenshot of each state | defects found (count), all tests pass | guest |
