@@ -241,6 +241,8 @@ fn scan_volume_inner(
     queue.push_back((root.to_path_buf(), root_renamed));
 
     let mut batch = Vec::with_capacity(BATCH_SIZE);
+    // REMOVALS_RECEIVED when the folder of the batch's first item was listed.
+    let mut batch_since = 0u64;
     let mut total_scanned = 0u64;
 
     while let Some((dir, any_case)) = queue.pop_front() {
@@ -254,6 +256,8 @@ fn scan_volume_inner(
             continue;
         }
 
+        // Before the listing: a removal received after this point may concern its entries.
+        let listed_at = super::REMOVALS_RECEIVED.load(Ordering::Acquire);
         let listing = match list(&dir) {
             FolderRead::Listed(listing) => listing,
             // Removed since its parent was listed: its removal has its own
@@ -315,6 +319,9 @@ fn scan_volume_inner(
 
             if is_dir {
                 if !unchanged {
+                    if batch.is_empty() {
+                        batch_since = listed_at;
+                    }
                     batch.push(ScannedItem {
                         normalized_path: child_normalized,
                         display_path: child_display,
@@ -329,7 +336,7 @@ fn scan_volume_inner(
                 }
 
                 if batch.len() >= BATCH_SIZE {
-                    flush_file_batch(db, volume_id, plan.generation, &mut batch)?;
+                    flush_file_batch(db, volume_id, plan.generation, &mut batch, batch_since)?;
                     progress_callback(total_scanned);
                 }
 
@@ -350,6 +357,9 @@ fn scan_volume_inner(
                     .extension()
                     .map(|ext| ext.to_string_lossy().to_lowercase());
 
+                if batch.is_empty() {
+                    batch_since = listed_at;
+                }
                 batch.push(ScannedItem {
                     normalized_path: child_normalized,
                     display_path: child_display,
@@ -363,7 +373,7 @@ fn scan_volume_inner(
                 });
 
                 if batch.len() >= BATCH_SIZE {
-                    flush_file_batch(db, volume_id, plan.generation, &mut batch)?;
+                    flush_file_batch(db, volume_id, plan.generation, &mut batch, batch_since)?;
                     progress_callback(total_scanned);
                 }
             }
@@ -391,7 +401,7 @@ fn scan_volume_inner(
         return Err("scan cancelled".to_string());
     }
 
-    flush_file_batch(db, volume_id, plan.generation, &mut batch)?;
+    flush_file_batch(db, volume_id, plan.generation, &mut batch, batch_since)?;
 
     if plan.finish_volume {
         db.finish_volume_scan(volume_id, plan.generation, total_scanned)?;
@@ -406,21 +416,38 @@ fn flush_file_batch(
     volume_id: &str,
     generation: u64,
     batch: &mut Vec<ScannedItem>,
+    since: u64,
 ) -> Result<(), String> {
     // The watcher can rename or remove an entry between the listing and this
-    // write. Drop each item that is gone now, or the walk writes a ghost row.
-    // An idle sweep has almost no changed rows, so this test is cheap. It does
-    // not follow links, and any error except "not found" counts as "there".
-    batch.retain(|item| {
-        !matches!(
+    // write; if it applies the removal first, the walk writes a ghost row. The
+    // test opens each item (about 45 us), 4 of the 6 s of a first index of
+    // 90,767 entries, so it runs only when the watcher received a removal since
+    // the batch's folders were listed (session H). It does not follow links,
+    // and any error except "not found" counts as "there".
+    let gone = |item: &ScannedItem| {
+        matches!(
             std::fs::symlink_metadata(&item.display_path),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound
         )
-    });
+    };
+    let quiet = super::REMOVALS_RECEIVED.load(Ordering::Acquire) == since;
+    if !quiet {
+        batch.retain(|item| !gone(item));
+    }
     if batch.is_empty() {
         return Ok(());
     }
     db.insert_batch(volume_id, generation, batch)?;
+    // A removal received while the batch was written may have been applied
+    // before it: drop the rows of what is gone now.
+    if quiet && super::REMOVALS_RECEIVED.load(Ordering::Acquire) != since {
+        let ghosts: Vec<(String, bool)> = batch
+            .iter()
+            .filter(|item| gone(item))
+            .map(|item| (item.normalized_path.clone(), item.is_directory))
+            .collect();
+        db.remove_rows(volume_id, &ghosts)?;
+    }
     batch.clear();
     Ok(())
 }

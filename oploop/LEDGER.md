@@ -1784,3 +1784,59 @@ visible-to-first-frame part (34 ms) is larger than on the owner's GPU.
   fell); B is steady at 38 ms.
 - Gates: check pass, prism-core tests 44/44.
 - Decision: KEEP.
+
+### H-003 Gone-entry check with one system call (first index)
+
+- Journey: H3, first index of `C:\Program Files` (90,767 entries) into an empty catalog,
+  `catalog_sweep <db> "C:\Program Files" --fresh`, warm file cache: 6006 / 6274 ms wall (first, cold run
+  10,199), kernel 4891 / 5250 ms, user 719 / 656 ms; read 187.3 MiB, write 180.6 MiB; catalog 72 MB.
+- Profile: kernel time is 83% of the wall. `flush_file_batch` (scanner.rs:416) calls
+  `std::fs::symlink_metadata` for every batched entry (F-005, "a walk writes no row for a gone entry";
+  cheap on an idle sweep, but a first index batches every entry): open, query, close a handle, about
+  50 us of kernel time each.
+- Hypothesis: `GetFileAttributesW` answers the same question (not found, or there; no link is followed)
+  with one system call and no handle. It should cut the first index from about 6 s to about 2 s.
+- Test: `catalog_sweep --fresh --verify` (catalog rows against a fresh walk of the disk): 0 differences.
+- Result: A/B 3 a side (A 5938/6138/6333 ms, B 5835/6097/6124 ms; kernel 5.0-5.3 s on both): no gain.
+  `GetFileAttributesW` still opens the file inside the kernel (`NtQueryAttributesFile`).
+- Decision: REVERT. The pre-existing `--verify` result on A and B: 2 differences (two Java junctions,
+  `javapath` and `jdk-21`, reparse folders that the verify walk lists as files); not in this loop.
+
+Profile of H3 with `oploop/bench/sampler.py` (new: suspends each thread about every 1 ms, reads the
+instruction pointer, names it with dbghelp; a thread in a system call shows the ntdll stub; no admin):
+scan thread `NtCreateFile` 57%, `NtClose` 11%, `NtWriteFile` + `NtFlushBuffersFile` 9%,
+`NtQueryDirectoryFile` (the listing) 3%. A bare `os.scandir` walk of the same tree: 0.6 s. Upper bound
+without the gone-entry check: 1984 / 2396 ms (A 6242 / 6241). Eliminated: SQLite mmap (6298-6373 vs
+6286-6606 ms), the scan efficiency guard (6055-6526 vs 6371-6433 ms).
+
+### H-004 Gone-entry check only after the watcher received a removal
+
+- Journey: H3 (and every repair walk of new folders: the owner's `catalog-walks.log` has 36,313 entries
+  in 12,975 ms, 67,746 in 5,757 ms).
+- Hypothesis: the per-entry `symlink_metadata` in `flush_file_batch` (scanner.rs:414) costs about 4 s of the
+  6.2 s first index. It guards one race: the watcher applies a removal before the walk writes the entry
+  (F-005). That needs a removal the watcher received after the folder was listed. A counter of received
+  removals (removed, rename old name, overflow) lets a batch skip the check when it did not change; when
+  it changes during the batch's write, the batch is checked after the write and gone rows are removed.
+  Expected: first index about 2.4 s.
+- Gates: `catalog_sweep --verify` (same as A); `churn_bench` replays (`rec-hi-180s`, and `rec-bc-hi-60s`
+  with `--sweep-at 10`): 0 catalog differences.
+- Result (3 a side, interleaved): first index 5806-6629 -> 1733-1844 ms (-70%), kernel 5047-5094 ->
+  953-1297 ms; `--verify` 2 differences, as A.
+
+H4 every state (agent desktop): `functest.py run`, 30 tests on build h002: 22 pass at first. Triage:
+- harness: footer clicks assumed a 560 px window (the guest default is 640): `refresh_apps`,
+  `check_for_updates` failed; fixed (`footer()` from the right edge), now pass.
+- environment, not Prism: `file_search_open` (no Notepad in the sandbox), `autostart_entry` (Prism copied,
+  not installed), `taskbar_density` (a fresh profile has no TaskbarSi values to return to),
+  `quick_access_folder` (expects Home missing, the owner's state).
+- Settings "Display settings" opens Settings Home in the sandbox; `start ms-settings:display` does the same
+  without Prism (Remote Desktop session), so not a Prism defect.
+- I6: "Couldn't open item" (palette.rs:922) drops the error; the result also covers the palette hide after
+  the launch, so a failed hide reads as a failed open. Seen once in the functest run, not reproduced by hand.
+Screen tour (`agent-desktop/host/batch.ts`): 18 states in `C:\Users\hi\.t3\scratch\prism-shots\states`.
+H5 new file to catalog: owner's 1.0.26 (directory backend) 11.0 s with the palette hidden, by design
+(`HIDDEN_FLUSH_AGE` 10 s; an open flushes within one 750 ms tick); the sandbox's MFT backend 3-5 s.
+- Gates: check pass; prism-core tests 44/44; `churn_bench` (driver `prism-scratch/io/run_h004.sh`, ballast
+  100 k): `rec-hi-180s` 0 differences; `rec-bc-hi-60s --sweep-at 10` twice: 0 differences (exit 0 all).
+- Decision: KEEP.

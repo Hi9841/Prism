@@ -865,6 +865,7 @@ fn run_reader_loop(
         } {
             Ok(handle) => handle,
             Err(_) => {
+                super::REMOVALS_RECEIVED.fetch_add(1, Ordering::AcqRel);
                 event_queue
                     .lock()
                     .unwrap()
@@ -907,6 +908,7 @@ fn run_reader_loop(
                 if super::catalog_debug_enabled() {
                     eprintln!("[catalog] reader overflow root={} success={success}", root.display());
                 }
+                super::REMOVALS_RECEIVED.fetch_add(1, Ordering::AcqRel);
                 event_queue
                     .lock()
                     .unwrap()
@@ -961,6 +963,9 @@ fn run_reader_loop(
                 if !target_normalized.starts_with(&app_data_normalized)
                     && !is_unsearchable_top_level(&relative_name)
                 {
+                    if info.Action == FILE_ACTION_REMOVED || info.Action == FILE_ACTION_RENAMED_OLD_NAME {
+                        super::REMOVALS_RECEIVED.fetch_add(1, Ordering::AcqRel);
+                    }
                     let event = match info.Action {
                         FILE_ACTION_ADDED => Some(WatcherEvent::Added(target_path)),
                         FILE_ACTION_REMOVED => Some(WatcherEvent::Removed(target_path)),

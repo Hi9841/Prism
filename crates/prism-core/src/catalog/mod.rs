@@ -14,6 +14,11 @@ use std::io::Cursor;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
+
+/// Removals (and rename old names, and overflows, which can hide removals) that the watcher has
+/// received, on any volume. A walk batch that saw no change of it since its folders were listed
+/// needs no gone-entry check: a removal received later is applied after the batch's write.
+pub(crate) static REMOVALS_RECEIVED: AtomicU64 = AtomicU64::new(0);
 use std::time::Duration;
 
 use base64::Engine;
