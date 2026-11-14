@@ -1764,3 +1764,23 @@ visible-to-first-frame part (34 ms) is larger than on the owner's GPU.
   foreground 38/38 both. Less than the 27 ms estimate: frames land on the display cycle (~16.7 ms).
 - Gates: check pass, prism-core tests 44/44.
 - Decision: KEEP.
+
+### H-002 Wake the Win-key pump with a high-resolution timer
+
+- Journey: H1 (and H2c close).
+- Profile (h001, 11 warm opens, app perf events against the key's wall time,
+  `results/raw/20261114-155808-winkey-open`): key to `palette_toggle` end 15.9 ms median, bimodal (5-7 or
+  15-20 ms); to `palette_present` end 26.9; visible 22.0; first frame 53.8.
+- Hypothesis: the pump waits for the 3 ms quiet time with `MsgWaitForMultipleObjectsEx(timeout)`; a
+  timeout ends on the system clock tick (15.6 ms by default), so the toggle waits up to one tick. A
+  high-resolution waitable timer in the same wait should make key-to-toggle about 4 ms and save about
+  10 ms of the H1 median.
+- Change: `CreateWaitableTimerExW(CREATE_WAITABLE_TIMER_HIGH_RESOLUTION)` armed for pump waits under 1 s
+  and passed to `MsgWaitForMultipleObjectsEx`; the timeout stays as a backstop.
+- Test: `winchord.py` 8 cases x 3: ALL SAME.
+- Result (`results/raw/20261114-160351-winkey-open`, 2 x 20 a build): H1 warm 53.2 -> 37.9 ms (p95 54.8 -> 39.3,
+  n=38); close 20.9 -> 6.5 ms (p95 22.9 -> 8.1). First open after a start (`20261114-160805`, 6 starts a
+  build): 71.0 (58-77) -> 73.7 (62-77), no change. A was bimodal (25 or 53 ms, by where the 15.6 ms tick
+  fell); B is steady at 38 ms.
+- Gates: check pass, prism-core tests 44/44.
+- Decision: KEEP.

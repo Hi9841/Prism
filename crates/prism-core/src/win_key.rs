@@ -30,7 +30,7 @@ use windows::Win32::Devices::HumanInterfaceDevice::{
     HID_USAGE_GENERIC_KEYBOARD, HID_USAGE_PAGE_GENERIC, KEYBOARD_OVERRUN_MAKE_CODE,
 };
 use windows::Win32::Foundation::{
-    FreeLibrary, HINSTANCE, HMODULE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM,
+    CloseHandle, FreeLibrary, HANDLE, HINSTANCE, HMODULE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM,
 };
 use windows::Win32::System::Com::{
     CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED,
@@ -39,7 +39,10 @@ use windows::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress, Lo
 use windows::Win32::System::RemoteDesktop::{
     WTSRegisterSessionNotification, WTSUnRegisterSessionNotification, NOTIFY_FOR_THIS_SESSION,
 };
-use windows::Win32::System::Threading::GetCurrentThreadId;
+use windows::Win32::System::Threading::{
+    CreateWaitableTimerExW, GetCurrentThreadId, SetWaitableTimer, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,
+    TIMER_ALL_ACCESS,
+};
 use windows::Win32::System::Variant::VARIANT;
 use windows::Win32::UI::Accessibility::{
     CUIAutomation, IUIAutomation, IUIAutomationCondition, IUIAutomationElement,
@@ -796,6 +799,15 @@ unsafe fn run_pump(ready: HookReady) {
     const REINSTALL_MAX_DELAY: Duration = Duration::from_secs(30);
     let mut reinstall_delay = REINSTALL_FIRST_DELAY;
     let mut reinstall_at: Option<Instant> = None;
+    // A wait timeout ends on the system clock tick (15.6 ms by default), and the pending Win
+    // toggle is due 3 ms after Win-up: short waits use a high-resolution timer instead.
+    let precise_timer = CreateWaitableTimerExW(
+        None,
+        PCWSTR::null(),
+        CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,
+        TIMER_ALL_ACCESS.0,
+    )
+    .ok();
     let mut msg = MSG::default();
     'pump: loop {
         while PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
@@ -876,12 +888,21 @@ unsafe fn run_pump(ready: HookReady) {
             .min()
             .unwrap_or(START_RECT_REFRESH_INTERVAL)
             .min(START_RECT_REFRESH_INTERVAL);
+        let timer_armed = precise_timer.filter(|_| wait < Duration::from_secs(1)).is_some_and(|timer| {
+            // A negative due time is relative, in 100 ns units.
+            let due = -((wait.as_nanos() / 100).max(1) as i64);
+            SetWaitableTimer(timer, &due, 0, None, None, false).is_ok()
+        });
+        let timer_handles: [HANDLE; 1] = [precise_timer.unwrap_or_default()];
         let _ = MsgWaitForMultipleObjectsEx(
-            None,
+            timer_armed.then_some(&timer_handles[..]),
             wait.as_micros().div_ceil(1000).min(u128::from(u32::MAX)) as u32,
             QS_ALLINPUT,
             Default::default(),
         );
+    }
+    if let Some(timer) = precise_timer {
+        let _ = CloseHandle(timer);
     }
     SHELL_BRIDGE_ACTIVE.store(false, Ordering::Release);
     SHELL_TASKBAR_THREAD.store(0, Ordering::Release);
