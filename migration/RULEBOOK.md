@@ -162,6 +162,10 @@ another app, Esc cancels, a click works after the drag, and a release over the p
 
 ## Deviation log
 
+- 2026-11-14: "Couldn't open item" names the error (owner: "yes" to showing it): the detail is
+  `<title>: <error>`, not the title alone. A failed palette hide after a successful launch is no longer
+  reported as a failed open (the original's `runItem` joined both steps in one result); it goes to stderr.
+  No golden covers this toast.
 - 2026-11-12: No icon or row flash while typing (owner: "windows logos and icons randomly flash ...
   when i hold backspace"). (1) The app list carries its icons: the original fetched them per rendered row
   (`iconLoading.ts`, a Tauri IPC saving), so a new row showed its monogram, then an empty box, then the

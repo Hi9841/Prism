@@ -1868,3 +1868,9 @@ after an update) are first-touch page-ins of new code: prefetch the image at sta
 (harness: cold file cache plus a busy disk); (2) `ShowWindow` is 6.5 ms of `palette_present` and raise 1.4 ms
 in the sandbox: measure on a GPU desktop before any change; (3) the MFT backend reads the journal every
 5 s (3-5 s new-file latency in the sandbox): wait on the journal instead of a timer.
+
+After the session (owner: I3 "only win key" (no change), P1 "you decide" (later session: a format change
+with a migration needs its own tests), I6 "yes"): "Couldn't open item" shows `<title>: <error>`; a failed
+hide after a launch is not a failed open (RULEBOOK deviation 2026-11-14). Release candidate checks on the
+agent desktop: functest launch set 8/9 pass; `prism_pin_unpin` passes after `window_width` (its row pin
+click assumes a 560 px window, as the footer did). Gates: check pass, prism-core tests 44/44.

@@ -895,15 +895,17 @@ impl PaletteState {
             }
             let result: Result<(), String> = async {
                 let run = cx.update(|cx| run_action(item.run.clone(), cx)).map_err(|e| e.to_string())?;
-                run.await?;
-                // A fresh palette open resets the gate. Hide only the palette
-                // that this launch still owns.
-                if !clipboard_item && ticket.is_current() {
-                    cx.update(|cx| bridge::shell(cx).hide_palette(false, cx)).map_err(|e| e.to_string())??;
-                }
-                Ok(())
+                run.await
             }
             .await;
+            // A fresh palette open resets the gate. Hide only the palette that this launch
+            // still owns. The item is open: a failed hide is not a failed open.
+            if result.is_ok() && !clipboard_item && ticket.is_current() {
+                let hidden = cx.update(|cx| bridge::shell(cx).hide_palette(false, cx));
+                if let Ok(Err(error)) = hidden {
+                    eprintln!("Prism could not hide the palette after a launch: {}", error_string(&error));
+                }
+            }
             // The launch and hide are done: history and intent writes need no gate.
             drop(ticket);
             match result {
@@ -919,7 +921,12 @@ impl PaletteState {
                         let _ = bridge::accept_intent(query, action_id.to_owned()).await;
                     }
                 }
-                Err(_) => toast("Couldn\u{2019}t open item", item.title.clone(), ToastKind::Error, cx),
+                Err(error) => toast(
+                    "Couldn\u{2019}t open item",
+                    format!("{}: {}", item.title, error_string(&error)),
+                    ToastKind::Error,
+                    cx,
+                ),
             }
         })
         .detach();
