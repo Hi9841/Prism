@@ -905,12 +905,21 @@ mod provider {
             kind: ToastKind,
             cx: &mut Context<Self>,
         ) {
+            let title = title.into();
+            // The same message twice (two failed attempts of one action) shows once.
+            if self
+                .toasts
+                .iter()
+                .any(|t| t.closing.is_none() && t.kind == kind && t.title == title && t.detail == detail)
+            {
+                return;
+            }
             let id = self.toast_seq;
             self.toast_seq += 1;
             // Keep at most two toasts on screen; evict the oldest with its exit
             // animation instead of dropping it instantly.
             let visible: Vec<u64> = self.toasts.iter().map(|t| t.id).collect();
-            self.toasts.push(Toast { id, title: title.into(), detail, kind, closing: None, born: Instant::now() });
+            self.toasts.push(Toast { id, title, detail, kind, closing: None, born: Instant::now() });
             if kind == ToastKind::Success {
                 let timer = cx.spawn(async move |this, cx| {
                     Timer::after(Duration::from_millis(1900)).await;
