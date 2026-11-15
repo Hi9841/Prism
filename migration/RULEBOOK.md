@@ -162,6 +162,14 @@ another app, Esc cancels, a click works after the drag, and a release over the p
 
 ## Deviation log
 
+- 2026-11-15: App search ranking (owner: "why is this at the top", then "do what you think is correct").
+  "control" listed Administrative Tools above Control Panel. (1) A keyword hit scores 899 at most
+  (`score::KEYWORD_CAP`): a title that starts with the query always ranks above it (the original let a
+  whole keyword match, 950, beat a title prefix, 900 and up). (2) App keywords leave out the target name of
+  a shortcut with arguments (`control.exe /name ...`), words that many apps share (`programs`, `app`,
+  `bin`, `x64`, `http`), the scheme of a web link, and descriptions longer than 3 words. (3) A registry
+  entry whose only executable is an uninstaller or installer is not an app ("Mozilla Maintenance Service"
+  opened `Uninstall.exe`). No golden changed. `examples/rank_audit.rs` checks a PC's real index.
 - 2026-11-14: "Couldn't open item" names the error (owner: "yes" to showing it): the detail is
   `<title>: <error>`, not the title alone. A failed palette hide after a successful launch is no longer
   reported as a failed open (the original's `runItem` joined both steps in one result); it goes to stderr.

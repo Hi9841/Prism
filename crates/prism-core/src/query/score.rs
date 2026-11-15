@@ -10,6 +10,12 @@ pub struct Query {
     significant: usize,
 }
 
+/// The best score of a keyword hit. A title that starts with the query scores
+/// 901 and up, so a keyword never ranks an entry above the entry that has the
+/// query as the start of its name ("disk" listed Resource Monitor, keyword
+/// "disk", above Disk Cleanup and Disk Management).
+pub const KEYWORD_CAP: i32 = 899;
+
 impl Query {
     pub fn new(query: &str) -> Self {
         let lower = query.to_lowercase();
@@ -50,7 +56,8 @@ impl Query {
         self.fuzzy(chars.len(), |index| chars[index])
     }
 
-    /// `score` plus the keywords: a keyword scores 50 below a title.
+    /// `score` plus the keywords: a keyword scores 50 below a title, and
+    /// always below a title that starts with the query ([`KEYWORD_CAP`]).
     pub fn score_with_keywords<S: AsRef<str>>(
         &self,
         title: &str,
@@ -62,7 +69,7 @@ impl Query {
                 continue;
             };
             // A weak fuzzy keyword hit that the penalty takes to zero is no match.
-            let keyword_score = score - 50;
+            let keyword_score = (score - 50).min(KEYWORD_CAP);
             if keyword_score > 0 && best.is_none_or(|current| keyword_score > current) {
                 best = Some(keyword_score);
             }
@@ -153,4 +160,25 @@ pub fn score_with_keywords(query: &str, title: &str, keywords: &[&str]) -> Optio
 
 fn is_word_separator(ch: char) -> bool {
     matches!(ch, ' ' | '\t' | '-' | '_' | '.' | '/' | '\\')
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_title_that_starts_with_the_query_beats_a_whole_keyword_match() {
+        let query = Query::new("disk");
+        let keyword_hit = query.score_with_keywords("Resource Monitor", ["disk"]).unwrap();
+        let title_hit = query.score_with_keywords("Disk Cleanup", [""; 0]).unwrap();
+        assert!(keyword_hit < title_hit, "{keyword_hit} vs {title_hit}");
+    }
+
+    #[test]
+    fn a_whole_keyword_match_beats_a_title_that_contains_the_query() {
+        let query = Query::new("code");
+        let keyword_hit = query.score_with_keywords("Visual Studio Code", ["code"]).unwrap();
+        let other = query.score_with_keywords("Barcode Reader", [""; 0]).unwrap();
+        assert!(keyword_hit > other, "{keyword_hit} vs {other}");
+    }
 }
