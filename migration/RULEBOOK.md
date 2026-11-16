@@ -162,6 +162,15 @@ another app, Esc cancels, a click works after the drag, and a release over the p
 
 ## Deviation log
 
+- 2026-11-16: File index "catalog v2" (owner: "fix all those issues" after a checkup found a 6.26 GB catalog,
+  28% orphan rows and whole-home re-walks). (1) The index is in memory with a snapshot file
+  (`file-index.bin`), not a SQLite row per file; NTFS volumes track changes with the unprivileged USN
+  journal, not `ReadDirectoryChangesW` and periodic sweeps. (2) The "full coverage" policy ends: a default
+  exclusion list (`node_modules`, `.git`, `__pycache__`, `.gradle`, cargo registry, rustup toolchains, NuGet
+  packages, `AppData\Local\Temp`, `WinSxS`, `Windows\Installer`, Windows container layers, recycle bin,
+  System Volume Information, Prism's app data) is not indexed; `file-index-exclusions.txt` in the app data
+  folder replaces it. (3) Non-NTFS volumes re-walk every 30 minutes instead of a live watcher. No golden covers file search.
+  Design: `oploop/catalog-v2/SPEC.md`.
 - 2026-11-15: App search ranking (owner: "why is this at the top", then "do what you think is correct").
   "control" listed Administrative Tools above Control Panel. (1) A keyword hit scores 899 at most
   (`score::KEYWORD_CAP`): a title that starts with the query always ranks above it (the original let a

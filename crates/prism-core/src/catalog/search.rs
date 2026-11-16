@@ -2,8 +2,7 @@ use std::cmp::Ordering;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 
-use super::db::Database;
-use super::name_index::{IndexCandidates, NameIndex, NameQuery};
+use super::store::{FileStore, IndexCandidates, NameQuery};
 use super::types::{
     CandidateEntry, FileEntry, FileSearchError, FileSearchErrorKind, FileSearchResponse,
     VolumeCoverage,
@@ -26,8 +25,7 @@ pub fn path_depth(path: &str) -> usize {
 pub fn search_with_generation(
     query: &str,
     limit: Option<usize>,
-    db: &Database,
-    names: Option<&NameIndex>,
+    store: &FileStore,
     search_generation: &AtomicU64,
     generation: u64,
     volumes: &[VolumeCoverage],
@@ -85,36 +83,11 @@ pub fn search_with_generation(
     let tokens: Vec<&str> = query_lower.split_whitespace().collect();
     let cancelled = || is_cancelled(search_generation, generation);
 
-    let candidate_limit = (limit * 15).max(150);
+    let parsed = NameQuery::new(&query_lower, &tokens);
     let IndexCandidates {
         entries: candidates,
         typos,
-    } = match candidates(
-        db,
-        names,
-        query_trimmed,
-        &tokens,
-        &query_lower,
-        limit,
-        candidate_limit,
-        &cancelled,
-    ) {
-        Ok(c) => c,
-        Err(message) => {
-            return response(
-                Vec::new(),
-                ready,
-                indexing,
-                false,
-                volumes,
-                total_indexed,
-                Some(FileSearchError {
-                    kind: FileSearchErrorKind::IndexQuery,
-                    message,
-                }),
-            );
-        }
-    };
+    } = store.candidates(&parsed, limit, true, &cancelled);
 
     if cancelled() {
         return response(
@@ -152,7 +125,7 @@ pub fn search_with_generation(
     scored.sort_by(result_order);
 
     // Verify disk existence only for the items we are about to return. A row
-    // can briefly outlive its file (the watcher removes it within seconds),
+    // can briefly outlive its file (the journal reader removes it within seconds),
     // so the guarantee stays: results never point at missing files. Checking
     // every candidate instead cost one stat syscall per candidate (up to 300)
     // per keystroke.
@@ -232,41 +205,6 @@ pub fn result_order(
                 .to_lowercase()
                 .cmp(&item_b.display_path.to_lowercase())
         })
-}
-
-/// Fallback-catalog candidates come from the in-memory name index once it is
-/// loaded, else from the SQL stages (no typo matches). NTFS volumes always use
-/// SQL; a strong NTFS match turns the index's typo pass off.
-#[allow(clippy::too_many_arguments)]
-fn candidates(
-    db: &Database,
-    names: Option<&NameIndex>,
-    query: &str,
-    tokens: &[&str],
-    query_lower: &str,
-    limit: usize,
-    candidate_limit: usize,
-    cancelled: &(dyn Fn() -> bool + Sync),
-) -> Result<IndexCandidates, String> {
-    if let Some(names) = names.filter(|names| names.is_loaded()) {
-        let ntfs = db.ntfs_candidates_until(query, candidate_limit, cancelled)?;
-        // Only an NTFS entry that is a result (every token matches) and a
-        // strong one turns the typo pass off.
-        let typos = !ntfs.iter().any(|entry| {
-            let (name, directory) = (&entry.lower_name, entry.is_directory);
-            name_score(name, directory, tokens, query_lower).is_some()
-                && is_strong_match(name, directory, tokens, query_lower)
-        });
-        let parsed = NameQuery::new(query_lower, tokens);
-        if let Some(mut found) = names.candidates(db, &parsed, limit, typos, cancelled)? {
-            found.entries.extend(ntfs);
-            return Ok(found);
-        }
-    }
-    Ok(IndexCandidates {
-        entries: db.search_candidates_until(query, candidate_limit, cancelled)?,
-        typos: Vec::new(),
-    })
 }
 
 fn is_cancelled(search_generation: &AtomicU64, generation: u64) -> bool {
@@ -402,10 +340,10 @@ fn is_one_insertion(name: &str, query: &str) -> bool {
         && name[start + extra..] == query[start..]
 }
 
-/// High-noise locations and filenames. The catalog is full-coverage - system
-/// directories, dependency trees, and temp folders are all indexed - so these
-/// matches stay findable and merely rank below the same match in a
-/// user-authored location. Penalties are sized to sit well under the gaps
+/// High-noise locations and filenames. The catalog leaves out only the
+/// folders on the exclusion list (`walk::Exclusions`); the other system and
+/// tool folders are indexed, so their matches stay findable and rank below
+/// the same match in a user-authored location. Penalties are sized to sit well under the gaps
 /// between quality tiers (exact 10_000, stem 9_500, near-exact 9_000, prefix
 /// 4_000, substring 3_000, subsequence 1_000): a great match in Windows still
 /// beats a weak match in Documents, but a same-quality match never does.

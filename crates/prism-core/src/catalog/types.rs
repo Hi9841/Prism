@@ -79,19 +79,6 @@ pub struct VolumeInfo {
     pub accessible: bool,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct NtfsNode {
-    pub frn: u64,
-    pub parent_frn: u64,
-    pub name: String,
-    pub lower_name: String,
-    pub extension: Option<String>,
-    pub is_directory: bool,
-    pub attributes: u32,
-    pub modified_at: i64,
-    pub size: u64,
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct JournalMetadata {
     pub journal_id: u64,
@@ -106,25 +93,6 @@ pub struct JournalCheckpoint {
     pub next_usn: i64,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum NtfsChange {
-    Upsert(NtfsNode),
-    Delete { frn: u64 },
-}
-
-#[derive(Clone, Debug)]
-pub struct ScannedItem {
-    pub normalized_path: String,
-    pub display_path: String,
-    pub name: String,
-    pub lower_name: String,
-    pub parent: String,
-    pub is_directory: bool,
-    pub extension: Option<String>,
-    pub modified_at: u64,
-    pub size: u64,
-}
-
 #[derive(Clone, Debug)]
 pub struct CandidateEntry {
     pub id: i64,
@@ -133,42 +101,4 @@ pub struct CandidateEntry {
     pub is_directory: bool,
     #[allow(dead_code)]
     pub extension: Option<String>,
-}
-
-/// One fallback-catalog row as the in-memory name index loads it. The index
-/// needs three numbers from the row's path, not the path, so `NameRow::new`
-/// computes them while SQLite still holds the text: the paths of a large
-/// catalog (over 600 MB for 5.8 M rows) are never copied.
-#[derive(Clone, Debug)]
-pub struct NameRow {
-    pub id: i64,
-    pub lower_name: String,
-    /// `search::path_penalty` of the row's path and name.
-    pub penalty: i32,
-    /// `search::path_depth` of the row's path.
-    pub depth: usize,
-    /// Byte length of the row's path.
-    pub path_len: usize,
-    pub is_directory: bool,
-}
-
-impl NameRow {
-    pub fn new(id: i64, lower_name: String, display_path: &str, is_directory: bool) -> Self {
-        Self {
-            id,
-            penalty: super::search::path_penalty(display_path, &lower_name),
-            depth: super::search::path_depth(display_path),
-            path_len: display_path.len(),
-            lower_name,
-            is_directory,
-        }
-    }
-}
-
-/// Current state of a fallback row that the name index selected.
-#[derive(Clone, Debug)]
-pub enum RowLookup {
-    Found(CandidateEntry),
-    Missing,
-    Excluded,
 }

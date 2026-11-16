@@ -1,28 +1,36 @@
-pub mod backend;
-pub mod db;
-pub mod name_index;
-pub mod ntfs;
-pub mod scanner;
+//! The file index: one in-memory `FileStore` (`store.rs`), fed by a walk of
+//! each volume (`walk.rs`) and by the NTFS change journal (`journal.rs`), and
+//! saved to a snapshot file (`snapshot.rs`).
+//!
+//! Threads:
+//! - `warm` runs one async task. It loads the snapshot, finds the volumes
+//!   every 15 s, starts or stops one volume thread for each, and saves the
+//!   snapshot when the store changed.
+//! - One OS thread per volume. A journal volume builds (or catches up from
+//!   its checkpoint), then reads the journal in a loop. A walk volume walks
+//!   at start and again every 30 minutes. A volume thread owns all writes to
+//!   its volume in the store, so no two threads change one volume.
+//! - Searches run on the blocking pool and only read the store.
+
+pub mod journal;
 pub mod search;
+pub mod snapshot;
+pub mod store;
 pub mod types;
 pub mod volume;
-pub mod watcher;
+pub mod walk;
 
 use std::collections::{HashMap, HashSet};
 use std::ffi::c_void;
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, AtomicUsize, Ordering};
+use std::sync::mpsc::sync_channel;
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
-
-/// Removals (and rename old names, and overflows, which can hide removals) that the watcher has
-/// received, on any volume. A walk batch that saw no change of it since its folders were listed
-/// needs no gone-entry check: a removal received later is applied after the batch's write.
-pub(crate) static REMOVALS_RECEIVED: AtomicU64 = AtomicU64::new(0);
-use std::time::Duration;
+use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
 
 use base64::Engine;
-use serde::Deserialize;
 use windows::core::GUID;
 use windows::Win32::System::Com::CoTaskMemFree;
 use windows::Win32::UI::Shell::{
@@ -35,111 +43,54 @@ pub use types::{
     VolumeInfo, VolumeState,
 };
 
-use self::backend::{select_backend, BackendKind};
-use self::db::Database;
-use self::name_index::NameIndex;
-use self::ntfs::NtfsBackend;
-use self::watcher::{watcher_root_changed, VolumeWatcher};
+use self::journal::{journal_continuity, JournalContinuity, JournalError, JournalVolume};
+use self::store::{FileStore, FsChange, FsNode, VolumeBackend, VolumeMeta, VolumeSlot};
+use self::types::JournalCheckpoint;
+use self::walk::Exclusions;
 
-/// Journal catch-up cadence while the palette is visible. This is the
-/// freshness window for NTFS-backed file results while the user is searching.
-const ACTIVE_POLL_INTERVAL: Duration = Duration::from_secs(5);
-/// Journal catch-up cadence while hidden - the launcher's normal state. The
-/// poll opens the raw volume device and issues an ioctl per NTFS drive, so the
-/// idle cadence dominates the app's steady-state background cost.
-const IDLE_POLL_INTERVAL: Duration = Duration::from_secs(30);
 /// Mount topology (usb plug, network mount) changes are rare; the discovery
 /// pass calls GetVolumeInformationW on every volume, which can block for
-/// seconds on disconnected network drives. Only re-enumerate this often and
-/// reuse the previous snapshot in between.
+/// seconds on disconnected network drives. Only re-enumerate this often.
 const VOLUME_DISCOVERY_INTERVAL: Duration = Duration::from_secs(15);
-/// Long sleeps are sliced so a hidden -> visible transition resumes the fast
-/// cadence (and journal freshness) within a second of opening the palette.
-const POLL_WAKE_SLICE: Duration = Duration::from_secs(1);
-// Sweeps walk the tree but write only rows that actually changed, so the
-// periodic reconcile catches watcher misses cheaply without the disk churn of
-// the old full re-index.
-const RECONCILIATION_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60); // 6 hours
-                                                                            // At startup the persisted index is served directly: volumes scanned within
-                                                                            // this window are not re-walked (the watcher keeps them fresh while running,
-                                                                            // and results are verified against disk before being shown). Only volumes
-                                                                            // that are new, never scanned, or stale get a sweep.
-const STARTUP_SWEEP_WINDOW: Duration = Duration::from_secs(24 * 60 * 60);
-
-/// A scoped repair re-walks its directory tree. During a burst (a build, an
-/// unzip) overflows keep arriving: wait until the scope is quiet, so one walk
-/// covers the whole burst instead of walking back to back while it lasts.
-const SCOPE_REPAIR_QUIET: Duration = Duration::from_secs(2);
-/// Freshness bound: a repair never waits longer than this after its first request.
-const SCOPE_REPAIR_MAX_DELAY: Duration = Duration::from_secs(20);
-/// Minimum time between two walks of the same scope.
-const SCOPE_REPAIR_MIN_GAP: Duration = Duration::from_secs(10);
-/// A shard root (a top-level folder such as C:\Users, after a kernel buffer
-/// overflow) re-walks millions of entries: wait for a longer quiet period so
-/// a long build or install costs one walk at its end.
-const SHARD_REPAIR_QUIET: Duration = Duration::from_secs(30);
-const SHARD_REPAIR_MAX_DELAY: Duration = Duration::from_secs(5 * 60);
-/// Repair walks that run at one time. A build makes hundreds of folders, and
-/// each one asks for a walk: with no limit they all started when the burst
-/// went quiet, each on a blocking-pool thread of its own (hundreds of threads).
-/// The walks share two database connections, so more of them at one time
-/// only wait on each other.
-const SCOPE_REPAIR_SLOTS: usize = 2;
-
-/// A walk that takes less than this is not logged: the log would fill with
-/// small repairs, and the slow walks are the ones to read.
+/// A volume with no journal is walked again this often while it is mounted.
+const WALK_VOLUME_INTERVAL: Duration = Duration::from_secs(30 * 60);
+/// A walk volume whose walk failed tries again after this time.
+const WALK_RETRY_INTERVAL: Duration = Duration::from_secs(5 * 60);
+/// The snapshot is written at most this often while the store changes.
+const SNAPSHOT_INTERVAL: Duration = Duration::from_secs(10 * 60);
+/// A snapshot is also written for a journal cursor that moved with no entry
+/// change, but not more often than this (a save of a clean store costs
+/// 100 MB or more of writes).
+const CURSOR_SNAPSHOT_INTERVAL: Duration = Duration::from_secs(60 * 60);
+/// The reader gives its cursor to the store at most this often when no
+/// change comes with it.
+const CURSOR_PUBLISH_GAP: Duration = Duration::from_secs(5);
+/// The pause after a read that found no record. Reads do not wait in the
+/// kernel (see `JournalVolume::read_with`), so this is the search latency of a
+/// new file and the poll cost: one read per second per volume.
+const EMPTY_READ_PAUSE: Duration = Duration::from_secs(1);
+/// A volume that the discovery misses keeps its entries (state Offline) for
+/// this many passes (about 1 minute). Then its entries go.
+const VOLUME_MISSING_PASSES: u32 = 4;
+/// At exit the save waits this long for a folder walk to end.
+const EXIT_WALK_WAIT: Duration = Duration::from_secs(3);
+/// A failed journal read is tried again after 1 s, then 2 s, ... up to this.
+const BACKOFF_START: Duration = Duration::from_secs(1);
+const BACKOFF_MAX: Duration = Duration::from_secs(60);
+/// `file-index-updated` is sent at most this often while changes arrive.
+const EMIT_GAP: Duration = Duration::from_secs(2);
+/// Nodes of a walk that one write-lock step applies.
+const APPLY_CHUNK: usize = 4096;
+/// Nodes of a walk that go to the store in one message.
+const WALK_BATCH: usize = 4096;
+/// A walk of a new folder that is faster than this is not logged: the log
+/// would fill with small walks.
 const WALK_LOG_MIN: Duration = Duration::from_secs(1);
 
-/// One line of the always-on walk log (`catalog-walks`).
-#[derive(serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-struct WalkRecord<'a> {
-    unix_ms: u128,
-    /// `repair` (a scope repair walk) or `sweep` (a full volume sweep).
-    kind: &'static str,
-    scope: &'a str,
-    entries: u64,
-    ms: u64,
-    /// For a repair: the scope is a volume root or a top-level folder.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    broad: Option<bool>,
-}
-
-/// Appends a record for a walk that took `WALK_LOG_MIN` or more. File I/O: call
-/// it off the UI thread.
-fn log_walk(kind: &'static str, scope: &Path, entries: u64, elapsed: Duration, broad: Option<bool>) {
-    if elapsed < WALK_LOG_MIN {
-        return;
-    }
-    let Some(dir) = crate::logs::dir() else { return };
-    let scope = scope.to_string_lossy();
-    let record = WalkRecord {
-        unix_ms: crate::logs::unix_ms(),
-        kind,
-        scope: &scope,
-        entries,
-        ms: elapsed.as_millis() as u64,
-        broad,
-    };
-    crate::logs::append(&dir, "catalog-walks", &record);
-}
-
-/// The volume roots and top-level folders (C:\, C:\Users) are shard roots.
-fn is_broad_scope(scope: &Path) -> bool {
-    scope.components().count() <= 3
-}
-
-/// How a scope repair ended.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ScopeRepairResult {
-    /// The walk ran. A folder that could not be read (access denied, a
-    /// listing that stalls under churn) keeps its rows; the periodic sweep
-    /// takes it. A walk that ran again would meet the same folder.
-    Walked,
-    /// The repair could not run (no watcher, the scope is not under its
-    /// root) or a walk failed. The scope stays recorded for the next start.
-    Skipped,
-}
+const SNAPSHOT_FILE: &str = "file-index.bin";
+const EXCLUSIONS_FILE: &str = "file-index-exclusions.txt";
+/// The files of the old SQLite catalog. They go when the new index is built.
+const LEGACY_CATALOG_FILES: [&str; 3] = ["catalog.db", "catalog.db-wal", "catalog.db-shm"];
 
 pub fn catalog_debug_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
@@ -150,171 +101,393 @@ pub fn catalog_debug_enabled() -> bool {
     })
 }
 
-/// In-memory per-volume file counts. Seeded from the database at startup,
-/// updated by scan progress and watcher deltas, and re-seeded from
-/// `scanned_entries` after every completed scan. Keeps every status path O(1)
-/// - counting millions of rows on every palette open was a major stall.
-#[derive(Clone, Default)]
-pub struct IndexCounts {
-    inner: Arc<Mutex<HashMap<String, u64>>>,
+// ---------------------------------------------------------------------------
+// Walk log
+// ---------------------------------------------------------------------------
+
+/// One line of the always-on walk log (`catalog-walks`).
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WalkRecord<'a> {
+    unix_ms: u128,
+    /// `volume` (a full walk of a volume) or `folder` (a folder that became
+    /// visible).
+    kind: &'static str,
+    scope: &'a str,
+    entries: u64,
+    ms: u64,
 }
 
-#[derive(Default)]
-struct ScopeRepairCoordinator {
-    /// Presence means one worker owns the scope; true requests another pass.
-    /// The instant is the latest request (the burst is quiet after it).
-    running: HashMap<String, (bool, std::time::Instant)>,
+/// Appends a record for a walk. A `folder` walk is logged only when it took
+/// `WALK_LOG_MIN` or more. File I/O: call it off the UI thread.
+fn log_walk(kind: &'static str, scope: &Path, entries: u64, elapsed: Duration) {
+    if kind == "folder" && elapsed < WALK_LOG_MIN {
+        return;
+    }
+    let Some(dir) = crate::logs::dir() else { return };
+    let scope = scope.to_string_lossy();
+    let record = WalkRecord {
+        unix_ms: crate::logs::unix_ms(),
+        kind,
+        scope: &scope,
+        entries,
+        ms: elapsed.as_millis() as u64,
+    };
+    crate::logs::append(&dir, "catalog-walks", &record);
 }
 
-impl ScopeRepairCoordinator {
-    fn request(&mut self, key: String) -> bool {
-        let now = std::time::Instant::now();
-        if let Some((pending, last)) = self.running.get_mut(&key) {
-            *pending = true;
-            *last = now;
-            false
-        } else {
-            self.running.insert(key, (false, now));
-            true
+// ---------------------------------------------------------------------------
+// Exclusion list file
+// ---------------------------------------------------------------------------
+
+const EXCLUSIONS_HEADER: &str = "\
+# Prism file index: folders that Prism does not index.
+# One item on each line. Blank lines and lines that start with # are ignored.
+# A folder name (node_modules) matches a folder of that name anywhere.
+# An absolute path (C:\\Work\\cache) matches only that folder.
+# <home> stands for your user folder.
+# Prism reads this file when it starts. A changed list starts a new full walk.
+";
+
+/// The items of an exclusion file: one for each line that is not blank and
+/// not a comment.
+fn parse_exclusion_list(text: &str) -> Vec<String> {
+    text.trim_start_matches('\u{feff}')
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .map(str::to_string)
+        .collect()
+}
+
+/// The text of an exclusion file: the format header and one item for each line.
+fn format_exclusion_file(items: &[String]) -> String {
+    let mut text = String::from(EXCLUSIONS_HEADER);
+    for item in items {
+        text.push_str(item);
+        text.push('\n');
+    }
+    text
+}
+
+/// A number for a list that does not change with the order or the case of
+/// its items (FNV-1a over the sorted lowercase items).
+fn exclusion_fingerprint(items: &[String]) -> u64 {
+    let mut lowered: Vec<String> = items.iter().map(|item| item.trim().to_lowercase()).collect();
+    lowered.sort();
+    lowered.dedup();
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for item in &lowered {
+        for byte in item.bytes().chain(std::iter::once(b'\n')) {
+            hash ^= u64::from(byte);
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
         }
     }
+    hash
+}
 
-    /// Time since the latest request for `key`.
-    fn quiet_for(&self, key: &str) -> Duration {
-        self.running.get(key).map_or(Duration::MAX, |(_, last)| last.elapsed())
-    }
-
-    /// A walk starts now: it covers every request until this point.
-    fn start_pass(&mut self, key: &str) {
-        if let Some((pending, _)) = self.running.get_mut(key) {
-            *pending = false;
-        }
-    }
-
-    fn finish_pass(&mut self, key: &str) -> bool {
-        match self.running.get_mut(key) {
-            Some((pending, _)) if *pending => {
-                *pending = false;
-                true
+/// Reads the exclusion file of the app data folder. When it does not exist,
+/// writes the default list there and returns it. A file that cannot be read
+/// gives the default list for this run.
+fn load_exclusion_list(app_data_dir: &Path) -> Vec<String> {
+    let path = app_data_dir.join(EXCLUSIONS_FILE);
+    match std::fs::read_to_string(&path) {
+        Ok(text) => parse_exclusion_list(&text),
+        Err(error) => {
+            let items = Exclusions::default_entries(app_data_dir);
+            if error.kind() == std::io::ErrorKind::NotFound {
+                let _ = std::fs::create_dir_all(app_data_dir);
+                if let Err(error) = std::fs::write(&path, format_exclusion_file(&items)) {
+                    eprintln!("[Prism Catalog] cannot write {}: {error}", path.display());
+                }
+            } else {
+                eprintln!("[Prism Catalog] cannot read {}: {error}", path.display());
             }
-            Some(_) => {
-                self.running.remove(key);
-                false
+            items
+        }
+    }
+}
+
+/// The exclusion list of this run, as the walk and the journal use it.
+struct ExclusionSet {
+    matcher: Exclusions,
+    fingerprint: u64,
+}
+
+impl ExclusionSet {
+    fn new(items: &[String]) -> Self {
+        Self { matcher: Exclusions::new(items), fingerprint: exclusion_fingerprint(items) }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Pure helpers of the journal reader
+// ---------------------------------------------------------------------------
+
+/// The folders in `changes` that were not live, shown folders before the
+/// changes: a folder that came in from the recycle bin, an excluded folder,
+/// another volume, or that was an excluded folder with another name. The
+/// journal gives no record for what is inside them, so the caller walks
+/// them. A folder whose parent is also in the list is left out: the walk of
+/// the parent covers it. `was_accepted` is asked before the changes are
+/// applied.
+fn folders_to_walk(changes: &[FsChange], was_accepted: &dyn Fn(u64) -> bool) -> Vec<u64> {
+    let new: Vec<(u64, u64)> = changes
+        .iter()
+        .filter_map(|change| match change {
+            FsChange::Upsert(node)
+                if node.is_dir && !node.excluded && !node.link && !was_accepted(node.record) =>
+            {
+                Some((node.record, node.parent_record))
             }
-            None => false,
+            _ => None,
+        })
+        .collect();
+    let records: HashSet<u64> = new.iter().map(|(record, _)| *record).collect();
+    new.into_iter()
+        .filter(|(_, parent)| !records.contains(parent))
+        .map(|(record, _)| record)
+        .collect()
+}
+
+/// The nodes of a walk of folder `root` as upserts, each folder before its
+/// contents (the walk can send them in any order). A node whose parent is
+/// not below `root` is dropped.
+fn order_subtree(root: u64, nodes: Vec<FsNode>) -> Vec<FsChange> {
+    let mut by_parent: HashMap<u64, Vec<FsNode>> = HashMap::new();
+    for node in nodes {
+        by_parent.entry(node.parent_record).or_default().push(node);
+    }
+    let mut ordered = Vec::new();
+    let mut parents = vec![root];
+    let mut next = 0;
+    while next < parents.len() {
+        let parent = parents[next];
+        next += 1;
+        for child in by_parent.remove(&parent).unwrap_or_default() {
+            if child.is_dir && !child.excluded {
+                parents.push(child.record);
+            }
+            ordered.push(FsChange::Upsert(child));
+        }
+    }
+    ordered
+}
+
+/// Deletes the files of the old SQLite catalog. Returns how many it deleted.
+fn delete_legacy_catalog(app_data_dir: &Path) -> usize {
+    let mut deleted = 0;
+    for name in LEGACY_CATALOG_FILES {
+        let path = app_data_dir.join(name);
+        if !path.exists() {
+            continue;
+        }
+        match std::fs::remove_file(&path) {
+            Ok(()) => deleted += 1,
+            Err(error) => eprintln!("[Prism Catalog] cannot delete {}: {error}", path.display()),
+        }
+    }
+    deleted
+}
+
+// ---------------------------------------------------------------------------
+// Volume threads
+// ---------------------------------------------------------------------------
+
+/// What a volume thread shares with the status code.
+struct RunShared {
+    /// A `VolumeState` as a number.
+    state: AtomicU8,
+    /// Entries a running walk has found.
+    progress: AtomicU64,
+    /// The first build (or catch-up) of the volume ended.
+    built: AtomicBool,
+}
+
+impl RunShared {
+    fn new() -> Self {
+        Self {
+            state: AtomicU8::new(Self::code(VolumeState::Indexing)),
+            progress: AtomicU64::new(0),
+            built: AtomicBool::new(false),
+        }
+    }
+
+    fn code(state: VolumeState) -> u8 {
+        match state {
+            VolumeState::Ready => 0,
+            VolumeState::Indexing => 1,
+            VolumeState::Offline => 2,
+            VolumeState::Error => 3,
+        }
+    }
+
+    fn set_state(&self, state: VolumeState) {
+        self.state.store(Self::code(state), Ordering::Relaxed);
+    }
+
+    fn state(&self) -> VolumeState {
+        match self.state.load(Ordering::Relaxed) {
+            0 => VolumeState::Ready,
+            1 => VolumeState::Indexing,
+            2 => VolumeState::Offline,
+            _ => VolumeState::Error,
         }
     }
 }
 
-#[derive(Default)]
-struct SourceWorkerCoordinator {
-    /// Presence means a worker is active. Some(value) requests another pass;
-    /// false wins because a forced rebuild cannot be weakened by a fresh pass.
-    running: HashMap<String, Option<bool>>,
+/// One volume as its thread sees it.
+struct VolumeCtl {
+    volume_id: String,
+    mount: PathBuf,
+    /// The mount path with a trailing backslash (`C:\`): the name in the
+    /// coverage list and in the snapshot.
+    mount_text: String,
+    ntfs: bool,
+    /// Set to stop the thread (volume removed, rebuild, exit).
+    stop: AtomicBool,
+    shared: RunShared,
 }
 
-impl SourceWorkerCoordinator {
-    fn request(&mut self, volume_id: String, fresh_ok: bool) -> bool {
-        if let Some(pending) = self.running.get_mut(&volume_id) {
-            *pending = Some(pending.unwrap_or(true) && fresh_ok);
-            false
-        } else {
-            self.running.insert(volume_id, None);
-            true
+impl VolumeCtl {
+    fn stopped(&self) -> bool {
+        self.stop.load(Ordering::Relaxed)
+    }
+
+    /// Sleeps for `total`, in short steps. Returns false when stopped.
+    fn sleep(&self, total: Duration) -> bool {
+        let end = Instant::now() + total;
+        loop {
+            if self.stopped() {
+                return false;
+            }
+            let left = end.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return true;
+            }
+            std::thread::sleep(left.min(Duration::from_millis(250)));
         }
-    }
-
-    fn finish_pass(&mut self, volume_id: &str) -> Option<bool> {
-        let pending = self.running.get_mut(volume_id)?.take();
-        if pending.is_none() {
-            self.running.remove(volume_id);
-        }
-        pending
-    }
-
-    fn is_empty(&self) -> bool {
-        self.running.is_empty()
-    }
-
-    fn is_running(&self, volume_id: &str) -> bool {
-        self.running.contains_key(volume_id)
     }
 }
 
-impl IndexCounts {
-    pub fn set(&self, drive: &str, count: u64) {
-        if let Ok(mut inner) = self.inner.lock() {
-            inner.insert(drive.to_string(), count);
-        }
-    }
+struct Run {
+    ctl: Arc<VolumeCtl>,
+    thread: Option<JoinHandle<()>>,
+    /// Discovery passes in a row that did not find the volume. 0: the volume
+    /// is mounted and its thread runs. More: its thread is stopped and its
+    /// entries stay (state Offline) until `VOLUME_MISSING_PASSES`.
+    missing: u32,
+}
 
-    pub fn adjust(&self, drive: &str, delta: i64) {
-        if let Ok(mut inner) = self.inner.lock() {
-            let entry = inner.entry(drive.to_string()).or_insert(0);
-            *entry = (*entry as i64 + delta).max(0) as u64;
-        }
-    }
+/// A run that reconcile takes out of the map or stops.
+struct Leaving {
+    ctl: Arc<VolumeCtl>,
+    thread: Option<JoinHandle<()>>,
+    /// The entries of the volume go. When false the volume stays in the
+    /// store (it is Offline, or it starts again).
+    remove_entries: bool,
+    /// The run stays in the map as Offline.
+    offline: bool,
+}
 
-    pub fn get(&self, drive: &str) -> u64 {
-        self.inner
-            .lock()
-            .ok()
-            .and_then(|m| m.get(drive).copied())
-            .unwrap_or(0)
-    }
+/// Counts a running build for the `indexing` flag.
+struct BuildGuard<'a> {
+    builds: &'a AtomicUsize,
+}
 
-    pub fn total(&self) -> u64 {
-        self.inner.lock().map(|m| m.values().sum()).unwrap_or(0)
+impl<'a> BuildGuard<'a> {
+    fn new(builds: &'a AtomicUsize, ctl: &VolumeCtl) -> Self {
+        builds.fetch_add(1, Ordering::SeqCst);
+        ctl.shared.set_state(VolumeState::Indexing);
+        Self { builds }
     }
+}
 
-    pub fn clear(&self) {
-        if let Ok(mut inner) = self.inner.lock() {
-            inner.clear();
-        }
+impl Drop for BuildGuard<'_> {
+    fn drop(&mut self) {
+        self.builds.fetch_sub(1, Ordering::SeqCst);
     }
+}
+
+/// Counts the folder walks of a journal batch that are not finished: the
+/// snapshot is not saved while one runs (see `save_snapshot`).
+struct WalkGuard<'a> {
+    pending: &'a AtomicUsize,
+}
+
+impl<'a> WalkGuard<'a> {
+    fn new(pending: &'a AtomicUsize) -> Self {
+        pending.fetch_add(1, Ordering::SeqCst);
+        Self { pending }
+    }
+}
+
+impl Drop for WalkGuard<'_> {
+    fn drop(&mut self) {
+        self.pending.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// How the journal read loop ended.
+enum LoopEnd {
+    Stopped,
+    /// The journal lost its history: walk the volume again.
+    Rebuild,
+}
+
+struct Core {
+    store: RwLock<Arc<FileStore>>,
+    search_generation: AtomicU64,
+    app_data_dir: RwLock<PathBuf>,
+    exclusions: RwLock<Arc<ExclusionSet>>,
+    runs: Mutex<HashMap<String, Run>>,
+    /// Held while volume threads start or stop.
+    reconcile: Mutex<()>,
+    /// The snapshot is loaded (or known to be missing).
+    loaded: AtomicBool,
+    /// `warm` has not found the volumes yet.
+    warming: AtomicBool,
+    /// Builds that run now.
+    builds: AtomicUsize,
+    /// Journal batches whose folder walks run now.
+    walks_pending: AtomicUsize,
+    ready: AtomicBool,
+    /// A good snapshot file exists: loaded or saved.
+    snapshot_ok: AtomicBool,
+    /// A journal checkpoint moved since the last save, with no entry change.
+    cursor_moved: AtomicBool,
+    legacy_done: AtomicBool,
+    save_lock: Mutex<()>,
+    last_save: Mutex<Instant>,
 }
 
 #[derive(Clone)]
 pub struct FileIndex {
-    db: Arc<RwLock<Option<Arc<Database>>>>,
-    names: Arc<NameIndex>,
-    search_generation: Arc<AtomicU64>,
-    volumes: Arc<RwLock<Vec<VolumeCoverage>>>,
-    indexing: Arc<AtomicBool>,
-    ready: Arc<AtomicBool>,
-    counts: IndexCounts,
-    watchers: Arc<Mutex<HashMap<String, VolumeWatcher>>>,
-    scan_cancels: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>,
-    app_data_dir: Arc<RwLock<PathBuf>>,
-    scan_generation: Arc<AtomicU64>,
-    scope_repairs: Arc<Mutex<ScopeRepairCoordinator>>,
-    source_workers: Arc<Mutex<SourceWorkerCoordinator>>,
-    scan_slots: Arc<tokio::sync::Semaphore>,
-    repair_slots: Arc<tokio::sync::Semaphore>,
-    /// One shard-root walk (minutes) at a time: the other repair slot stays
-    /// free for the short walks.
-    shard_repair_slot: Arc<tokio::sync::Semaphore>,
+    core: Arc<Core>,
 }
 
 impl Default for FileIndex {
     fn default() -> Self {
+        let no_exclusions = Arc::new(ExclusionSet::new(&[]));
         Self {
-            db: Arc::new(RwLock::new(None)),
-            names: Arc::new(NameIndex::default()),
-            search_generation: Arc::new(AtomicU64::new(0)),
-            volumes: Arc::new(RwLock::new(Vec::new())),
-            indexing: Arc::new(AtomicBool::new(false)),
-            ready: Arc::new(AtomicBool::new(false)),
-            counts: IndexCounts::default(),
-            watchers: Arc::new(Mutex::new(HashMap::new())),
-            scan_cancels: Arc::new(Mutex::new(HashMap::new())),
-            app_data_dir: Arc::new(RwLock::new(PathBuf::from("."))),
-            scan_generation: Arc::new(AtomicU64::new(1)),
-            scope_repairs: Arc::new(Mutex::new(ScopeRepairCoordinator::default())),
-            source_workers: Arc::new(Mutex::new(SourceWorkerCoordinator::default())),
-            scan_slots: Arc::new(tokio::sync::Semaphore::new(2)),
-            repair_slots: Arc::new(tokio::sync::Semaphore::new(SCOPE_REPAIR_SLOTS)),
-            shard_repair_slot: Arc::new(tokio::sync::Semaphore::new(1)),
+            core: Arc::new(Core {
+                store: RwLock::new(Arc::new(FileStore::new())),
+                search_generation: AtomicU64::new(0),
+                app_data_dir: RwLock::new(PathBuf::from(".")),
+                exclusions: RwLock::new(no_exclusions),
+                runs: Mutex::new(HashMap::new()),
+                reconcile: Mutex::new(()),
+                loaded: AtomicBool::new(false),
+                warming: AtomicBool::new(false),
+                builds: AtomicUsize::new(0),
+                walks_pending: AtomicUsize::new(0),
+                ready: AtomicBool::new(false),
+                snapshot_ok: AtomicBool::new(false),
+                cursor_moved: AtomicBool::new(false),
+                legacy_done: AtomicBool::new(false),
+                save_lock: Mutex::new(()),
+                last_save: Mutex::new(Instant::now()),
+            }),
         }
     }
 }
@@ -327,37 +500,104 @@ impl FileIndex {
         index
     }
 
-    /// Opens the catalog. Returns false when it cannot be opened now (for
-    /// example, locked by an instance that is still exiting).
-    pub fn init(&self, app_data_dir: &Path) -> bool {
-        *self.app_data_dir.write().unwrap_or_else(|e| e.into_inner()) = app_data_dir.to_path_buf();
-        let db_path = app_data_dir.join("catalog.db");
-        let opened = Database::open(&db_path);
-        if let Err(error) = &opened {
-            eprintln!("[Prism Catalog] cannot open the catalog: {error}");
-        }
-        if let Ok(d) = opened {
-            let db_arc = Arc::new(d);
-            if let Ok(covs) = db_arc.get_volume_coverages() {
-                for cov in &covs {
-                    self.counts.set(&cov.drive, cov.indexed_count);
-                }
-                if let Ok(mut vols) = self.volumes.write() {
-                    *vols = covs;
-                }
+    /// Loads the snapshot and the exclusion list of `app_data_dir`. A missing
+    /// or bad snapshot gives an empty store (the volumes are built by walks).
+    pub fn init(&self, app_data_dir: &Path) {
+        *self.core.app_data_dir.write().unwrap_or_else(|e| e.into_inner()) = app_data_dir.to_path_buf();
+        let path = app_data_dir.join(SNAPSHOT_FILE);
+        let store = match FileStore::load(&path) {
+            Ok(store) => {
+                self.core.snapshot_ok.store(true, Ordering::SeqCst);
+                store
             }
-            if self.counts.total() > 0 {
-                self.ready.store(true, Ordering::SeqCst);
+            Err(error) => {
+                if path.exists() {
+                    eprintln!("[Prism Catalog] the snapshot is not usable, building again: {error}");
+                } else {
+                    eprintln!("[Prism Catalog] no snapshot yet, building the index");
+                }
+                FileStore::new()
             }
-            self.names.spawn_sync(Arc::clone(&db_arc));
-            *self.db.write().unwrap_or_else(|e| e.into_inner()) = Some(db_arc);
-            return true;
+        };
+        self.load_exclusions();
+        if self.total_indexed(&store) > 0 {
+            self.core.ready.store(true, Ordering::SeqCst);
         }
-        false
+        *self.core.store.write().unwrap_or_else(|e| e.into_inner()) = Arc::new(store);
+        self.core.loaded.store(true, Ordering::SeqCst);
+    }
+
+    fn load_exclusions(&self) {
+        let dir = self.core.app_data_dir.read().unwrap_or_else(|e| e.into_inner()).clone();
+        let items = load_exclusion_list(&dir);
+        *self.core.exclusions.write().unwrap_or_else(|e| e.into_inner()) =
+            Arc::new(ExclusionSet::new(&items));
+    }
+
+    /// The store, for checks and probes (`examples/index_probe.rs`).
+    #[doc(hidden)]
+    pub fn store_handle(&self) -> Arc<FileStore> {
+        self.store()
+    }
+
+    fn store(&self) -> Arc<FileStore> {
+        self.core.store.read().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    fn exclusions(&self) -> Arc<ExclusionSet> {
+        self.core.exclusions.read().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    fn app_data_dir(&self) -> PathBuf {
+        self.core.app_data_dir.read().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    fn total_indexed(&self, store: &FileStore) -> u64 {
+        store
+            .volumes()
+            .iter()
+            .filter_map(|meta| store.volume_slot(&meta.volume_id))
+            .map(|slot| store.live_count(slot))
+            .sum()
     }
 
     pub fn begin_search(&self) -> u64 {
-        self.search_generation.fetch_add(1, Ordering::AcqRel) + 1
+        self.core.search_generation.fetch_add(1, Ordering::AcqRel) + 1
+    }
+
+    fn indexing(&self) -> bool {
+        self.core.warming.load(Ordering::Relaxed) || self.core.builds.load(Ordering::Relaxed) > 0
+    }
+
+    /// The coverage of each volume and the number of entries of the store.
+    fn status(&self, store: &FileStore) -> (Vec<VolumeCoverage>, u64) {
+        let mut volumes: Vec<VolumeCoverage> = self
+            .core
+            .runs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .values()
+            .map(|run| {
+                let ctl = &run.ctl;
+                let stored = store
+                    .volume_slot(&ctl.volume_id)
+                    .map_or(0, |slot| store.live_count(slot));
+                let state = ctl.shared.state();
+                let indexed_count = if state == VolumeState::Ready {
+                    stored
+                } else {
+                    stored.max(ctl.shared.progress.load(Ordering::Relaxed))
+                };
+                VolumeCoverage {
+                    drive: ctl.mount_text.clone(),
+                    state,
+                    indexed_count,
+                    total_progress: None,
+                }
+            })
+            .collect();
+        volumes.sort_by(|a, b| a.drive.cmp(&b.drive));
+        (volumes, self.total_indexed(store))
     }
 
     pub fn search_with_generation(
@@ -366,1162 +606,723 @@ impl FileIndex {
         limit: Option<usize>,
         generation: u64,
     ) -> FileSearchResponse {
-        let volumes = self
-            .volumes
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone();
-        let total_indexed = self.counts.total();
-        let indexing = self.indexing.load(Ordering::Relaxed);
-        let ready = self.ready.load(Ordering::Relaxed);
-
-        if self.search_generation.load(Ordering::Acquire) != generation {
-            return FileSearchResponse {
-                items: Vec::new(),
-                ready,
-                indexing,
-                path_browse: false,
-                volumes,
-                total_indexed,
-                error: None,
-            };
-        }
-
-        let db = self.db.read().unwrap_or_else(|e| e.into_inner()).clone();
-        let Some(ref db) = db else {
-            return search::browse_path_with_errors(query.trim(), search::clamp_limit(limit))
-                .map(|result| match result {
-                    Ok(items) => FileSearchResponse {
-                        items,
-                        ready: false,
-                        indexing: false,
-                        path_browse: true,
-                        volumes,
-                        total_indexed: 0,
-                        error: None,
-                    },
-                    Err(message) => FileSearchResponse {
-                        items: Vec::new(),
-                        ready: false,
-                        indexing: false,
-                        path_browse: true,
-                        volumes,
-                        total_indexed: 0,
-                        error: Some(FileSearchError {
-                            kind: FileSearchErrorKind::DirectoryAccess,
-                            message,
-                        }),
-                    },
-                })
-                .unwrap_or_else(|| FileSearchResponse {
-                    items: Vec::new(),
-                    ready: false,
-                    indexing: false,
-                    path_browse: false,
-                    volumes: Vec::new(),
-                    total_indexed: 0,
-                    error: None,
-                });
-        };
-
-        let response = search::search_with_generation(
+        let store = self.store();
+        let (volumes, total_indexed) = self.status(&store);
+        let indexing = self.indexing();
+        let ready = self.core.ready.load(Ordering::Relaxed) || total_indexed > 0;
+        search::search_with_generation(
             query,
             limit,
-            db,
-            Some(&self.names),
-            &self.search_generation,
+            &store,
+            &self.core.search_generation,
             generation,
             &volumes,
             total_indexed,
             indexing,
             ready,
-        );
-        self.sync_names();
-        response
+        )
     }
 
-    /// Wipes the catalog and rebuilds it from scratch (used by the UI's
-    /// "rebuild index" action).
+    /// Builds every volume again from a walk (the UI's "rebuild index"
+    /// action). The old entries stay searchable until the new ones are ready.
     pub fn rebuild(&self) {
         let this = self.clone();
         crate::runtime::spawn(async move {
-            this.cancel_all_scans();
-            let db = this.db.read().unwrap_or_else(|e| e.into_inner()).clone();
-            if let Some(db) = db.clone() {
-                // A space reclaim can hold the writer for a full VACUUM; wait
-                // on the blocking pool, never on an async worker.
-                let _ = crate::runtime::spawn_blocking(move || db.clear_catalog()).await;
-            }
-            this.names.reset();
-            this.counts.clear();
-            this.ready.store(false, Ordering::SeqCst);
-            this.scan_all_volumes(false).await;
+            let _ = crate::runtime::spawn_blocking(move || {
+                this.load_exclusions();
+                let volumes = volume::discover_volumes();
+                this.reconcile_volumes(volumes, true);
+            })
+            .await;
         });
     }
 
-    /// Returns unused catalog space to the file system on a blocking thread.
-    /// Searches keep running through the vacuum; they wait for the final
-    /// checkpoint, which holds the reader connection.
-    async fn reclaim_space(&self) {
-        let db = self.db.read().unwrap_or_else(|e| e.into_inner()).clone();
-        let Some(db) = db else { return };
-        let result = crate::runtime::spawn_blocking(move || db.reclaim_space()).await;
-        match result {
-            Ok(Ok(report)) if report.after < report.before => eprintln!(
-                "[Prism Catalog] reclaimed {} MB (catalog {} MB -> {} MB)",
-                (report.before - report.after) / 1_048_576,
-                report.before / 1_048_576,
-                report.after / 1_048_576
-            ),
-            Ok(Err(error)) => eprintln!("[Prism Catalog] space reclaim failed: {error}"),
-            _ => {}
+    /// Saves the snapshot when something changed. Call it before the process
+    /// exits, off the UI thread. It stops the volume threads first, so the
+    /// checkpoints stay as they are.
+    pub fn flush_for_exit(&self) {
+        for run in self.core.runs.lock().unwrap_or_else(|e| e.into_inner()).values() {
+            run.ctl.stop.store(true, Ordering::Relaxed);
         }
-    }
-
-    fn cancel_all_scans(&self) {
-        let cancels = self.scan_cancels.lock().unwrap_or_else(|e| e.into_inner());
-        for cancel in cancels.values() {
-            cancel.store(true, Ordering::SeqCst);
+        // A stopped folder walk takes its folders out of the store again.
+        // Wait for it, so the file never holds a folder with no contents.
+        let end = Instant::now() + EXIT_WALK_WAIT;
+        while self.core.walks_pending.load(Ordering::SeqCst) > 0 && Instant::now() < end {
+            std::thread::sleep(Duration::from_millis(20));
         }
-    }
-
-    /// True when the palette window is shown. The background poll loop uses
-    /// this to poll journal catch-up fast while the user is searching and
-    /// slowly while the launcher sits hidden.
-    fn palette_visible(&self) -> bool {
-        crate::host::get().is_none_or(|host| host.palette_visible())
-    }
-
-    /// Starts the background name-index sync when it has work (new rows, deleted
-    /// ids, a compaction). A no-op while a sync runs.
-    fn sync_names(&self) {
-        let db = self.db.read().unwrap_or_else(|e| e.into_inner()).clone();
-        if let Some(db) = db {
-            if self.names.needs_sync_with(&db) {
-                self.names.spawn_sync(db);
-            }
-        }
+        self.save_snapshot("exit", true);
     }
 
     fn emit_updated(&self) {
         crate::host::emit("file-index-updated", serde_json::Value::Null);
     }
 
-    /// Synchronizes every connected volume. Local fixed NTFS volumes use the
-    /// persisted FRN catalog and USN cursor; all other volumes retain the
-    /// recursive scanner/watcher fallback. `fresh_ok` only short-circuits the
-    /// fallback path.
-    async fn scan_all_volumes(&self, fresh_ok: bool) {
-        let db_opt = self.db.read().unwrap_or_else(|e| e.into_inner()).clone();
-        let Some(ref db) = db_opt else { return };
+    // -----------------------------------------------------------------------
+    // Snapshot
+    // -----------------------------------------------------------------------
 
-        let discovered = crate::runtime::spawn_blocking(volume::discover_volumes)
-            .await
-            .unwrap_or_default();
-
-        // Drop duplicate volume identities left by earlier builds (the same
-        // mount path discovered under a GUID id and a serial id): their rows
-        // duplicate the real volume's files.
-        if let Ok(known) = db.get_volume_ids() {
-            for (db_id, db_mount) in known {
-                let claimed = discovered.iter().find(|v| {
-                    v.normalized_mount_paths().iter().any(|path| {
-                        path.as_os_str()
-                            .to_string_lossy()
-                            .eq_ignore_ascii_case(&db_mount)
-                    })
-                });
-                if let Some(vol) = claimed {
-                    if vol.volume_id != db_id {
-                        eprintln!(
-                            "[Prism Catalog] Removing duplicate volume identity {db_id} (claimed by {})",
-                            vol.volume_id
-                        );
-                        let _ = db.remove_volume(&db_id);
-                    }
-                }
-            }
-        }
-
-        // Persist discovery and mount changes before scheduling source work.
-        // Each source owns its subsequent lifecycle, so a slow share cannot
-        // hold back another discovered volume.
-        for vol in &discovered {
-            let Some(mount_path) = vol.canonical_mount_path() else {
-                continue;
-            };
-            let initial_state = if vol.accessible {
-                VolumeState::Indexing
-            } else {
-                VolumeState::Offline
-            };
-            let update = db.upsert_volume(vol, initial_state);
-            let fresh = vol.accessible
-                && fresh_ok
-                && db
-                    .is_volume_fresh_at_mount(
-                        &vol.volume_id,
-                        &mount_path,
-                        STARTUP_SWEEP_WINDOW.as_secs(),
-                    )
-                    .unwrap_or(false);
-            if fresh {
-                let _ = db.set_volume_state(&vol.volume_id, VolumeState::Ready);
-            }
-            if let Ok(update) = &update {
-                if let Some(previous_mount) = &update.previous_mount_path {
-                    if !previous_mount.eq_ignore_ascii_case(&mount_path.to_string_lossy()) {
-                        if let Some(watcher) = self
-                            .watchers
-                            .lock()
-                            .unwrap_or_else(|e| e.into_inner())
-                            .remove(&vol.volume_id)
-                        {
-                            watcher.request_stop();
-                        }
-                    }
-                }
-            }
-            debug_volume_plan(db, vol, &mount_path, fresh, update.as_ref().ok());
-        }
-
-        for volume in discovered.into_iter().filter(|volume| volume.accessible) {
-            let volume_id = volume.volume_id.clone();
-            let should_start = self
-                .source_workers
-                .lock()
-                .unwrap()
-                .request(volume_id.clone(), fresh_ok);
-            if !should_start {
-                continue;
-            }
-
-            let this = self.clone();
-            let slots = self.scan_slots.clone();
-            crate::runtime::spawn(async move {
-                let mut pass_fresh_ok = fresh_ok;
-                loop {
-                    if let Ok(permit) = slots.clone().acquire_owned().await {
-                        let index = this.clone();
-                        let pass_volume = volume.clone();
-                        let _ = crate::runtime::spawn_blocking(move || {
-                            index.scan_one_volume_sync(&pass_volume, pass_fresh_ok);
-                        })
-                        .await;
-                        drop(permit);
-                    }
-
-                    let pending = this
-                        .source_workers
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .finish_pass(&volume_id);
-                    let Some(next_fresh_ok) = pending else {
-                        break;
-                    };
-                    pass_fresh_ok = next_fresh_ok;
-                }
-
-                this.refresh_totals_and_status();
-                let active = !this
-                    .source_workers
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .is_empty();
-                this.indexing.store(active, Ordering::SeqCst);
-                this.ready.store(true, Ordering::SeqCst);
-                this.emit_updated();
-            });
-        }
-
-        self.refresh_totals_and_status();
-        let active = !self
-            .source_workers
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .is_empty();
-        self.indexing.store(active, Ordering::SeqCst);
-        if !active {
-            self.ready.store(true, Ordering::SeqCst);
-        }
-        self.emit_updated();
-    }
-
-    /// Registers `volume` and synchronizes it on the calling thread: its
-    /// watcher starts and its tree is walked. `scan_all_volumes` does both
-    /// for each discovered volume; a bench calls this for a test tree.
-    pub fn sync_volume(&self, volume: &VolumeInfo, fresh_ok: bool) {
-        let db = self.db.read().unwrap_or_else(|e| e.into_inner()).clone();
-        if let Some(db) = db {
-            let _ = db.upsert_volume(volume, VolumeState::Indexing);
-        }
-        self.scan_one_volume_sync(volume, fresh_ok);
-    }
-
-    /// The whole per-volume scan is synchronous; the async wrappers only move
-    /// it off the runtime threads. Keeping the overflow handler fully sync
-    /// (spawn_blocking with no nested future) also avoids the type-level cycle
-    /// of an async closure that awaits back into this module's own futures.
-    fn scan_one_volume_sync(&self, vol: &VolumeInfo, fresh_ok: bool) {
-        let db_opt = self.db.read().unwrap_or_else(|e| e.into_inner()).clone();
-        let Some(db) = db_opt else { return };
-
-        let volume_id = vol.volume_id.clone();
-        let mount_path = match vol.canonical_mount_path() {
-            Some(p) => p.clone(),
-            None => return,
-        };
-        let drive = mount_path.to_string_lossy().into_owned();
-
-        // A watcher means this volume already selected the directory backend
-        // for the current process. Do not race it with an NTFS generation
-        // swap; raw access will be probed again on the next launch.
-        let fallback_active = self
-            .watchers
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .contains_key(&volume_id);
-        let mut directory_fallback = select_backend(vol, true) == BackendKind::Directory;
-        if !fallback_active && !directory_fallback {
-            let had_ready_generation = db.get_ntfs_checkpoint(&volume_id).ok().flatten().is_some();
-            match NtfsBackend::open(vol) {
-                Ok(mut backend) => {
-                    self.update_volume_coverage(&drive, VolumeState::Indexing);
-                    match backend.synchronize(vol, &db) {
-                        Ok(stats) => {
-                            if let Ok(exact) = db.get_scanned_entries(&volume_id) {
-                                self.counts.set(&drive, exact);
-                            }
-                            let _ = db.checkpoint();
-                            self.update_volume_coverage(&drive, VolumeState::Ready);
-                            debug_ntfs_complete(&db, vol, &drive, stats.records, None);
-                            self.emit_updated();
-                            return;
-                        }
-                        Err(error) => {
-                            if had_ready_generation {
-                                eprintln!(
-                                    "[Prism Catalog] NTFS synchronization deferred for {volume_id}; preserving the ready generation: {error}"
-                                );
-                                let _ = db.mark_ntfs_ready(&volume_id);
-                                self.update_volume_coverage(&drive, VolumeState::Ready);
-                                debug_ntfs_complete(&db, vol, &drive, 0, Some(&error));
-                                return;
-                            }
-                            eprintln!(
-                                "[Prism Catalog] NTFS backend failed for {volume_id}; using directory fallback: {error}"
-                            );
-                            directory_fallback = true;
-                        }
-                    }
-                }
-                Err(error) => {
-                    // Raw access can be denied to a normal user. The directory
-                    // backend remains fully functional and the UI never needs
-                    // to run elevated.
-                    if catalog_debug_enabled() {
-                        eprintln!(
-                            "{}",
-                            serde_json::json!({
-                                "event": "ntfs_open_failed",
-                                "volume_id": volume_id,
-                                "mount_path": drive,
-                                "error": error,
-                                "selected_backend": "directory",
-                            })
-                        );
-                    }
-                    directory_fallback = true;
-                }
-            }
-        }
-
-        if directory_fallback {
-            // Preserve a valid NTFS generation while the fallback walk builds
-            // path rows. finish_volume_scan performs the atomic handover.
-            let _ = db.mark_directory_backend(&volume_id);
-        }
-
-        let skip_scan = fresh_ok
-            && db
-                .is_volume_fresh_at_mount(&volume_id, &mount_path, STARTUP_SWEEP_WINDOW.as_secs())
-                .unwrap_or(false);
-
-        // Repair only the shard that lost events, on the blocking pool so the
-        // watcher thread is never stalled.
-        let overflow_index = self.clone();
-        let overflow_volume = volume_id.clone();
-        let overflow_cb: Arc<dyn Fn(String, PathBuf) + Send + Sync> = Arc::new(move |_, scope| {
-            let idx = overflow_index.clone();
-            let v_id = overflow_volume.clone();
-            idx.request_scope_repair(v_id, scope);
-        });
-        let update_index = self.clone();
-        let update_cb: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
-            // A hidden palette runs no searches, and searches drain the
-            // deleted ids: without this, a long build overflows the queue and
-            // forces a full reload.
-            update_index.sync_names();
-            update_index.emit_updated();
-        });
-
-        // Start the watcher if needed, otherwise buffer its events so the scan
-        // and the watcher never race on the same rows.
-        {
-            let mut watchers = self.watchers.lock().unwrap_or_else(|e| e.into_inner());
-            let replace = watchers
-                .get(&volume_id)
-                .is_some_and(|watcher| watcher_root_changed(watcher.root(), &mount_path));
-            if replace {
-                if let Some(watcher) = watchers.remove(&volume_id) {
-                    watcher.request_stop();
-                }
-            }
-            if !watchers.contains_key(&volume_id) {
-                let db_clone = db.clone();
-                let app_data_clone = self
-                    .app_data_dir
-                    .read()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .clone();
-                let counts_clone = self.counts.clone();
-                let drive_clone = drive.clone();
-                if let Some(w) = VolumeWatcher::start(
-                    mount_path.clone(),
-                    volume_id.clone(),
-                    db_clone,
-                    app_data_clone,
-                    counts_clone,
-                    drive_clone,
-                    update_cb,
-                    overflow_cb,
-                ) {
-                    watchers.insert(volume_id.clone(), w);
-                }
-            } else if let Some(w) = watchers.get(&volume_id) {
-                w.set_buffering(true);
-            }
-        }
-
-        if skip_scan {
-            // The persisted index is fresh: serve it as-is and let the
-            // watcher apply events directly (it was just started in buffering
-            // mode above). Drain events captured between the last scan and the
-            // watcher becoming live before releasing the buffer.
-            let watchers = self.watchers.lock().unwrap_or_else(|e| e.into_inner());
-            if let Some(w) = watchers.get(&volume_id) {
-                w.flush_queue(&db);
-            }
-            drop(watchers);
-            // A fresh index has no sweep to cover what the last run dropped.
-            self.requeue_deferred_scopes(&db, &volume_id);
+    /// Writes the snapshot file. With `only_if_changed` it does nothing when
+    /// neither an entry nor a checkpoint changed since the last save. Call it
+    /// on a thread that may block.
+    fn save_snapshot(&self, why: &str, only_if_changed: bool) {
+        // A store that was never loaded would replace a good file.
+        if !self.core.loaded.load(Ordering::SeqCst) {
             return;
         }
-
-        self.indexing.store(true, Ordering::SeqCst);
-        self.update_volume_coverage(&drive, VolumeState::Indexing);
-
-        let cancel = Arc::new(AtomicBool::new(false));
-        {
-            self.scan_cancels
-                .lock()
-                .unwrap()
-                .insert(volume_id.clone(), cancel.clone());
-        }
-
-        let gen = self.scan_generation.fetch_add(1, Ordering::SeqCst);
-        let app_data_scan = self
-            .app_data_dir
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone();
-        let index_for_progress = self.clone();
-        let drive_progress = drive.clone();
-
-        // Events that come after this point are not covered by the sweep.
-        let sweep_started = db::unix_millis();
-        let sweep_clock = std::time::Instant::now();
-        let scan_result = scanner::scan_volume(
-            &mount_path,
-            &volume_id,
-            gen,
-            db.clone(),
-            &app_data_scan,
-            cancel,
-            move |count| {
-                index_for_progress.update_progress(&drive_progress, count);
-            },
-        );
-
-        match &scan_result {
-            Ok(entries) => {
-                log_walk("sweep", &mount_path, *entries, sweep_clock.elapsed(), None);
-                self.update_volume_coverage(&drive, VolumeState::Ready);
-            }
-            Err(e) => {
-                eprintln!("[Prism Catalog] Scan for volume {volume_id} error: {e}");
-                let _ = db.set_volume_state(&volume_id, VolumeState::Error);
-                self.update_volume_coverage(&drive, VolumeState::Error);
-            }
-        }
-
-        debug_scan_complete(&db, vol, &drive, &scan_result);
-
-        // Exact count as scanned, then apply buffered watcher deltas on top.
-        if let Ok(exact) = db.get_scanned_entries(&volume_id) {
-            self.counts.set(&drive, exact);
-        }
-
-        // The baseline is complete before queued name events are replayed.
-        // A directory addition found during replay may therefore schedule a
-        // scoped repair immediately without being mistaken for a competing
-        // volume scan.
-        self.scan_cancels
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .remove(&volume_id);
-
-        // Flush buffered watcher events (also releases buffering); deltas are
-        // applied on top of the exact scanned count.
-        {
-            let watchers = self.watchers.lock().unwrap_or_else(|e| e.into_inner());
-            if let Some(w) = watchers.get(&volume_id) {
-                w.flush_queue(&db);
-            }
-        }
-        // The sweep walked every folder of the volume. It covers the scopes
-        // that were recorded before it began, so forget them. A scope
-        // recorded after it began is walked again. A failed sweep covers
-        // nothing.
-        if scan_result.is_ok() {
-            match db.clear_deferred_scope(&volume_id, &drive, sweep_started) {
-                Ok(()) => self.rerecord_deferred_scopes(&volume_id, Path::new(&drive)),
-                Err(error) => {
-                    eprintln!("[Prism Catalog] Cannot forget the scopes of the sweep of {volume_id}: {error}");
-                }
-            }
-        }
-        self.requeue_deferred_scopes(&db, &volume_id);
-
-        if let Ok(mut vols) = self.volumes.write() {
-            if let Some(v) = vols
-                .iter_mut()
-                .find(|v| v.drive.eq_ignore_ascii_case(&drive))
-            {
-                v.indexed_count = self.counts.get(&drive);
-            }
-        }
-
-        // The sweep left most of the WAL behind; fold
-        // it back into the catalog so the next launch does not pay recovery.
-        let _ = db.checkpoint();
-        self.emit_updated();
-    }
-
-    async fn catch_up_ntfs_volumes(&self, volumes: &[VolumeInfo]) {
-        for volume in volumes {
-            if select_backend(volume, true) != BackendKind::Ntfs
-                || self
-                    .source_workers
-                    .lock()
-                    .unwrap()
-                    .is_running(&volume.volume_id)
-                || self
-                    .watchers
-                    .lock()
-                    .unwrap()
-                    .contains_key(&volume.volume_id)
-            {
-                continue;
-            }
-            let this = self.clone();
-            // The blocking task must own its volume (one small clone per NTFS
-            // drive per poll tick).
-            let volume = volume.clone();
-            let _ = crate::runtime::spawn_blocking(move || {
-                let Some(db) = this.db.read().unwrap_or_else(|e| e.into_inner()).clone() else {
-                    return;
-                };
-                let mount = volume
-                    .canonical_mount_path()
-                    .map(|path| path.to_string_lossy().into_owned())
-                    .unwrap_or_default();
-                if let Ok(mut backend) = NtfsBackend::open(&volume) {
-                    if backend.synchronize(&volume, &db).is_ok() {
-                        if let Ok(count) = db.get_scanned_entries(&volume.volume_id) {
-                            this.counts.set(&mount, count);
-                        }
-                    }
-                }
-            })
-            .await;
-        }
-        self.refresh_totals_and_status();
-    }
-
-    fn request_scope_repair(&self, volume_id: String, scope: PathBuf) {
-        if catalog_debug_enabled() {
-            eprintln!("[catalog] repair requested scope={}", scope.display());
-        }
-        let key = format!("{}|{}", volume_id, scope.to_string_lossy().to_lowercase());
-        if !self
-            .scope_repairs
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .request(key.clone())
-        {
+        let _guard = self.core.save_lock.lock().unwrap_or_else(|e| e.into_inner());
+        let store = self.store();
+        if store.volumes().is_empty() {
             return;
         }
-
-        let index = self.clone();
-        let broad = is_broad_scope(&scope);
-        // The waits are async: a burst can request hundreds of scopes, and
-        // only the walk itself may hold a blocking-pool thread.
-        crate::runtime::spawn(async move {
-            loop {
-                index.wait_for_quiet_scope(&key, broad).await;
-                // The semaphores are never closed, so a permit always comes.
-                let _shard_slot = match broad {
-                    true => index.shard_repair_slot.clone().acquire_owned().await.ok(),
-                    false => None,
-                };
-                let _slot = index.repair_slots.clone().acquire_owned().await.ok();
-                // The pass starts here: it covers the requests that came
-                // while this scope waited for its slot.
-                index
-                    .scope_repairs
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .start_pass(&key);
-                // Events that come after this point are not covered by the walk.
-                let walk_started = db::unix_millis();
-                let (walker, walk_volume, walk_scope) = (index.clone(), volume_id.clone(), scope.clone());
-                let result =
-                    crate::runtime::spawn_blocking(move || walker.reconcile_scope_sync(&walk_volume, &walk_scope))
-                        .await
-                        .unwrap_or(ScopeRepairResult::Skipped);
-                drop((_slot, _shard_slot));
-                index.settle_scope_repair(&volume_id, &scope, walk_started, result);
-                if !index
-                    .scope_repairs
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .finish_pass(&key)
-                {
-                    break;
-                }
-                tokio::time::sleep(SCOPE_REPAIR_MIN_GAP).await;
-            }
-        });
-    }
-
-    /// Settles the record of a scope after a repair walk. A walk that ran
-    /// forgets the scope. A walk that was skipped keeps the record.
-    fn settle_scope_repair(&self, volume_id: &str, scope: &Path, walk_started: i64, result: ScopeRepairResult) {
-        if result != ScopeRepairResult::Walked {
+        if only_if_changed && !store.is_dirty() && !self.core.cursor_moved.load(Ordering::SeqCst) {
             return;
         }
-        let db = self.db.read().unwrap_or_else(|e| e.into_inner()).clone();
-        if let Some(db) = db {
-            match db.clear_deferred_scope(volume_id, &scope.to_string_lossy(), walk_started) {
-                Ok(()) => self.rerecord_deferred_scopes(volume_id, scope),
-                Err(error) => {
-                    eprintln!("[Prism Catalog] Cannot forget the repaired scope {}: {error}", scope.display());
-                }
-            }
+        // A folder walk of a journal batch runs: the store holds the folder
+        // but not its contents yet, and the checkpoint is before the batch.
+        // A file saved now would lose the contents at the next start.
+        if why != "exit" && self.core.walks_pending.load(Ordering::SeqCst) > 0 {
+            return;
         }
-    }
-
-    /// The clear of a scope removes the records below it, also those of scopes
-    /// that the watcher still holds deferred. Records them again.
-    fn rerecord_deferred_scopes(&self, volume_id: &str, scope: &Path) {
-        let watchers = self.watchers.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(watcher) = watchers.get(volume_id) {
-            watcher.rerecord_deferred_below(scope);
-        }
-    }
-
-    /// Queues a repair for every scope that an earlier run deferred and did
-    /// not repair: the watcher dropped the events below those folders, and a
-    /// process that ended first never walked them. Called when the volume's
-    /// watcher is live, so events from now on are not missed. A scope below
-    /// another recorded scope gets no request of its own: the walk of the
-    /// outer scope covers it and forgets its record. Returns the number of
-    /// repairs requested.
-    fn requeue_deferred_scopes(&self, db: &Database, volume_id: &str) -> usize {
-        let scopes = match db.deferred_scopes(volume_id) {
-            Ok(scopes) => scopes,
-            Err(error) => {
-                eprintln!("[Prism Catalog] Cannot read the deferred scopes of {volume_id}: {error}");
-                return 0;
-            }
-        };
-        let lowered: Vec<PathBuf> = scopes.iter().map(|scope| PathBuf::from(scope.to_lowercase())).collect();
-        let mut requested = 0;
-        for (scope, lower) in scopes.iter().zip(&lowered) {
-            let covered = lowered
-                .iter()
-                .any(|outer| outer != lower && lower.starts_with(outer));
-            if covered {
-                continue;
-            }
-            self.request_scope_repair(volume_id.to_string(), PathBuf::from(scope));
-            requested += 1;
-        }
-        requested
-    }
-
-    /// Waits until no repair request for `key` arrived for the quiet period,
-    /// or the maximum delay passed.
-    async fn wait_for_quiet_scope(&self, key: &str, broad: bool) {
-        let (quiet_needed, max_delay) = if broad {
-            (SHARD_REPAIR_QUIET, SHARD_REPAIR_MAX_DELAY)
-        } else {
-            (SCOPE_REPAIR_QUIET, SCOPE_REPAIR_MAX_DELAY)
-        };
-        let started = std::time::Instant::now();
-        loop {
-            let quiet = self
-                .scope_repairs
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .quiet_for(key);
-            let waited = started.elapsed();
-            if quiet >= quiet_needed || waited >= max_delay {
-                return;
-            }
-            let remaining = quiet_needed - quiet;
-            tokio::time::sleep(remaining.min(max_delay - waited)).await;
-        }
-    }
-
-    fn reconcile_scope_sync(&self, volume_id: &str, requested_scope: &Path) -> ScopeRepairResult {
-        let Some(db) = self.db.read().unwrap_or_else(|e| e.into_inner()).clone() else {
-            return ScopeRepairResult::Skipped;
-        };
-        let (volume_root, attached) = {
-            let watchers = self.watchers.lock().unwrap_or_else(|e| e.into_inner());
-            let Some(watcher) = watchers.get(volume_id) else {
-                return ScopeRepairResult::Skipped;
-            };
-            let volume_root = watcher.root().to_path_buf();
-            // A new top-level folder needs a reader of its own. Only a repair
-            // at the root or one level below it can come from one: a deeper
-            // repair does not list the volume root each time.
-            let near_root = requested_scope == volume_root || requested_scope.parent() == Some(volume_root.as_path());
-            let attached = if near_root { watcher.ensure_current_shards() } else { Vec::new() };
-            (volume_root, attached)
-        };
-
-        if requested_scope != volume_root && !requested_scope.starts_with(&volume_root) {
-            return ScopeRepairResult::Skipped;
-        }
-
-        let mut scopes: HashSet<PathBuf> = attached.into_iter().collect();
-        scopes.insert(requested_scope.to_path_buf());
-        let app_data_dir = self
-            .app_data_dir
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone();
-        let mut walked = true;
-        for scope in scopes {
-            let started = std::time::Instant::now();
-            let generation = self.scan_generation.fetch_add(1, Ordering::SeqCst);
-            let cancel = Arc::new(AtomicBool::new(false));
-            let result = if scope == volume_root {
-                scanner::reconcile_directory(
-                    &scope,
-                    volume_id,
-                    generation,
-                    db.clone(),
-                    &app_data_dir,
-                    cancel,
-                )
-            } else {
-                scanner::reconcile_scope(
-                    &scope,
-                    volume_id,
-                    generation,
-                    db.clone(),
-                    &app_data_dir,
-                    cancel,
-                )
-            };
-            if catalog_debug_enabled() {
+        self.core.cursor_moved.store(false, Ordering::SeqCst);
+        let path = self.app_data_dir().join(SNAPSHOT_FILE);
+        let started = Instant::now();
+        match store.save(&path) {
+            Ok(bytes) => {
+                self.core.snapshot_ok.store(true, Ordering::SeqCst);
+                *self.core.last_save.lock().unwrap_or_else(|e| e.into_inner()) = Instant::now();
                 eprintln!(
-                    "[catalog] repair pass scope={} entries={:?} ms={}",
-                    scope.display(),
-                    result.as_ref().ok(),
+                    "[Prism Catalog] snapshot saved ({why}): {} MB in {} ms",
+                    bytes / 1_048_576,
                     started.elapsed().as_millis()
                 );
             }
-            if let Ok(entries) = &result {
-                log_walk("repair", &scope, *entries, started.elapsed(), Some(is_broad_scope(&scope)));
-            }
-            if let Err(error) = result {
-                walked = false;
-                eprintln!("[Prism Catalog] Scoped repair for {} failed: {}", scope.display(), error);
-            }
-        }
-        // No forced checkpoint: a scoped repair writes little, and SQLite's
-        // automatic checkpoint bounds the WAL. A truncating checkpoint after
-        // every small repair cost up to 2 s each during bursts.
-        self.emit_updated();
-        if walked {
-            ScopeRepairResult::Walked
-        } else {
-            ScopeRepairResult::Skipped
-        }
-    }
-
-    fn update_progress(&self, drive: &str, count: u64) {
-        // Progress only ever grows here; a sweep of a few changed directories
-        // must not knock the displayed count back down. The exact count is
-        // restored from the database when the scan finishes.
-        let current = self.counts.get(drive);
-        if count > current {
-            self.counts.set(drive, count);
-        }
-        if let Ok(mut vols) = self.volumes.write() {
-            for v in vols.iter_mut() {
-                if v.drive.eq_ignore_ascii_case(drive) {
-                    v.indexed_count = v.indexed_count.max(count);
-                }
+            Err(error) => {
+                self.core.cursor_moved.store(true, Ordering::SeqCst);
+                eprintln!("[Prism Catalog] cannot save the snapshot ({why}): {error}");
             }
         }
     }
 
-    fn update_volume_coverage(&self, drive: &str, state: VolumeState) {
-        if let Ok(mut vols) = self.volumes.write() {
-            if let Some(v) = vols
-                .iter_mut()
-                .find(|v| v.drive.eq_ignore_ascii_case(drive))
-            {
-                v.state = state;
-            } else {
-                vols.push(VolumeCoverage {
-                    drive: drive.to_string(),
-                    state,
-                    indexed_count: self.counts.get(drive),
-                    total_progress: None,
-                });
-            }
-        }
+    /// The store changed and the last save is `SNAPSHOT_INTERVAL` old, or
+    /// only the journal cursor moved and the last save is
+    /// `CURSOR_SNAPSHOT_INTERVAL` old. A file with an old cursor makes the
+    /// next start read a long journal, or walk the volume.
+    fn snapshot_due(&self) -> bool {
+        let since_save = self.core.last_save.lock().unwrap_or_else(|e| e.into_inner()).elapsed();
+        (self.store().is_dirty() && since_save >= SNAPSHOT_INTERVAL)
+            || (self.core.cursor_moved.load(Ordering::SeqCst) && since_save >= CURSOR_SNAPSHOT_INTERVAL)
     }
 
-    fn refresh_totals_and_status(&self) {
-        let db_opt = self.db.read().unwrap_or_else(|e| e.into_inner()).clone();
-        if let Some(ref db) = db_opt {
-            if let Ok(covs) = db.get_volume_coverages() {
-                self.counts.clear();
-                for coverage in &covs {
-                    self.counts.set(&coverage.drive, coverage.indexed_count);
-                }
-                if let Ok(mut vols) = self.volumes.write() {
-                    *vols = covs;
-                }
-            }
-        }
-    }
-
-    /// Migrates temporary bootstrap entries from old files.json if present
-    fn try_migrate_legacy_cache(&self, legacy_cache_path: &Path) {
-        let db_opt = self.db.read().unwrap_or_else(|e| e.into_inner()).clone();
-        let Some(ref db) = db_opt else { return };
-        if let Ok(total) = db.get_total_indexed_count() {
-            if total > 0 {
-                return; // Already has indexed data
-            }
-        }
-
-        if !legacy_cache_path.exists() {
+    /// When every volume has built and a snapshot exists, the old SQLite
+    /// catalog is not needed any more: deletes it, once.
+    fn finish_migration_if_ready(&self) {
+        if self.core.legacy_done.load(Ordering::SeqCst) || !self.core.snapshot_ok.load(Ordering::SeqCst) {
             return;
         }
+        // Every volume that is still mounted has built well (a volume in
+        // Error does not set `built`).
+        let all_built = {
+            let runs = self.core.runs.lock().unwrap_or_else(|e| e.into_inner());
+            let mut mounted = runs.values().filter(|run| run.missing == 0).peekable();
+            mounted.peek().is_some() && mounted.all(|run| run.ctl.shared.built.load(Ordering::SeqCst))
+        };
+        if !all_built || self.core.legacy_done.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let deleted = delete_legacy_catalog(&self.app_data_dir());
+        if deleted > 0 {
+            eprintln!("[Prism Catalog] deleted {deleted} file(s) of the old catalog");
+        }
+    }
 
-        if let Ok(text) = std::fs::read_to_string(legacy_cache_path) {
-            #[derive(Deserialize)]
-            struct OldCache {
-                entries: Vec<OldEntry>,
+    // -----------------------------------------------------------------------
+    // Volumes
+    // -----------------------------------------------------------------------
+
+    /// Starts a thread for each new volume and stops the thread of each
+    /// volume that is gone (its entries stay for a short time, then go).
+    /// With `force` every thread restarts and builds its volume from a new
+    /// walk.
+    fn reconcile_volumes(&self, discovered: Vec<VolumeInfo>, force: bool) {
+        let _reconcile = self.core.reconcile.lock().unwrap_or_else(|e| e.into_inner());
+
+        // The wanted volumes: accessible, one for each id and each mount.
+        let mut wanted: Vec<(VolumeInfo, PathBuf)> = Vec::new();
+        for info in discovered.into_iter().filter(|info| info.accessible) {
+            let Some(mount) = info.canonical_mount_path() else { continue };
+            let key = mount.to_string_lossy().to_lowercase();
+            let taken = wanted.iter().any(|(held, held_mount)| {
+                held.volume_id == info.volume_id || held_mount.to_string_lossy().to_lowercase() == key
+            });
+            if !taken {
+                wanted.push((info, mount));
             }
-            #[derive(Deserialize)]
-            struct OldEntry {
-                p: String,
-                #[serde(default)]
-                d: bool,
+        }
+
+        // Phase 1: take out the threads that must stop. A volume that the
+        // discovery does not find stays in the map as Offline with its
+        // entries, until it is missing for `VOLUME_MISSING_PASSES` passes in
+        // a row.
+        let mut leaving: Vec<Leaving> = Vec::new();
+        {
+            let mut runs = self.core.runs.lock().unwrap_or_else(|e| e.into_inner());
+            let ids: Vec<String> = runs.keys().cloned().collect();
+            for id in ids {
+                let kept = wanted.iter().find(|(info, _)| info.volume_id == id);
+                let Some(run) = runs.get_mut(&id) else { continue };
+                let Some((_, mount)) = kept else {
+                    run.missing += 1;
+                    if run.missing >= VOLUME_MISSING_PASSES {
+                        if let Some(run) = runs.remove(&id) {
+                            leaving.push(Leaving {
+                                ctl: run.ctl,
+                                thread: run.thread,
+                                remove_entries: true,
+                                offline: false,
+                            });
+                        }
+                    } else if run.missing == 1 {
+                        leaving.push(Leaving {
+                            ctl: Arc::clone(&run.ctl),
+                            thread: run.thread.take(),
+                            remove_entries: false,
+                            offline: true,
+                        });
+                    }
+                    continue;
+                };
+                let same_mount = mount_text(mount).eq_ignore_ascii_case(&run.ctl.mount_text);
+                let finished = run.thread.as_ref().is_none_or(JoinHandle::is_finished);
+                // An Offline volume that is back starts again like a new one:
+                // the journal decides between a catch-up and a walk.
+                if force || !same_mount || finished || run.missing > 0 {
+                    if let Some(run) = runs.remove(&id) {
+                        leaving.push(Leaving {
+                            ctl: run.ctl,
+                            thread: run.thread,
+                            remove_entries: false,
+                            offline: false,
+                        });
+                    }
+                }
             }
+        }
 
-            if let Ok(old) = serde_json::from_str::<OldCache>(&text) {
-                let items: Vec<types::ScannedItem> = old
-                    .entries
-                    .into_iter()
-                    .filter_map(|e| {
-                        let path = Path::new(&e.p);
-                        let name = path.file_name()?.to_string_lossy().into_owned();
-                        let lower_name = name.to_lowercase();
-                        let parent = path
-                            .parent()
-                            .map(|p| p.to_string_lossy().into_owned())
-                            .unwrap_or_default();
-                        let extension = if e.d {
-                            None
-                        } else {
-                            path.extension()
-                                .map(|ext| ext.to_string_lossy().to_lowercase())
-                        };
+        // Phase 2: stop them and wait. The store changes only after the
+        // thread is gone: a late write could reach a slot that another
+        // volume took.
+        let store = self.store();
+        for leave in &leaving {
+            leave.ctl.stop.store(true, Ordering::Relaxed);
+        }
+        for mut leave in leaving {
+            if let Some(thread) = leave.thread.take() {
+                let _ = thread.join();
+            }
+            if leave.offline {
+                eprintln!("[Prism Catalog] volume {} is offline", leave.ctl.mount_text);
+                leave.ctl.shared.set_state(VolumeState::Offline);
+            }
+            if leave.remove_entries {
+                eprintln!("[Prism Catalog] volume {} is gone", leave.ctl.mount_text);
+                store.remove_volume(&leave.ctl.volume_id);
+            }
+        }
+        // Entries of volumes that this run does not know (a snapshot of
+        // a drive that is not mounted now). An Offline volume keeps them.
+        if !wanted.is_empty() {
+            let runs = self.core.runs.lock().unwrap_or_else(|e| e.into_inner());
+            for meta in store.volumes() {
+                if !wanted.iter().any(|(info, _)| info.volume_id == meta.volume_id)
+                    && !runs.contains_key(&meta.volume_id)
+                {
+                    store.remove_volume(&meta.volume_id);
+                }
+            }
+        }
 
-                        Some(types::ScannedItem {
-                            normalized_path: e.p.to_lowercase(),
-                            display_path: e.p,
-                            name,
-                            lower_name,
-                            parent,
-                            is_directory: e.d,
-                            extension,
-                            modified_at: 0,
-                            size: 0,
-                        })
-                    })
-                    .collect();
-
-                let _ = db.insert_batch("C", 0, &items);
+        // Phase 3: start the new threads. The lock stays held, so a fast
+        // thread that checks "every volume built" sees all of them.
+        let mut runs = self.core.runs.lock().unwrap_or_else(|e| e.into_inner());
+        for (info, mount) in wanted {
+            if runs.contains_key(&info.volume_id) {
+                continue;
+            }
+            let ctl = Arc::new(VolumeCtl {
+                volume_id: info.volume_id.clone(),
+                mount_text: mount_text(&mount),
+                mount,
+                ntfs: info.fs_type.eq_ignore_ascii_case("NTFS"),
+                stop: AtomicBool::new(false),
+                shared: RunShared::new(),
+            });
+            let index = self.clone();
+            let thread_ctl = Arc::clone(&ctl);
+            let spawned = std::thread::Builder::new()
+                .name(format!("catalog-{}", ctl.mount_text))
+                .spawn(move || index.volume_main(&thread_ctl, force));
+            match spawned {
+                Ok(thread) => {
+                    runs.insert(info.volume_id, Run { ctl, thread: Some(thread), missing: 0 });
+                }
+                Err(error) => eprintln!("[Prism Catalog] cannot start the thread of {}: {error}", ctl.mount_text),
             }
         }
     }
-}
 
-pub fn warm(index: FileIndex, app_data_dir: PathBuf) {
-    crate::runtime::spawn(async move {
-        // Open the persisted catalog. This was previously only reachable
-        // through the dead `FileIndex::new` helper - without it the index is
-        // never loaded or built and filename searches return nothing.
-        // Opening can wait on SQLite locks or WAL recovery (a previous
-        // instance was killed, e.g. by an update): never on the startup path,
-        // which also installs the Win key.
-        // A catalog that cannot be opened (still locked) gets four more
-        // tries, 1, 2, 4, and 8 seconds apart, instead of no file search.
-        for attempt in 0..5u32 {
-            if attempt > 0 {
-                tokio::time::sleep(std::time::Duration::from_secs(1 << (attempt - 1))).await;
-            }
-            let init_index = index.clone();
-            let init_dir = app_data_dir.clone();
-            let opened = crate::runtime::spawn_blocking(move || {
-                let opened = init_index.init(&init_dir);
-                if opened {
-                    init_index.try_migrate_legacy_cache(&init_dir.join("files.json"));
+    /// The body of a volume thread.
+    fn volume_main(&self, ctl: &VolumeCtl, force: bool) {
+        let journal = if ctl.ntfs {
+            JournalVolume::open(&ctl.mount)
+                .ok()
+                .filter(|journal| journal.query().is_ok())
+        } else {
+            None
+        };
+        match journal {
+            Some(journal) => self.journal_loop(ctl, &journal, force),
+            None => self.walk_loop(ctl),
+        }
+    }
+
+    /// The first build of a volume ended (well or not): the status, the
+    /// snapshot, the migration. A build that ended in Error does not count for
+    /// the migration.
+    fn finish_build(&self, ctl: &VolumeCtl, state: VolumeState, rebuilt: bool) {
+        ctl.shared.set_state(state);
+        self.core.ready.store(true, Ordering::SeqCst);
+        if rebuilt && state == VolumeState::Ready {
+            self.save_snapshot("build", false);
+        }
+        if state != VolumeState::Error {
+            ctl.shared.built.store(true, Ordering::SeqCst);
+        }
+        self.emit_updated();
+        self.finish_migration_if_ready();
+    }
+
+    /// Walks `ctl.mount` into the store with `meta`. The walk and the build of
+    /// the new arrays run at the same time, so the nodes are never all in
+    /// memory. `Ok(None)`: stopped. The old entries stay when the walk fails.
+    fn walk_into_store(
+        &self,
+        ctl: &VolumeCtl,
+        meta: VolumeMeta,
+        synthetic: bool,
+    ) -> Result<Option<VolumeSlot>, String> {
+        let store = self.store();
+        let exclusions = self.exclusions();
+        ctl.shared.progress.store(0, Ordering::Relaxed);
+        let failed = AtomicBool::new(false);
+        let started = Instant::now();
+        let (slot, walked) = std::thread::scope(|scope| {
+            let (sender, receiver) = sync_channel::<Vec<FsNode>>(16);
+            let (matcher, stop, progress, failed_flag) =
+                (&exclusions.matcher, &ctl.stop, &ctl.shared.progress, &failed);
+            let root = ctl.mount.as_path();
+            let walker = scope.spawn(move || {
+                let mut batch: Vec<FsNode> = Vec::with_capacity(WALK_BATCH);
+                let mut sink = |node: FsNode| {
+                    progress.fetch_add(1, Ordering::Relaxed);
+                    batch.push(node);
+                    if batch.len() >= WALK_BATCH {
+                        let _ = sender.send(std::mem::replace(&mut batch, Vec::with_capacity(WALK_BATCH)));
+                    }
+                };
+                let result = if synthetic {
+                    walk::walk_volume_synthetic(root, matcher, stop, &mut sink)
+                } else {
+                    walk::walk_volume(root, matcher, stop, &mut sink)
+                };
+                if result.is_err() {
+                    failed_flag.store(true, Ordering::SeqCst);
                 }
-                opened
-            })
-            .await
-            .unwrap_or(false);
-            if opened {
-                break;
+                if !batch.is_empty() {
+                    let _ = sender.send(batch);
+                }
+                result
+            });
+            let slot = store.replace_volume_checked(meta, receiver.into_iter().flatten(), || {
+                !failed.load(Ordering::SeqCst)
+            });
+            (slot, walker.join())
+        });
+        let walked = walked.map_err(|_| "the walk thread failed".to_string())?;
+        match (slot, walked) {
+            (Some(slot), Ok(stats)) => {
+                log_walk("volume", &ctl.mount, stats.entries, started.elapsed());
+                eprintln!(
+                    "[Prism Catalog] walked {}: {} entries, {} folders, {} not read, {} ms",
+                    ctl.mount_text, stats.entries, stats.folders, stats.denied, stats.ms
+                );
+                Ok(Some(slot))
+            }
+            (_, Err(_)) if ctl.stopped() => Ok(None),
+            (_, Err(error)) => Err(error),
+            (None, Ok(_)) => Err("the walk did not finish".to_string()),
+        }
+    }
+
+    fn volume_meta(&self, ctl: &VolumeCtl, backend: VolumeBackend, root_record: u64) -> VolumeMeta {
+        VolumeMeta {
+            volume_id: ctl.volume_id.clone(),
+            mount_path: ctl.mount_text.clone(),
+            root_record,
+            backend,
+            journal_id: 0,
+            next_usn: 0,
+            exclusions: self.exclusions().fingerprint,
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Walk volumes
+    // -----------------------------------------------------------------------
+
+    /// A volume with no journal: walk now, and again every 30 minutes.
+    fn walk_loop(&self, ctl: &VolumeCtl) {
+        loop {
+            let result = {
+                let _build = BuildGuard::new(&self.core.builds, ctl);
+                let meta = self.volume_meta(ctl, VolumeBackend::Walk, 0);
+                self.walk_into_store(ctl, meta, true)
+            };
+            let wait = match result {
+                Ok(Some(_)) => {
+                    self.finish_build(ctl, VolumeState::Ready, true);
+                    WALK_VOLUME_INTERVAL
+                }
+                Ok(None) => return,
+                Err(error) => {
+                    eprintln!("[Prism Catalog] walk of {} failed: {error}", ctl.mount_text);
+                    self.finish_build(ctl, VolumeState::Error, true);
+                    WALK_RETRY_INTERVAL
+                }
+            };
+            if !ctl.sleep(wait) {
+                return;
             }
         }
+    }
 
-        // Startup: serve the persisted index directly. Volumes whose index is
-        // fresh are not re-walked (the watcher keeps them live), so a normal
-        // launch has results immediately - no indexing phase.
-        index.scan_all_volumes(true).await;
-        index.reclaim_space().await;
+    // -----------------------------------------------------------------------
+    // Journal volumes
+    // -----------------------------------------------------------------------
 
-        let mut last_reconcile = tokio::time::Instant::now();
-        let mut last_discovery = tokio::time::Instant::now();
-        // Seed the known set so the first poll does not immediately re-sweep.
-        let mut current_volumes = crate::runtime::spawn_blocking(volume::discover_volumes)
-            .await
-            .unwrap_or_default();
-        let mut known_topology = volume_topology_fingerprint(&current_volumes);
-
+    /// A volume with a journal: build or catch up, then read the journal.
+    fn journal_loop(&self, ctl: &VolumeCtl, journal: &JournalVolume, force: bool) {
+        let mut force = force;
+        let mut backoff = BACKOFF_START;
         loop {
-            // Fast cadence while the palette is open (search freshness), slow
-            // cadence while hidden (steady-state background cost). The sleep is
-            // sliced so showing the palette resumes the fast cadence within a
-            // second instead of after the full idle interval.
-            let visible = index.palette_visible();
-            let deadline = tokio::time::Instant::now()
-                + if visible {
-                    ACTIVE_POLL_INTERVAL
-                } else {
-                    IDLE_POLL_INTERVAL
-                };
-            while tokio::time::Instant::now() < deadline {
-                let slice = deadline
-                    .saturating_duration_since(tokio::time::Instant::now())
-                    .min(POLL_WAKE_SLICE);
-                if slice.is_zero() {
-                    break;
-                }
-                tokio::time::sleep(slice).await;
-                if index.palette_visible() != visible {
-                    break;
-                }
+            if ctl.stopped() {
+                return;
             }
-
-            if last_discovery.elapsed() >= VOLUME_DISCOVERY_INTERVAL {
-                last_discovery = tokio::time::Instant::now();
-                current_volumes = crate::runtime::spawn_blocking(volume::discover_volumes)
-                    .await
-                    .unwrap_or_default();
-
-                let current_topology = volume_topology_fingerprint(&current_volumes);
-                let volume_set_changed = current_topology != known_topology;
-                let reconcile_due = last_reconcile.elapsed() >= RECONCILIATION_INTERVAL;
-                if volume_set_changed || reconcile_due {
-                    known_topology = current_topology;
-                    // A mount change only needs newly discovered or stale volumes;
-                    // healthy NTFS volumes catch up from USN and live fallback
-                    // watchers cover existing directory-backed volumes.
-                    index
-                        .scan_all_volumes(volume_set_changed && !reconcile_due)
-                        .await;
-                    last_reconcile = tokio::time::Instant::now();
-                    // scan_all_volumes discovers volumes itself; refresh the
-                    // snapshot so the next tick does not see a phantom change.
-                    current_volumes =
-                        crate::runtime::spawn_blocking(volume::discover_volumes)
-                            .await
-                            .unwrap_or_default();
+            let started = match self.journal_start(ctl, journal, force) {
+                Ok(Some(started)) => started,
+                Ok(None) => return,
+                Err(JournalError::NotActive(message)) => {
+                    // The journal was deleted: this volume can only be walked.
+                    eprintln!("[Prism Catalog] {}: {message}", ctl.mount_text);
+                    self.walk_loop(ctl);
+                    return;
+                }
+                Err(error) => {
+                    eprintln!("[Prism Catalog] cannot start {}: {error}", ctl.mount_text);
+                    self.finish_build(ctl, VolumeState::Error, false);
+                    if !ctl.sleep(backoff) {
+                        return;
+                    }
+                    backoff = (backoff * 2).min(BACKOFF_MAX);
                     continue;
                 }
+            };
+            backoff = BACKOFF_START;
+            self.finish_build(ctl, VolumeState::Ready, started.rebuilt);
+            match self.read_loop(ctl, journal, &started) {
+                LoopEnd::Stopped => return,
+                // The history is lost: the next start walks the volume.
+                LoopEnd::Rebuild => force = true,
             }
+        }
+    }
 
-            // Healthy NTFS volumes never receive periodic recursive
-            // reconciliation. Their persisted cursor advances from the
-            // journal every poll while directory backends stay watcher-led.
-            index.catch_up_ntfs_volumes(&current_volumes).await;
+    /// Chooses where the journal reader starts. A saved checkpoint that the
+    /// journal still holds is used. Any other case walks the volume: the USN
+    /// is recorded BEFORE the walk, so the reader replays what changed
+    /// during the walk.
+    fn journal_start(
+        &self,
+        ctl: &VolumeCtl,
+        journal: &JournalVolume,
+        force: bool,
+    ) -> Result<Option<JournalStart>, JournalError> {
+        let query = journal.query()?;
+        let store = self.store();
+        let fingerprint = self.exclusions().fingerprint;
+        let stored = if force {
+            None
+        } else {
+            store.volumes().into_iter().find(|meta| {
+                meta.volume_id == ctl.volume_id
+                    && meta.backend == VolumeBackend::Journal
+                    && meta.mount_path.eq_ignore_ascii_case(&ctl.mount_text)
+                    && meta.exclusions == fingerprint
+            })
+        };
+        let checkpoint = stored
+            .as_ref()
+            .map(|meta| JournalCheckpoint { journal_id: meta.journal_id, next_usn: meta.next_usn });
+        match journal_continuity(checkpoint, query) {
+            JournalContinuity::Current | JournalContinuity::CatchUp => {
+                let (Some(meta), Some(slot)) = (stored, store.volume_slot(&ctl.volume_id)) else {
+                    return Err(JournalError::Failed("the saved volume is missing".to_string()));
+                };
+                Ok(Some(JournalStart {
+                    slot,
+                    journal_id: meta.journal_id,
+                    usn: meta.next_usn,
+                    rebuilt: false,
+                }))
+            }
+            JournalContinuity::Rebuild(reason) => {
+                eprintln!("[Prism Catalog] walking {} ({reason:?})", ctl.mount_text);
+                let _build = BuildGuard::new(&self.core.builds, ctl);
+                let root = walk::root_record(&ctl.mount).map_err(JournalError::Failed)?;
+                let mut meta = self.volume_meta(ctl, VolumeBackend::Journal, root);
+                meta.journal_id = query.journal_id;
+                meta.next_usn = query.next_usn;
+                let slot = self
+                    .walk_into_store(ctl, meta, false)
+                    .map_err(JournalError::Failed)?;
+                Ok(slot.map(|slot| JournalStart {
+                    slot,
+                    journal_id: query.journal_id,
+                    usn: query.next_usn,
+                    rebuilt: true,
+                }))
+            }
+        }
+    }
+
+    /// Reads the journal and applies it, until the thread stops or the
+    /// journal loses its history. The cursor is local. The store gets it with
+    /// each batch that has records, and at most every `CURSOR_PUBLISH_GAP`
+    /// otherwise (and when the loop stops).
+    fn read_loop(&self, ctl: &VolumeCtl, journal: &JournalVolume, start: &JournalStart) -> LoopEnd {
+        let store = self.store();
+        let exclusions = self.exclusions();
+        let (slot, journal_id) = (start.slot, start.journal_id);
+        let mut cursor = start.usn;
+        let mut published = cursor;
+        let mut last_publish = Instant::now();
+        let mut buffer: Vec<u8> = Vec::new();
+        let mut backoff = BACKOFF_START;
+        let mut unannounced = false;
+        let mut last_emit = Instant::now();
+        loop {
+            if ctl.stopped() {
+                if cursor != published {
+                    self.publish_cursor(&store, slot, journal_id, cursor);
+                }
+                return LoopEnd::Stopped;
+            }
+            match journal.read_with(&mut buffer, cursor, journal_id) {
+                Ok(batch) => {
+                    if batch.records.is_empty() {
+                        backoff = BACKOFF_START;
+                        cursor = batch.next_usn;
+                        if cursor != published && last_publish.elapsed() >= CURSOR_PUBLISH_GAP {
+                            self.publish_cursor(&store, slot, journal_id, cursor);
+                            published = cursor;
+                            last_publish = Instant::now();
+                        }
+                        if unannounced && last_emit.elapsed() >= EMIT_GAP {
+                            unannounced = false;
+                            last_emit = Instant::now();
+                            self.emit_updated();
+                        }
+                        // Poll: a stop ends the pause, and the loop handles it.
+                        ctl.sleep(EMPTY_READ_PAUSE);
+                        continue;
+                    }
+                    let accepts = |record: u64| store.accepts_children(slot, record);
+                    let changes = journal.changes(&batch, &accepts, &exclusions.matcher);
+                    let folders = folders_to_walk(&changes, &accepts);
+                    if folders.is_empty() {
+                        store.apply_and_checkpoint(slot, &changes, journal_id, batch.next_usn);
+                    } else {
+                        // The cursor moves only after the walks end well. When
+                        // a walk fails or stops, the folders go out of the
+                        // store again and the next read gives the batch
+                        // again: the folders are new then, and are walked.
+                        let _walking = WalkGuard::new(&self.core.walks_pending);
+                        store.apply(slot, &changes);
+                        if !self.walk_new_folders(ctl, &store, slot, &folders, &changes, &exclusions.matcher) {
+                            if ctl.stopped() {
+                                continue;
+                            }
+                            eprintln!(
+                                "[Prism Catalog] a new folder of {} was not walked, trying again",
+                                ctl.mount_text
+                            );
+                            if !ctl.sleep(backoff) {
+                                continue;
+                            }
+                            backoff = (backoff * 2).min(BACKOFF_MAX);
+                            continue;
+                        }
+                        store.advance_checkpoint(slot, journal_id, batch.next_usn);
+                    }
+                    backoff = BACKOFF_START;
+                    self.core.cursor_moved.store(true, Ordering::SeqCst);
+                    cursor = batch.next_usn;
+                    published = cursor;
+                    last_publish = Instant::now();
+                    unannounced = true;
+                    if last_emit.elapsed() >= EMIT_GAP {
+                        unannounced = false;
+                        last_emit = Instant::now();
+                        self.emit_updated();
+                    }
+                }
+                Err(JournalError::HistoryLost(message) | JournalError::NotActive(message)) => {
+                    eprintln!("[Prism Catalog] {}: {message}", ctl.mount_text);
+                    return LoopEnd::Rebuild;
+                }
+                Err(JournalError::Failed(message)) => {
+                    eprintln!("[Prism Catalog] journal read of {} failed: {message}", ctl.mount_text);
+                    if !ctl.sleep(backoff) {
+                        return LoopEnd::Stopped;
+                    }
+                    backoff = (backoff * 2).min(BACKOFF_MAX);
+                }
+            }
+        }
+    }
+
+    /// Gives the cursor to the store. The next save keeps it, with or
+    /// without an entry change.
+    fn publish_cursor(&self, store: &FileStore, slot: VolumeSlot, journal_id: u64, cursor: i64) {
+        store.advance_checkpoint(slot, journal_id, cursor);
+        self.core.cursor_moved.store(true, Ordering::SeqCst);
+    }
+
+    /// Walks the new `folders` of a batch whose `changes` are applied. Returns
+    /// false when a walk was stopped: the folders from that one on are
+    /// removed from the store again (a walk applies its contents only when it
+    /// ends well).
+    fn walk_new_folders(
+        &self,
+        ctl: &VolumeCtl,
+        store: &FileStore,
+        slot: VolumeSlot,
+        folders: &[u64],
+        changes: &[FsChange],
+        exclusions: &Exclusions,
+    ) -> bool {
+        for (index, &record) in folders.iter().enumerate() {
+            if self.walk_new_folder(ctl, store, slot, record, exclusions) {
+                continue;
+            }
+            let undo: Vec<FsChange> = changes
+                .iter()
+                .filter_map(|change| match change {
+                    FsChange::Upsert(node) if folders[index..].contains(&node.record) => {
+                        Some(FsChange::Remove { record: node.record, seq: node.seq })
+                    }
+                    _ => None,
+                })
+                .collect();
+            store.apply(slot, &undo);
+            return false;
+        }
+        true
+    }
+
+    /// A folder became visible with its contents (moved in, or an excluded
+    /// folder renamed): the journal has no record for the contents, so the
+    /// folder is walked and its subtree applied. Returns false only when the walk
+    /// was stopped.
+    fn walk_new_folder(
+        &self,
+        ctl: &VolumeCtl,
+        store: &FileStore,
+        slot: VolumeSlot,
+        record: u64,
+        exclusions: &Exclusions,
+    ) -> bool {
+        let Some(path) = store.folder_path(slot, record) else { return true };
+        let started = Instant::now();
+        let mut nodes = Vec::new();
+        // One thread: a build makes thousands of new folders, and most hold a
+        // few entries. Three threads per folder would cost more than the walk.
+        let result = walk::walk_volume_threads(
+            Path::new(&path),
+            exclusions,
+            &ctl.stop,
+            1,
+            false,
+            &mut |node| nodes.push(node),
+        );
+        let stats = match result {
+            Ok(stats) => stats,
+            // Stopped (exit, rebuild): the caller reads the batch again.
+            Err(_) if ctl.stopped() => return false,
+            // Any other error does not go away on a retry (the folder is gone
+            // again, or it cannot be read): a retry would hold the reader on
+            // this batch. The folder entry stays; a full walk reads it later.
+            Err(error) => {
+                eprintln!("[Prism Catalog] walk of new folder {path} failed: {error}");
+                return true;
+            }
+        };
+        let changes = order_subtree(record, nodes);
+        for chunk in changes.chunks(APPLY_CHUNK) {
+            store.apply(slot, chunk);
+        }
+        log_walk("folder", Path::new(&path), stats.entries, started.elapsed());
+        true
+    }
+}
+
+/// Where a journal reader starts.
+struct JournalStart {
+    slot: VolumeSlot,
+    journal_id: u64,
+    usn: i64,
+    /// The volume was walked now (the snapshot has to be saved).
+    rebuilt: bool,
+}
+
+/// The mount path with a trailing backslash.
+fn mount_text(mount: &Path) -> String {
+    let text = mount.to_string_lossy();
+    format!("{}\\", text.trim_end_matches(['\\', '/']))
+}
+
+/// Starts the file index in the background: loads the snapshot, then builds
+/// or updates every volume and keeps them current. Never on the startup path.
+pub fn warm(index: FileIndex, app_data_dir: PathBuf) {
+    index.core.warming.store(true, Ordering::SeqCst);
+    crate::runtime::spawn(async move {
+        let init_index = index.clone();
+        let _ = crate::runtime::spawn_blocking(move || init_index.init(&app_data_dir)).await;
+
+        loop {
+            let volumes = crate::runtime::spawn_blocking(volume::discover_volumes)
+                .await
+                .unwrap_or_default();
+            let reconcile_index = index.clone();
+            let _ = crate::runtime::spawn_blocking(move || reconcile_index.reconcile_volumes(volumes, false)).await;
+            index.core.warming.store(false, Ordering::SeqCst);
+
+            if index.snapshot_due() {
+                let save_index = index.clone();
+                let _ = crate::runtime::spawn_blocking(move || save_index.save_snapshot("timer", false)).await;
+            }
+            tokio::time::sleep(VOLUME_DISCOVERY_INTERVAL).await;
         }
     });
-}
-
-fn volume_topology_fingerprint(volumes: &[VolumeInfo]) -> Vec<String> {
-    let mut fingerprints: Vec<String> = volumes
-        .iter()
-        .map(|volume| {
-            let canonical = volume
-                .canonical_mount_path()
-                .map(|path| path.to_string_lossy().to_lowercase())
-                .unwrap_or_default();
-            let aliases = volume
-                .normalized_mount_paths()
-                .iter()
-                .map(|path| path.to_string_lossy().to_lowercase())
-                .collect::<Vec<_>>()
-                .join("|");
-            format!(
-                "{};{};{};{};{}",
-                volume.volume_id.to_lowercase(),
-                canonical,
-                aliases,
-                volume.fs_type.to_lowercase(),
-                volume.drive_type
-            )
-        })
-        .collect();
-    fingerprints.sort_unstable();
-    fingerprints.dedup();
-    fingerprints
-}
-
-fn debug_volume_plan(
-    db: &Database,
-    volume: &VolumeInfo,
-    mount_path: &Path,
-    fresh: bool,
-    update: Option<&self::db::VolumeUpdate>,
-) {
-    if !catalog_debug_enabled() {
-        return;
-    }
-    let eligible_backend = match select_backend(volume, true) {
-        BackendKind::Ntfs => "ntfs-probe-pending",
-        BackendKind::Directory => "directory",
-    };
-    eprintln!(
-        "{}",
-        serde_json::json!({
-            "event": "volume_scan_plan",
-            "sources": volume.discovery_sources,
-            "raw_volume_guid_path": volume.volume_guid_path,
-            "volume_id": volume.volume_id,
-            "mount_paths": volume.normalized_mount_paths().iter().map(|p| p.to_string_lossy()).collect::<Vec<_>>(),
-            "canonical_mount_path": mount_path.to_string_lossy(),
-            "drive_letter": volume.drive_letter,
-            "drive_type": volume.drive_type,
-            "file_system": volume.fs_type,
-            "label": volume.label,
-            "accessible": volume.accessible,
-            "selected_backend": eligible_backend,
-            "existing_database_mount_path": update.and_then(|value| value.previous_mount_path.as_deref()),
-            "volume_change": update.map(|value| format!("{:?}", value.change)),
-            "fresh": fresh,
-            "scan_action": if !volume.accessible { "skipped-offline" } else if fresh { "backend-sync-or-watcher" } else { "started" },
-            "database_status": db.volume_debug_status(&volume.volume_id).ok().map(|status| serde_json::json!({
-                "mount_path": status.0,
-                "backend": status.1,
-                "state": status.2,
-                "scanned_entries": status.3,
-                "last_scanned_at": status.4,
-                "index_status": status.5,
-            })),
-        })
-    );
-}
-
-fn debug_scan_complete(
-    db: &Database,
-    volume: &VolumeInfo,
-    mount_path: &str,
-    result: &Result<u64, String>,
-) {
-    if !catalog_debug_enabled() {
-        return;
-    }
-    let status = db.volume_debug_status(&volume.volume_id).ok();
-    eprintln!(
-        "{}",
-        serde_json::json!({
-            "event": "volume_scan_complete",
-            "volume_id": volume.volume_id,
-            "mount_path": mount_path,
-            "scan_count": result.as_ref().ok(),
-            "scan_error": result.as_ref().err(),
-            "database_backend": status.as_ref().map(|value| value.1.as_str()),
-            "database_state": status.as_ref().map(|value| value.2.as_str()),
-            "database_scanned_entries": status.as_ref().map(|value| value.3),
-            "last_scanned_at": status.as_ref().map(|value| value.4),
-            "index_status": status.as_ref().map(|value| value.5.as_str()),
-        })
-    );
-}
-
-fn debug_ntfs_complete(
-    db: &Database,
-    volume: &VolumeInfo,
-    mount_path: &str,
-    records: u64,
-    deferred_error: Option<&str>,
-) {
-    if !catalog_debug_enabled() {
-        return;
-    }
-    let status = db.volume_debug_status(&volume.volume_id).ok();
-    eprintln!(
-        "{}",
-        serde_json::json!({
-            "event": "volume_ntfs_sync_complete",
-            "volume_id": volume.volume_id,
-            "mount_path": mount_path,
-            "records": records,
-            "deferred_error": deferred_error,
-            "database_backend": status.as_ref().map(|value| value.1.as_str()),
-            "database_state": status.as_ref().map(|value| value.2.as_str()),
-            "database_scanned_entries": status.as_ref().map(|value| value.3),
-            "last_scanned_at": status.as_ref().map(|value| value.4),
-            "index_status": status.as_ref().map(|value| value.5.as_str()),
-        })
-    );
 }
 
 pub fn quick_access() -> Vec<QuickAccessEntry> {
@@ -1647,81 +1448,233 @@ fn image_thumbnail(path: &Path, len: u64) -> Option<String> {
 mod tests {
     use super::*;
 
-    const VOLUME: &str = "vol-mod-test";
-
+    /// A fresh folder under the repo's `target/tmp` (the shell cannot write to `%TEMP%`).
     fn data_dir(label: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("prism-index-test-{}-{label}", std::process::id()));
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/tmp")
+            .join(format!("prism-index-test-{}-{label}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
     }
 
-    fn record(index: &FileIndex, scope: &str) {
-        let db = index.db.read().unwrap().clone().unwrap();
-        db.update_deferred_scopes(VOLUME, &[(scope.to_string(), true)]).unwrap();
+    fn node(record: u64, parent: u64, name: &str, is_dir: bool, excluded: bool) -> FsNode {
+        FsNode { record, seq: 1, parent_record: parent, name: name.into(), is_dir, excluded, link: false }
     }
 
-    fn recorded(index: &FileIndex) -> Vec<String> {
-        let db = index.db.read().unwrap().clone().unwrap();
-        db.deferred_scopes(VOLUME).unwrap()
+    fn folder(record: u64, parent: u64) -> FsChange {
+        FsChange::Upsert(node(record, parent, "f", true, false))
+    }
+
+    // --- exclusion file ---
+
+    #[test]
+    fn the_exclusion_file_text_reads_back_as_the_same_items() {
+        let items = vec![
+            "node_modules".to_string(),
+            r"C:\Work\cache".to_string(),
+            r"<home>\.cargo\registry".to_string(),
+        ];
+        assert_eq!(parse_exclusion_list(&format_exclusion_file(&items)), items);
     }
 
     #[test]
-    fn a_scope_deferred_before_a_restart_is_queued_for_repair_after_it() {
-        let dir = data_dir("restart");
+    fn comments_blank_lines_spaces_and_a_bom_are_ignored() {
+        let text = "\u{feff}# header\n\n  .git  \r\n   # indented comment\nnode_modules\n\n";
+        assert_eq!(parse_exclusion_list(text), vec![".git", "node_modules"]);
+        assert!(parse_exclusion_list("# only a comment\n").is_empty());
+    }
+
+    #[test]
+    fn a_missing_exclusion_file_is_written_with_the_default_list() {
+        let dir = data_dir("excl-default");
+        let items = load_exclusion_list(&dir);
+        assert_eq!(items, Exclusions::default_entries(&dir));
+        let text = std::fs::read_to_string(dir.join(EXCLUSIONS_FILE)).unwrap();
+        assert!(text.starts_with("# Prism file index"));
+        // The second start reads the file back: the same list.
+        assert_eq!(load_exclusion_list(&dir), items);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn an_edited_exclusion_file_replaces_the_default_list() {
+        let dir = data_dir("excl-edited");
+        let _ = load_exclusion_list(&dir);
+        std::fs::write(dir.join(EXCLUSIONS_FILE), "# mine\nbuild\n").unwrap();
+        assert_eq!(load_exclusion_list(&dir), vec!["build"]);
+        // An empty list is a list: nothing is excluded.
+        std::fs::write(dir.join(EXCLUSIONS_FILE), "# nothing\n").unwrap();
+        assert!(load_exclusion_list(&dir).is_empty());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn the_fingerprint_ignores_order_and_case_and_sees_a_change() {
+        let a = vec!["Node_Modules".to_string(), ".git".to_string()];
+        let b = vec![".GIT".to_string(), "node_modules".to_string()];
+        assert_eq!(exclusion_fingerprint(&a), exclusion_fingerprint(&b));
+        let c = vec![".git".to_string()];
+        assert_ne!(exclusion_fingerprint(&a), exclusion_fingerprint(&c));
+        assert_ne!(exclusion_fingerprint(&c), exclusion_fingerprint(&[]));
+    }
+
+    // --- newly visible folders ---
+
+    #[test]
+    fn a_folder_that_was_not_shown_before_is_walked() {
+        let changes = vec![folder(10, 5)];
+        assert_eq!(folders_to_walk(&changes, &|_| false), vec![10]);
+        // A folder that was a live, shown folder (a plain rename) is not.
+        assert!(folders_to_walk(&changes, &|record| record == 10).is_empty());
+    }
+
+    #[test]
+    fn files_removes_and_excluded_folders_are_not_walked() {
+        let changes = vec![
+            FsChange::Upsert(node(10, 5, "a.txt", false, false)),
+            FsChange::Upsert(node(11, 5, "node_modules", true, true)),
+            FsChange::Remove { record: 12, seq: 1 },
+        ];
+        assert!(folders_to_walk(&changes, &|_| false).is_empty());
+    }
+
+    #[test]
+    fn a_new_junction_or_symlink_folder_is_not_walked() {
+        let link = FsChange::Upsert(FsNode { link: true, ..node(10, 5, "x", true, false) });
+        assert!(folders_to_walk(&[link, folder(11, 5)], &|_| false) == vec![11]);
+    }
+
+    #[test]
+    fn a_folder_below_another_new_folder_is_left_to_the_walk_of_its_parent() {
+        let changes = vec![folder(10, 5), folder(11, 10), folder(12, 11), folder(20, 5)];
+        assert_eq!(folders_to_walk(&changes, &|_| false), vec![10, 20]);
+        // When the parent was shown before, the child needs its own walk.
+        assert_eq!(folders_to_walk(&changes, &|record| record == 10), vec![11, 20]);
+    }
+
+    #[test]
+    fn a_walked_subtree_is_ordered_with_each_folder_before_its_contents() {
+        let nodes = vec![
+            node(32, 31, "deep.txt", false, false),
+            node(31, 30, "inner", true, false),
+            node(33, 30, "skip", true, true),
+            node(30, 99, "stray", false, false),
+            node(34, 30, "top.txt", false, false),
+        ];
+        let ordered = order_subtree(30, nodes);
+        let records: Vec<u64> = ordered
+            .iter()
+            .map(|change| match change {
+                FsChange::Upsert(node) => node.record,
+                FsChange::Remove { record, .. } => *record,
+            })
+            .collect();
+        // The node whose parent is not below the root (30 under 99) is dropped.
+        assert_eq!(records.len(), 4);
+        let at = |record: u64| records.iter().position(|&held| held == record).unwrap();
+        assert!(at(31) < at(32));
+        assert!(!records.contains(&30));
+    }
+
+    // --- migration ---
+
+    #[test]
+    fn the_old_catalog_files_are_deleted_and_other_files_stay() {
+        let dir = data_dir("legacy");
+        for name in ["catalog.db", "catalog.db-wal", "catalog.db-shm", "file-index.bin", "files.json"] {
+            std::fs::write(dir.join(name), b"x").unwrap();
+        }
+        assert_eq!(delete_legacy_catalog(&dir), 3);
+        for name in LEGACY_CATALOG_FILES {
+            assert!(!dir.join(name).exists(), "{name}");
+        }
+        assert!(dir.join("file-index.bin").exists());
+        assert!(dir.join("files.json").exists());
+        // Nothing left to delete, and a missing folder is not an error.
+        assert_eq!(delete_legacy_catalog(&dir), 0);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(delete_legacy_catalog(&dir), 0);
+    }
+
+    // --- FileIndex ---
+
+    #[test]
+    fn a_start_with_no_snapshot_has_an_empty_store_and_writes_the_exclusion_file() {
+        let dir = data_dir("no-snapshot");
+        let index = FileIndex::new(&dir);
+        let (volumes, total) = index.status(&index.store());
+        assert!(volumes.is_empty());
+        assert_eq!(total, 0);
+        assert!(!index.core.ready.load(Ordering::SeqCst));
+        assert!(dir.join(EXCLUSIONS_FILE).exists());
+        // An empty store is never written over a snapshot.
+        index.save_snapshot("test", false);
+        assert!(!dir.join(SNAPSHOT_FILE).exists());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_saved_snapshot_is_loaded_at_the_next_start() {
+        let dir = data_dir("snapshot");
         let first = FileIndex::new(&dir);
-        record(&first, r"C:\Work\Cit");
-        record(&first, r"C:\Work\Build");
-        // A scope below a recorded scope waits for the walk of the outer one.
-        record(&first, r"C:\WORK\Cit\Sub");
+        let meta = VolumeMeta {
+            volume_id: "vol-test".into(),
+            mount_path: r"C:\".into(),
+            root_record: 5,
+            backend: VolumeBackend::Journal,
+            journal_id: 3,
+            next_usn: 40,
+            exclusions: first.exclusions().fingerprint,
+        };
+        first.store().replace_volume(
+            meta,
+            vec![node(6, 5, "docs", true, false), node(7, 6, "plan.txt", false, false)],
+        );
+        first.save_snapshot("test", false);
+        assert!(dir.join(SNAPSHOT_FILE).exists());
         drop(first);
 
-        // The new process has no memory of the scopes except the catalog.
         let second = FileIndex::new(&dir);
-        let db = second.db.read().unwrap().clone().unwrap();
-        assert_eq!(second.requeue_deferred_scopes(&db, VOLUME), 2);
-        assert_eq!(second.requeue_deferred_scopes(&db, "other"), 0);
-        {
-            let repairs = second.scope_repairs.lock().unwrap();
-            assert!(repairs.running.contains_key(&format!("{VOLUME}|c:\\work\\cit")));
-            assert!(repairs.running.contains_key(&format!("{VOLUME}|c:\\work\\build")));
-            assert!(!repairs.running.contains_key(&format!("{VOLUME}|c:\\work\\cit\\sub")));
-        }
-        // The records stay until a walk has finished.
-        assert_eq!(recorded(&second).len(), 3);
-        drop((db, second));
+        let (_, total) = second.status(&second.store());
+        assert_eq!(total, 2);
+        assert!(second.core.ready.load(Ordering::SeqCst));
+        assert!(second.core.snapshot_ok.load(Ordering::SeqCst));
+        let volumes = second.store().volumes();
+        assert_eq!((volumes[0].journal_id, volumes[0].next_usn), (3, 40));
         let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
-    fn a_repaired_scope_is_cleared_and_a_skipped_or_newer_one_is_not() {
-        let dir = data_dir("clear");
+    fn a_bad_snapshot_gives_an_empty_store() {
+        let dir = data_dir("bad-snapshot");
+        std::fs::write(dir.join(SNAPSHOT_FILE), b"not an index").unwrap();
         let index = FileIndex::new(&dir);
-        let scope = Path::new(r"C:\Work\Cit");
-        record(&index, r"C:\Work\Cit");
-        let later = db::unix_millis() + 60_000;
-
-        // The repair could not run (no watcher): the record stays.
-        index.settle_scope_repair(VOLUME, scope, later, ScopeRepairResult::Skipped);
-        assert_eq!(recorded(&index).len(), 1);
-        // Events came after the walk began: the record stays.
-        let walk_began = 0;
-        index.settle_scope_repair(VOLUME, scope, walk_began, ScopeRepairResult::Walked);
-        assert_eq!(recorded(&index).len(), 1);
-        // A walk that began after the record clears it.
-        index.settle_scope_repair(VOLUME, scope, later, ScopeRepairResult::Walked);
-        assert!(recorded(&index).is_empty());
-        drop(index);
+        assert_eq!(index.status(&index.store()).1, 0);
+        assert!(!index.core.snapshot_ok.load(Ordering::SeqCst));
         let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
-    fn a_repair_with_no_watcher_is_skipped_and_never_counts_as_done() {
-        let dir = data_dir("skipped");
-        let index = FileIndex::new(&dir);
-        let result = index.reconcile_scope_sync(VOLUME, Path::new(r"C:\Work\Cit"));
-        assert_eq!(result, ScopeRepairResult::Skipped);
-        drop(index);
-        let _ = std::fs::remove_dir_all(dir);
+    fn a_cursor_that_moved_makes_a_snapshot_due_only_after_an_hour() {
+        let index = FileIndex::default();
+        let ago = |minutes: u64| Instant::now().checked_sub(Duration::from_secs(minutes * 60));
+        let Some(old) = ago(61) else { return };
+        let recent = ago(30).unwrap_or_else(Instant::now);
+        // Nothing changed: never due.
+        *index.core.last_save.lock().unwrap() = old;
+        assert!(!index.snapshot_due());
+        // The cursor moved: due when the last save is over an hour old.
+        index.core.cursor_moved.store(true, Ordering::SeqCst);
+        assert!(index.snapshot_due());
+        *index.core.last_save.lock().unwrap() = recent;
+        assert!(!index.snapshot_due());
+    }
+
+    #[test]
+    fn the_mount_text_has_one_trailing_backslash() {
+        assert_eq!(mount_text(Path::new(r"C:\")), r"C:\");
+        assert_eq!(mount_text(Path::new("C:")), r"C:\");
+        assert_eq!(mount_text(Path::new(r"D:\Mounts\Disk1")), r"D:\Mounts\Disk1\");
     }
 }

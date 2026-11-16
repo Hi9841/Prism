@@ -410,7 +410,7 @@ impl Backend {
         query::focus_window(hwnd)
     }
 
-    /// Phase 2: SQLite FTS5 file search. The UI must not block Phase 1 on this.
+    /// Phase 2: file search over the in-memory file index. The UI must not block Phase 1 on this.
     pub async fn search_files(
         &self,
         query: String,
@@ -668,6 +668,9 @@ impl Backend {
         let _ = win_key::set_enabled(false);
         let _ = start_menu::restore();
         win_key::set_provider_suppression(false);
+        // Last: the snapshot is a write of about 100 MB, and the shell hooks
+        // above must be released first.
+        self.file_index.flush_for_exit();
     }
 }
 
