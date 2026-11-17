@@ -1874,3 +1874,56 @@ with a migration needs its own tests), I6 "yes"): "Couldn't open item" shows `<t
 hide after a launch is not a failed open (RULEBOOK deviation 2026-11-14). Release candidate checks on the
 agent desktop: functest launch set 8/9 pass; `prism_pin_unpin` passes after `window_width` (its row pin
 click assumes a 560 px window, as the footer did). Gates: check pass, prism-core tests 44/44.
+
+
+## Session 2026-11-17 (I): background memory
+
+Owner: "mem usage is around 250 MB when in background, lets try to improve even more" (1.0.30). Branch: `main`
+(work stays uncommitted until a win is kept). No sandbox (Windows Sandbox missing), so no app runs: the file
+store is measured offline from a copy of the owner's `file-index.bin`.
+
+Profile (read-only, the owner's running 1.0.30, `prism-scratch/mem/memws.py` = resident pages per allocation):
+private committed 336 MiB, private resident about 200 MiB; the file store about 147 MiB of it (2,640,475
+entries, 337,801 dead = 12.8%, 937,079 lowercase names, 942,136 display names of which 156,286 differ in case,
+`by_record` 6.39 M slots for 2.35 M records). UI layer alone (session E, parity mode): working set about 66 MiB.
+
+Harness: `crates/prism-core/examples/index_mem_bench.rs <snapshot> <results.txt> [reps]` loads the snapshot
+(no walk, no journal, no disk check), prints store buffers, process private and working set, and the median
+candidate time of 40 queries; writes the ranked candidates for an A/B diff. `INDEX_BENCH_COMPACT=1` compacts
+first.
+
+Baseline (3 runs): store 146.3 MiB, private +146.6 MiB, load 210-224 ms, 40 queries 57.4-58.1 ms (noise ~1%).
+With one compaction: dropped 337,801 in 439 ms, store 135.0 MiB (-11.3), queries 50.0 ms.
+
+Rejected before the loop: a paged `by_record` saves 3-5 MiB (pages of 256 records: 20,183 of 24,975 in use).
+
+### I-001 Compact at a lower tombstone share
+
+- Hypothesis: dead entries stay until 25% (`COMPACT_SHARE` 4). They cost about 33 bytes each and slow every
+  scan. Compacting at 12.5% (share 8) should keep about 5-6 MiB less on average and keep queries faster.
+- Change: `COMPACT_SHARE` 4 -> 8 (98a4893a).
+- Measure: the bench has no churn, so no steady-state number. Evidence: one compaction of the owner's
+  snapshot (12.8% dead) frees 11.3 MiB and takes the 40 queries from 57.6 to 50.0 ms; at share 8 that
+  snapshot compacts at the next journal change (at share 4 it waits until 25%).
+- Gates: build clean, prism-core 107/107, judge 269/269. Decision: KEEP.
+
+### I-002 Places on demand
+
+- Hypothesis: `places` (u32 per entry, 10.1 MiB) is only a tie break in `compare` and an input for a new
+  child. Computing depth and path length from the parent chain when a tie needs it should save 10.1 MiB with
+  no measurable query cost (ties are rare; chains are about 10 deep).
+- Change (0a896ad4): `Segment::places_of` walks the chain (`MAX_DEPTH` guard); `compare` reads places only
+  for hits that tie on score and name, cached once per `Hit`. Snapshot version 3 has no places section;
+  version 2 still loads.
+- Result (interleaved, base `main` vs B, 10 pairs, memory exact every run): store 146.3 -> 136.2 MiB (-10.1),
+  private 147.1 -> 137.0 MiB. Ranked candidates of all 40 queries byte-identical. Query sum (14 pairs, a busy
+  host: a qemu VM at ~49% CPU, so best runs): min 57.5 -> 60.0 ms, q1 59.5 -> 60.9 ms (+2.5 ms over 40
+  queries, about 0.06 ms a search).
+- Gates: build clean, prism-core 110/110, judge 269/269.
+- Decision: KEEP (10.1 MiB for an unnoticeable 0.06 ms a search).
+
+### I-003 Display names only for case variants
+
+- Hypothesis: `Displays` keeps ends, lower and a hash slot for all 942,136 names, but only 156,286 differ from
+  their lowercase form. An entry that points to its lowercase name, with case variants in a small table,
+  should save about 12 MiB (snapshot format version 3; an old snapshot is rebuilt).
