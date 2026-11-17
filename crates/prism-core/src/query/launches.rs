@@ -170,10 +170,14 @@ mod tests {
 
     #[test]
     fn counts_saturate() {
+        let path = temp_file("saturate");
+        fs::write(&path, format!(r#"{{"a":{}}}"#, u32::MAX)).unwrap();
         let store = LaunchStore::new();
-        store.inner.lock().unwrap().counts.insert("a".into(), u32::MAX);
+        store.set_path(path.clone());
         store.record("a").unwrap();
-        assert_eq!(store.inner.lock().unwrap().counts["a"], u32::MAX);
+        let again = LaunchStore::new();
+        again.set_path(path);
+        assert_eq!(again.boost("a"), 6);
     }
 
     #[test]
@@ -245,10 +249,10 @@ mod tests {
         store.record("popular").unwrap();
         store.record("popular").unwrap();
         store.record("popular").unwrap();
-        let counts = store.inner.lock().unwrap();
-        assert_eq!(counts.counts.len(), MAX_ENTRIES);
-        assert!(counts.counts.contains_key("popular"));
-        assert!(counts.counts.contains_key("app-499"));
-        assert!(!counts.counts.contains_key("app-000"));
+        assert_eq!(store.boost("popular"), 2);
+        assert_eq!(store.boost("app-000"), 0);
+        for index in 1..MAX_ENTRIES {
+            assert_eq!(store.boost(&format!("app-{index:03}")), 1, "app-{index:03}");
+        }
     }
 }
