@@ -47,9 +47,10 @@ const CANCEL_CHECK_INTERVAL: usize = 16_384;
 /// caller rejects after a disk check.
 const CANDIDATES_PER_RESULT: usize = 15;
 const MIN_CANDIDATES: usize = 150;
-/// Tombstones that start a compaction: a share of the entries, at least this
-/// many.
-const COMPACT_SHARE: usize = 4;
+/// Tombstones that start a compaction: 1/`COMPACT_SHARE` of the entries, at
+/// least `MIN_COMPACT_TOMBSTONES`. A dead entry costs memory and scan time, so
+/// the store compacts when 1/8 of the entries are dead.
+const COMPACT_SHARE: usize = 8;
 const MIN_COMPACT_TOMBSTONES: usize = 10_000;
 /// The SQL subsequence stage probed only the first four tokens.
 const PROBE_TOKENS: usize = 4;
