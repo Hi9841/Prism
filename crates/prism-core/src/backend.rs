@@ -43,6 +43,7 @@ pub struct Backend {
     apps_scan_lock: tokio::sync::Mutex<()>,
     file_index: files::FileIndex,
     intent: query::IntentStore,
+    launches: query::LaunchStore,
     shortcut: Mutex<String>,
     shortcut_generation: AtomicU64,
 }
@@ -57,6 +58,7 @@ pub fn backend() -> &'static Backend {
         apps_scan_lock: tokio::sync::Mutex::new(()),
         file_index: files::FileIndex::default(),
         intent: query::IntentStore::new(),
+        launches: query::LaunchStore::new(),
         shortcut: Mutex::new(String::new()),
         shortcut_generation: AtomicU64::new(0),
     })
@@ -125,6 +127,7 @@ impl Backend {
         self.apply_startup_shortcut(startup_shortcut(persisted));
         let app_data_dir = crate::host::app_data_dir_or_cwd();
         self.intent.set_path(app_data_dir.join("intent-cache.db"));
+        self.launches.set_path(app_data_dir.join("launch-counts.json"));
         files::warm(self.file_index.clone(), app_data_dir);
         crate::runtime::spawn_blocking(windows_tools::warm);
         crate::runtime::spawn_blocking(crate::settings_index::warm);
@@ -271,6 +274,9 @@ impl Backend {
             .await
             .map_err(|e| join_error("launch task failed", e))?;
         perf::finish(timer, "launch_app", move || detail.clone());
+        if result.is_ok() {
+            self.count_launch(&id);
+        }
         result
     }
 
@@ -278,7 +284,25 @@ impl Backend {
         let entry = self.cached_app(&id)?;
         crate::runtime::spawn_blocking(move || apps::launch_elevated(&entry))
             .await
-            .map_err(|e| join_error("elevated launch task failed", e))?
+            .map_err(|e| join_error("elevated launch task failed", e))??;
+        self.count_launch(&id);
+        Ok(())
+    }
+
+    /// A launch that works counts for search ranking. A failed save does not
+    /// fail the launch: the app is already open.
+    fn count_launch(&self, id: &str) {
+        let _ = self.launches.record(id);
+    }
+
+    /// Removes the launch counts of all apps (the Recent items "Clear" action).
+    pub fn clear_launch_counts(&self) -> Result<(), String> {
+        self.launches.clear()
+    }
+
+    /// Removes the launch count of one app (Recent items "Remove").
+    pub fn forget_app_launches(&self, id: String) -> Result<(), String> {
+        self.launches.forget(&id)
     }
 
     pub async fn open_path(&self, path: String) -> Result<(), String> {
@@ -375,7 +399,7 @@ impl Backend {
             .and_then(|guard| guard.as_ref())
             .map(|list| list.as_slice())
             .unwrap_or(&[]);
-        let response = query::phase1(&query, apps, &windows, &self.intent);
+        let response = query::phase1(&query, apps, &windows, &self.intent, &self.launches);
         perf::finish(timer, "query_phase1", || {
             format!(
                 "queryLength={query_length};actions={};apps={};windows={}",

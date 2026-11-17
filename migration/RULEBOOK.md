@@ -162,6 +162,10 @@ another app, Esc cancels, a click works after the drag, and a release over the p
 
 ## Deviation log
 
+- 2026-11-17: App launch ranking (owner approved). App results rank launch count inside a match tier: tier, then
+  launch boost (floor(log2(count + 1)), at most 6), then score, then source. A launched app never passes a higher tier. The original had no
+  launch ranking. Counts live in `launch-counts.json`; Recent items "Clear" and "Remove" reset them. No golden changed:
+  the goldens have no launches.
 - 2026-11-16: File index "catalog v2" (owner: "fix all those issues" after a checkup found a 6.26 GB catalog,
   28% orphan rows and whole-home re-walks). (1) The index is in memory with a snapshot file
   (`file-index.bin`), not a SQLite row per file; NTFS volumes track changes with the unprivileged USN

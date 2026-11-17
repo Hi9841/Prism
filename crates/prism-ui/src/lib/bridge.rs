@@ -274,6 +274,17 @@ pub fn accept_intent(query: String, action_id: String) -> Reply<()> {
     command("accept_intent", serde_json::json!({ "query": query, "actionId": action_id }), async move { backend().accept_intent(query, action_id) })
 }
 
+/// Removes the launch counts of all apps. Search ranking only: the fixture
+/// records nothing, so parity captures see the same call list as the original.
+pub fn clear_launch_counts() -> Reply<()> {
+    answer(|_| Ok(()), async { backend().clear_launch_counts() })
+}
+
+/// Removes the launch count of one app. Like [`clear_launch_counts`], it is not recorded.
+pub fn forget_app_launches(app_id: String) -> Reply<()> {
+    answer(|_| Ok(()), async move { backend().forget_app_launches(app_id) })
+}
+
 pub fn focus_window(hwnd: i64) -> Reply<()> {
     command("focus_window", serde_json::json!({ "hwnd": hwnd }), async move { backend().focus_window(hwnd) })
 }

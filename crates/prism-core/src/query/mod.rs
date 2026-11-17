@@ -6,6 +6,7 @@
 
 mod catalog;
 mod jev;
+mod launches;
 mod open_windows;
 pub mod score;
 
@@ -13,6 +14,7 @@ use crate::apps::AppEntry;
 use serde::Serialize;
 
 pub use jev::IntentStore;
+pub use launches::LaunchStore;
 pub use open_windows::list as list_open_windows;
 pub use open_windows::OpenWindow;
 
@@ -84,6 +86,7 @@ pub fn phase1(
     apps: &[AppEntry],
     windows: &[OpenWindow],
     intent: &IntentStore,
+    launches: &LaunchStore,
 ) -> Phase1Response {
     let trimmed = query.trim();
     if trimmed.is_empty() {
@@ -98,7 +101,7 @@ pub fn phase1(
         .into_iter()
         .map(|(window, score)| window_hit(&window, score))
         .collect();
-    let app_hits = search_apps(&prepared, apps);
+    let app_hits = search_apps(&prepared, apps, launches);
     let actions = search_actions(&prepared, intent_action_id.as_deref());
 
     Phase1Response {
@@ -174,7 +177,15 @@ fn search_actions(query: &score::Query, intent_id: Option<&str>) -> Vec<Phase1Hi
     hits
 }
 
-fn search_apps(query: &score::Query, apps: &[AppEntry]) -> Vec<Phase1Hit> {
+/// The match tier of a score: 1,000 is a whole title, 9 a title prefix, 8 a
+/// substring or a keyword, and lower tiers are fuzzy.
+fn match_tier(score: i32) -> i32 {
+    score.div_euclid(100)
+}
+
+/// Apps in one match tier go by launch count first, then by score. A launched
+/// app never passes an app in a higher tier.
+fn search_apps(query: &score::Query, apps: &[AppEntry], launches: &LaunchStore) -> Vec<Phase1Hit> {
     let mut ranked: Vec<(&AppEntry, i32, i32)> = Vec::new();
     for app in apps {
         let Some(score) = query.score_with_keywords(&app.name, &app.keywords) else {
@@ -189,11 +200,21 @@ fn search_apps(query: &score::Query, apps: &[AppEntry]) -> Vec<Phase1Hit> {
             .then_with(|| b.1.cmp(&a.1))
     });
     ranked.dedup_by(|a, b| a.0.normalized_name == b.0.normalized_name);
-    ranked.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| b.2.cmp(&a.2)));
-    ranked.truncate(APP_LIMIT);
-    ranked
+    let mut boosted: Vec<(&AppEntry, i32, i32, u32)> = ranked
         .into_iter()
-        .map(|(app, score, _)| app_hit(app, score))
+        .map(|(app, score, source)| (app, score, source, launches.boost(&app.app_id)))
+        .collect();
+    boosted.sort_by(|a, b| {
+        match_tier(b.1)
+            .cmp(&match_tier(a.1))
+            .then_with(|| b.3.cmp(&a.3))
+            .then_with(|| b.1.cmp(&a.1))
+            .then_with(|| b.2.cmp(&a.2))
+    });
+    boosted.truncate(APP_LIMIT);
+    boosted
+        .into_iter()
+        .map(|(app, score, _, _)| app_hit(app, score))
         .collect()
 }
 
@@ -308,5 +329,89 @@ fn source_rank(source: &str) -> i32 {
         "registry" | "appPaths" | "applications" => 2,
         "programs" => 1,
         _ => 0,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn app(name: &str, keywords: &[&str]) -> AppEntry {
+        AppEntry {
+            name: name.to_string(),
+            normalized_name: name.to_lowercase(),
+            app_id: format!("id-{name}"),
+            icon: None,
+            path: None,
+            args: None,
+            working_directory: None,
+            location: None,
+            aumid: None,
+            source: "startMenu".to_string(),
+            keywords: keywords.iter().map(|word| word.to_string()).collect(),
+        }
+    }
+
+    fn ranked(query: &str, apps: &[AppEntry], launches: &LaunchStore) -> Vec<String> {
+        let prepared = score::Query::new(query);
+        search_apps(&prepared, apps, launches)
+            .into_iter()
+            .map(|hit| hit.title)
+            .collect()
+    }
+
+    fn launched(names: &[(&str, usize)]) -> LaunchStore {
+        let store = LaunchStore::new();
+        for (name, times) in names {
+            for _ in 0..*times {
+                store.record(&format!("id-{name}")).unwrap();
+            }
+        }
+        store
+    }
+
+    #[test]
+    fn a_launched_app_beats_an_unlaunched_app_in_the_same_tier() {
+        // Both titles start with "note": the same tier and the same score.
+        let apps = [app("Notepad", &[]), app("Notes", &[])];
+        assert_eq!(ranked("note", &apps, &LaunchStore::new()), ["Notepad", "Notes"]);
+        assert_eq!(ranked("note", &apps, &launched(&[("Notes", 1)])), ["Notes", "Notepad"]);
+    }
+
+    #[test]
+    fn more_launches_rank_higher_in_a_tier() {
+        let apps = [app("Notepad", &[]), app("Notes", &[]), app("Notion", &[])];
+        let store = launched(&[("Notepad", 1), ("Notes", 7), ("Notion", 3)]);
+        assert_eq!(ranked("no", &apps, &store), ["Notes", "Notion", "Notepad"]);
+    }
+
+    #[test]
+    fn a_launched_app_never_passes_a_whole_title_match() {
+        let apps = [app("Code", &[]), app("Code Helper", &[])];
+        let store = launched(&[("Code Helper", 500)]);
+        assert_eq!(ranked("code", &apps, &store), ["Code", "Code Helper"]);
+    }
+
+    #[test]
+    fn a_launched_keyword_hit_never_passes_a_title_prefix() {
+        let apps = [app("Terminal", &[]), app("Console Host", &["terminal"])];
+        let store = launched(&[("Console Host", 500)]);
+        assert_eq!(ranked("termi", &apps, &store), ["Terminal", "Console Host"]);
+    }
+
+    #[test]
+    fn a_launched_substring_match_never_passes_a_title_prefix() {
+        let apps = [app("Paint", &[]), app("Microsoft Paint 3D", &[])];
+        let store = launched(&[("Microsoft Paint 3D", 500)]);
+        assert_eq!(ranked("pain", &apps, &store), ["Paint", "Microsoft Paint 3D"]);
+    }
+
+    #[test]
+    fn the_score_in_the_hit_does_not_change() {
+        let apps = [app("Notepad", &[])];
+        let prepared = score::Query::new("note");
+        let plain = search_apps(&prepared, &apps, &LaunchStore::new());
+        let boosted = search_apps(&prepared, &apps, &launched(&[("Notepad", 63)]));
+        assert_eq!(plain[0].score, boosted[0].score);
     }
 }

@@ -791,6 +791,12 @@ mod provider {
         pub fn clear_history(&mut self, cx: &mut Context<Self>) {
             self.note_history_change();
             self.history.clear();
+            // Recent items and app launch counts go together: a cleared list
+            // must not keep ranking apps by old launches.
+            cx.spawn(async move |_, _| {
+                let _ = bridge::clear_launch_counts().await;
+            })
+            .detach();
             self.schedule_persist(cx);
             cx.emit(AppEvent::HistoryChanged);
             cx.notify();
@@ -804,6 +810,13 @@ mod provider {
             }
             self.note_history_change();
             self.history = next;
+            if let Some(app_id) = id.strip_prefix("app::") {
+                let app_id = app_id.to_owned();
+                cx.spawn(async move |_, _| {
+                    let _ = bridge::forget_app_launches(app_id).await;
+                })
+                .detach();
+            }
             self.schedule_persist(cx);
             cx.emit(AppEvent::HistoryChanged);
             cx.notify();

@@ -12,7 +12,7 @@ use std::fmt::Write as _;
 use std::path::PathBuf;
 
 use prism_core::query::score::Query;
-use prism_core::query::{self, IntentStore, Phase1Hit};
+use prism_core::query::{self, IntentStore, LaunchStore, Phase1Hit};
 
 struct Entry {
     title: String,
@@ -101,11 +101,12 @@ fn main() {
     eprintln!("queries {}", queries.len());
 
     let intent = IntentStore::new();
+    let launches = LaunchStore::new();
     let mut findings = String::from("section\tquery\tkind\twinner\twinner_score\tvia_keyword\tkeyword_tier\tloser\tloser_title_tier\tloser_score\tword_start\tloser_actual\n");
     let mut count = 0usize;
     for q in &queries {
         let prepared = Query::new(q);
-        let response = query::phase1(q, &apps, &[], &intent);
+        let response = query::phase1(q, &apps, &[], &intent, &launches);
         for (section, hits) in [("apps", &response.apps), ("actions", &response.actions)] {
             let shown: BTreeSet<&str> = hits.iter().map(|h| h.id.as_str()).collect();
             let check = |winner: &Phase1Hit, loser_title: &str, loser_score: Option<i32>, loser_actual: i32, kind: &str, findings: &mut String| -> bool {
