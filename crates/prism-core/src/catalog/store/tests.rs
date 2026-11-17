@@ -917,3 +917,226 @@ fn a_version_2_snapshot_still_loads() {
     assert_eq!(std::fs::read(&saved).unwrap(), std::fs::read(&current).unwrap());
     assert_eq!(find(&FileStore::load(&saved).unwrap(), "report"), find(&store, "report"));
 }
+
+/// The display path of every live entry, sorted.
+fn all_paths(store: &FileStore) -> Vec<String> {
+    let inner = store.read();
+    let mut paths = Vec::new();
+    for segment in inner.segments() {
+        for entry in 1..segment.entries() {
+            if segment.flags[entry] & FLAG_DEAD == 0 && segment.parent_alive(entry) {
+                paths.push(segment.path_of(entry as u32));
+            }
+        }
+    }
+    paths.sort();
+    paths
+}
+
+/// Names that differ only in case, in several folders, and some that do not.
+fn case_nodes() -> Vec<FsNode> {
+    vec![
+        dir(10, 5, "Docs"),
+        dir(11, 5, "docs"),
+        dir(12, 5, "DOCS"),
+        file(20, 10, "Readme.md"),
+        file(21, 11, "readme.md"),
+        file(22, 12, "README.MD"),
+        file(23, 12, "README.MD"),
+        file(24, 10, "Ünïcode-Näme.TXT"),
+        file(25, 11, "plain.txt"),
+    ]
+}
+
+#[test]
+fn only_case_variants_keep_an_exact_name() {
+    let (store, slot) = store_with(case_nodes());
+    let inner = store.read();
+    let segment = inner.segment(slot).unwrap();
+    // Variants: Docs, DOCS, Readme.md, README.MD, Ünïcode-Näme.TXT.
+    assert_eq!(segment.variants.ends.len(), 5);
+    for (record, tagged) in [(10, true), (11, false), (12, true), (21, false), (22, true), (25, false)] {
+        let entry = segment.entry_of(record).unwrap() as usize;
+        assert_eq!(segment.display[entry] & VARIANT_TAG != 0, tagged, "record {record}");
+        // The lowercase name is the same either way.
+        assert_eq!(
+            segment.names.name(segment.lower_of(entry) as usize),
+            segment.display_name(entry).to_lowercase()
+        );
+        assert_eq!(segment.display_len(entry), segment.display_name(entry).len());
+    }
+    // A plain entry holds the lowercase name number itself.
+    let plain = segment.entry_of(25).unwrap() as usize;
+    assert_eq!(segment.names.name(segment.display[plain] as usize), "plain.txt");
+    assert_eq!(segment.display[0], NONE);
+}
+
+#[test]
+fn names_that_differ_only_in_case_stay_distinct() {
+    let (store, _) = store_with(case_nodes());
+    assert_eq!(
+        sorted(find(&store, "readme")),
+        vec!["C:\\DOCS\\README.MD", "C:\\DOCS\\README.MD", "C:\\Docs\\Readme.md", "C:\\docs\\readme.md"]
+    );
+    assert_eq!(
+        all_paths(&store),
+        vec![
+            "C:\\DOCS",
+            "C:\\DOCS\\README.MD",
+            "C:\\DOCS\\README.MD",
+            "C:\\Docs",
+            "C:\\Docs\\Readme.md",
+            "C:\\Docs\\Ünïcode-Näme.TXT",
+            "C:\\docs",
+            "C:\\docs\\plain.txt",
+            "C:\\docs\\readme.md",
+        ]
+    );
+    assert_places_match_paths(&store);
+}
+
+#[test]
+fn a_rename_between_plain_and_variant_changes_only_the_exact_name() {
+    let (store, slot) = store_with(case_nodes());
+    store.apply(
+        slot,
+        &[
+            upsert(file(20, 10, "readme.md")), // variant -> plain
+            upsert(file(21, 11, "ReadMe.md")), // plain -> a new variant
+            upsert(file(22, 12, "Readme.md")), // variant -> an old variant
+        ],
+    );
+    assert_eq!(
+        sorted(find(&store, "readme")),
+        vec!["C:\\DOCS\\README.MD", "C:\\DOCS\\Readme.md", "C:\\Docs\\readme.md", "C:\\docs\\ReadMe.md"]
+    );
+    assert_places_match_paths(&store);
+}
+
+#[test]
+fn compaction_keeps_only_the_variants_in_use() {
+    let (store, slot) = store_with(case_nodes());
+    let before_paths = all_paths(&store);
+    // Drop the only entries that use the variants "Docs", "Readme.md" and
+    // "Ünïcode-Näme.TXT": the folder is dead, and so are its files.
+    store.apply(slot, &[FsChange::Remove { record: 10, seq: 1 }]);
+    let compaction = store.compact().expect("compacted");
+    assert_eq!(compaction.dropped, 3);
+    let after_paths = all_paths(&store);
+    assert_eq!(
+        after_paths,
+        before_paths
+            .iter()
+            .filter(|path| !path.starts_with("C:\\Docs"))
+            .cloned()
+            .collect::<Vec<_>>()
+    );
+    {
+        let inner = store.read();
+        let segment = inner.segment(slot).unwrap();
+        // Left: "DOCS" and "README.MD".
+        assert_eq!(segment.variants.ends.len(), 2);
+        assert_eq!(segment.variants.text, "DOCSREADME.MD");
+        // Every entry is in the chain of its own lowercase name.
+        let mut chained = 0;
+        for name in 0..segment.names.len() {
+            let mut entry = segment.names.heads[name];
+            while entry != NONE {
+                assert_eq!(segment.lower_of(entry as usize) as usize, name);
+                chained += 1;
+                entry = segment.next[entry as usize];
+            }
+        }
+        assert_eq!(chained, segment.entries() - 1);
+    }
+    assert_eq!(
+        sorted(find(&store, "readme")),
+        vec!["C:\\DOCS\\README.MD", "C:\\DOCS\\README.MD", "C:\\docs\\readme.md"]
+    );
+    assert_places_match_paths(&store);
+    // A new variant after the compaction is found and kept apart.
+    store.apply(slot, &[upsert(file(30, 11, "ReadMe.MD"))]);
+    assert!(find(&store, "readme").contains(&"C:\\docs\\ReadMe.MD".to_string()));
+    assert_places_match_paths(&store);
+}
+
+#[test]
+fn the_snapshot_keeps_case_variants() {
+    let temp = TempDir::new();
+    let path = temp.0.join("file-index.bin");
+    let (store, slot) = store_with(case_nodes());
+    store.save(&path).expect("save");
+    let loaded = FileStore::load(&path).expect("load");
+    assert_eq!(all_paths(&loaded), all_paths(&store));
+    assert_eq!(find(&loaded, "readme"), find(&store, "readme"));
+    {
+        let inner = loaded.read();
+        let segment = inner.segment(slot).unwrap();
+        assert_eq!(segment.variants.ends.len(), 5);
+        assert_eq!(segment.display, store.read().segment(slot).unwrap().display);
+    }
+    // The loaded variant table finds an old variant again, and adds a new one.
+    loaded.apply(slot, &[upsert(file(40, 11, "Readme.md")), upsert(file(41, 11, "ReadMe.md"))]);
+    assert_eq!(loaded.read().segment(slot).unwrap().variants.ends.len(), 6);
+    assert_places_match_paths(&loaded);
+    // A variant number past the table does not load.
+    let mut segments = super::super::snapshot::read(&path).expect("read");
+    let mut segment = segments.pop().unwrap();
+    segment.display[3] = VARIANT_TAG | 99;
+    super::super::snapshot::write(&path, &[&segment]).expect("write");
+    assert!(FileStore::load(&path).is_err());
+}
+
+#[test]
+fn a_version_3_snapshot_loads_and_converts_its_display_table() {
+    let temp = TempDir::new();
+    let path = temp.0.join("file-index.bin");
+    let (store, slot) = store_with(case_nodes());
+    store.apply(slot, &[FsChange::Remove { record: 25, seq: 1 }]);
+    let segments = store.read();
+    let segments: Vec<&Segment> = segments.segments().collect();
+    super::super::snapshot::write_version_3(&path, &segments).expect("write version 3");
+    drop(segments);
+    // The old layout has one display name for each exact-case name, so its
+    // bytes differ from the current layout.
+    let current = temp.0.join("current.bin");
+    store.save(&current).expect("save");
+    assert_ne!(std::fs::read(&path).unwrap(), std::fs::read(&current).unwrap());
+
+    let loaded = FileStore::load(&path).expect("load version 3");
+    assert_eq!(all_paths(&loaded), all_paths(&store));
+    for query in ["readme", "docs", "ünïcode", "plain", "txt"] {
+        assert_eq!(find(&loaded, query), find(&store, query), "query {query}");
+    }
+    assert_eq!(loaded.live_count(slot), store.live_count(slot));
+    assert_places_match_paths(&loaded);
+    {
+        let inner = loaded.read();
+        let segment = inner.segment(slot).unwrap();
+        assert_eq!(segment.variants.ends.len(), 5);
+        assert_eq!(segment.display[0], NONE);
+    }
+    // The next save writes version 4, equal to a save of the first store.
+    let saved = temp.0.join("saved.bin");
+    loaded.save(&saved).expect("save");
+    assert_eq!(std::fs::read(&saved).unwrap(), std::fs::read(&current).unwrap());
+}
+
+#[test]
+fn a_bad_display_table_in_an_old_snapshot_does_not_load() {
+    let temp = TempDir::new();
+    let path = temp.0.join("file-index.bin");
+    let (store, _) = store_with(case_nodes());
+    let segments = store.read();
+    let segments: Vec<&Segment> = segments.segments().collect();
+    super::super::snapshot::write_version_3(&path, &segments).expect("write version 3");
+    drop(segments);
+    FileStore::load(&path).expect("the good file loads");
+    // An entry's display number past the old table. The sections get good
+    // checksums when written again, so only the index test catches it.
+    let mut segments = super::super::snapshot::read(&path).expect("read");
+    let mut segment = segments.pop().unwrap();
+    segment.display[2] = 9_999;
+    super::super::snapshot::write_version_3(&path, &[&segment]).expect("write");
+    assert!(FileStore::load(&path).is_err());
+}

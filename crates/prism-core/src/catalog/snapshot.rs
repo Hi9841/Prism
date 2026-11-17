@@ -5,15 +5,21 @@
 //! section: header   = volume count (u32)
 //! per volume, 13 sections:
 //!   meta, lowercase name text, name ends, name heads,
-//!   display text, display ends, display lower numbers,
+//!   variant text, variant ends, variant lower numbers,
 //!   parent, display, flags, seq, next, by_record
 //! section: trailer  = "PRISM-END"
 //! ```
 //!
 //! A section is its length (u64), its bytes, and the CRC-32 of the bytes (u32).
-//! Version 2 had a 14th section, "places", after the flags. The load reads
-//! and drops it, so an update does not force a full rebuild. All numbers are
-//! little endian. The name tables, the masks and the hash
+//! A case variant is an exact-case name that differs from its lowercase name.
+//! The "display" section holds, for each entry, either the lowercase name
+//! number (the exact name equals it) or `0x8000_0000` | the variant number.
+//! Versions 2 and 3 had a display table with one name for each exact-case
+//! name (the same three sections, an empty range for a name equal to its
+//! lowercase form) and a display number for each entry. The load converts it
+//! to case variants. Version 2 also had a 14th section, "places", after the
+//! flags. The load reads and drops it. So an update does not force a full
+//! rebuild. All numbers are little endian. The name tables, the masks and the hash
 //! tables are not stored: the load builds them again from the text.
 //!
 //! The store is first serialized to memory (`serialize`, under the store
@@ -27,10 +33,12 @@ use std::fs::File;
 use std::io::{BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 
-use super::store::{Displays, Names, Segment, VolumeBackend, VolumeMeta};
+use super::store::{Names, Segment, Variants, VolumeBackend, VolumeMeta};
 
 const MAGIC: &[u8; 8] = b"PRISMIDX";
-const VERSION: u32 = 3;
+const VERSION: u32 = 4;
+/// The last version with a display table (see the format above).
+const LAST_DISPLAY_TABLE_VERSION: u32 = 3;
 /// The last version with the "places" section.
 const VERSION_WITH_PLACES: u32 = 2;
 const TRAILER: &[u8] = b"PRISM-END";
@@ -200,10 +208,17 @@ fn meta_bytes(segment: &Segment) -> Vec<u8> {
     out
 }
 
-/// Writes the snapshot in the old layout of version 2 (with places).
+/// Writes the snapshot in the old layout of version 2 (display table and
+/// places).
 #[cfg(test)]
 pub(super) fn write_version_2(path: &Path, segments: &[&Segment]) -> Result<u64, String> {
-    write_file(path, &serialize_as(segments, VERSION_WITH_PLACES)?)
+    write_file(path, &serialize_legacy(segments, VERSION_WITH_PLACES)?)
+}
+
+/// Writes the snapshot in the old layout of version 3 (display table).
+#[cfg(test)]
+pub(super) fn write_version_3(path: &Path, segments: &[&Segment]) -> Result<u64, String> {
+    write_file(path, &serialize_legacy(segments, LAST_DISPLAY_TABLE_VERSION)?)
 }
 
 /// Writes the snapshot. Returns its size in bytes.
@@ -215,28 +230,76 @@ pub(super) fn write(path: &Path, segments: &[&Segment]) -> Result<u64, String> {
 /// The bytes of the snapshot file. Memory only: the caller can hold a lock
 /// while it runs and release it before `write_file`.
 pub(super) fn serialize(segments: &[&Segment]) -> Result<Vec<u8>, String> {
-    serialize_as(segments, VERSION)
-}
-
-/// `serialize` in the layout of `version`. Only the tests ask for the old
-/// version 2.
-fn serialize_as(segments: &[&Segment], version: u32) -> Result<Vec<u8>, String> {
     let mut out = Out { buffer: Vec::new(), scratch: Vec::new() };
     out.raw(MAGIC)?;
-    out.raw(&version.to_le_bytes())?;
+    out.raw(&VERSION.to_le_bytes())?;
     out.bytes_section(&(segments.len() as u32).to_le_bytes())?;
     for segment in segments {
         out.bytes_section(&meta_bytes(segment))?;
         out.bytes_section(segment.names.text.as_bytes())?;
         out.u32_section(&segment.names.ends)?;
         out.u32_section(&segment.names.heads)?;
-        out.bytes_section(segment.displays.text.as_bytes())?;
-        out.u32_section(&segment.displays.ends)?;
-        out.u32_section(&segment.displays.lower)?;
+        out.bytes_section(segment.variants.text.as_bytes())?;
+        out.u32_section(&segment.variants.ends)?;
+        out.u32_section(&segment.variants.lower)?;
         out.u32_section(&segment.parent)?;
         out.u32_section(&segment.display)?;
         out.u16_section(&segment.flags)?;
-        #[cfg(test)]
+        out.u16_section(&segment.seq)?;
+        out.u32_section(&segment.next)?;
+        out.u32_section(&segment.by_record)?;
+    }
+    out.bytes_section(TRAILER)?;
+    Ok(out.buffer)
+}
+
+/// `serialize` in the layout of version 2 or 3: a display table with one
+/// name for each exact-case name that an entry uses, and a display number
+/// for each entry. Only the tests write the old layouts.
+#[cfg(test)]
+fn serialize_legacy(segments: &[&Segment], version: u32) -> Result<Vec<u8>, String> {
+    let mut out = Out { buffer: Vec::new(), scratch: Vec::new() };
+    out.raw(MAGIC)?;
+    out.raw(&version.to_le_bytes())?;
+    out.bytes_section(&(segments.len() as u32).to_le_bytes())?;
+    for segment in segments {
+        // The old display numbers, in the order that the entries first use them.
+        let mut numbers = std::collections::HashMap::new();
+        let mut text = String::new();
+        let mut ends = Vec::new();
+        let mut lower = Vec::new();
+        let mut display = Vec::with_capacity(segment.display.len());
+        for (entry, &value) in segment.display.iter().enumerate() {
+            if entry == 0 {
+                display.push(u32::MAX);
+                continue;
+            }
+            let number = *numbers.entry(value).or_insert_with(|| {
+                let number = ends.len() as u32;
+                if value & 0x8000_0000 == 0 {
+                    // Equal to its lowercase name: an empty range.
+                    lower.push(value);
+                } else {
+                    let variant = (value & !0x8000_0000) as usize;
+                    let start = if variant == 0 { 0 } else { segment.variants.ends[variant - 1] };
+                    text.push_str(&segment.variants.text[start as usize..segment.variants.ends[variant] as usize]);
+                    lower.push(segment.variants.lower[variant]);
+                }
+                ends.push(text.len() as u32);
+                number
+            });
+            display.push(number);
+        }
+        out.bytes_section(&meta_bytes(segment))?;
+        out.bytes_section(segment.names.text.as_bytes())?;
+        out.u32_section(&segment.names.ends)?;
+        out.u32_section(&segment.names.heads)?;
+        out.bytes_section(text.as_bytes())?;
+        out.u32_section(&ends)?;
+        out.u32_section(&lower)?;
+        out.u32_section(&segment.parent)?;
+        out.u32_section(&display)?;
+        out.u16_section(&segment.flags)?;
         if version == VERSION_WITH_PLACES {
             let places: Vec<u32> = (0..segment.entries() as u32).map(|e| segment.places_of(e)).collect();
             out.u32_section(&places)?;
@@ -391,7 +454,7 @@ pub(super) fn read(path: &Path) -> Result<Vec<Segment>, String> {
     let mut version = [0u8; 4];
     input.exact(&mut version)?;
     let version = u32::from_le_bytes(version);
-    if version != VERSION && version != VERSION_WITH_PLACES {
+    if !(VERSION_WITH_PLACES..=VERSION).contains(&version) {
         return Err("an unknown file index version".into());
     }
     let header = input.section()?;
@@ -405,12 +468,28 @@ pub(super) fn read(path: &Path) -> Result<Vec<Segment>, String> {
         names.text = input.text()?;
         names.ends = input.u32s()?;
         names.heads = input.u32s()?;
-        let mut displays = Displays::default();
-        displays.text = input.text()?;
-        displays.ends = input.u32s()?;
-        displays.lower = input.u32s()?;
+        let mut variants = Variants::default();
+        variants.text = input.text()?;
+        variants.ends = input.u32s()?;
+        variants.lower = input.u32s()?;
         let parent = input.u32s()?;
-        let display = input.u32s()?;
+        let mut display = input.u32s()?;
+        if version <= LAST_DISPLAY_TABLE_VERSION {
+            // The sections held a display table: convert it to case variants
+            // and give each entry its new display value.
+            let (converted, map) = Variants::from_legacy(
+                &variants.text,
+                &variants.ends,
+                &variants.lower,
+                names.ends.len(),
+            )?;
+            variants = converted;
+            for value in display.iter_mut().skip(1) {
+                *value = *map
+                    .get(*value as usize)
+                    .ok_or("an entry's name points outside its array")?;
+            }
+        }
         let flags = input.u16s()?;
         if version == VERSION_WITH_PLACES {
             // The entry count must still match; the values are not kept.
@@ -422,7 +501,7 @@ pub(super) fn read(path: &Path) -> Result<Vec<Segment>, String> {
         let next = input.u32s()?;
         let by_record = input.u32s()?;
         segments.push(Segment::from_parts(
-            0, meta, names, displays, parent, display, flags, seq, next, by_record,
+            0, meta, names, variants, parent, display, flags, seq, next, by_record,
         )?);
     }
     if input.section()? != TRAILER {

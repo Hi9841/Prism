@@ -3,8 +3,10 @@
 //! One `Segment` per volume. A segment holds the entries of one volume in
 //! parallel arrays (parent, name, flags, sequence number, name chain)
 //! and the names in two pools: each distinct lowercase name once (the text the
-//! search scans), and each distinct exact-case name once (the text a result
-//! shows). No path text is stored: a result's path comes from the parent chain.
+//! search scans), and each distinct exact-case name that differs from its
+//! lowercase form once (a case variant). A name equal to its lowercase form
+//! (most names) has no second copy: the entry points to the lowercase name.
+//! No path text is stored: a result's path comes from the parent chain.
 //!
 //! The ranking code (`NameQuery`, `top_hits`, `compare`, the typo pass) is
 //! the code of the old `NameIndex` (SQLite catalog, removed) and ranks the
@@ -71,6 +73,11 @@ const FLAG_PENALTY_MASK: u16 = 0xff;
 const NO_PLACES: u32 = u32::MAX;
 /// "No entry" and "no name".
 const NONE: u32 = u32::MAX;
+/// The high bit of `Segment::display`. Set: the low 31 bits number a case
+/// variant. Clear: the value is the lowercase name number, and the exact name
+/// equals the lowercase name. `NONE` (the root entry) has the bit set: test
+/// for `NONE` first.
+const VARIANT_TAG: u32 = 1 << 31;
 const ROOT_ENTRY: u32 = 0;
 /// Record numbers from this value on are not indexed: `by_record` holds one
 /// slot per record number, so a stray huge number must not grow it.
@@ -374,7 +381,7 @@ impl Names {
             }
         }
         let end = u32::try_from(self.text.len() + name.len()).ok()?;
-        let number = u32::try_from(self.ends.len()).ok().filter(|&n| n != NONE)?;
+        let number = u32::try_from(self.ends.len()).ok().filter(|&n| n < VARIANT_TAG)?;
         self.text.push_str(name);
         self.ends.push(end);
         self.masks.push(char_mask(name));
@@ -415,92 +422,66 @@ impl Names {
     }
 }
 
-/// Each distinct exact-case name once. A name that is equal to its lowercase
-/// form (most names) stores no text of its own: its range is empty.
+/// The case variants: each distinct exact-case name that differs from its
+/// lowercase form, once. A name equal to its lowercase form is not here: its
+/// entry points to the lowercase name (see `VARIANT_TAG`).
 #[derive(Default)]
-pub(super) struct Displays {
-    /// The names that differ from their lowercase form, back to back.
+pub(super) struct Variants {
+    /// The variant texts, back to back.
     pub(super) text: String,
-    /// End offset of each display name in `text`; an empty range means "the
-    /// lowercase name".
+    /// End offset of each variant in `text`.
     pub(super) ends: Vec<u32>,
-    /// The lowercase name number of each display name.
+    /// The lowercase name number of each variant.
     pub(super) lower: Vec<u32>,
-    /// Hash table over the exact text, as in `Names`.
+    /// Hash table over the exact text: variant number + 1, or 0 for a free
+    /// slot. Its length is a power of two.
     table: Vec<u32>,
 }
 
-impl Displays {
-    fn range(&self, display: usize) -> (usize, usize) {
-        let start = if display == 0 {
+impl Variants {
+    /// The text of variant `variant`.
+    fn text_of(&self, variant: usize) -> &str {
+        let start = if variant == 0 {
             0
         } else {
-            self.ends[display - 1] as usize
+            self.ends[variant - 1] as usize
         };
-        (start, self.ends[display] as usize)
+        &self.text[start..self.ends[variant] as usize]
     }
 
-    /// The exact-case text of display name `display`.
-    fn text_of<'a>(&'a self, names: &'a Names, display: usize) -> &'a str {
-        let (start, end) = self.range(display);
-        if start == end {
-            names.name(self.lower[display] as usize)
-        } else {
-            &self.text[start..end]
-        }
-    }
-
-    /// The display number of `name`, added when it is new. `plain` says that
-    /// `name` equals its lowercase form (number `lower`); `hash` is the
-    /// `name_hash` of `name`.
-    fn intern(
-        &mut self,
-        names: &Names,
-        name: &str,
-        plain: bool,
-        lower: u32,
-        hash: u64,
-    ) -> Option<u32> {
+    /// The variant number of `name` (whose `name_hash` is `hash`; its
+    /// lowercase form is name number `lower`), added when it is new. `None`
+    /// when the text would pass 4 GiB.
+    fn intern(&mut self, name: &str, lower: u32, hash: u64) -> Option<u32> {
         if (self.ends.len() + 1) * TABLE_LOAD_DENOMINATOR > self.table.len() * TABLE_LOAD_NUMERATOR
         {
-            self.place_displays((self.table.len() * 2).max(MIN_TABLE_SLOTS), names);
+            self.place_variants((self.table.len() * 2).max(MIN_TABLE_SLOTS));
         }
         let mask = self.table.len() - 1;
         let mut slot = slot_of(hash, mask);
         loop {
             match self.table[slot] {
                 0 => break,
-                stored => {
-                    let display = stored as usize - 1;
-                    if self.lower[display] == lower {
-                        let (start, end) = self.range(display);
-                        let stored_plain = start == end;
-                        if stored_plain == plain && (plain || &self.text[start..end] == name) {
-                            return Some(stored - 1);
-                        }
-                    }
-                    slot = (slot + 1) & mask;
-                }
+                stored if self.text_of(stored as usize - 1) == name => return Some(stored - 1),
+                _ => slot = (slot + 1) & mask,
             }
         }
-        let number = u32::try_from(self.ends.len()).ok().filter(|&n| n != NONE)?;
-        let end = u32::try_from(self.text.len() + if plain { 0 } else { name.len() }).ok()?;
-        if !plain {
-            self.text.push_str(name);
-        }
+        let number = u32::try_from(self.ends.len()).ok().filter(|&n| n < VARIANT_TAG)?;
+        let end = u32::try_from(self.text.len() + name.len()).ok()?;
+        self.text.push_str(name);
         self.ends.push(end);
         self.lower.push(lower);
         self.table[slot] = number + 1;
         Some(number)
     }
 
-    /// Fills a new hash table of `slots` slots (a power of two).
-    fn place_displays(&mut self, slots: usize, names: &Names) {
+    /// Fills a new hash table of `slots` slots (a power of two). The text
+    /// holds the names, so the hashes are computed again instead of stored.
+    fn place_variants(&mut self, slots: usize) {
         let mut table = vec![0u32; slots];
         let mask = slots - 1;
         for number in 0..self.ends.len() {
-            let hash = name_hash(self.text_of(names, number));
-            let mut slot = slot_of(hash, mask);
+            let mut slot = slot_of(name_hash(self.text_of(number)), mask);
             while table[slot] != 0 {
                 slot = (slot + 1) & mask;
             }
@@ -510,12 +491,62 @@ impl Displays {
     }
 
     /// Builds the hash table again (after a load).
-    pub(super) fn rebuild_table(&mut self, names: &Names) {
+    pub(super) fn rebuild_table(&mut self) {
         let mut slots = MIN_TABLE_SLOTS;
         while (self.ends.len() + 1) * TABLE_LOAD_DENOMINATOR > slots * TABLE_LOAD_NUMERATOR {
             slots *= 2;
         }
-        self.place_displays(slots, names);
+        self.place_variants(slots);
+    }
+
+    /// Converts the display names of snapshot versions 2 and 3 (one per
+    /// exact-case name, an empty range for a name equal to its lowercase form)
+    /// to case variants. Returns the variants and, for each old display
+    /// number, the `Segment::display` value that replaces it. `name_count` is
+    /// the number of lowercase names.
+    pub(super) fn from_legacy(
+        text: &str,
+        ends: &[u32],
+        lower: &[u32],
+        name_count: usize,
+    ) -> Result<(Self, Vec<u32>), String> {
+        if lower.len() != ends.len() {
+            return Err("the display names differ in length".into());
+        }
+        if ends.last().map_or(0, |&end| end as usize) != text.len() {
+            return Err("the display text has a tail".into());
+        }
+        // The old text holds only the non-empty names: the arrays get their
+        // exact size.
+        let starts = std::iter::once(&0).chain(ends);
+        let count = ends.iter().zip(starts).filter(|(end, start)| end != start).count();
+        let mut variants = Self {
+            text: String::with_capacity(text.len()),
+            ends: Vec::with_capacity(count),
+            lower: Vec::with_capacity(count),
+            table: Vec::new(),
+        };
+        let mut map = Vec::with_capacity(ends.len());
+        let mut start = 0usize;
+        for (&end, &lower) in ends.iter().zip(lower) {
+            let end = end as usize;
+            if end < start || end > text.len() || !text.is_char_boundary(end) {
+                return Err("a name range is wrong".into());
+            }
+            if lower as usize >= name_count || lower >= VARIANT_TAG {
+                return Err("a display name points outside its array".into());
+            }
+            if start == end {
+                map.push(lower);
+            } else {
+                map.push(VARIANT_TAG | variants.ends.len() as u32);
+                variants.text.push_str(&text[start..end]);
+                variants.ends.push(variants.text.len() as u32);
+                variants.lower.push(lower);
+            }
+            start = end;
+        }
+        Ok((variants, map))
     }
 
     fn shrink(&mut self) {
@@ -549,11 +580,13 @@ pub(super) struct Segment {
     /// The places of the root entry (see `places_of`).
     root_places: u32,
     pub(super) names: Names,
-    pub(super) displays: Displays,
+    pub(super) variants: Variants,
     /// Parent entry. `NONE` only for the root entry, and for an entry that
     /// waits for its parent after a compaction (it is hidden meanwhile).
     pub(super) parent: Vec<u32>,
-    /// Display name number; `NONE` for the root entry.
+    /// The exact-case name: the lowercase name number when the name equals
+    /// its lowercase form, else `VARIANT_TAG` | the case variant number.
+    /// `NONE` for the root entry.
     pub(super) display: Vec<u32>,
     /// Directory, dead, excluded and root flags; penalty / `PENALTY_STEP` in
     /// the low byte.
@@ -592,7 +625,7 @@ impl Segment {
             root_path,
             root_places,
             names: Names::default(),
-            displays: Displays::default(),
+            variants: Variants::default(),
             parent: vec![NONE],
             display: vec![NONE],
             flags: vec![FLAG_ROOT | FLAG_DIRECTORY],
@@ -615,7 +648,7 @@ impl Segment {
         id: u64,
         meta: VolumeMeta,
         mut names: Names,
-        mut displays: Displays,
+        mut variants: Variants,
         parent: Vec<u32>,
         display: Vec<u32>,
         flags: Vec<u16>,
@@ -653,26 +686,35 @@ impl Segment {
         if names.heads.len() != names.ends.len() {
             return Err("the name heads differ in length".into());
         }
-        check_text(&displays.text, &displays.ends)?;
-        if displays.ends.last().map_or(0, |&end| end as usize) != displays.text.len() {
-            return Err("the display text has a tail".into());
+        check_text(&variants.text, &variants.ends)?;
+        if variants.ends.last().map_or(0, |&end| end as usize) != variants.text.len() {
+            return Err("the variant text has a tail".into());
         }
-        if displays.lower.len() != displays.ends.len() {
-            return Err("the display names differ in length".into());
+        if variants.lower.len() != variants.ends.len() {
+            return Err("the variants differ in length".into());
         }
         let name_count = names.ends.len();
-        let display_count = displays.ends.len();
+        let variant_count = variants.ends.len();
         let wrong = |what: &str| Err(format!("{what} points outside its array"));
         if names.heads.iter().any(|&head| head != NONE && head as usize >= entries) {
             return wrong("a name head");
         }
-        if displays.lower.iter().any(|&lower| lower as usize >= name_count) {
-            return wrong("a display name");
+        if variants.lower.iter().any(|&lower| lower as usize >= name_count) {
+            return wrong("a case variant");
         }
         if parent.iter().any(|&p| p != NONE && p as usize >= entries) {
             return wrong("a parent");
         }
-        if display.iter().skip(1).any(|&d| d as usize >= display_count) {
+        // The root entry has no name. Any other entry names a lowercase name
+        // or a case variant (`NONE` has the tag and no variant is that high).
+        let named = |d: u32| {
+            if d & VARIANT_TAG == 0 {
+                (d as usize) < name_count
+            } else {
+                ((d & !VARIANT_TAG) as usize) < variant_count
+            }
+        };
+        if display[0] != NONE || !display.iter().skip(1).all(|&d| named(d)) {
             return wrong("an entry's name");
         }
         if next.iter().any(|&n| n != NONE && n as usize >= entries) {
@@ -691,7 +733,7 @@ impl Segment {
         }
         names.masks = (0..name_count).map(|n| char_mask(names.name(n))).collect();
         names.rebuild_table();
-        displays.rebuild_table(&names);
+        variants.rebuild_table();
         let deleted = flags.iter().filter(|&&f| f & FLAG_DEAD != 0).count();
         let root_path = meta.mount_path.trim_end_matches('\\').to_string();
         let root_places = root_places_of(&root_path);
@@ -702,7 +744,7 @@ impl Segment {
             root_path,
             root_places,
             names,
-            displays,
+            variants,
             parent,
             display,
             flags,
@@ -728,10 +770,10 @@ impl Segment {
             + of(&self.names.masks)
             + of(&self.names.heads)
             + of(&self.names.table)
-            + self.displays.text.capacity()
-            + of(&self.displays.ends)
-            + of(&self.displays.lower)
-            + of(&self.displays.table)
+            + self.variants.text.capacity()
+            + of(&self.variants.ends)
+            + of(&self.variants.lower)
+            + of(&self.variants.table)
             + of(&self.parent)
             + of(&self.display)
             + of(&self.flags)
@@ -753,7 +795,7 @@ impl Segment {
 
     fn shrink(&mut self) {
         self.names.shrink();
-        self.displays.shrink();
+        self.variants.shrink();
         fit(&mut self.parent);
         fit(&mut self.display);
         fit(&mut self.flags);
@@ -783,25 +825,42 @@ impl Segment {
         self.by_record[record] = entry;
     }
 
-    /// The exact-case name of an entry.
+    /// The exact-case name of an entry. Not for the root entry.
     fn display_name(&self, entry: usize) -> &str {
-        self.displays.text_of(&self.names, self.display[entry] as usize)
-    }
-
-    /// The byte length of the exact-case name of an entry.
-    fn display_len(&self, entry: usize) -> usize {
-        let display = self.display[entry] as usize;
-        let (start, end) = self.displays.range(display);
-        if start == end {
-            self.names.len_of(self.displays.lower[display] as usize)
+        let display = self.display[entry];
+        debug_assert!(display != NONE, "the root entry has no name");
+        if display & VARIANT_TAG == 0 {
+            self.names.name(display as usize)
         } else {
-            end - start
+            self.variants.text_of((display & !VARIANT_TAG) as usize)
         }
     }
 
-    /// The lowercase name number of an entry.
+    /// The byte length of the exact-case name of an entry. Not for the root
+    /// entry.
+    fn display_len(&self, entry: usize) -> usize {
+        let display = self.display[entry];
+        debug_assert!(display != NONE, "the root entry has no name");
+        if display & VARIANT_TAG == 0 {
+            self.names.len_of(display as usize)
+        } else {
+            self.variants.text_of((display & !VARIANT_TAG) as usize).len()
+        }
+    }
+
+    /// The lowercase name number of an entry. Not for the root entry.
     fn lower_of(&self, entry: usize) -> u32 {
-        self.displays.lower[self.display[entry] as usize]
+        self.lower_of_display(self.display[entry])
+    }
+
+    /// The lowercase name number that a `display` value stands for.
+    fn lower_of_display(&self, display: u32) -> u32 {
+        debug_assert!(display != NONE, "the root entry has no name");
+        if display & VARIANT_TAG == 0 {
+            display
+        } else {
+            self.variants.lower[(display & !VARIANT_TAG) as usize]
+        }
     }
 
     /// True when the entry and every ancestor up to the root is live and not
@@ -931,16 +990,16 @@ impl Segment {
         depth << 16 | length
     }
 
-    /// The display and lowercase name numbers of `name`.
+    /// The `display` value and the lowercase name number of `name`. A name
+    /// equal to its lowercase form gets the lowercase number as its display
+    /// value; any other name gets a case variant.
     fn intern_name(&mut self, name: &str, lower: &str) -> Option<(u32, u32)> {
-        let hash = name_hash(lower);
-        let lower_number = self.names.intern(lower, hash)?;
-        let plain = lower == name;
-        let display_hash = if plain { hash } else { name_hash(name) };
-        let display = self
-            .displays
-            .intern(&self.names, name, plain, lower_number, display_hash)?;
-        Some((display, lower_number))
+        let lower_number = self.names.intern(lower, name_hash(lower))?;
+        if lower == name {
+            return Some((lower_number, lower_number));
+        }
+        let variant = self.variants.intern(name, lower_number, name_hash(name))?;
+        Some((VARIANT_TAG | variant, lower_number))
     }
 
     /// Adds a new entry below `parent`. Returns its number.
@@ -1647,24 +1706,33 @@ impl FileStore {
         fresh.flags.reserve_exact(kept);
         fresh.seq.reserve_exact(kept);
         fresh.next.reserve_exact(kept);
-        // Display names are copied once each, by text, into the new pools.
-        let mut display_map: Vec<u32> = Vec::new();
+        // Names and case variants are copied once each, by text, into the new
+        // pools: only the ones that a kept entry uses. The maps go from an old
+        // lowercase name number and an old variant number to the new
+        // `display` value.
+        let mut plain_map: Vec<u32> = Vec::new();
+        let mut variant_map: Vec<u32> = Vec::new();
         for range in slices(entries) {
             self.with_segment(slot, id, |segment| {
                 for entry in range {
                     if entry == 0 || state[entry] != 1 {
                         continue;
                     }
-                    let old_display = segment.display[entry] as usize;
-                    if old_display >= display_map.len() {
-                        display_map.resize(old_display + 1, NONE);
+                    let old_display = segment.display[entry];
+                    let (map, number) = if old_display & VARIANT_TAG == 0 {
+                        (&mut plain_map, old_display as usize)
+                    } else {
+                        (&mut variant_map, (old_display & !VARIANT_TAG) as usize)
+                    };
+                    if number >= map.len() {
+                        map.resize(number + 1, NONE);
                     }
-                    if display_map[old_display] == NONE {
-                        let exact = segment.displays.text_of(&segment.names, old_display);
-                        let lower = segment.names.name(segment.displays.lower[old_display] as usize);
-                        display_map[old_display] = fresh.intern_name(exact, lower)?.0;
+                    if map[number] == NONE {
+                        let exact = segment.display_name(entry);
+                        let lower = segment.names.name(segment.lower_of(entry) as usize);
+                        map[number] = fresh.intern_name(exact, lower)?.0;
                     }
-                    let display = display_map[old_display];
+                    let display = map[number];
                     let parent = segment.parent[entry];
                     let parent = if parent == NONE || parent as usize >= entries {
                         NONE
@@ -1682,7 +1750,7 @@ impl FileStore {
                         // Died after the decision: the log kills it too.
                         fresh.deleted += 1;
                     }
-                    fresh.link(fresh.displays.lower[display as usize], index);
+                    fresh.link(fresh.lower_of_display(display), index);
                 }
                 Some(())
             })??;
