@@ -10,6 +10,7 @@ use futures::FutureExt;
 use futures::future::BoxFuture;
 use gpui::{App, Global};
 use prism_core::backend::backend;
+pub use prism_core::files::{FileStamp, Thumbnail};
 use serde::{Deserialize, Serialize};
 
 use crate::lib::fixture;
@@ -108,7 +109,9 @@ pub enum BackendEvent {
     Toggle { open: bool },
     /// The window gained or lost focus (`onFocusChanged`).
     WindowFocused(bool),
-    FileIndexUpdated,
+    /// The file index changed. `content`: entries that a search can return
+    /// changed; otherwise only the index status may have changed.
+    FileIndexUpdated { content: bool },
     AppsUpdated,
     SystemThemeChanged(String),
     WinModeFailed(String),
@@ -296,6 +299,10 @@ pub fn search_files(query: String, limit: usize) -> Reply<FileSearchResponse> {
     })
 }
 
+pub fn file_index_status() -> Reply<FileSearchResponse> {
+    answer(|f| reshape(f.search_files("")), async { reshape(backend().file_index_status().await?) })
+}
+
 pub fn rebuild_file_index() -> Reply<()> {
     command("rebuild_file_index", serde_json::json!({}), async {
         backend().rebuild_file_index();
@@ -303,15 +310,19 @@ pub fn rebuild_file_index() -> Reply<()> {
     })
 }
 
-/// Thumbnails for many paths in one round trip, returned in input order.
-pub fn get_file_thumbnails(paths: Vec<String>) -> Reply<Vec<Option<String>>> {
-    let count = paths.len();
-    let canned = paths.clone();
-    answer_infallible(move |f| f.thumbnails(&canned), async move {
-        let mut thumbnails = backend().get_file_thumbnails(paths).await;
-        thumbnails.resize(count, None);
-        thumbnails
-    })
+/// Previews for many paths in one round trip, returned in input order. Each
+/// path comes with the stamp of the preview the caller holds, if any.
+pub fn get_file_thumbnails(requests: Vec<(String, Option<FileStamp>)>) -> Reply<Vec<Thumbnail>> {
+    let count = requests.len();
+    let canned: Vec<String> = requests.iter().map(|(path, _)| path.clone()).collect();
+    answer_infallible(
+        move |f| f.thumbnails(&canned).into_iter().map(|image| Thumbnail::Read { stamp: None, image }).collect(),
+        async move {
+            let mut thumbnails = backend().get_file_thumbnails(requests).await;
+            thumbnails.resize(count, Thumbnail::Read { stamp: None, image: None });
+            thumbnails
+        },
+    )
 }
 
 pub fn get_quick_access() -> Reply<Vec<QuickAccessEntry>> {

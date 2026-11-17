@@ -467,8 +467,18 @@ impl Backend {
         self.file_index.rebuild();
     }
 
-    pub async fn get_file_thumbnails(&self, paths: Vec<String>) -> Vec<Option<String>> {
-        crate::runtime::spawn_blocking(move || files::file_thumbnails(paths))
+    pub async fn file_index_status(&self) -> Result<files::FileSearchResponse, String> {
+        let index = self.file_index.clone();
+        crate::runtime::spawn_blocking(move || index.status_response())
+            .await
+            .map_err(|error| join_error("file index status task failed", error))
+    }
+
+    pub async fn get_file_thumbnails(
+        &self,
+        requests: Vec<(String, Option<files::FileStamp>)>,
+    ) -> Vec<files::Thumbnail> {
+        crate::runtime::spawn_blocking(move || files::file_thumbnails(requests))
             .await
             .unwrap_or_default()
     }

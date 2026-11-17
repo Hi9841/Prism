@@ -6,7 +6,7 @@ use windows::Win32::Storage::FileSystem::{
 };
 
 pub use crate::catalog::types::{FileSearchResponse, QuickAccessEntry};
-pub use crate::catalog::{file_thumbnails, quick_access, warm, FileIndex};
+pub use crate::catalog::{file_thumbnails, quick_access, warm, FileIndex, FileStamp, Thumbnail};
 
 pub fn replace_file(temp: &Path, destination: &Path) -> Result<(), String> {
     let from: Vec<u16> = temp.as_os_str().encode_wide().chain(Some(0)).collect();

@@ -1140,3 +1140,28 @@ fn a_bad_display_table_in_an_old_snapshot_does_not_load() {
     super::super::snapshot::write_version_3(&path, &[&segment]).expect("write");
     assert!(FileStore::load(&path).is_err());
 }
+
+/// The journal reader tells the UI to refresh its results only when a batch
+/// changed an entry: build churn in excluded or unknown folders changes none.
+#[test]
+fn apply_reports_whether_an_entry_changed() {
+    let (store, slot) = store_with({
+        let mut nodes = sample();
+        nodes.push(excluded(30, 11, "target"));
+        nodes
+    });
+    // Records of an excluded folder, an unknown parent, a stale remove.
+    let churn = [
+        upsert(file(40, 30, "build.o")),
+        upsert(file(41, 999, "ghost.txt")),
+        FsChange::Remove { record: 40, seq: 1 },
+        FsChange::Remove { record: 20, seq: 9 },
+    ];
+    assert!(!store.apply_and_checkpoint(slot, &churn, 7, 200));
+    assert_eq!(store.volumes()[0].next_usn, 200, "the checkpoint still moves");
+    // The same name and place again changes nothing.
+    assert!(!store.apply(slot, &[upsert(file(20, 12, "report.txt"))]));
+    assert!(store.apply(slot, &[upsert(file(23, 12, "new.md"))]));
+    assert!(store.apply(slot, &[upsert(file(23, 12, "renamed.md"))]));
+    assert!(store.apply(slot, &[FsChange::Remove { record: 23, seq: 1 }]));
+}

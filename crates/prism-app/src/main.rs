@@ -168,7 +168,9 @@ fn main() {
                 let _ = cx.update(|cx| match message {
                     HostMessage::Emit { event, payload } => {
                         let event = match event.as_str() {
-                            "file-index-updated" => Some(BackendEvent::FileIndexUpdated),
+                            "file-index-updated" => Some(BackendEvent::FileIndexUpdated {
+                                content: payload.get("content").and_then(|c| c.as_bool()).unwrap_or(true),
+                            }),
                             "apps-updated" => Some(BackendEvent::AppsUpdated),
                             "system-theme-changed" => payload
                                 .get("theme")
