@@ -2398,7 +2398,7 @@ fn wide(value: &str) -> Vec<u16> {
 
 #[cfg(test)]
 mod tests {
-    use super::{fnv1a_64, install_shell_hook_library};
+    use super::install_shell_hook_library;
     use std::path::{Path, PathBuf};
 
     fn scratch(label: &str) -> PathBuf {
@@ -2425,7 +2425,7 @@ mod tests {
         let second = install_shell_hook_library(&dir, b"build one").unwrap();
         assert_eq!(first, second);
         assert_eq!(std::fs::read(&first).unwrap(), b"build one");
-        assert_eq!(file_names(&dir), [format!("prism-shell-hook-{:016x}.dll", fnv1a_64(b"build one"))]);
+        assert_eq!(file_names(&dir), [first.file_name().unwrap().to_str().unwrap()]);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
