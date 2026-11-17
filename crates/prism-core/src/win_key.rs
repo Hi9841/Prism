@@ -3,11 +3,15 @@
 //! Turns a standalone Win-key press into a Prism toggle while leaving
 //! Win+* combos and other global keyboard tools intact. Design rules:
 //!
-//! - A pure, side-aware state machine (`WinKeyMachine`) decides everything;
-//!   it is unit-tested without Win32 involvement.
-//! - A message-only raw-input observer detects standalone Win in every mode.
-//!   Prism never installs a low-level keyboard hook or modifies physical input.
+//! - Normal mode works as Open-Shell does: Explorer's bare-Win and Ctrl+Esc
+//!   hotkeys are released, so Windows itself decides what a standalone Win tap
+//!   is and sends `SC_TASKLIST` to the shell. The Explorer hook forwards that
+//!   command to Prism. Prism reads no keyboard input in this mode.
 //! - StartAllBack integration disables the provider's Win action reversibly.
+//!   The provider then consumes Win before Explorer sees it, so only in this
+//!   mode a raw-input observer and the side-aware state machine
+//!   (`WinKeyMachine`, unit-tested without Win32) detect standalone Win.
+//!   Prism never installs a low-level keyboard hook or modifies physical input.
 //! - A small Explorer message hook takes ownership of `SC_TASKLIST` before
 //!   native Start is launched, and of Explorer `WM_HOTKEY` Win+S / Win+Q
 //!   before native Search (opened via `activate_palette`). Without provider
@@ -404,7 +408,7 @@ impl WinKeyMachine {
 
 static ACTIVE: AtomicBool = AtomicBool::new(false);
 static PROVIDER_SUPPRESSES_START: AtomicBool = AtomicBool::new(false);
-static RAW_OBSERVER_ACTIVE: AtomicBool = AtomicBool::new(false);
+static OBSERVER_ACTIVE: AtomicBool = AtomicBool::new(false);
 static THREAD_ID: AtomicU32 = AtomicU32::new(0);
 type HookReady = mpsc::SyncSender<Result<(), String>>;
 type StopReady = mpsc::SyncSender<()>;
@@ -757,20 +761,21 @@ fn pump_loop(rx: mpsc::Receiver<HookReady>) {
     THREAD_ID.store(0, Ordering::SeqCst);
 }
 
-/// Registers raw input and the Explorer Start-command bridge.
+/// Creates the observer window (raw keyboard input only in provider mode) and
+/// installs the Explorer Start-command bridge.
 unsafe fn run_pump(ready: HookReady) {
     let provider_mode = PROVIDER_SUPPRESSES_START.load(Ordering::Acquire);
     let _ = taskbar_created_message();
-    let raw_input_window = match create_raw_input_window() {
+    let observer_window = match create_observer_window(provider_mode) {
         Ok(window) => window,
         Err(error) => {
             let detail = error.clone();
             let _ = ready.send(Err(error));
-            disable_observation("raw keyboard observer registration failed", &detail);
+            disable_observation("Win-key observer registration failed", &detail);
             return;
         }
     };
-    RAW_OBSERVER_ACTIVE.store(true, Ordering::Release);
+    OBSERVER_ACTIVE.store(true, Ordering::Release);
     let com_initialized = CoInitializeEx(None, COINIT_MULTITHREADED).is_ok();
     let mut shell_bridge = match ShellBridge::install(!provider_mode) {
         Ok(bridge) => {
@@ -779,8 +784,8 @@ unsafe fn run_pump(ready: HookReady) {
         }
         Err(error) => {
             debug_trace(&format!("bridge-install-error {error}"));
-            RAW_OBSERVER_ACTIVE.store(false, Ordering::Release);
-            destroy_raw_input_window(raw_input_window);
+            OBSERVER_ACTIVE.store(false, Ordering::Release);
+            destroy_observer_window(observer_window);
             let detail = error.clone();
             let _ = ready.send(Err(error));
             disable_observation("Explorer Start-command bridge installation failed", &detail);
@@ -906,13 +911,13 @@ unsafe fn run_pump(ready: HookReady) {
     }
     SHELL_BRIDGE_ACTIVE.store(false, Ordering::Release);
     SHELL_TASKBAR_THREAD.store(0, Ordering::Release);
-    RAW_OBSERVER_ACTIVE.store(false, Ordering::Release);
+    OBSERVER_ACTIVE.store(false, Ordering::Release);
     RAW_MACHINE.lock().map(|mut machine| machine.reset()).ok();
     cancel_pending_win_toggle();
     // Ask the Explorer-thread renderer to tear down its window while the hook
     // and observer are still alive, then release the bridge.
     drop(shell_bridge);
-    destroy_raw_input_window(raw_input_window);
+    destroy_observer_window(observer_window);
     if com_initialized {
         CoUninitialize();
     }
@@ -1000,7 +1005,6 @@ struct ShellBridge {
     search_button_locator: SearchButtonLocator,
     search_rect: Option<RECT>,
     last_rect_refresh: Option<Instant>,
-    library_path: PathBuf,
     /// The hooks are gone (`release`); the struct only keeps the last rects.
     released: bool,
 }
@@ -1022,7 +1026,7 @@ struct AutomationStartButton {
 
 impl ShellBridge {
     unsafe fn install(release_win_hotkey: bool) -> Result<Self, String> {
-        let library_path = write_shell_hook_library()?;
+        let library_path = shell_hook_library()?;
         let library_wide = wide(&library_path.to_string_lossy());
         let module = LoadLibraryW(PCWSTR(library_wide.as_ptr()))
             .map_err(|error| format!("load Explorer bridge: {error}"))?;
@@ -1033,7 +1037,6 @@ impl ShellBridge {
                 }
                 None => {
                     let _ = FreeLibrary(module);
-                    let _ = std::fs::remove_file(&library_path);
                     return Err("Explorer bridge export is missing".to_string());
                 }
             };
@@ -1044,7 +1047,6 @@ impl ShellBridge {
                 }
                 None => {
                     let _ = FreeLibrary(module);
-                    let _ = std::fs::remove_file(&library_path);
                     return Err("Explorer mouse bridge export is missing".to_string());
                 }
             };
@@ -1053,14 +1055,12 @@ impl ShellBridge {
             Ok(window) => window,
             Err(error) => {
                 let _ = FreeLibrary(module);
-                let _ = std::fs::remove_file(&library_path);
                 return Err(error);
             }
         };
         let progman_thread = GetWindowThreadProcessId(progman, None);
         if progman_thread == 0 {
             let _ = FreeLibrary(module);
-            let _ = std::fs::remove_file(&library_path);
             return Err("Explorer desktop thread is unavailable".to_string());
         }
         let progman_hook = match SetWindowsHookExW(
@@ -1072,7 +1072,6 @@ impl ShellBridge {
             Ok(hook) => hook,
             Err(error) => {
                 let _ = FreeLibrary(module);
-                let _ = std::fs::remove_file(&library_path);
                 return Err(format!("hook Explorer Start command: {error}"));
             }
         };
@@ -1080,13 +1079,13 @@ impl ShellBridge {
         let taskbar = match find_shell_window("Shell_TrayWnd") {
             Ok(window) => window,
             Err(error) => {
-                cleanup_shell_hook(progman_hook, module, &library_path);
+                cleanup_shell_hook(progman_hook, module);
                 return Err(error);
             }
         };
         let taskbar_thread = GetWindowThreadProcessId(taskbar, None);
         if taskbar_thread == 0 {
-            cleanup_shell_hook(progman_hook, module, &library_path);
+            cleanup_shell_hook(progman_hook, module);
             return Err("Explorer taskbar thread is unavailable".to_string());
         }
         let taskbar_message_hook = if taskbar_thread == progman_thread {
@@ -1100,7 +1099,7 @@ impl ShellBridge {
             ) {
                 Ok(hook) => Some(hook),
                 Err(error) => {
-                    cleanup_shell_hook(progman_hook, module, &library_path);
+                    cleanup_shell_hook(progman_hook, module);
                     return Err(format!("hook Explorer taskbar command: {error}"));
                 }
             }
@@ -1112,7 +1111,7 @@ impl ShellBridge {
             if let Some(hook) = taskbar_message_hook {
                 let _ = UnhookWindowsHookEx(hook);
             }
-            cleanup_shell_hook(progman_hook, module, &library_path);
+            cleanup_shell_hook(progman_hook, module);
             return Err("Explorer taskbar process is unavailable".to_string());
         }
         let (start_button_locator, start_rect) =
@@ -1122,7 +1121,7 @@ impl ShellBridge {
                     if let Some(hook) = taskbar_message_hook {
                         let _ = UnhookWindowsHookEx(hook);
                     }
-                    cleanup_shell_hook(progman_hook, module, &library_path);
+                    cleanup_shell_hook(progman_hook, module);
                     return Err(error);
                 }
             };
@@ -1139,7 +1138,7 @@ impl ShellBridge {
                 if let Some(hook) = taskbar_message_hook {
                     let _ = UnhookWindowsHookEx(hook);
                 }
-                cleanup_shell_hook(progman_hook, module, &library_path);
+                cleanup_shell_hook(progman_hook, module);
                 return Err(format!("hook Explorer Start-button mouse path: {error}"));
             }
         };
@@ -1150,7 +1149,7 @@ impl ShellBridge {
                 if let Some(hook) = taskbar_message_hook {
                     let _ = UnhookWindowsHookEx(hook);
                 }
-                cleanup_shell_hook(progman_hook, module, &library_path);
+                cleanup_shell_hook(progman_hook, module);
                 return Err(error);
             }
         };
@@ -1160,7 +1159,7 @@ impl ShellBridge {
             if let Some(hook) = taskbar_message_hook {
                 let _ = UnhookWindowsHookEx(hook);
             }
-            cleanup_shell_hook(progman_hook, module, &library_path);
+            cleanup_shell_hook(progman_hook, module);
             return Err(error);
         }
         if wait_for_ack(&SHELL_START_RECT_ACK, Duration::from_secs(1)) != 2 {
@@ -1168,7 +1167,7 @@ impl ShellBridge {
             if let Some(hook) = taskbar_message_hook {
                 let _ = UnhookWindowsHookEx(hook);
             }
-            cleanup_shell_hook(progman_hook, module, &library_path);
+            cleanup_shell_hook(progman_hook, module);
             return Err("Explorer did not accept the Start-button rectangle".to_string());
         }
 
@@ -1191,7 +1190,6 @@ impl ShellBridge {
                 search_button_locator,
                 search_rect,
                 last_rect_refresh: None,
-                library_path,
                 released: false,
             });
         }
@@ -1203,7 +1201,7 @@ impl ShellBridge {
                 if let Some(hook) = taskbar_message_hook {
                     let _ = UnhookWindowsHookEx(hook);
                 }
-                cleanup_shell_hook(progman_hook, module, &library_path);
+                cleanup_shell_hook(progman_hook, module);
                 return Err(error);
             }
         };
@@ -1213,7 +1211,7 @@ impl ShellBridge {
             if let Some(hook) = taskbar_message_hook {
                 let _ = UnhookWindowsHookEx(hook);
             }
-            cleanup_shell_hook(progman_hook, module, &library_path);
+            cleanup_shell_hook(progman_hook, module);
             return Err("Explorer application-manager thread is unavailable".to_string());
         }
 
@@ -1232,7 +1230,7 @@ impl ShellBridge {
                     if let Some(hook) = taskbar_message_hook {
                         let _ = UnhookWindowsHookEx(hook);
                     }
-                    cleanup_shell_hook(progman_hook, module, &library_path);
+                    cleanup_shell_hook(progman_hook, module);
                     return Err(format!("enter Explorer hotkey thread: {error}"));
                 }
             }
@@ -1249,7 +1247,7 @@ impl ShellBridge {
                 if let Some(hook) = taskbar_message_hook {
                     let _ = UnhookWindowsHookEx(hook);
                 }
-                cleanup_shell_hook(progman_hook, module, &library_path);
+                cleanup_shell_hook(progman_hook, module);
                 return Err(error);
             }
         };
@@ -1266,7 +1264,7 @@ impl ShellBridge {
             if let Some(hook) = taskbar_message_hook {
                 let _ = UnhookWindowsHookEx(hook);
             }
-            cleanup_shell_hook(progman_hook, module, &library_path);
+            cleanup_shell_hook(progman_hook, module);
             return Err(format!("ask Explorer to release bare Win: {error}"));
         }
 
@@ -1279,7 +1277,7 @@ impl ShellBridge {
             if let Some(hook) = taskbar_message_hook {
                 let _ = UnhookWindowsHookEx(hook);
             }
-            cleanup_shell_hook(progman_hook, module, &library_path);
+            cleanup_shell_hook(progman_hook, module);
             return Err("Explorer did not acknowledge the bare-Win handoff".to_string());
         }
 
@@ -1304,7 +1302,6 @@ impl ShellBridge {
             search_button_locator,
             search_rect,
             last_rect_refresh: None,
-            library_path,
             released: false,
         })
     }
@@ -1717,7 +1714,6 @@ impl ShellBridge {
             let _ = UnhookWindowsHookEx(self.taskbar_mouse_hook);
             let _ = FreeLibrary(self.module);
         }
-        let _ = std::fs::remove_file(&self.library_path);
         #[cfg(debug_assertions)]
         eprintln!("[win-key] Explorer bridge released");
     }
@@ -1739,10 +1735,9 @@ fn request_start_icon_shutdown(thread: u32) {
     let _ = wait_for_ack(&SHELL_ICON_SHUTDOWN_ACK, Duration::from_millis(250));
 }
 
-unsafe fn cleanup_shell_hook(hook: HHOOK, module: HMODULE, library_path: &PathBuf) {
+unsafe fn cleanup_shell_hook(hook: HHOOK, module: HMODULE) {
     let _ = UnhookWindowsHookEx(hook);
     let _ = FreeLibrary(module);
-    let _ = std::fs::remove_file(library_path);
 }
 
 fn shell_bridge_message() -> Result<u32, String> {
@@ -1814,43 +1809,76 @@ fn wait_for_ack(acknowledgement: &AtomicU32, timeout: Duration) -> u32 {
     acknowledgement.load(Ordering::Acquire)
 }
 
-fn write_shell_hook_library() -> Result<PathBuf, String> {
-    let directory = std::env::temp_dir().join("Prism").join("shell-hooks");
-    std::fs::create_dir_all(&directory)
-        .map_err(|error| format!("create Explorer bridge directory: {error}"))?;
-    if let Ok(entries) = std::fs::read_dir(&directory) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            let is_stale_hook =
-                path.file_name()
-                    .and_then(|name| name.to_str())
-                    .is_some_and(|name| {
-                        name.starts_with("prism-shell-hook-") && name.ends_with(".dll")
-                    });
-            if is_stale_hook {
-                // Loaded DLLs remain locked on Windows, so this removes only
-                // debris from already-terminated Prism instances.
-                let _ = std::fs::remove_file(path);
+/// The Explorer bridge DLL: one fixed file for each build of it, at
+/// `%LOCALAPPDATA%\app.prism.launcher\shell-hook\prism-shell-hook-<hash>.dll`.
+/// Before 1.0.30, each start wrote a new file with a random name to `%TEMP%` and loaded it into
+/// Explorer. Antivirus tools flag that pattern. The uninstaller removes this folder.
+fn shell_hook_library() -> Result<PathBuf, String> {
+    let local = std::env::var_os("LOCALAPPDATA").ok_or("LOCALAPPDATA is not set")?;
+    let directory = PathBuf::from(local).join("app.prism.launcher").join("shell-hook");
+    // Files that versions before 1.0.30 left in %TEMP%.
+    remove_stale_shell_hooks(&std::env::temp_dir().join("Prism").join("shell-hooks"), "");
+    install_shell_hook_library(&directory, include_bytes!(env!("PRISM_SHELL_HOOK_DLL")))
+}
+
+/// Puts `bytes` at `<directory>\prism-shell-hook-<hash>.dll` and returns the path. A file with the
+/// same bytes stays as it is. A new build has a new name, so an update never has to replace a file
+/// that Explorer holds locked.
+fn install_shell_hook_library(directory: &Path, bytes: &[u8]) -> Result<PathBuf, String> {
+    std::fs::create_dir_all(directory).map_err(|error| format!("create Explorer bridge directory: {error}"))?;
+    let name = format!("prism-shell-hook-{:016x}.dll", fnv1a_64(bytes));
+    remove_stale_shell_hooks(directory, &name);
+    let path = directory.join(&name);
+    if std::fs::read(&path).is_ok_and(|existing| existing == bytes) {
+        return Ok(path);
+    }
+    // Write a private file, then rename it: a second Prism that starts at the same time never
+    // loads a DLL that is not fully written.
+    let staging = directory.join(format!("{name}.{}.tmp", std::process::id()));
+    let written = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(&staging)
+        .and_then(|mut file| file.write_all(bytes).and_then(|_| file.sync_all()));
+    if let Err(error) = written {
+        let _ = std::fs::remove_file(&staging);
+        return Err(format!("write Explorer bridge DLL: {error}"));
+    }
+    match std::fs::rename(&staging, &path) {
+        Ok(()) => Ok(path),
+        Err(error) => {
+            let _ = std::fs::remove_file(&staging);
+            // Another Prism can have put the same file there first.
+            if std::fs::read(&path).is_ok_and(|existing| existing == bytes) {
+                Ok(path)
+            } else {
+                Err(format!("install Explorer bridge DLL: {error}"))
             }
         }
     }
-    let nonce = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    let path = directory.join(format!(
-        "prism-shell-hook-{}-{nonce}.dll",
-        std::process::id()
-    ));
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&path)
-        .map_err(|error| format!("create Explorer bridge DLL: {error}"))?;
-    file.write_all(include_bytes!(env!("PRISM_SHELL_HOOK_DLL")))
-        .and_then(|_| file.sync_all())
-        .map_err(|error| format!("write Explorer bridge DLL: {error}"))?;
-    Ok(path)
+}
+
+/// Removes bridge DLLs other than `keep`. Explorer holds a loaded DLL locked, so this removes
+/// only files that no Explorer uses now.
+fn remove_stale_shell_hooks(directory: &Path, keep: &str) {
+    let Ok(entries) = std::fs::read_dir(directory) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let file_name = entry.file_name();
+        let Some(name) = file_name.to_str() else {
+            continue;
+        };
+        if name != keep && name.starts_with("prism-shell-hook-") && name.ends_with(".dll") {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
+/// FNV-1a, 64 bits: a stable name for each build of the bridge DLL (not a security check).
+fn fnv1a_64(bytes: &[u8]) -> u64 {
+    bytes.iter().fold(0xcbf2_9ce4_8422_2325, |hash, &byte| (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3))
 }
 
 const RAW_INPUT_WINDOW_CLASS: &str = "PrismRawKeyboardObserver";
@@ -1876,7 +1904,9 @@ unsafe fn ensure_raw_input_class() -> Result<(), String> {
         .clone()
 }
 
-unsafe fn create_raw_input_window() -> Result<HWND, String> {
+/// The window that receives the Explorer bridge's events. With `watch_keyboard`
+/// (provider mode only) it also receives raw keyboard input.
+unsafe fn create_observer_window(watch_keyboard: bool) -> Result<HWND, String> {
     ensure_raw_input_class()?;
     let module = GetModuleHandleW(None).map_err(|error| format!("get Prism module: {error}"))?;
     let instance = HINSTANCE(module.0);
@@ -1923,17 +1953,19 @@ unsafe fn create_raw_input_window() -> Result<HWND, String> {
     // INPUTSINK only observes input while Prism is in the background. It does
     // not set NOLEGACY, so normal key messages and third-party tools continue
     // to receive the original keyboard stream.
-    let device = RAWINPUTDEVICE {
-        usUsagePage: HID_USAGE_PAGE_GENERIC,
-        usUsage: HID_USAGE_GENERIC_KEYBOARD,
-        dwFlags: RIDEV_INPUTSINK,
-        hwndTarget: window,
-    };
-    if let Err(error) =
-        RegisterRawInputDevices(&[device], std::mem::size_of::<RAWINPUTDEVICE>() as u32)
-    {
-        let _ = DestroyWindow(window);
-        return Err(format!("register raw keyboard observer: {error}"));
+    if watch_keyboard {
+        let device = RAWINPUTDEVICE {
+            usUsagePage: HID_USAGE_PAGE_GENERIC,
+            usUsage: HID_USAGE_GENERIC_KEYBOARD,
+            dwFlags: RIDEV_INPUTSINK,
+            hwndTarget: window,
+        };
+        if let Err(error) =
+            RegisterRawInputDevices(&[device], std::mem::size_of::<RAWINPUTDEVICE>() as u32)
+        {
+            let _ = DestroyWindow(window);
+            return Err(format!("register raw keyboard observer: {error}"));
+        }
     }
     // Lock and unlock reset the press state (`WM_WTSSESSION_CHANGE`). Without
     // it, reconciling at the next key-down still recovers, so a failure here
@@ -1944,7 +1976,8 @@ unsafe fn create_raw_input_window() -> Result<HWND, String> {
     Ok(window)
 }
 
-unsafe fn destroy_raw_input_window(window: HWND) {
+/// Removes a raw keyboard registration if there is one (no effect without it).
+unsafe fn destroy_observer_window(window: HWND) {
     let remove = RAWINPUTDEVICE {
         usUsagePage: HID_USAGE_PAGE_GENERIC,
         usUsage: HID_USAGE_GENERIC_KEYBOARD,
@@ -2043,7 +2076,7 @@ impl ShellStartFallback {
 /// Open Prism (idempotent). Extra taps cannot close it or reopen Search.
 fn note_shell_search_command() {
     if !ACTIVE.load(Ordering::Acquire)
-        || !RAW_OBSERVER_ACTIVE.load(Ordering::Acquire)
+        || !OBSERVER_ACTIVE.load(Ordering::Acquire)
         || !SHELL_BRIDGE_ACTIVE.load(Ordering::Acquire)
     {
         return;
@@ -2062,13 +2095,13 @@ fn win_keys_physically_down() -> bool {
     key_physically_down(VK_LWIN.0) || key_physically_down(VK_RWIN.0)
 }
 
-/// Explorer saw a bare Win / Ctrl+Esc (`SC_TASKLIST`) but the raw observer may
-/// also report it. Arm a short fallback; a raw event cancels it. This is how
-/// Open-Shell/StartAllBack-style launchers work: the shell command is the
-/// signal, so an elevated foreground cannot block it.
+/// Explorer saw a bare Win / Ctrl+Esc (`SC_TASKLIST`). In normal mode this is
+/// the only Win signal, as in Open-Shell: Windows decides that the tap was
+/// standalone, and an elevated foreground cannot block it. In provider mode the
+/// raw observer may also report the press; a recent raw toggle skips this one.
 fn note_shell_start_command() {
     if !ACTIVE.load(Ordering::Acquire)
-        || !RAW_OBSERVER_ACTIVE.load(Ordering::Acquire)
+        || !OBSERVER_ACTIVE.load(Ordering::Acquire)
         || !SHELL_BRIDGE_ACTIVE.load(Ordering::Acquire)
     {
         return;
@@ -2103,7 +2136,7 @@ fn flush_shell_start_fallback() {
         .is_some_and(|mut pending| pending.take_if_ready(Instant::now()));
     if ready
         && ACTIVE.load(Ordering::Acquire)
-        && RAW_OBSERVER_ACTIVE.load(Ordering::Acquire)
+        && OBSERVER_ACTIVE.load(Ordering::Acquire)
         && SHELL_BRIDGE_ACTIVE.load(Ordering::Acquire)
     {
         debug_trace("shell-start-fallback-toggle");
@@ -2127,7 +2160,7 @@ fn flush_pending_win_toggle() {
             // take this same lock after clearing ACTIVE, so a candidate either
             // queues before their final drain or observes inactive.
             if ACTIVE.load(Ordering::Acquire)
-                && RAW_OBSERVER_ACTIVE.load(Ordering::Acquire)
+                && OBSERVER_ACTIVE.load(Ordering::Acquire)
                 && SHELL_BRIDGE_ACTIVE.load(Ordering::Acquire)
             {
                 queue_action(Action::ToggleWin(side));
@@ -2246,7 +2279,7 @@ unsafe extern "system" fn raw_input_window_proc(
             }
             SHELL_EVENT_TASKBAR_START_CLICK_Y
                 if ACTIVE.load(Ordering::Acquire)
-                    && RAW_OBSERVER_ACTIVE.load(Ordering::Acquire)
+                    && OBSERVER_ACTIVE.load(Ordering::Acquire)
                     && SHELL_BRIDGE_ACTIVE.load(Ordering::Acquire) =>
             {
                 queue_action(Action::ToggleTaskbar(POINT {
@@ -2260,7 +2293,7 @@ unsafe extern "system" fn raw_input_window_proc(
     }
     if message == WM_INPUT
         && ACTIVE.load(Ordering::Acquire)
-        && RAW_OBSERVER_ACTIVE.load(Ordering::Acquire)
+        && OBSERVER_ACTIVE.load(Ordering::Acquire)
     {
         let mut input = RAWINPUT::default();
         let mut size = std::mem::size_of::<RAWINPUT>() as u32;
@@ -2362,3 +2395,59 @@ fn wide(value: &str) -> Vec<u16> {
 /* ------------------------------------------------------------------ */
 /*  Unit tests - the full shortcut matrix                              */
 /* ------------------------------------------------------------------ */
+
+#[cfg(test)]
+mod tests {
+    use super::{fnv1a_64, install_shell_hook_library};
+    use std::path::{Path, PathBuf};
+
+    fn scratch(label: &str) -> PathBuf {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/tmp")
+            .join(format!("shell-hook-test-{}-{label}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        dir
+    }
+
+    fn file_names(dir: &Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn the_same_build_keeps_one_file_with_a_stable_name() {
+        let dir = scratch("stable");
+        let first = install_shell_hook_library(&dir, b"build one").unwrap();
+        let second = install_shell_hook_library(&dir, b"build one").unwrap();
+        assert_eq!(first, second);
+        assert_eq!(std::fs::read(&first).unwrap(), b"build one");
+        assert_eq!(file_names(&dir), [format!("prism-shell-hook-{:016x}.dll", fnv1a_64(b"build one"))]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_new_build_gets_a_new_name_and_the_old_file_goes() {
+        let dir = scratch("update");
+        let old = install_shell_hook_library(&dir, b"build one").unwrap();
+        let new = install_shell_hook_library(&dir, b"build two").unwrap();
+        assert_ne!(old, new);
+        assert!(!old.exists());
+        assert_eq!(file_names(&dir).len(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_damaged_file_is_written_again() {
+        let dir = scratch("damaged");
+        let path = install_shell_hook_library(&dir, b"build one").unwrap();
+        std::fs::write(&path, b"half").unwrap();
+        assert_eq!(install_shell_hook_library(&dir, b"build one").unwrap(), path);
+        assert_eq!(std::fs::read(&path).unwrap(), b"build one");
+        assert_eq!(file_names(&dir).len(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

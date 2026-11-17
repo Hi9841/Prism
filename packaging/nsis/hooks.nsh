@@ -66,6 +66,9 @@
     DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "Prism"
     DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run" "Prism"
     RMDir /r "$APPDATA\app.prism.launcher"
+    ; The Explorer bridge DLL (win_key.rs `shell_hook_library`). Explorer can still hold it
+    ; locked for a short time; RMDir then leaves it.
+    RMDir /r "$LOCALAPPDATA\app.prism.launcher\shell-hook"
     nsExec::Exec '"$SYSDIR\schtasks.exe" /delete /tn "${PRISM_TASK_NAME}" /f'
     Pop $0
   ${EndIf}
