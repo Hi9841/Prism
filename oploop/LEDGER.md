@@ -1927,3 +1927,24 @@ Rejected before the loop: a paged `by_record` saves 3-5 MiB (pages of 256 record
 - Hypothesis: `Displays` keeps ends, lower and a hash slot for all 942,136 names, but only 156,286 differ from
   their lowercase form. An entry that points to its lowercase name, with case variants in a small table,
   should save about 12 MiB (snapshot format version 3; an old snapshot is rebuilt).
+- Change (328b9208): `Segment::display` holds the lowercase name number, or `VARIANT_TAG` (bit 31) | a case
+  variant number; `Variants` keeps only names that differ from lowercase. Snapshot version 4; versions 2 and 3
+  load through `Variants::from_legacy` (no rebuild).
+- Result (interleaved, I-002 vs I-003, 10 pairs, host load 11%): store 136.2 -> 123.2 MiB (-13.0), private
+  137.0 -> 124.0 MiB, load of the v2 copy 213 -> 194 ms (median), query sum min 60.5 -> 60.0, median 64.3 ->
+  64.4 ms (no change). Ranked candidates byte-identical to I-002 and to the base.
+- Gates: build clean, prism-core 117/117, judge 269/269. Decision: KEEP.
+
+### Session I summary (offline, owner's snapshot copy)
+
+| Step | Store MiB | Private MiB after load | 40 queries (best) |
+|---|---|---|---|
+| base (1.0.30) | 146.3 | 147.1 | 57.5 ms |
+| I-002 | 136.2 | 137.0 | 60.0 ms |
+| I-003 | 123.2 | 124.0 | 60.0 ms |
+| + one compaction (I-001 makes it happen at 12.5%) | about 112 (base: 135.0 after compaction) | | about 50 ms |
+
+Next hypotheses: (1) UI layer at rest (~66 MiB WS): release GPU/atlas memory while the palette is hidden
+(needs the app: sandbox); (2) the 18 MiB and 16 MiB private blocks outside the store (unknown owner: needs a
+heap trace on a running build); (3) `names.text` grows by doubling (67 MiB committed for 35 MiB of names in
+the live app): grow by a share as the entry arrays do (commit only, not working set).
