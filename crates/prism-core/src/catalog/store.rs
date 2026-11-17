@@ -1847,20 +1847,12 @@ impl Segment {
     fn candidate(&self, hit: &Hit) -> CandidateEntry {
         let entry = hit.index as usize;
         let is_directory = self.flags[entry] & FLAG_DIRECTORY != 0;
-        let extension = if is_directory {
-            None
-        } else {
-            Path::new(self.display_name(entry))
-                .extension()
-                .map(|extension| extension.to_string_lossy().to_lowercase())
-        };
         CandidateEntry {
             // The slot in the high half keeps the numbers of two volumes apart.
             id: i64::from(self.slot) << 32 | i64::from(hit.index),
             display_path: self.path_of(hit.index),
             lower_name: self.names.name(hit.name as usize).to_string(),
             is_directory,
-            extension,
         }
     }
 }

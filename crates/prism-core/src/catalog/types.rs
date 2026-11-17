@@ -99,6 +99,4 @@ pub struct CandidateEntry {
     pub display_path: String,
     pub lower_name: String,
     pub is_directory: bool,
-    #[allow(dead_code)]
-    pub extension: Option<String>,
 }

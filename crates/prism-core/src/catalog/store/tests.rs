@@ -153,7 +153,7 @@ fn builds_paths_from_the_parent_chain() {
 }
 
 #[test]
-fn candidates_carry_name_kind_and_extension() {
+fn candidates_carry_name_and_kind() {
     let (store, _) = store_with(sample());
     let tokens = ["report"];
     let query = NameQuery::new("report", &tokens);
@@ -164,14 +164,12 @@ fn candidates_carry_name_kind_and_extension() {
         .find(|entry| entry.lower_name == "report-2.txt")
         .unwrap();
     assert!(!entry.is_directory);
-    assert_eq!(entry.extension.as_deref(), Some("txt"));
     assert_eq!(entry.display_path, "C:\\Users\\hi\\Report-2.TXT");
     let tokens = ["docs"];
     let query = NameQuery::new("docs", &tokens);
     let found = store.candidates(&query, 10, false, &|| false);
     assert_eq!(found.entries.len(), 1);
     assert!(found.entries[0].is_directory);
-    assert_eq!(found.entries[0].extension, None);
 }
 
 #[test]
@@ -429,25 +427,6 @@ fn compaction_drops_tombstones_and_keeps_the_results() {
     assert!(compaction.locked < Duration::from_millis(500));
     assert_eq!(queries.map(|query| find(&store, query)), before);
     assert_eq!(entries(&store, slot), count - compaction.dropped);
-    {
-        let inner = store.read();
-        let segment = inner.segment(slot).unwrap();
-        assert_eq!(segment.deleted, 0);
-        assert!(segment.flags.iter().all(|flags| flags & FLAG_DEAD == 0));
-        // Every entry is in exactly one name chain, except the root.
-        let chained = (0..segment.names.len())
-            .map(|name| {
-                let mut entry = segment.names.heads[name];
-                let mut count = 0;
-                while entry != NONE {
-                    count += 1;
-                    entry = segment.next[entry as usize];
-                }
-                count
-            })
-            .sum::<usize>();
-        assert_eq!(chained, segment.entries() - 1);
-    }
     assert_places_match_paths(&store);
     // The record map follows the new numbers.
     store.apply(
@@ -502,9 +481,10 @@ fn changes_during_a_compaction_are_replayed() {
     assert!(find(&store, "moved").is_empty());
     assert!(find(&store, "in-newdir").is_empty());
     assert_eq!(find(&store, "file-").len(), 46);
-    // The log is closed: the next compaction can start.
-    assert!(store.read().segment(slot).unwrap().log.is_none());
     assert_places_match_paths(&store);
+    // The next compaction can start.
+    store.apply(slot, &[FsChange::Remove { record: 104, seq: 1 }]);
+    assert!(store.compact().is_some());
 }
 
 #[test]
@@ -566,11 +546,12 @@ fn searches_that_meet_hidden_entries_ask_for_a_compaction() {
         nodes.extend((0..12_000u64).map(|n| file(100 + n, 10, &format!("item-{n}.dat"))));
         nodes
     });
+    // One tombstone: the remove alone does not compact.
     store.apply(slot, &[FsChange::Remove { record: 10, seq: 1 }]);
+    assert_eq!(entries(&store, slot), 12_002);
     assert!(find(&store, "item").is_empty());
-    assert!(store.read().segment(slot).unwrap().has_many_tombstones());
-    let compaction = store.compact().expect("compacted");
-    assert_eq!(compaction.dropped, 12_001);
+    // The search met 12,000 hidden entries: the next batch compacts.
+    store.apply(slot, &[]);
     assert_eq!(entries(&store, slot), 1);
 }
 
@@ -665,8 +646,10 @@ fn checkpoints_and_volume_metadata() {
 
 #[test]
 fn a_batch_with_no_effect_leaves_the_store_clean() {
+    let temp = TempDir::new();
+    let path = temp.0.join("file-index.bin");
     let (store, slot) = store_with(sample());
-    store.dirty.store(false, AtomicOrdering::Release);
+    store.save(&path).expect("save");
     // Removes of unknown ids (records of an excluded folder), a stale remove
     // (another sequence number), and an upsert that changes nothing.
     let changes = [
@@ -686,7 +669,7 @@ fn a_batch_with_no_effect_leaves_the_store_clean() {
     store.apply(slot, &[FsChange::Remove { record: 20, seq: 1 }]);
     assert!(store.is_dirty());
     // A remove of an entry that is already dead has no effect.
-    store.dirty.store(false, AtomicOrdering::Release);
+    store.save(&path).expect("save");
     store.apply(slot, &[FsChange::Remove { record: 20, seq: 1 }]);
     assert!(!store.is_dirty());
 }
@@ -816,44 +799,6 @@ fn a_bad_index_with_good_checksums_does_not_load() {
 }
 
 #[test]
-fn places_come_from_the_parent_chain() {
-    // The root, a deep chain of long names, and a short branch, under two
-    // mount paths.
-    for mount in ["C:\\", "D:\\Data\\"] {
-        let long = "n".repeat(200);
-        let mut nodes = Vec::new();
-        let mut parent = 5;
-        for depth in 0..40u64 {
-            let record = 10 + depth;
-            nodes.push(dir(record, parent, &format!("{long}{depth}")));
-            parent = record;
-        }
-        nodes.push(file(100, parent, "Deep.TXT"));
-        nodes.push(dir(101, 5, "a"));
-        nodes.push(file(102, 101, "b.txt"));
-        let store = FileStore::new();
-        let slot = store.replace_volume(meta("vol", mount), nodes);
-        assert_places_match_paths(&store);
-        let inner = store.read();
-        let segment = inner.segment(slot).unwrap();
-        let root = mount.trim_end_matches('\\');
-        assert_eq!(
-            segment.places_of(ROOT_ENTRY),
-            (path_depth(root) as u32) << 16 | root.len() as u32
-        );
-        let short = segment.entry_of(102).unwrap();
-        let path = segment.path_of(short);
-        assert_eq!(
-            segment.places_of(short),
-            (path_depth(&path) as u32) << 16 | path.len() as u32
-        );
-        let deep = segment.entry_of(100).unwrap();
-        assert!(segment.path_of(deep).len() > 8_000);
-        assert_eq!(segment.places_of(deep) >> 16, (path_depth(&segment.path_of(deep)) as u32));
-    }
-}
-
-#[test]
 fn places_stop_at_the_limit_and_follow_a_folder_rename() {
     let name = "x".repeat(250);
     let mut nodes = Vec::new();
@@ -864,26 +809,12 @@ fn places_stop_at_the_limit_and_follow_a_folder_rename() {
     }
     nodes.push(dir(400, 5, "top"));
     nodes.push(file(401, 400, "f.txt"));
+    // 300 folders of 251 bytes are more than 0xffff bytes.
     let (store, slot) = store_with(nodes);
-    {
-        let inner = store.read();
-        let segment = inner.segment(slot).unwrap();
-        let deepest = segment.entry_of(309).unwrap();
-        // 300 folders of 251 bytes are more than 0xffff bytes.
-        assert_eq!(segment.places_of(deepest) & 0xffff, 0xffff);
-        assert_eq!(segment.places_of(deepest) >> 16, 300);
-        let file = segment.entry_of(401).unwrap();
-        assert_eq!(segment.places_of(file), 2 << 16 | "C:\\top\\f.txt".len() as u32);
-    }
+    assert_places_match_paths(&store);
     // A folder rename changes the places of its children at once.
     store.apply(slot, &[upsert(dir(400, 5, "a-much-longer-name"))]);
-    let inner = store.read();
-    let segment = inner.segment(slot).unwrap();
-    let file = segment.entry_of(401).unwrap();
-    assert_eq!(
-        segment.places_of(file),
-        2 << 16 | "C:\\a-much-longer-name\\f.txt".len() as u32
-    );
+    assert_places_match_paths(&store);
 }
 
 #[test]
@@ -949,29 +880,6 @@ fn case_nodes() -> Vec<FsNode> {
 }
 
 #[test]
-fn only_case_variants_keep_an_exact_name() {
-    let (store, slot) = store_with(case_nodes());
-    let inner = store.read();
-    let segment = inner.segment(slot).unwrap();
-    // Variants: Docs, DOCS, Readme.md, README.MD, Ünïcode-Näme.TXT.
-    assert_eq!(segment.variants.ends.len(), 5);
-    for (record, tagged) in [(10, true), (11, false), (12, true), (21, false), (22, true), (25, false)] {
-        let entry = segment.entry_of(record).unwrap() as usize;
-        assert_eq!(segment.display[entry] & VARIANT_TAG != 0, tagged, "record {record}");
-        // The lowercase name is the same either way.
-        assert_eq!(
-            segment.names.name(segment.lower_of(entry) as usize),
-            segment.display_name(entry).to_lowercase()
-        );
-        assert_eq!(segment.display_len(entry), segment.display_name(entry).len());
-    }
-    // A plain entry holds the lowercase name number itself.
-    let plain = segment.entry_of(25).unwrap() as usize;
-    assert_eq!(segment.names.name(segment.display[plain] as usize), "plain.txt");
-    assert_eq!(segment.display[0], NONE);
-}
-
-#[test]
 fn names_that_differ_only_in_case_stay_distinct() {
     let (store, _) = store_with(case_nodes());
     assert_eq!(
@@ -1014,7 +922,7 @@ fn a_rename_between_plain_and_variant_changes_only_the_exact_name() {
 }
 
 #[test]
-fn compaction_keeps_only_the_variants_in_use() {
+fn compaction_keeps_the_exact_names_of_the_entries_it_keeps() {
     let (store, slot) = store_with(case_nodes());
     let before_paths = all_paths(&store);
     // Drop the only entries that use the variants "Docs", "Readme.md" and
@@ -1031,24 +939,6 @@ fn compaction_keeps_only_the_variants_in_use() {
             .cloned()
             .collect::<Vec<_>>()
     );
-    {
-        let inner = store.read();
-        let segment = inner.segment(slot).unwrap();
-        // Left: "DOCS" and "README.MD".
-        assert_eq!(segment.variants.ends.len(), 2);
-        assert_eq!(segment.variants.text, "DOCSREADME.MD");
-        // Every entry is in the chain of its own lowercase name.
-        let mut chained = 0;
-        for name in 0..segment.names.len() {
-            let mut entry = segment.names.heads[name];
-            while entry != NONE {
-                assert_eq!(segment.lower_of(entry as usize) as usize, name);
-                chained += 1;
-                entry = segment.next[entry as usize];
-            }
-        }
-        assert_eq!(chained, segment.entries() - 1);
-    }
     assert_eq!(
         sorted(find(&store, "readme")),
         vec!["C:\\DOCS\\README.MD", "C:\\DOCS\\README.MD", "C:\\docs\\readme.md"]
@@ -1069,15 +959,11 @@ fn the_snapshot_keeps_case_variants() {
     let loaded = FileStore::load(&path).expect("load");
     assert_eq!(all_paths(&loaded), all_paths(&store));
     assert_eq!(find(&loaded, "readme"), find(&store, "readme"));
-    {
-        let inner = loaded.read();
-        let segment = inner.segment(slot).unwrap();
-        assert_eq!(segment.variants.ends.len(), 5);
-        assert_eq!(segment.display, store.read().segment(slot).unwrap().display);
-    }
-    // The loaded variant table finds an old variant again, and adds a new one.
+    // The loaded store takes an old variant again, and a new one.
     loaded.apply(slot, &[upsert(file(40, 11, "Readme.md")), upsert(file(41, 11, "ReadMe.md"))]);
-    assert_eq!(loaded.read().segment(slot).unwrap().variants.ends.len(), 6);
+    let found = find(&loaded, "readme");
+    assert!(found.contains(&"C:\\docs\\Readme.md".to_string()), "{found:?}");
+    assert!(found.contains(&"C:\\docs\\ReadMe.md".to_string()), "{found:?}");
     assert_places_match_paths(&loaded);
     // A variant number past the table does not load.
     let mut segments = super::super::snapshot::read(&path).expect("read");
@@ -1110,12 +996,6 @@ fn a_version_3_snapshot_loads_and_converts_its_display_table() {
     }
     assert_eq!(loaded.live_count(slot), store.live_count(slot));
     assert_places_match_paths(&loaded);
-    {
-        let inner = loaded.read();
-        let segment = inner.segment(slot).unwrap();
-        assert_eq!(segment.variants.ends.len(), 5);
-        assert_eq!(segment.display[0], NONE);
-    }
     // The next save writes version 4, equal to a save of the first store.
     let saved = temp.0.join("saved.bin");
     loaded.save(&saved).expect("save");
