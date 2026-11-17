@@ -714,7 +714,9 @@ fn erase_native_glyph(frame: &mut [u8], width: i32, height: i32) {
     let right = left + edge;
     let bottom = top + edge;
     for y in top..bottom {
-        let left_source = ((y * width + left.saturating_sub(1)) * 4) as usize;
+        // `i32::saturating_sub` stops at i32::MIN, not 0: an edge-wide glyph (button of 33 px
+        // or less) gave column -1 and a panic, and `panic=abort` ends Explorer.
+        let left_source = ((y * width + (left - 1).max(0)) * 4) as usize;
         let right_source = ((y * width + right.min(width - 1)) * 4) as usize;
         let left_pixel = frame[left_source..left_source + 4].to_vec();
         let right_pixel = frame[right_source..right_source + 4].to_vec();
