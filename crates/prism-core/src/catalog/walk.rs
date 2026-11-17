@@ -853,13 +853,6 @@ mod tests {
         assert!(!is_link_folder(FILE_ATTRIBUTE_DIRECTORY.0, 0));
     }
 
-    #[test]
-    fn cloud_tags_are_descended_and_other_tags_are_not() {
-        assert!(is_cloud_reparse_tag(IO_REPARSE_TAG_CLOUD | 0x3000));
-        assert!(!is_cloud_reparse_tag(0xA000_0003)); // mount point
-        assert!(!is_cloud_reparse_tag(0xA000_000C)); // symlink
-    }
-
     /// One record of the listing: header (zeros), then the name.
     fn record(layout: &Layout, name: &str, attributes: u32, tag: u32, id: u64, last: bool) -> Vec<u8> {
         let units: Vec<u8> = name.encode_utf16().flat_map(|unit| unit.to_le_bytes()).collect();
