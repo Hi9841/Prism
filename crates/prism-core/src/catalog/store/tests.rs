@@ -89,7 +89,7 @@ fn entries(store: &FileStore, slot: VolumeSlot) -> usize {
 }
 
 /// Every entry's penalty and places equal what `path_penalty`, `path_depth` and
-/// the length of its display path give.
+/// the length of its display path give. The places come from the parent chain.
 fn assert_places_match_paths(store: &FileStore) {
     let inner = store.read();
     for segment in inner.segments() {
@@ -102,7 +102,7 @@ fn assert_places_match_paths(store: &FileStore) {
             let penalty = i32::from(segment.flags[entry] & FLAG_PENALTY_MASK) * PENALTY_STEP;
             assert_eq!(penalty, path_penalty(&path, lower), "penalty of {path}");
             let places = (path_depth(&path).min(0xffff) as u32) << 16 | path.len().min(0xffff) as u32;
-            assert_eq!(segment.places[entry], places, "places of {path}");
+            assert_eq!(segment.places_of(entry as u32), places, "places of {path}");
         }
     }
 }
@@ -219,8 +219,8 @@ fn insert_rename_move_and_remove() {
     // A stale remove (another sequence number) does nothing.
     store.apply(slot, &[FsChange::Remove { record: 20, seq: 9 }]);
     assert_eq!(exact(&store, "report.txt"), vec!["C:\\Users\\hi\\Papers\\report.txt"]);
-    // The children of a renamed folder keep their old places until a
-    // compaction computes them again.
+    // The children of a renamed folder keep their old penalty until a
+    // compaction computes it again; their places are always current.
     store.compact().expect("one tombstone");
     assert_places_match_paths(&store);
 }
@@ -393,7 +393,7 @@ fn location_penalties_come_from_the_chain() {
     store.apply(slot, &[upsert(dir(17, 16, "drivers")), upsert(file(24, 17, "etc.txt"))]);
     assert_places_match_paths(&store);
     // A folder that moves gets its own values; the compaction that follows
-    // computes its children's again.
+    // computes its children's penalty again.
     store.apply(slot, &[upsert(dir(13, 11, "node_modules")), upsert(file(25, 11, "Thumbs.db"))]);
     store.apply(slot, &[FsChange::Remove { record: 25, seq: 1 }]);
     store.compact().expect("one tombstone");
@@ -524,7 +524,7 @@ fn a_move_during_a_compaction_lands_under_a_new_parent() {
     drop(old);
     assert_eq!(find(&store, "other-005"), vec!["C:\\a\\newdir\\b\\other-005.txt"]);
     assert_eq!(find(&store, "other-").len(), 20);
-    // A later compaction computes the places of the moved files again.
+    // A later compaction computes the penalty of the moved files again.
     store.apply(slot, &[FsChange::Remove { record: 101, seq: 1 }]);
     store.compact().expect("one tombstone");
     assert_places_match_paths(&store);
@@ -813,4 +813,107 @@ fn a_bad_index_with_good_checksums_does_not_load() {
     segment.parent[3] = 9_999;
     super::super::snapshot::write(&path, &[&segment]).expect("write");
     assert!(FileStore::load(&path).is_err());
+}
+
+#[test]
+fn places_come_from_the_parent_chain() {
+    // The root, a deep chain of long names, and a short branch, under two
+    // mount paths.
+    for mount in ["C:\\", "D:\\Data\\"] {
+        let long = "n".repeat(200);
+        let mut nodes = Vec::new();
+        let mut parent = 5;
+        for depth in 0..40u64 {
+            let record = 10 + depth;
+            nodes.push(dir(record, parent, &format!("{long}{depth}")));
+            parent = record;
+        }
+        nodes.push(file(100, parent, "Deep.TXT"));
+        nodes.push(dir(101, 5, "a"));
+        nodes.push(file(102, 101, "b.txt"));
+        let store = FileStore::new();
+        let slot = store.replace_volume(meta("vol", mount), nodes);
+        assert_places_match_paths(&store);
+        let inner = store.read();
+        let segment = inner.segment(slot).unwrap();
+        let root = mount.trim_end_matches('\\');
+        assert_eq!(
+            segment.places_of(ROOT_ENTRY),
+            (path_depth(root) as u32) << 16 | root.len() as u32
+        );
+        let short = segment.entry_of(102).unwrap();
+        let path = segment.path_of(short);
+        assert_eq!(
+            segment.places_of(short),
+            (path_depth(&path) as u32) << 16 | path.len() as u32
+        );
+        let deep = segment.entry_of(100).unwrap();
+        assert!(segment.path_of(deep).len() > 8_000);
+        assert_eq!(segment.places_of(deep) >> 16, (path_depth(&segment.path_of(deep)) as u32));
+    }
+}
+
+#[test]
+fn places_stop_at_the_limit_and_follow_a_folder_rename() {
+    let name = "x".repeat(250);
+    let mut nodes = Vec::new();
+    let mut parent = 5;
+    for depth in 0..300u64 {
+        nodes.push(dir(10 + depth, parent, &name));
+        parent = 10 + depth;
+    }
+    nodes.push(dir(400, 5, "top"));
+    nodes.push(file(401, 400, "f.txt"));
+    let (store, slot) = store_with(nodes);
+    {
+        let inner = store.read();
+        let segment = inner.segment(slot).unwrap();
+        let deepest = segment.entry_of(309).unwrap();
+        // 300 folders of 251 bytes are more than 0xffff bytes.
+        assert_eq!(segment.places_of(deepest) & 0xffff, 0xffff);
+        assert_eq!(segment.places_of(deepest) >> 16, 300);
+        let file = segment.entry_of(401).unwrap();
+        assert_eq!(segment.places_of(file), 2 << 16 | "C:\\top\\f.txt".len() as u32);
+    }
+    // A folder rename changes the places of its children at once.
+    store.apply(slot, &[upsert(dir(400, 5, "a-much-longer-name"))]);
+    let inner = store.read();
+    let segment = inner.segment(slot).unwrap();
+    let file = segment.entry_of(401).unwrap();
+    assert_eq!(
+        segment.places_of(file),
+        2 << 16 | "C:\\a-much-longer-name\\f.txt".len() as u32
+    );
+}
+
+#[test]
+fn a_version_2_snapshot_still_loads() {
+    let temp = TempDir::new();
+    let path = temp.0.join("file-index.bin");
+    let (store, slot) = store_with({
+        let mut nodes = sample();
+        nodes.push(file(31, 11, "Ünïcode-Näme.TXT"));
+        nodes
+    });
+    store.apply(slot, &[FsChange::Remove { record: 22, seq: 1 }]);
+    let segments = store.read();
+    let segments: Vec<&Segment> = segments.segments().collect();
+    super::super::snapshot::write_version_2(&path, &segments).expect("write version 2");
+    drop(segments);
+    // The old layout has the places section, so it is longer.
+    let current = temp.0.join("current.bin");
+    store.save(&current).expect("save");
+    assert!(std::fs::metadata(&path).unwrap().len() > std::fs::metadata(&current).unwrap().len());
+
+    let loaded = FileStore::load(&path).expect("load version 2");
+    for query in ["report", "budget", "ünïcode", "docs", "txt"] {
+        assert_eq!(find(&loaded, query), find(&store, query), "query {query}");
+    }
+    assert_eq!(loaded.live_count(slot), store.live_count(slot));
+    assert_places_match_paths(&loaded);
+    // The next save writes the new version, and it loads again.
+    let saved = temp.0.join("saved.bin");
+    loaded.save(&saved).expect("save");
+    assert_eq!(std::fs::read(&saved).unwrap(), std::fs::read(&current).unwrap());
+    assert_eq!(find(&FileStore::load(&saved).unwrap(), "report"), find(&store, "report"));
 }

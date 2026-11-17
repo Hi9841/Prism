@@ -3,15 +3,17 @@
 //! ```text
 //! magic (8 bytes) | format version (u32)
 //! section: header   = volume count (u32)
-//! per volume, 14 sections:
+//! per volume, 13 sections:
 //!   meta, lowercase name text, name ends, name heads,
 //!   display text, display ends, display lower numbers,
-//!   parent, display, flags, places, seq, next, by_record
+//!   parent, display, flags, seq, next, by_record
 //! section: trailer  = "PRISM-END"
 //! ```
 //!
 //! A section is its length (u64), its bytes, and the CRC-32 of the bytes (u32).
-//! All numbers are little endian. The name tables, the masks and the hash
+//! Version 2 had a 14th section, "places", after the flags. The load reads
+//! and drops it, so an update does not force a full rebuild. All numbers are
+//! little endian. The name tables, the masks and the hash
 //! tables are not stored: the load builds them again from the text.
 //!
 //! The store is first serialized to memory (`serialize`, under the store
@@ -28,7 +30,9 @@ use std::path::{Path, PathBuf};
 use super::store::{Displays, Names, Segment, VolumeBackend, VolumeMeta};
 
 const MAGIC: &[u8; 8] = b"PRISMIDX";
-const VERSION: u32 = 2;
+const VERSION: u32 = 3;
+/// The last version with the "places" section.
+const VERSION_WITH_PLACES: u32 = 2;
 const TRAILER: &[u8] = b"PRISM-END";
 /// Elements converted to bytes at once.
 const CHUNK: usize = 1 << 14;
@@ -196,6 +200,12 @@ fn meta_bytes(segment: &Segment) -> Vec<u8> {
     out
 }
 
+/// Writes the snapshot in the old layout of version 2 (with places).
+#[cfg(test)]
+pub(super) fn write_version_2(path: &Path, segments: &[&Segment]) -> Result<u64, String> {
+    write_file(path, &serialize_as(segments, VERSION_WITH_PLACES)?)
+}
+
 /// Writes the snapshot. Returns its size in bytes.
 #[cfg(test)]
 pub(super) fn write(path: &Path, segments: &[&Segment]) -> Result<u64, String> {
@@ -205,9 +215,15 @@ pub(super) fn write(path: &Path, segments: &[&Segment]) -> Result<u64, String> {
 /// The bytes of the snapshot file. Memory only: the caller can hold a lock
 /// while it runs and release it before `write_file`.
 pub(super) fn serialize(segments: &[&Segment]) -> Result<Vec<u8>, String> {
+    serialize_as(segments, VERSION)
+}
+
+/// `serialize` in the layout of `version`. Only the tests ask for the old
+/// version 2.
+fn serialize_as(segments: &[&Segment], version: u32) -> Result<Vec<u8>, String> {
     let mut out = Out { buffer: Vec::new(), scratch: Vec::new() };
     out.raw(MAGIC)?;
-    out.raw(&VERSION.to_le_bytes())?;
+    out.raw(&version.to_le_bytes())?;
     out.bytes_section(&(segments.len() as u32).to_le_bytes())?;
     for segment in segments {
         out.bytes_section(&meta_bytes(segment))?;
@@ -220,7 +236,11 @@ pub(super) fn serialize(segments: &[&Segment]) -> Result<Vec<u8>, String> {
         out.u32_section(&segment.parent)?;
         out.u32_section(&segment.display)?;
         out.u16_section(&segment.flags)?;
-        out.u32_section(&segment.places)?;
+        #[cfg(test)]
+        if version == VERSION_WITH_PLACES {
+            let places: Vec<u32> = (0..segment.entries() as u32).map(|e| segment.places_of(e)).collect();
+            out.u32_section(&places)?;
+        }
         out.u16_section(&segment.seq)?;
         out.u32_section(&segment.next)?;
         out.u32_section(&segment.by_record)?;
@@ -370,7 +390,8 @@ pub(super) fn read(path: &Path) -> Result<Vec<Segment>, String> {
     }
     let mut version = [0u8; 4];
     input.exact(&mut version)?;
-    if u32::from_le_bytes(version) != VERSION {
+    let version = u32::from_le_bytes(version);
+    if version != VERSION && version != VERSION_WITH_PLACES {
         return Err("an unknown file index version".into());
     }
     let header = input.section()?;
@@ -391,12 +412,17 @@ pub(super) fn read(path: &Path) -> Result<Vec<Segment>, String> {
         let parent = input.u32s()?;
         let display = input.u32s()?;
         let flags = input.u16s()?;
-        let places = input.u32s()?;
+        if version == VERSION_WITH_PLACES {
+            // The entry count must still match; the values are not kept.
+            if input.section()?.len() != parent.len() * 4 {
+                return Err("the entry arrays differ in length".into());
+            }
+        }
         let seq = input.u16s()?;
         let next = input.u32s()?;
         let by_record = input.u32s()?;
         segments.push(Segment::from_parts(
-            0, meta, names, displays, parent, display, flags, places, seq, next, by_record,
+            0, meta, names, displays, parent, display, flags, seq, next, by_record,
         )?);
     }
     if input.section()? != TRAILER {

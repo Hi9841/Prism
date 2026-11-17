@@ -1,7 +1,7 @@
 //! In-memory file store: the truth of the file index while Prism runs.
 //!
 //! One `Segment` per volume. A segment holds the entries of one volume in
-//! parallel arrays (parent, name, flags, places, sequence number, name chain)
+//! parallel arrays (parent, name, flags, sequence number, name chain)
 //! and the names in two pools: each distinct lowercase name once (the text the
 //! search scans), and each distinct exact-case name once (the text a result
 //! shows). No path text is stored: a result's path comes from the parent chain.
@@ -15,8 +15,10 @@
 //!   marked dead; its descendants stay in the arrays but search and path
 //!   building drop them (dead by ancestry). Compaction frees them.
 //! - A folder rename or move changes one entry; its children keep their
-//!   parent index. The children's penalty and places stay as they were until
-//!   compaction recomputes them (tie breaks only).
+//!   parent index. The children's penalty stays as it was until compaction
+//!   recomputes it. Their places (depth and path length, a tie break) come
+//!   from the parent chain when a search needs them, so they are always
+//!   current.
 //! - An excluded folder is stored (the journal reader needs to find it) but
 //!   never shown and never gets children.
 //! - A segment is replaced as a whole by `replace_volume`: the new arrays are
@@ -64,6 +66,9 @@ const FLAG_EXCLUDED: u16 = 1 << 13;
 /// The entry of a volume root: always entry 0 of its segment.
 const FLAG_ROOT: u16 = 1 << 12;
 const FLAG_PENALTY_MASK: u16 = 0xff;
+/// A hit's places are not computed yet. No real value is this large: a chain
+/// has at most `MAX_DEPTH` links.
+const NO_PLACES: u32 = u32::MAX;
 /// "No entry" and "no name".
 const NONE: u32 = u32::MAX;
 const ROOT_ENTRY: u32 = 0;
@@ -210,6 +215,8 @@ struct Hit {
     seg: VolumeSlot,
     /// Found by the typo pass: `score` is its final rank.
     typo: bool,
+    /// The entry's places once a tie needed them, else `NO_PLACES`.
+    places: u32,
 }
 
 impl<'a> NameQuery<'a> {
@@ -336,6 +343,11 @@ impl Names {
     }
 
     /// The text of name number `name`.
+    fn len_of(&self, name: usize) -> usize {
+        let start = if name == 0 { 0 } else { self.ends[name - 1] as usize };
+        self.ends[name] as usize - start
+    }
+
     pub(super) fn name(&self, name: usize) -> &str {
         let start = if name == 0 {
             0
@@ -534,6 +546,8 @@ pub(super) struct Segment {
     /// The mount path without its trailing backslash: the path of the root
     /// entry. A child's path is this, a backslash, and its name.
     root_path: String,
+    /// The places of the root entry (see `places_of`).
+    root_places: u32,
     pub(super) names: Names,
     pub(super) displays: Displays,
     /// Parent entry. `NONE` only for the root entry, and for an entry that
@@ -544,9 +558,6 @@ pub(super) struct Segment {
     /// Directory, dead, excluded and root flags; penalty / `PENALTY_STEP` in
     /// the low byte.
     pub(super) flags: Vec<u16>,
-    /// Path depth (high 16 bits) and path byte length (low 16 bits): the
-    /// final sort's tie breaks after the name.
-    pub(super) places: Vec<u32>,
     /// NTFS sequence number of the record.
     pub(super) seq: Vec<u16>,
     /// Next older entry with the same lowercase name, or `NONE`.
@@ -563,22 +574,28 @@ pub(super) struct Segment {
     log: Option<Vec<FsChange>>,
 }
 
+/// The places of a volume's root entry: the depth and the length of its path.
+fn root_places_of(root_path: &str) -> u32 {
+    let depth = path_depth(root_path).min(0xffff) as u32;
+    let length = root_path.len().min(0xffff) as u32;
+    depth << 16 | length
+}
+
 impl Segment {
     /// An empty segment with its root entry.
     fn new(id: u64, meta: VolumeMeta) -> Self {
         let root_path = meta.mount_path.trim_end_matches('\\').to_string();
-        let depth = path_depth(&root_path).min(0xffff) as u32;
-        let length = root_path.len().min(0xffff) as u32;
+        let root_places = root_places_of(&root_path);
         let mut segment = Self {
             id,
             slot: 0,
             root_path,
+            root_places,
             names: Names::default(),
             displays: Displays::default(),
             parent: vec![NONE],
             display: vec![NONE],
             flags: vec![FLAG_ROOT | FLAG_DIRECTORY],
-            places: vec![depth << 16 | length],
             seq: vec![0],
             next: vec![NONE],
             by_record: Vec::new(),
@@ -602,14 +619,13 @@ impl Segment {
         parent: Vec<u32>,
         display: Vec<u32>,
         flags: Vec<u16>,
-        places: Vec<u32>,
         seq: Vec<u16>,
         next: Vec<u32>,
         by_record: Vec<u32>,
     ) -> Result<Self, String> {
         let entries = parent.len();
         if entries == 0
-            || [display.len(), flags.len(), places.len(), seq.len(), next.len()]
+            || [display.len(), flags.len(), seq.len(), next.len()]
                 .iter()
                 .any(|&length| length != entries)
         {
@@ -678,17 +694,18 @@ impl Segment {
         displays.rebuild_table(&names);
         let deleted = flags.iter().filter(|&&f| f & FLAG_DEAD != 0).count();
         let root_path = meta.mount_path.trim_end_matches('\\').to_string();
+        let root_places = root_places_of(&root_path);
         Ok(Self {
             id,
             slot: 0,
             meta,
             root_path,
+            root_places,
             names,
             displays,
             parent,
             display,
             flags,
-            places,
             seq,
             next,
             by_record,
@@ -718,7 +735,6 @@ impl Segment {
             + of(&self.parent)
             + of(&self.display)
             + of(&self.flags)
-            + of(&self.places)
             + of(&self.seq)
             + of(&self.next)
             + of(&self.by_record)
@@ -741,7 +757,6 @@ impl Segment {
         fit(&mut self.parent);
         fit(&mut self.display);
         fit(&mut self.flags);
-        fit(&mut self.places);
         fit(&mut self.seq);
         fit(&mut self.next);
         fit(&mut self.by_record);
@@ -771,6 +786,17 @@ impl Segment {
     /// The exact-case name of an entry.
     fn display_name(&self, entry: usize) -> &str {
         self.displays.text_of(&self.names, self.display[entry] as usize)
+    }
+
+    /// The byte length of the exact-case name of an entry.
+    fn display_len(&self, entry: usize) -> usize {
+        let display = self.display[entry] as usize;
+        let (start, end) = self.displays.range(display);
+        if start == end {
+            self.names.len_of(self.displays.lower[display] as usize)
+        } else {
+            end - start
+        }
     }
 
     /// The lowercase name number of an entry.
@@ -863,16 +889,9 @@ impl Segment {
         (path_penalty(&path, "") / PENALTY_STEP) as u8
     }
 
-    /// The flags (penalty, kind) and places of an entry below `parent`, whose
-    /// below-penalty is `parent_below`. Equal to `path_penalty`,
-    /// `path_depth` and the length of the entry's display path.
-    fn entry_values(
-        &self,
-        parent: u32,
-        parent_below: u8,
-        node: &FsNode,
-        lower: &str,
-    ) -> (u16, u32) {
+    /// The flags (penalty, kind) of an entry below a folder whose
+    /// below-penalty is `parent_below`. The penalty equals `path_penalty`.
+    fn entry_flags(parent_below: u8, node: &FsNode, lower: &str) -> u16 {
         let penalty = (i32::from(parent_below) * PENALTY_STEP).max(path_penalty("", lower));
         let mut flags = (penalty / PENALTY_STEP) as u16 & FLAG_PENALTY_MASK;
         if node.is_dir {
@@ -881,10 +900,35 @@ impl Segment {
                 flags |= FLAG_EXCLUDED;
             }
         }
-        let parent_places = self.places[parent as usize];
-        let depth = ((parent_places >> 16) + 1).min(0xffff);
-        let length = ((parent_places & 0xffff) + 1 + node.name.len() as u32).min(0xffff);
-        (flags, depth << 16 | length)
+        flags
+    }
+
+    /// The places of an entry: path depth (high 16 bits) and path byte length
+    /// (low 16 bits), each at most 0xffff. They are the final sort's tie
+    /// breaks after the name, and equal `path_depth` and the length of the
+    /// display path. Computed from the parent chain, so they are always
+    /// current. An entry whose chain does not reach the root (a parent still
+    /// missing, or a cycle) counts from zero.
+    pub(super) fn places_of(&self, entry: u32) -> u32 {
+        let mut depth = 0u32;
+        let mut length = 0u32;
+        let mut current = entry;
+        let mut base = 0;
+        for _ in 0..MAX_DEPTH {
+            if current == NONE {
+                break;
+            }
+            if self.flags[current as usize] & FLAG_ROOT != 0 {
+                base = self.root_places;
+                break;
+            }
+            depth += 1;
+            length += 1 + self.display_len(current as usize) as u32;
+            current = self.parent[current as usize];
+        }
+        let depth = ((base >> 16) + depth).min(0xffff);
+        let length = ((base & 0xffff) + length).min(0xffff);
+        depth << 16 | length
     }
 
     /// The display and lowercase name numbers of `name`.
@@ -904,17 +948,15 @@ impl Segment {
         let index = u32::try_from(self.parent.len()).ok().filter(|&i| i != NONE)?;
         let lower = node.name.to_lowercase();
         let (display, lower_number) = self.intern_name(&node.name, &lower)?;
-        let (flags, places) = self.entry_values(parent, parent_below, node, &lower);
+        let flags = Self::entry_flags(parent_below, node, &lower);
         room(&mut self.parent);
         room(&mut self.display);
         room(&mut self.flags);
-        room(&mut self.places);
         room(&mut self.seq);
         room(&mut self.next);
         self.parent.push(parent);
         self.display.push(display);
         self.flags.push(flags);
-        self.places.push(places);
         self.seq.push(node.seq);
         self.next.push(NONE);
         self.link(lower_number, index);
@@ -1038,11 +1080,10 @@ impl Segment {
             self.link(lower_number, entry);
         }
         let below = self.below_of(parent);
-        let (flags, places) = self.entry_values(parent, below, node, &lower);
+        let flags = Self::entry_flags(below, node, &lower);
         self.display[index] = display;
         self.parent[index] = parent;
         self.flags[index] = flags;
-        self.places[index] = places;
         if was_dead {
             self.deleted -= 1;
         }
@@ -1093,9 +1134,9 @@ impl Segment {
         segment
     }
 
-    /// Computes the penalty and the places of every entry again, from the
-    /// chains. Parents may come after their children in the arrays.
-    fn recompute_places(&mut self) {
+    /// Computes the penalty of every entry again, from the chains. Parents
+    /// may come after their children in the arrays.
+    fn recompute_penalties(&mut self) {
         let count = self.parent.len();
         let mut done = vec![false; count];
         let mut below = vec![0u8; count];
@@ -1125,20 +1166,12 @@ impl Segment {
             for (position, &entry) in stack.iter().enumerate().rev() {
                 let top = position + 1 == stack.len();
                 let parent = self.parent[entry];
-                let (parent_places, parent_below) = if top && base_missing {
-                    (0, 0)
-                } else {
-                    (self.places[parent as usize], below[parent as usize])
-                };
-                let name_len = self.display_name(entry).len() as u32;
-                let depth = ((parent_places >> 16) + 1).min(0xffff);
-                let length = ((parent_places & 0xffff) + 1 + name_len).min(0xffff);
+                let parent_below = if top && base_missing { 0 } else { below[parent as usize] };
                 let lower = self.names.name(self.lower_of(entry) as usize);
                 let penalty = (i32::from(parent_below) * PENALTY_STEP).max(path_penalty("", lower));
                 let flags = self.flags[entry];
                 self.flags[entry] = (flags & !FLAG_PENALTY_MASK)
                     | ((penalty / PENALTY_STEP) as u16 & FLAG_PENALTY_MASK);
-                self.places[entry] = depth << 16 | length;
                 if flags & FLAG_DIRECTORY != 0 && flags & FLAG_EXCLUDED == 0 {
                     below[entry] = self.below_of(entry as u32);
                 }
@@ -1481,8 +1514,7 @@ impl FileStore {
             }
             let typo_hits = inner.typo_hits(query, MAX_TYPO_HITS, &hits, &mut closeness);
             hits.extend(typo_hits);
-            inner.keep_best(&mut hits, wanted);
-            hits.sort_unstable_by(|a, b| inner.compare(a, b));
+            inner.rank(&mut hits, wanted);
         }
         if is_cancelled() {
             return IndexCandidates::default();
@@ -1500,7 +1532,7 @@ impl FileStore {
     }
 
     /// Builds new arrays without the dead entries and without the entries
-    /// below a dead or excluded folder, recomputes their penalty and places
+    /// below a dead or excluded folder, recomputes their penalty
     /// from the chains, and swaps them in. Searches run during the build (it
     /// holds the read lock in slices). Compacts every volume that has
     /// tombstones. Returns `None` when there was nothing to do.
@@ -1613,7 +1645,6 @@ impl FileStore {
         fresh.parent.reserve_exact(kept);
         fresh.display.reserve_exact(kept);
         fresh.flags.reserve_exact(kept);
-        fresh.places.reserve_exact(kept);
         fresh.seq.reserve_exact(kept);
         fresh.next.reserve_exact(kept);
         // Display names are copied once each, by text, into the new pools.
@@ -1645,7 +1676,6 @@ impl FileStore {
                     fresh.parent.push(parent);
                     fresh.display.push(display);
                     fresh.flags.push(flags);
-                    fresh.places.push(segment.places[entry]);
                     fresh.seq.push(segment.seq[entry]);
                     fresh.next.push(NONE);
                     if flags & FLAG_DEAD != 0 {
@@ -1668,7 +1698,7 @@ impl FileStore {
                 }
             })?;
         }
-        fresh.recompute_places();
+        fresh.recompute_penalties();
         fresh.shrink();
         Some((fresh, entries - kept))
     }
@@ -1772,35 +1802,79 @@ impl Inner {
     /// length, name, path depth, path length), with the entry number as the
     /// last tie break so the selection is deterministic.
     fn compare(&self, left: &Hit, right: &Hit) -> Ordering {
-        right
-            .score
-            .cmp(&left.score)
-            .then_with(|| {
-                // One number per distinct name in a segment: equal numbers,
-                // equal names.
-                if left.seg == right.seg && left.name == right.name {
-                    return Ordering::Equal;
-                }
-                let left_name = self.seg(left.seg).names.name(left.name as usize);
-                let right_name = self.seg(right.seg).names.name(right.name as usize);
-                left_name
-                    .len()
-                    .cmp(&right_name.len())
-                    .then_with(|| left_name.cmp(right_name))
-            })
-            .then_with(|| {
-                let left_places = self.seg(left.seg).places[left.index as usize];
-                let right_places = self.seg(right.seg).places[right.index as usize];
-                left_places.cmp(&right_places)
-            })
+        self.compare_names(left, right)
+            .then_with(|| self.places(left).cmp(&self.places(right)))
             .then_with(|| (left.seg, left.index).cmp(&(right.seg, right.index)))
     }
 
-    fn keep_best(&self, hits: &mut Vec<Hit>, wanted: usize) {
-        if hits.len() > wanted {
-            hits.select_nth_unstable_by(wanted - 1, |a, b| self.compare(a, b));
-            hits.truncate(wanted);
+    /// `compare` without the places and the entry number: the order of the
+    /// score and the name.
+    fn compare_names(&self, left: &Hit, right: &Hit) -> Ordering {
+        right.score.cmp(&left.score).then_with(|| {
+            // One number per distinct name in a segment: equal numbers,
+            // equal names.
+            if left.seg == right.seg && left.name == right.name {
+                return Ordering::Equal;
+            }
+            let left_name = self.seg(left.seg).names.name(left.name as usize);
+            let right_name = self.seg(right.seg).names.name(right.name as usize);
+            left_name
+                .len()
+                .cmp(&right_name.len())
+                .then_with(|| left_name.cmp(right_name))
+        })
+    }
+
+    /// The places of a hit: the kept value, or a walk of the parent chain.
+    fn places(&self, hit: &Hit) -> u32 {
+        if hit.places == NO_PLACES {
+            self.seg(hit.seg).places_of(hit.index)
+        } else {
+            hit.places
         }
+    }
+
+    /// Keeps the value of the places in the hit, so a hit that ties many
+    /// times walks its parent chain once.
+    fn fill_places(&self, hit: &mut Hit) {
+        if hit.places == NO_PLACES {
+            hit.places = self.seg(hit.seg).places_of(hit.index);
+        }
+    }
+
+    /// Keeps the `wanted` best hits (not sorted). Only the hits that tie with
+    /// the last kept hit on score and name need their places.
+    fn keep_best(&self, hits: &mut Vec<Hit>, wanted: usize) {
+        if hits.len() <= wanted {
+            return;
+        }
+        hits.select_nth_unstable_by(wanted - 1, |a, b| self.compare_names(a, b));
+        let edge = hits[wanted - 1];
+        let mut tied = 0;
+        for hit in hits.iter_mut() {
+            if self.compare_names(hit, &edge) == Ordering::Equal {
+                self.fill_places(hit);
+                tied += 1;
+            }
+        }
+        if tied > 1 {
+            hits.select_nth_unstable_by(wanted - 1, |a, b| self.compare(a, b));
+        }
+        hits.truncate(wanted);
+    }
+
+    /// Keeps the `wanted` best hits and sorts them. The places are computed
+    /// only for hits that tie with a neighbour on score and name.
+    fn rank(&self, hits: &mut Vec<Hit>, wanted: usize) {
+        self.keep_best(hits, wanted);
+        hits.sort_unstable_by(|a, b| self.compare_names(a, b));
+        for index in 1..hits.len() {
+            if self.compare_names(&hits[index - 1], &hits[index]) == Ordering::Equal {
+                self.fill_places(&mut hits[index - 1]);
+                self.fill_places(&mut hits[index]);
+            }
+        }
+        hits.sort_unstable_by(|a, b| self.compare(a, b));
     }
 
     fn top_hits(
@@ -1838,8 +1912,7 @@ impl Inner {
             self.keep_best(&mut found, wanted);
             hits.extend(found);
         }
-        self.keep_best(&mut hits, wanted);
-        hits.sort_unstable_by(|a, b| self.compare(a, b));
+        self.rank(&mut hits, wanted);
         hits
     }
 
@@ -1902,6 +1975,7 @@ impl Inner {
                     name: name as u32,
                     seg: segment.slot,
                     typo: false,
+                    places: NO_PLACES,
                 });
                 if hits.len() >= wanted * 8 {
                     self.keep_best(&mut hits, wanted);
@@ -1966,8 +2040,7 @@ impl Inner {
         for segment in self.segments() {
             hits.extend(self.typo_hits_in(segment, query, wanted, admitted, closeness));
         }
-        self.keep_best(&mut hits, wanted);
-        hits.sort_unstable_by(|a, b| self.compare(a, b));
+        self.rank(&mut hits, wanted);
         hits
     }
 
@@ -2061,14 +2134,14 @@ impl Inner {
                     name: found.index,
                     seg: segment.slot,
                     typo: true,
+                    places: NO_PLACES,
                 });
                 if hits.len() >= wanted * 8 {
                     self.keep_best(&mut hits, wanted);
                 }
             }
         }
-        self.keep_best(&mut hits, wanted);
-        hits.sort_unstable_by(|a, b| self.compare(a, b));
+        self.rank(&mut hits, wanted);
         if super::catalog_debug_enabled() {
             eprintln!(
                 "[catalog] typo pass matches={match_count} match_ms={} rank_ms={}",
