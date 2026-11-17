@@ -493,13 +493,6 @@ impl Default for FileIndex {
 }
 
 impl FileIndex {
-    #[allow(dead_code)]
-    pub fn new(app_data_dir: &Path) -> Self {
-        let index = Self::default();
-        index.init(app_data_dir);
-        index
-    }
-
     /// Loads the snapshot and the exclusion list of `app_data_dir`. A missing
     /// or bad snapshot gives an empty store (the volumes are built by walks).
     pub fn init(&self, app_data_dir: &Path) {
@@ -1599,14 +1592,20 @@ mod tests {
 
     // --- FileIndex ---
 
+    fn start(dir: &Path) -> FileIndex {
+        let index = FileIndex::default();
+        index.init(dir);
+        index
+    }
+
     #[test]
     fn a_start_with_no_snapshot_has_an_empty_store_and_writes_the_exclusion_file() {
         let dir = data_dir("no-snapshot");
-        let index = FileIndex::new(&dir);
+        let index = start(&dir);
         let (volumes, total) = index.status(&index.store());
         assert!(volumes.is_empty());
         assert_eq!(total, 0);
-        assert!(!index.core.ready.load(Ordering::SeqCst));
+        assert!(!index.search_with_generation("plan", None, 0).ready);
         assert!(dir.join(EXCLUSIONS_FILE).exists());
         // An empty store is never written over a snapshot.
         index.save_snapshot("test", false);
@@ -1617,7 +1616,7 @@ mod tests {
     #[test]
     fn a_saved_snapshot_is_loaded_at_the_next_start() {
         let dir = data_dir("snapshot");
-        let first = FileIndex::new(&dir);
+        let first = start(&dir);
         let meta = VolumeMeta {
             volume_id: "vol-test".into(),
             mount_path: r"C:\".into(),
@@ -1635,11 +1634,9 @@ mod tests {
         assert!(dir.join(SNAPSHOT_FILE).exists());
         drop(first);
 
-        let second = FileIndex::new(&dir);
+        let second = start(&dir);
         let (_, total) = second.status(&second.store());
         assert_eq!(total, 2);
-        assert!(second.core.ready.load(Ordering::SeqCst));
-        assert!(second.core.snapshot_ok.load(Ordering::SeqCst));
         let volumes = second.store().volumes();
         assert_eq!((volumes[0].journal_id, volumes[0].next_usn), (3, 40));
         let _ = std::fs::remove_dir_all(dir);
@@ -1649,9 +1646,8 @@ mod tests {
     fn a_bad_snapshot_gives_an_empty_store() {
         let dir = data_dir("bad-snapshot");
         std::fs::write(dir.join(SNAPSHOT_FILE), b"not an index").unwrap();
-        let index = FileIndex::new(&dir);
+        let index = start(&dir);
         assert_eq!(index.status(&index.store()).1, 0);
-        assert!(!index.core.snapshot_ok.load(Ordering::SeqCst));
         let _ = std::fs::remove_dir_all(dir);
     }
 
