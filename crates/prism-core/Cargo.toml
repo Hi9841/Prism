@@ -1,9 +1,9 @@
 [package]
 name = "prism-core"
-version = "1.0.31"
-description = "Prism backend shared by the Tauri app and the GPUI app"
+version.workspace = true
+description = "Prism backend: Windows integration, file index, search, taskbar, audio"
 edition = "2021"
-publish = false
+publish.workspace = true
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }

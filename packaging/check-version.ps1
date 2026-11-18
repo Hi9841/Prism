@@ -6,20 +6,15 @@ param(
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
 
-# The workspace version (Cargo.toml) is the release version; prism-core
-# keeps its own field, and Cargo.lock records both.
+# The workspace version (Cargo.toml) is the release version of every crate;
+# Cargo.lock records it for prism-app and prism-core.
 $repoRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
 $workspaceToml = Get-Content -LiteralPath (Join-Path $repoRoot "Cargo.toml") -Raw
-$coreToml = Get-Content -LiteralPath (Join-Path $repoRoot "crates\prism-core\Cargo.toml") -Raw
 $cargoLock = Get-Content -LiteralPath (Join-Path $repoRoot "Cargo.lock") -Raw
 
 $workspaceVersion = [regex]::Match(
   $workspaceToml,
   '(?ms)^\[workspace\.package\].*?^version\s*=\s*"([^"]+)"'
-).Groups[1].Value
-$coreVersion = [regex]::Match(
-  $coreToml,
-  '(?ms)^\[package\].*?^version\s*=\s*"([^"]+)"'
 ).Groups[1].Value
 $lockApp = [regex]::Match(
   $cargoLock,
@@ -30,9 +25,9 @@ $lockCore = [regex]::Match(
   '(?ms)^name\s*=\s*"prism-core"\s*\r?\nversion\s*=\s*"([^"]+)"'
 ).Groups[1].Value
 
-$versions = @($workspaceVersion, $coreVersion, $lockApp, $lockCore)
+$versions = @($workspaceVersion, $lockApp, $lockCore)
 if (-not $workspaceVersion -or ($versions | Where-Object { $_ -ne $workspaceVersion })) {
-  throw "Version mismatch: workspace=$workspaceVersion, prism-core=$coreVersion, lock prism-app=$lockApp, lock prism-core=$lockCore"
+  throw "Version mismatch: workspace=$workspaceVersion, lock prism-app=$lockApp, lock prism-core=$lockCore"
 }
 
 if ($ExpectedTag -and $ExpectedTag -notin @($workspaceVersion, "v$workspaceVersion")) {

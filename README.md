@@ -116,8 +116,8 @@ oploop/           performance ledger, benchmarks, functional test of the real ap
 
 ## Release
 
-1. Set the same version in `Cargo.toml` (`[workspace.package]`) and `crates/prism-core/Cargo.toml`, then
-   run `cargo update --workspace` to update `Cargo.lock`.
+1. Set the version in `Cargo.toml` (`[workspace.package]`), then run `cargo update --workspace` to update
+   `Cargo.lock`.
 2. Build the installer. The script writes the exe, the NSIS installer, and its updater signature to
    `artifacts\`. It signs with `%USERPROFILE%\.prism\signing\updater.key`.
 
