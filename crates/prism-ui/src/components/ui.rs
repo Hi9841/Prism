@@ -3,7 +3,7 @@
 
 use gpui::{
     AnyElement, App, BoxShadow, ClickEvent, ElementId, FontWeight, IntoElement, ObjectFit, ParentElement,
-    Rgba, SharedString, StyleRefinement, Styled, TextRun, Window, div, img, prelude::*, px, relative,
+    Rgba, SharedString, Styled, TextRun, Window, div, img, prelude::*, px, relative,
 };
 
 use crate::gfx::{Tween, data_url_image, icon, r, zoomed};
@@ -533,11 +533,6 @@ pub fn icon_button(
         .when(!active, |d| d.tooltip(title_tooltip(label)))
         .child(icon(icon_name, icon_size, glyph))
         .child(hover)
-}
-
-/// Applies `text-*` color to an icon child that inherits it (`currentColor`).
-pub fn current_color(style: &mut StyleRefinement, color: Rgba) {
-    style.text.get_or_insert_with(Default::default).color = Some(hsla(color));
 }
 
 // PORT STATUS: confidence=medium todos=0

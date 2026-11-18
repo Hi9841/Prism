@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use gpui::{
     App, Context, DispatchPhase, EventEmitter, FocusHandle, Focusable, KeyDownEvent, MouseButton, MouseDownEvent,
-    ParentElement, Pixels, Point, Render, Styled, Task, Timer, Window, canvas, div, prelude::*, px,
+    ParentElement, Pixels, Point, Render, Styled, Task, Timer, Window, canvas, div, prelude::*,
 };
 
 use crate::components::menu::{self, Tone};
@@ -300,10 +300,6 @@ impl Render for ResultContextMenu {
 /// The menu position for a pointer at `point` (window px).
 pub fn menu_position_for(point: Point<Pixels>, item: &PaletteItem, zoom: f32, viewport: (f32, f32)) -> ContextMenuPosition {
     clamp_context_menu_position(f32::from(point.x) / zoom, f32::from(point.y) / zoom, menu_height(item), viewport)
-}
-
-pub fn px_of(value: f32) -> Pixels {
-    px(value)
 }
 
 // PORT STATUS: confidence=medium todos=0

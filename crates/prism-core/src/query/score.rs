@@ -148,12 +148,6 @@ impl Query {
     }
 }
 
-/// One query against one target. A caller that scores many targets prepares
-/// a [`Query`] once.
-pub fn score_text(query: &str, target: &str) -> Option<i32> {
-    Query::new(query).score(target)
-}
-
 pub fn score_with_keywords(query: &str, title: &str, keywords: &[&str]) -> Option<i32> {
     Query::new(query).score_with_keywords(title, keywords)
 }

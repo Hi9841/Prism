@@ -10,7 +10,7 @@ use std::time::Duration;
 use gpui::{App, AppContext, AsyncApp, Task, Timer};
 use prism_core::backend::backend;
 use prism_core::palette_window::{
-    self, DEFAULT_LOGICAL_WIDTH, PresentationAnchor, PresentationSource, is_prism_foreground, log_foreground,
+    self, DEFAULT_LOGICAL_WIDTH, PresentationAnchor, is_prism_foreground, log_foreground,
     presentation_anchor,
 };
 use prism_core::{drag, taskbar, taskbar_alignment, win_key};
@@ -173,11 +173,6 @@ impl GpuiShell {
         self.hwnd.get()
     }
 
-    /// Timers check the transition counter when they fire, so they can run detached.
-    fn keep(&self, task: Task<()>) {
-        task.detach();
-    }
-
     fn visible(&self) -> bool {
         unsafe { IsWindowVisible(self.hwnd()) }.as_bool()
     }
@@ -232,6 +227,7 @@ impl GpuiShell {
     fn schedule_palette_raise_retry(&self, transition: u64, cx: &mut App) {
         for &delay_ms in PALETTE_RAISE_RETRY_DELAYS {
             let hwnd = self.hwnd.get();
+            // Timers check the transition counter when they fire, so they run detached.
             let task = cx.spawn(async move |_cx: &mut AsyncApp| {
                 Timer::after(Duration::from_millis(delay_ms)).await;
                 if !palette_raise_still_wanted(transition) {
@@ -250,7 +246,7 @@ impl GpuiShell {
                 // first answer can come too late; ask it again.
                 ask_explorer_for_foreground(hwnd);
             });
-            self.keep(task);
+            task.detach();
         }
         let verdict = cx.spawn(async move |cx: &mut AsyncApp| {
             Timer::after(Duration::from_millis(FOCUS_VERDICT_MS)).await;
@@ -272,7 +268,7 @@ impl GpuiShell {
             })
             .detach();
         });
-        self.keep(verdict);
+        verdict.detach();
     }
 
     fn schedule_palette_hide(&self, transition: u64, cx: &mut App) {
@@ -288,29 +284,24 @@ impl GpuiShell {
                 taskbar::release();
             }
         });
-        self.keep(task);
+        task.detach();
     }
 
     pub fn toggle_palette(&self, cx: &mut App) {
-        self.toggle_palette_with_presentation(PresentationSource::ConfiguredShortcut, None, cx);
+        self.toggle_palette_with_presentation(None, cx);
     }
 
     pub fn toggle_palette_from_win(&self, start_button: Option<RECT>, cx: &mut App) {
         let anchor = start_button.map(|rect| presentation_anchor(Some(rect), None));
-        self.toggle_palette_with_presentation(PresentationSource::WinKey, anchor, cx);
+        self.toggle_palette_with_presentation(anchor, cx);
     }
 
     pub fn toggle_palette_from_taskbar(&self, click: POINT, start_button: Option<RECT>, cx: &mut App) {
         let anchor = Some(presentation_anchor(start_button, Some(click)));
-        self.toggle_palette_with_presentation(PresentationSource::TaskbarStartClick, anchor, cx);
+        self.toggle_palette_with_presentation(anchor, cx);
     }
 
-    fn toggle_palette_with_presentation(
-        &self,
-        source: PresentationSource,
-        anchor: Option<PresentationAnchor>,
-        cx: &mut App,
-    ) {
+    fn toggle_palette_with_presentation(&self, anchor: Option<PresentationAnchor>, cx: &mut App) {
         let timer = prism_core::perf::start();
         // A press must never be spent on a stale state: "open" with no visible
         // window (and no open in progress) means the palette is closed.
@@ -329,7 +320,6 @@ impl GpuiShell {
         let transition = PALETTE_TRANSITION.fetch_add(1, Ordering::AcqRel) + 1;
         log_foreground(if opening { "toggle-open-before" } else { "toggle-close-before" });
         prism_core::logs::debug_trace(&format!("palette-toggle open={opening}"));
-        let _ = source;
         if opening {
             PALETTE_TOOK_FOREGROUND.store(false, Ordering::Release);
             FOREGROUND_AT_MS.store(0, Ordering::Release);
@@ -381,7 +371,7 @@ impl GpuiShell {
                 });
             }
         });
-        self.keep(task);
+        task.detach();
     }
 
     /// Moves, sizes, and shows the window from a foreground task: a synchronous

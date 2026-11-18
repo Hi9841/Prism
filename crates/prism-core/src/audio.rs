@@ -21,15 +21,6 @@ use windows::Win32::UI::WindowsAndMessaging::{
     GetAncestor, GetClassNameW, WindowFromPoint, GA_ROOT,
 };
 
-#[derive(Debug, Clone)]
-pub struct AudioSessionEntry {
-    pub device_name: String,
-    pub pid: u32,
-    pub process_name: String,
-    pub volume: f32,
-    pub muted: bool,
-}
-
 /// Owns COM initialization for the dedicated audio worker thread.
 pub struct ComApartment;
 

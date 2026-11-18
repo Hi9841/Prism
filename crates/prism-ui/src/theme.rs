@@ -401,11 +401,6 @@ impl Theme {
         mix(self.accent, 13.0, self.surface_active)
     }
 
-    /// `color-mix(in oklab, var(--accent) 72%, var(--t-fg-secondary))`.
-    pub fn search_icon_focus(&self) -> Rgba {
-        mix(self.accent, 72.0, self.fg_secondary)
-    }
-
     /// `color-mix(in oklab, var(--t-line) 72%, transparent)`.
     pub fn footer_line(&self) -> Rgba {
         fade(self.line, 72.0)

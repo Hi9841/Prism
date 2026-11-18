@@ -1,5 +1,4 @@
-//! Palette window placement and foreground handling, on a raw HWND so the
-//! Tauri app and the GPUI app share one implementation.
+//! Palette window placement and foreground handling, on a raw HWND.
 
 use windows::Win32::Foundation::{HWND, POINT, RECT};
 use windows::Win32::Graphics::Gdi::{
@@ -26,24 +25,13 @@ pub const DEFAULT_LOGICAL_HEIGHT: u32 = 620;
 pub const MIN_LOGICAL_WIDTH: u32 = 480;
 pub const MIN_LOGICAL_HEIGHT: u32 = 400;
 
-#[derive(Clone, Copy, Debug, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-pub enum PresentationSource {
-    WinKey,
-    TaskbarStartClick,
-    ConfiguredShortcut,
-    FocusLoss,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PhysicalPoint {
     pub x: i32,
     pub y: i32,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PhysicalRect {
     pub left: i32,
     pub top: i32,
@@ -51,8 +39,7 @@ pub struct PhysicalRect {
     pub bottom: i32,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TaskbarEdge {
     Bottom,
     Top,
@@ -60,25 +47,14 @@ pub enum TaskbarEdge {
     Right,
 }
 
-#[derive(Clone, Copy, Debug, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Clone, Copy, Debug)]
 pub struct PresentationAnchor {
     pub start_button: Option<PhysicalRect>,
     pub click_point: Option<PhysicalPoint>,
     pub taskbar_edge: Option<TaskbarEdge>,
     pub monitor: Option<PhysicalRect>,
     pub work_area: Option<PhysicalRect>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub scale_factor: Option<f64>,
-}
-
-#[derive(Clone, Copy, Debug, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PresentationEvent {
-    pub open: bool,
-    pub source: PresentationSource,
-    pub anchor: Option<PresentationAnchor>,
-    pub generation: u64,
 }
 
 /// Where the palette goes and how large it is, in physical pixels.
