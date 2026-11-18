@@ -6,7 +6,7 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use gpui::{App, AppContext, Context, Entity, EventEmitter, Task, Timer};
-use prism_core::catalog::THUMBNAIL_BATCH_CAP;
+use prism_core::catalog::{THUMBNAIL_BATCH_CAP, THUMBNAIL_EXTENSIONS};
 use prism_core::catalog::search::MAX_LIMIT as MAX_FILE_RESULTS;
 
 use crate::features::palette::sections::{
@@ -38,7 +38,6 @@ const FILE_SEARCH_DELAY_MS: u64 = 35;
 /// How long the list of the last query stays while the Phase 1 reply of a new
 /// query is on its way. The reply takes a few ms; this bounds a slow backend.
 const PHASE1_WAIT_MS: u64 = 150;
-const THUMBNAIL_EXTENSIONS: [&str; 6] = ["png", "jpg", "jpeg", "gif", "bmp", "webp"];
 
 /// Insertion-ordered thumbnail cache; a cached `None` marks a known-iconless file.
 #[derive(Default)]

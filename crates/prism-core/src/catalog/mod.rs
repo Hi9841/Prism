@@ -1399,12 +1399,12 @@ pub fn file_thumbnails(paths: Vec<String>) -> Vec<Option<String>> {
         .collect()
 }
 
+/// The lowercase extensions that get a thumbnail.
+pub const THUMBNAIL_EXTENSIONS: [&str; 6] = ["png", "jpg", "jpeg", "gif", "bmp", "webp"];
+
 fn image_thumbnail(path: &Path, len: u64) -> Option<String> {
     let extension = path.extension()?.to_string_lossy().to_lowercase();
-    if !matches!(
-        extension.as_str(),
-        "png" | "jpg" | "jpeg" | "gif" | "bmp" | "webp"
-    ) {
+    if !THUMBNAIL_EXTENSIONS.contains(&extension.as_str()) {
         return None;
     }
     if len > THUMBNAIL_MAX_BYTES {
