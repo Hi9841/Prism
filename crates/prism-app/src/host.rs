@@ -8,7 +8,7 @@ use windows::Win32::Foundation::{POINT, RECT};
 
 /// Work for the UI thread.
 pub enum HostMessage {
-    Emit { event: String, payload: serde_json::Value },
+    Emit(prism_core::host::CoreEvent),
     ToggleFromWin(Option<RECT>),
     ToggleFromTaskbar(POINT, Option<RECT>),
     /// The configured (non-Win) shortcut was pressed.
@@ -24,8 +24,8 @@ pub struct GpuiHost {
 }
 
 impl prism_core::host::Host for GpuiHost {
-    fn emit(&self, event: &str, payload: serde_json::Value) {
-        let _ = self.sender.unbounded_send(HostMessage::Emit { event: event.to_owned(), payload });
+    fn emit(&self, event: prism_core::host::CoreEvent) {
+        let _ = self.sender.unbounded_send(HostMessage::Emit(event));
     }
 
     fn app_data_dir(&self) -> Result<PathBuf, String> {

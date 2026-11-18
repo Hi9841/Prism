@@ -196,7 +196,7 @@ impl Backend {
                 return;
             };
             self.publish_app_index(index);
-            crate::host::emit("apps-updated", serde_json::Value::Null);
+            crate::host::emit(crate::host::CoreEvent::AppsUpdated);
         });
     }
 
@@ -603,10 +603,9 @@ impl Backend {
                     return;
                 }
             }
-            crate::host::emit(
-                win_key::FAILED_EVENT,
-                serde_json::json!("Explorer taskbar integration was unavailable during startup"),
-            );
+            crate::host::emit(crate::host::CoreEvent::WinModeFailed(
+                "Explorer taskbar integration was unavailable during startup".to_string(),
+            ));
         });
     }
 

@@ -20,6 +20,7 @@ use gpui::{
     px, size,
 };
 use prism_core::backend::{autostart_disabled_by_user, backend, launched_for_autostart, load_state_value};
+use prism_core::host::CoreEvent;
 use prism_ui::lib::bridge::{self, BackendEvent, ShellHandle};
 use windows::Win32::Foundation::{ERROR_ALREADY_EXISTS, GetLastError, HANDLE, HWND, WAIT_ABANDONED, WAIT_OBJECT_0};
 use windows::Win32::System::Threading::{CreateEventW, CreateMutexW, INFINITE, ResetEvent, SetEvent, WaitForSingleObject};
@@ -166,22 +167,16 @@ fn main() {
             while let Some(message) = receiver.next().await {
                 let shell = message_shell.clone();
                 let _ = cx.update(|cx| match message {
-                    HostMessage::Emit { event, payload } => {
-                        let event = match event.as_str() {
-                            "file-index-updated" => Some(BackendEvent::FileIndexUpdated),
-                            "apps-updated" => Some(BackendEvent::AppsUpdated),
-                            "system-theme-changed" => payload
-                                .get("theme")
-                                .and_then(|t| t.as_str())
-                                .map(|t| BackendEvent::SystemThemeChanged(t.to_owned())),
-                            "win-mode-failed" => {
-                                Some(BackendEvent::WinModeFailed(payload.as_str().unwrap_or_default().to_owned()))
+                    HostMessage::Emit(event) => {
+                        let event = match event {
+                            CoreEvent::FileIndexUpdated => BackendEvent::FileIndexUpdated,
+                            CoreEvent::AppsUpdated => BackendEvent::AppsUpdated,
+                            CoreEvent::SystemThemeChanged { light } => {
+                                BackendEvent::SystemThemeChanged(if light { "light" } else { "dark" }.to_owned())
                             }
-                            _ => None,
+                            CoreEvent::WinModeFailed(reason) => BackendEvent::WinModeFailed(reason),
                         };
-                        if let Some(event) = event {
-                            bridge::emit_event(event, cx);
-                        }
+                        bridge::emit_event(event, cx);
                     }
                     HostMessage::ToggleFromWin(rect) => {
                         prism_core::ui_stall::input_handled();

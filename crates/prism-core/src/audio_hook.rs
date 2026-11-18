@@ -99,10 +99,6 @@ fn audio_worker_proc(receiver: Receiver<AudioRequest>) {
                 change.muted,
                 current.point,
             );
-            crate::host::emit(
-                "taskbar-volume-changed",
-                serde_json::to_value(&change).unwrap_or_default(),
-            );
         }
     }
 }

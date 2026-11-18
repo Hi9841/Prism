@@ -10,9 +10,22 @@ use std::sync::{Arc, OnceLock};
 
 use windows::Win32::Foundation::{POINT, RECT};
 
+/// What the backend tells the UI.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CoreEvent {
+    /// The file index changed (at most one each watcher flush).
+    FileIndexUpdated,
+    /// A rescan found new or changed apps.
+    AppsUpdated,
+    /// The Windows app theme changed.
+    SystemThemeChanged { light: bool },
+    /// Win-key mode stopped; the text is the reason for the user.
+    WinModeFailed(String),
+}
+
 pub trait Host: Send + Sync + 'static {
     /// Delivers an event to the UI. Must be callable from any thread.
-    fn emit(&self, event: &str, payload: serde_json::Value);
+    fn emit(&self, event: CoreEvent);
     /// The per-user data folder (`%APPDATA%\app.prism.launcher`).
     fn app_data_dir(&self) -> Result<PathBuf, String>;
     /// True when the palette window is shown.
@@ -40,9 +53,9 @@ pub fn get() -> Option<&'static Arc<dyn Host>> {
     HOST.get()
 }
 
-pub fn emit(event: &str, payload: serde_json::Value) {
+pub fn emit(event: CoreEvent) {
     if let Some(host) = HOST.get() {
-        host.emit(event, payload);
+        host.emit(event);
     }
 }
 

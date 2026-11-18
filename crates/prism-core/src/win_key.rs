@@ -94,8 +94,6 @@ const SHELL_START_DEDUPE_MS: u64 = 250;
 /// as a combo only while Win is still physically held and only for this long.
 const SEARCH_COMBO_GRACE: Duration = Duration::from_millis(250);
 
-/// Event the frontend receives when Win observation self-disables.
-pub const FAILED_EVENT: &str = "win-mode-failed";
 
 /* ------------------------------------------------------------------ */
 /*  Pure state machine (unit-tested)                                    */
@@ -948,7 +946,7 @@ fn disable_observation(reason: &str, detail: &str) {
     cancel_pending_win_toggle();
     clear_queued_actions();
     LAST_TOGGLE_MS.store(0, Ordering::Release);
-    crate::host::emit(FAILED_EVENT, serde_json::Value::String(reason.to_string()));
+    crate::host::emit(crate::host::CoreEvent::WinModeFailed(reason.to_string()));
 }
 
 fn clear_queued_actions() {

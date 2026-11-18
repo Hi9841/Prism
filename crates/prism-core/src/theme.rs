@@ -51,12 +51,7 @@ pub fn apps_light() -> Option<bool> {
     }
 }
 
-#[derive(Clone, serde::Serialize)]
-struct ThemeEvent {
-    theme: &'static str,
-}
-
-/// Waits for registry changes and emits `system-theme-changed` when the mode flips.
+/// Waits for registry changes and emits `SystemThemeChanged` when the mode flips.
 pub fn watch() {
     std::thread::spawn(move || {
         let mut wide_path: Vec<u16> = PERSONALIZE_KEY.encode_utf16().chain(Some(0)).collect();
@@ -87,13 +82,7 @@ pub fn watch() {
             if let Some(current) = apps_light() {
                 if current != last {
                     last = current;
-                    crate::host::emit(
-                        "system-theme-changed",
-                        serde_json::to_value(ThemeEvent {
-                            theme: if current { "light" } else { "dark" },
-                        })
-                        .unwrap_or_default(),
-                    );
+                    crate::host::emit(crate::host::CoreEvent::SystemThemeChanged { light: current });
                 }
             }
         }

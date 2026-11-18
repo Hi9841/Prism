@@ -647,7 +647,7 @@ impl FileIndex {
     }
 
     fn emit_updated(&self) {
-        crate::host::emit("file-index-updated", serde_json::Value::Null);
+        crate::host::emit(crate::host::CoreEvent::FileIndexUpdated);
     }
 
     // -----------------------------------------------------------------------

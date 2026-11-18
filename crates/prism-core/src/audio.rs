@@ -738,7 +738,7 @@ pub fn is_taskbar_window(hwnd: HWND) -> bool {
     false
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone)]
 pub struct VolumeChangeResult {
     pub title: String,
     pub volume: f32,
