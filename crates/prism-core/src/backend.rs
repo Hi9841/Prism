@@ -7,6 +7,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, SystemTime};
 
+use crate::win32::WriteError;
 use crate::settings::{
     migrate_state_value, startup_shortcut, startup_taskbar_alignment, validate_shortcut,
     validate_state,
@@ -744,5 +745,9 @@ pub fn load_state_value() -> Result<Option<serde_json::Value>, String> {
 
 pub fn persist_state_value(dir: &Path, value: &serde_json::Value) -> Result<(), String> {
     let text = serde_json::to_string_pretty(&value).map_err(|e| e.to_string())?;
-    crate::win32::write_atomic(&dir.join("prism.json"), text.as_bytes()).map_err(|e| format!("failed to save state: {e}"))
+    crate::win32::write_atomic(&dir.join("prism.json"), text.as_bytes()).map_err(|error| match error {
+        WriteError::Folder(e) => format!("failed to create data dir: {e}"),
+        WriteError::Create(e) | WriteError::Write(e) => format!("failed to save state: {e}"),
+        WriteError::Replace(e) => format!("failed to commit state: {e}"),
+    })
 }

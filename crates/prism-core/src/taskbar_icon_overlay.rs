@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use image::RgbaImage;
 
 use crate::shell_protocol::{ICON_MAGIC, START_ICON_FILE};
+use crate::win32::WriteError;
 
 pub struct OverlayIcon {
     pub pixels: RgbaImage,
@@ -43,7 +44,11 @@ fn write_icon_file(path: &Path, pixels: &RgbaImage) -> Result<(), String> {
     bytes.extend_from_slice(&pixels.width().to_le_bytes());
     bytes.extend_from_slice(&pixels.height().to_le_bytes());
     bytes.extend_from_slice(raw_pixels);
-    crate::win32::write_atomic(path, &bytes).map_err(|error| format!("write taskbar icon file: {error}"))
+    crate::win32::write_atomic(path, &bytes).map_err(|error| match error {
+        WriteError::Folder(e) => format!("create taskbar icon directory: {e}"),
+        WriteError::Create(e) | WriteError::Write(e) => format!("write taskbar icon file: {e}"),
+        WriteError::Replace(e) => e,
+    })
 }
 
 fn icon_path() -> PathBuf {

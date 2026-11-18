@@ -26,7 +26,7 @@ use windows::Win32::System::Threading::{OpenProcess, WaitForSingleObject, PROCES
 use windows::Win32::UI::WindowsAndMessaging::{
     FindWindowW, SendMessageTimeoutW, SMTO_ABORTIFHUNG, WM_SETTINGCHANGE,
 };
-use crate::win32::{registry, wide};
+use crate::win32::{registry, wide, WriteError};
 
 const KEY_PATH: &str = r"Software\StartIsBack";
 const VALUE_NAME: &str = "WinkeyFunction";
@@ -261,7 +261,12 @@ fn journal_path() -> PathBuf {
 fn write_journal(path: &Path, journal: &RestoreJournal) -> Result<(), String> {
     let bytes = serde_json::to_vec(journal).map_err(|error| error.to_string())?;
     // Synced: the crash-recovery path must never find a torn journal.
-    crate::win32::write_atomic_synced(path, &bytes).map_err(|error| format!("persist Start restore journal: {error}"))
+    crate::win32::write_atomic_synced(path, &bytes).map_err(|error| match error {
+        WriteError::Folder(e) => format!("create Start restore directory: {e}"),
+        WriteError::Create(e) => format!("create Start restore journal: {e}"),
+        WriteError::Write(e) => format!("persist Start restore journal: {e}"),
+        WriteError::Replace(e) => e,
+    })
 }
 
 fn open_provider_key() -> Result<Option<(registry::Key, Option<u32>)>, String> {

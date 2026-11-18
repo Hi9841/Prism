@@ -90,7 +90,7 @@ impl Inner {
             return Ok(());
         };
         let json = serde_json::to_vec(&self.counts).map_err(|error| error.to_string())?;
-        crate::win32::write_atomic(path, &json)
+        crate::win32::write_atomic(path, &json).map_err(String::from)
     }
 }
 

@@ -29,32 +29,59 @@ pub(crate) fn wide_path(path: &Path) -> Vec<u16> {
 
 /// Saves `bytes` as `path` in one step: a reader sees the old file or the new
 /// one, never a part. The bytes go to `<path>.tmp` first.
-pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
+pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), WriteError> {
     write_through_temp(path, bytes, false)
 }
 
 /// As `write_atomic`, and the bytes are on the disk before the replace, so a
 /// crash or power loss keeps a whole file (the restore journal, the file
 /// index snapshot). The flush costs about 2 ms, so caches and settings do not.
-pub(crate) fn write_atomic_synced(path: &Path, bytes: &[u8]) -> Result<(), String> {
+pub(crate) fn write_atomic_synced(path: &Path, bytes: &[u8]) -> Result<(), WriteError> {
     write_through_temp(path, bytes, true)
 }
 
-fn write_through_temp(path: &Path, bytes: &[u8], sync: bool) -> Result<(), String> {
+/// The step of an atomic write that failed, with the system's message. Each
+/// caller names the file in its own words.
+#[derive(Debug)]
+pub(crate) enum WriteError {
+    /// Creating the folder.
+    Folder(String),
+    /// Creating `<path>.tmp`.
+    Create(String),
+    /// Writing (and flushing) the bytes.
+    Write(String),
+    /// Replacing `path` with the temp file.
+    Replace(String),
+}
+
+impl std::fmt::Display for WriteError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let (Self::Folder(detail) | Self::Create(detail) | Self::Write(detail) | Self::Replace(detail)) = self;
+        f.write_str(detail)
+    }
+}
+
+impl From<WriteError> for String {
+    fn from(error: WriteError) -> Self {
+        error.to_string()
+    }
+}
+
+fn write_through_temp(path: &Path, bytes: &[u8], sync: bool) -> Result<(), WriteError> {
     if let Some(folder) = path.parent().filter(|folder| !folder.as_os_str().is_empty()) {
-        std::fs::create_dir_all(folder).map_err(|error| error.to_string())?;
+        std::fs::create_dir_all(folder).map_err(|error| WriteError::Folder(error.to_string()))?;
     }
     let mut temp = path.as_os_str().to_owned();
     temp.push(".tmp");
     let temp = PathBuf::from(temp);
-    let written = std::fs::File::create(&temp).and_then(|mut file| {
-        file.write_all(bytes)?;
-        if sync {
-            file.sync_all()?;
-        }
-        Ok(())
-    });
-    let result = written.map_err(|error| error.to_string()).and_then(|()| replace_file(&temp, path));
+    let result = std::fs::File::create(&temp)
+        .map_err(|error| WriteError::Create(error.to_string()))
+        .and_then(|mut file| {
+            file.write_all(bytes)
+                .and_then(|()| if sync { file.sync_all() } else { Ok(()) })
+                .map_err(|error| WriteError::Write(error.to_string()))
+        })
+        .and_then(|()| replace_file(&temp, path).map_err(WriteError::Replace));
     if result.is_err() {
         let _ = std::fs::remove_file(&temp);
     }

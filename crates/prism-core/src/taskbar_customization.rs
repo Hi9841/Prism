@@ -5,7 +5,7 @@
 //! reads from or writes to third-party shell-provider settings.
 
 use std::io::Cursor;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use base64::Engine;
@@ -21,7 +21,7 @@ use windows::Win32::System::Registry::{
 use windows::Win32::UI::Shell::{
     SHAppBarMessage, ABM_GETSTATE, ABM_SETSTATE, ABS_ALWAYSONTOP, ABS_AUTOHIDE, APPBARDATA,
 };
-use crate::win32::registry;
+use crate::win32::{registry, WriteError};
 
 const EXPLORER_ADVANCED_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced";
 const TASKBAR_SIZE_VALUE: &str = "TaskbarSi";
@@ -256,7 +256,7 @@ pub fn set_custom_start_icon(base64_png: &str) -> Result<(), String> {
         ));
     }
     let id = new_custom_icon_id();
-    crate::win32::write_atomic(&custom_icon_path_for_id(&id)?, &preview)?;
+    write_customization_file(&custom_icon_path_for_id(&id)?, &preview)?;
     let settings = IconSettings {
         version: 1,
         start_icon: StartIcon::Custom,
@@ -377,7 +377,7 @@ fn read_icon_settings() -> Result<IconSettings, String> {
 
 fn write_icon_settings(settings: &IconSettings) -> Result<(), String> {
     let bytes = serde_json::to_vec(&settings).map_err(|error| error.to_string())?;
-    crate::win32::write_atomic(&icon_settings_path(), &bytes)
+    write_customization_file(&icon_settings_path(), &bytes)
 }
 
 fn selected_custom_id(settings: &IconSettings) -> Option<String> {
@@ -482,6 +482,14 @@ fn write_dword(key: HKEY, name: &str, value: u32) -> Result<(), String> {
     registry::set_dword(key, name, value).map_err(|code| format!("write taskbar registry setting: Win32 error {code}"))
 }
 
+
+fn write_customization_file(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    crate::win32::write_atomic(path, bytes).map_err(|error| match error {
+        WriteError::Folder(e) => format!("create taskbar customization directory: {e}"),
+        WriteError::Create(e) | WriteError::Write(e) => format!("write taskbar customization file: {e}"),
+        WriteError::Replace(e) => e,
+    })
+}
 
 fn icon_settings_path() -> PathBuf {
     crate::host::data_dir().join(ICON_SETTINGS_NAME)
