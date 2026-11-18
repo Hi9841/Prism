@@ -2,7 +2,7 @@
 //!
 //! `cargo run --release --example launch_bench -- <apps.json> <app name or id> <window match> [reps] [gap ms]`
 //!
-//! Each launch runs `apps::launch` on the runtime's blocking pool, called from a
+//! Each launch runs `launch::launch` on the runtime's blocking pool, called from a
 //! plain thread (the palette calls it from a GPUI pool thread). The bench then
 //! waits for the first new visible top-level window whose process name or title
 //! contains `<window match>` (case-insensitive), closes it with `WM_CLOSE`, and
