@@ -29,6 +29,7 @@ use windows::Win32::UI::Shell::{
     SHCONTF_NONFOLDERS, SHELLEXECUTEINFOW, SIGDN_DESKTOPABSOLUTEPARSING, SIGDN_NORMALDISPLAY,
 };
 use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+use crate::win32::wide;
 
 #[derive(Clone, Debug)]
 pub struct WindowsTool {
@@ -1395,12 +1396,7 @@ pub(crate) fn slug(value: &str) -> String {
     }
     let slug = output.trim_matches('-').to_string();
     if slug.is_empty() {
-        let mut hash = 0xcbf29ce484222325u64;
-        for byte in value.as_bytes() {
-            hash ^= u64::from(*byte);
-            hash = hash.wrapping_mul(0x100000001b3);
-        }
-        format!("item-{hash:016x}")
+        format!("item-{:016x}", crate::fnv1a_64(value.as_bytes()))
     } else {
         slug
     }
@@ -1576,10 +1572,6 @@ pub(crate) fn shell_execute(target: &str, parameters: Option<&str>) -> Result<()
 pub(crate) fn system32_path(file: &str) -> PathBuf {
     let root = std::env::var_os("SystemRoot").unwrap_or_else(|| "C:\\Windows".into());
     PathBuf::from(root).join("System32").join(file)
-}
-
-pub(crate) fn wide(value: &str) -> Vec<u16> {
-    value.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
 pub(crate) unsafe fn open_registry_key(root: HKEY, path: &str) -> Option<HKEY> {

@@ -9,7 +9,6 @@ pub mod audio_osd;
 pub mod backend;
 pub mod catalog;
 pub mod drag;
-pub mod files;
 pub mod focus_log;
 pub mod logs;
 pub mod ui_stall;
@@ -32,3 +31,9 @@ pub mod theme;
 pub mod win_key;
 pub mod windows_settings;
 pub mod windows_tools;
+pub(crate) mod win32;
+
+/// FNV-1a, 64 bits: a stable short name for a string or a file (not a security check).
+pub(crate) fn fnv1a_64(bytes: &[u8]) -> u64 {
+    bytes.iter().fold(0xcbf2_9ce4_8422_2325, |hash, &byte| (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3))
+}

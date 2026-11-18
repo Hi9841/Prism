@@ -50,7 +50,7 @@ fn write_icon_file(path: &Path, pixels: &RgbaImage) -> Result<(), String> {
     bytes.extend_from_slice(raw_pixels);
     let temp = path.with_extension("tmp");
     std::fs::write(&temp, bytes).map_err(|error| format!("write taskbar icon file: {error}"))?;
-    crate::files::replace_file(&temp, path)
+    crate::win32::replace_file(&temp, path)
 }
 
 fn icon_path() -> Result<PathBuf, String> {

@@ -5,7 +5,6 @@
 //! reads from or writes to third-party shell-provider settings.
 
 use std::io::Cursor;
-use std::os::windows::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -23,6 +22,7 @@ use windows::Win32::System::Registry::{
 use windows::Win32::UI::Shell::{
     SHAppBarMessage, ABM_GETSTATE, ABM_SETSTATE, ABS_ALWAYSONTOP, ABS_AUTOHIDE, APPBARDATA,
 };
+use crate::win32::wide;
 
 const EXPLORER_ADVANCED_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced";
 const TASKBAR_SIZE_VALUE: &str = "TaskbarSi";
@@ -501,7 +501,7 @@ fn write_file_atomically(path: &Path, bytes: &[u8]) -> Result<(), String> {
     let temp = path.with_extension("tmp");
     std::fs::write(&temp, bytes)
         .map_err(|error| format!("write taskbar customization file: {error}"))?;
-    crate::files::replace_file(&temp, path)
+    crate::win32::replace_file(&temp, path)
 }
 
 fn icon_settings_path() -> Result<PathBuf, String> {
@@ -539,13 +539,6 @@ fn custom_icon_path_for_id(id: &str) -> Result<PathBuf, String> {
     } else {
         custom_icon_dir().map(|directory| directory.join(format!("{id}.png")))
     }
-}
-
-fn wide(value: &str) -> Vec<u16> {
-    std::ffi::OsStr::new(value)
-        .encode_wide()
-        .chain(Some(0))
-        .collect()
 }
 
 struct RegistryKey(HKEY);

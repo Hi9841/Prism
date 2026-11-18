@@ -4,7 +4,6 @@
 //! The lease stays only while a real fullscreen app is the one on screen,
 //! and ends as soon as the foreground app is windowed or the desktop.
 
-use std::os::windows::ffi::OsStrExt;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -23,6 +22,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW, SW_SHOWNOACTIVATE, WS_EX_APPWINDOW,
     WS_EX_TOOLWINDOW,
 };
+use crate::win32::wide;
 
 /// Persistent marker proving Prism still owns the taskbar's z-order. Present
 /// while the palette holds it topmost, and while it is parked behind a
@@ -439,11 +439,4 @@ fn write_marker(present: bool) {
 fn taskbar_window() -> Option<HWND> {
     let class = wide("Shell_TrayWnd");
     unsafe { FindWindowW(PCWSTR(class.as_ptr()), PCWSTR::null()).ok() }
-}
-
-fn wide(value: &str) -> Vec<u16> {
-    std::ffi::OsStr::new(value)
-        .encode_wide()
-        .chain(Some(0))
-        .collect()
 }

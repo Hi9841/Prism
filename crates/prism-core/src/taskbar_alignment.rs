@@ -4,7 +4,6 @@
 //! classic taskbar also exposes the Start button and task list as child HWNDs,
 //! which lets Prism provide a right-aligned mode without restarting Explorer.
 
-use std::os::windows::ffi::OsStrExt;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Mutex, OnceLock};
@@ -23,6 +22,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     SendMessageTimeoutW, SetWindowPos, SMTO_ABORTIFHUNG, SWP_NOACTIVATE, SWP_NOREDRAW, SWP_NOSIZE,
     SWP_NOZORDER, WM_SETTINGCHANGE,
 };
+use crate::win32::wide;
 
 const EXPLORER_ADVANCED_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced";
 const TASKBAR_ALIGNMENT_VALUE: &str = "TaskbarAl";
@@ -686,11 +686,4 @@ impl Drop for RegistryKey {
             let _ = RegCloseKey(self.0);
         }
     }
-}
-
-fn wide(value: &str) -> Vec<u16> {
-    std::ffi::OsStr::new(value)
-        .encode_wide()
-        .chain(Some(0))
-        .collect()
 }

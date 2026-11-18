@@ -28,6 +28,7 @@ use windows::Win32::System::Threading::{OpenProcess, WaitForSingleObject, PROCES
 use windows::Win32::UI::WindowsAndMessaging::{
     FindWindowW, SendMessageTimeoutW, SMTO_ABORTIFHUNG, WM_SETTINGCHANGE,
 };
+use crate::win32::wide;
 
 const KEY_PATH: &str = r"Software\StartIsBack";
 const VALUE_NAME: &str = "WinkeyFunction";
@@ -283,7 +284,7 @@ fn write_journal(path: &Path, journal: &RestoreJournal) -> Result<(), String> {
         .and_then(|_| file.sync_all())
         .map_err(|error| format!("persist Start restore journal: {error}"))?;
     drop(file);
-    crate::files::replace_file(&temp, path)
+    crate::win32::replace_file(&temp, path)
 }
 
 fn open_provider_key() -> Result<Option<(HKEY, Option<u32>)>, String> {
@@ -462,13 +463,6 @@ fn notify_provider() -> Result<(), String> {
     } else {
         Ok(())
     }
-}
-
-fn wide(value: &str) -> Vec<u16> {
-    std::ffi::OsStr::new(value)
-        .encode_wide()
-        .chain(Some(0))
-        .collect()
 }
 
 struct RegistryKey(HKEY);

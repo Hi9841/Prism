@@ -70,6 +70,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WM_SYSKEYUP, WM_WTSSESSION_CHANGE, WNDCLASSW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_POPUP,
 };
 
+use crate::win32::wide;
 use crate::shell_protocol::*;
 
 const ACTION_MESSAGE: u32 = WM_APP + 1;
@@ -1775,7 +1776,7 @@ fn shell_hook_library() -> Result<PathBuf, String> {
 /// that Explorer holds locked.
 fn install_shell_hook_library(directory: &Path, bytes: &[u8]) -> Result<PathBuf, String> {
     std::fs::create_dir_all(directory).map_err(|error| format!("create Explorer bridge directory: {error}"))?;
-    let name = format!("prism-shell-hook-{:016x}.dll", fnv1a_64(bytes));
+    let name = format!("prism-shell-hook-{:016x}.dll", crate::fnv1a_64(bytes));
     remove_stale_shell_hooks(directory, &name);
     let path = directory.join(&name);
     if std::fs::read(&path).is_ok_and(|existing| existing == bytes) {
@@ -1823,11 +1824,6 @@ fn remove_stale_shell_hooks(directory: &Path, keep: &str) {
             let _ = std::fs::remove_file(entry.path());
         }
     }
-}
-
-/// FNV-1a, 64 bits: a stable name for each build of the bridge DLL (not a security check).
-fn fnv1a_64(bytes: &[u8]) -> u64 {
-    bytes.iter().fold(0xcbf2_9ce4_8422_2325, |hash, &byte| (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3))
 }
 
 
@@ -2334,10 +2330,6 @@ fn queue_action(action: Action) {
             }
         }
     }
-}
-
-fn wide(value: &str) -> Vec<u16> {
-    value.encode_utf16().chain(Some(0)).collect()
 }
 
 /* ------------------------------------------------------------------ */

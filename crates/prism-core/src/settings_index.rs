@@ -676,7 +676,7 @@ fn registry_value_text(root: HKEY, path: &str, name: &str) -> Option<String> {
 }
 
 unsafe fn read_dword(key: HKEY, name: &str) -> Option<String> {
-    let name = crate::windows_tools::wide(name);
+    let name = crate::win32::wide(name);
     let mut value_type = REG_VALUE_TYPE(0);
     let mut data = 0u32;
     let mut length = std::mem::size_of::<u32>() as u32;

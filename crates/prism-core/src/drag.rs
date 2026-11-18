@@ -1,8 +1,7 @@
 //! Native Windows drag-and-drop support for dragging files (such as pictures)
 //! out of Prism into external applications (Discord, Explorer, Photoshop, etc.).
 
-use std::os::windows::ffi::OsStrExt;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use windows::core::{implement, Interface, BOOL, HRESULT, PCWSTR};
 use windows::Win32::Foundation::{
@@ -53,13 +52,6 @@ pub fn init_thread_ole() {
     }
 }
 
-fn wide_null(path: &Path) -> Vec<u16> {
-    path.as_os_str()
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect()
-}
-
 pub fn get_file_data_object(paths: &[PathBuf]) -> Result<IDataObject, String> {
     if paths.is_empty() {
         return Err("No file paths provided for drag".to_string());
@@ -75,7 +67,7 @@ pub fn get_file_data_object(paths: &[PathBuf]) -> Result<IDataObject, String> {
 
     unsafe {
         if paths.len() == 1 {
-            let wide = wide_null(&paths[0]);
+            let wide = crate::win32::wide_path(&paths[0]);
             let item: IShellItem = SHCreateItemFromParsingName(PCWSTR(wide.as_ptr()), None)
                 .map_err(|e| {
                     format!(
@@ -91,7 +83,7 @@ pub fn get_file_data_object(paths: &[PathBuf]) -> Result<IDataObject, String> {
 
         let mut pidls = Vec::with_capacity(paths.len());
         for path in paths {
-            let wide = wide_null(path);
+            let wide = crate::win32::wide_path(path);
             let pidl = ILCreateFromPathW(PCWSTR(wide.as_ptr()));
             if pidl.is_null() {
                 for p in &pidls {
@@ -126,7 +118,7 @@ fn attach_drag_image(data_object: &IDataObject, paths: &[PathBuf]) {
     let Some(first_path) = paths.first() else {
         return;
     };
-    let wide_path = wide_null(first_path);
+    let wide_path = crate::win32::wide_path(first_path);
     let shell_item: IShellItem =
         match unsafe { SHCreateItemFromParsingName(PCWSTR(wide_path.as_ptr()), None) } {
             Ok(item) => item,

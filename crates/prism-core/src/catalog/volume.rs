@@ -12,6 +12,7 @@ use windows::Win32::System::WindowsProgramming::{
     DRIVE_CDROM, DRIVE_FIXED, DRIVE_RAMDISK, DRIVE_REMOTE, DRIVE_REMOVABLE,
 };
 
+use crate::win32::wide;
 use super::types::VolumeInfo;
 
 const GUID_PREFIX: &str = r"\\?\Volume{";
@@ -245,7 +246,7 @@ fn inspect_guid_volume(
 fn inspect_logical_fallback(root: &Path) -> Option<VolumeInfo> {
     let (drive_type, label, fs_type) = inspect_mount_metadata(root)?;
     let mut serial_number = 0u32;
-    let wide_root = wide_null(root.as_os_str().to_string_lossy().as_ref());
+    let wide_root = wide(root.as_os_str().to_string_lossy().as_ref());
     let mut max_component_len = 0u32;
     let mut flags = 0u32;
     let _ = unsafe {
@@ -293,7 +294,7 @@ fn inspect_mount_metadata(root: &Path) -> Option<(u32, String, String)> {
     } else {
         format!("{root_text}\\")
     };
-    let wide_root = wide_null(&api_root);
+    let wide_root = wide(&api_root);
     let drive_type = unsafe { GetDriveTypeW(PCWSTR(wide_root.as_ptr())) };
     if !is_supported_drive_type(drive_type) {
         return None;
@@ -353,14 +354,14 @@ fn enumerate_volume_guids() -> Vec<String> {
 }
 
 fn volume_name_for_mount_point(root: &Path) -> Result<String, windows::core::Error> {
-    let wide_root = wide_null(root.as_os_str().to_string_lossy().as_ref());
+    let wide_root = wide(root.as_os_str().to_string_lossy().as_ref());
     let mut buffer = [0u16; 512];
     unsafe { GetVolumeNameForVolumeMountPointW(PCWSTR(wide_root.as_ptr()), &mut buffer) }?;
     Ok(wide_to_string(&buffer))
 }
 
 fn get_volume_mount_paths(volume_guid: &str) -> Result<Vec<PathBuf>, windows::core::Error> {
-    let wide_volume = wide_null(volume_guid);
+    let wide_volume = wide(volume_guid);
     let mut required = 0u32;
     let first = unsafe {
         GetVolumePathNamesForVolumeNameW(PCWSTR(wide_volume.as_ptr()), None, &mut required)
@@ -453,10 +454,6 @@ fn is_supported_drive_type(drive_type: u32) -> bool {
         drive_type,
         DRIVE_FIXED | DRIVE_REMOVABLE | DRIVE_RAMDISK | DRIVE_REMOTE | DRIVE_CDROM
     )
-}
-
-fn wide_null(value: &str) -> Vec<u16> {
-    value.encode_utf16().chain(Some(0)).collect()
 }
 
 fn wide_to_string(wide: &[u16]) -> String {

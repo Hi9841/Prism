@@ -39,6 +39,7 @@ use windows::Win32::System::Threading::{
     THREAD_POWER_THROTTLING_STATE, THREAD_PRIORITY_BELOW_NORMAL, THREAD_PRIORITY_NORMAL,
 };
 
+use crate::win32::wide;
 use super::store::{split_frn, FsNode, RECORD_MASK};
 
 // ---------------------------------------------------------------------------
@@ -206,7 +207,7 @@ pub fn walk_volume_threads(
 
 /// The record number of a folder (for a volume root on NTFS: 5).
 pub fn root_record(root: &Path) -> Result<u64, String> {
-    let wide = to_wide(&win32_long_path(&display_root(root)));
+    let wide = wide(&win32_long_path(&display_root(root)));
     // SAFETY: `wide` is NUL-terminated and outlives the call.
     let handle = unsafe {
         CreateFileW(
@@ -624,7 +625,7 @@ fn read_u64(bytes: &[u8], offset: usize) -> u64 {
 
 /// Lists `path` into entries. `buffer` is reused between folders.
 fn list_folder(path: &str, mode: IdMode, buffer: &mut [u64]) -> FolderRead {
-    let wide = to_wide(&win32_long_path(path));
+    let wide = wide(&win32_long_path(path));
     // SAFETY: `wide` is NUL-terminated and outlives the call.
     let handle = unsafe {
         CreateFileW(
@@ -728,10 +729,6 @@ fn win32_long_path(dir: &str) -> String {
     } else {
         format!(r"\\?\{trimmed}\")
     }
-}
-
-fn to_wide(text: &str) -> Vec<u16> {
-    text.encode_utf16().chain(Some(0)).collect()
 }
 
 /// File enumeration is background work. For its duration a thread runs at

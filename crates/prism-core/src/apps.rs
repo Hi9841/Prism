@@ -41,13 +41,13 @@ use windows::Win32::UI::Shell::{
     FOLDERID_ProgramFiles, FOLDERID_ProgramFilesX86, FOLDERID_Programs, FOLDERID_PublicDesktop,
     FOLDERID_PublicDocuments, FOLDERID_RoamingAppData, IApplicationActivationManager, IEnumIDList,
     ILCreateFromPathW, ILFree, IShellFolder, IShellItem, IShellItemImageFactory, IShellLinkW,
-    SHCreateItemFromParsingName, SHCreateItemWithParent, SHGetIDListFromObject,
-    SHGetKnownFolderPath, SHGetPathFromIDListW, SHOpenFolderAndSelectItems, SHParseDisplayName,
+    SHCreateItemFromParsingName, SHCreateItemWithParent, SHGetIDListFromObject, SHGetPathFromIDListW, SHOpenFolderAndSelectItems, SHParseDisplayName,
     ShellExecuteExW, ShellExecuteW, AO_NONE, SEE_MASK_INVOKEIDLIST, SEE_MASK_NOASYNC,
     SHCONTF_INCLUDEHIDDEN, SHCONTF_NONFOLDERS, SHELLEXECUTEINFOW, SIGDN_NORMALDISPLAY,
     SIIGBF_ICONONLY,
 };
 use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+use crate::win32::wide;
 
 const CACHE_TTL: Duration = Duration::from_secs(6 * 60 * 60);
 /// Bump when the scan output format changes so stale caches rescan.
@@ -199,7 +199,7 @@ fn write_cache(path: &Path, apps: &[AppEntry], scanned_at: SystemTime) {
     // corrupt the cache and force a full rescan.
     let temp = path.with_extension("json.tmp");
     if std::fs::write(&temp, text).is_ok() {
-        let _ = crate::files::replace_file(&temp, path);
+        let _ = crate::win32::replace_file(&temp, path);
     }
 }
 
@@ -271,14 +271,14 @@ fn install_watch_roots() -> Vec<InstallRoot> {
         (FOLDERID_Desktop, 3u32),
         (FOLDERID_PublicDesktop, 3u32),
     ] {
-        if let Some(path) = unsafe { known_folder(&fid) } {
+        if let Some(path) = crate::win32::known_folder(&fid) {
             roots.push(InstallRoot {
                 path,
                 kind: WatchKind::Shortcuts { depth },
             });
         }
     }
-    if let Some(profile) = unsafe { known_folder(&FOLDERID_Profile) } {
+    if let Some(profile) = crate::win32::known_folder(&FOLDERID_Profile) {
         let taskbar = profile
             .join("AppData")
             .join("Roaming")
@@ -293,14 +293,14 @@ fn install_watch_roots() -> Vec<InstallRoot> {
         });
     }
     for fid in [FOLDERID_ProgramFiles, FOLDERID_ProgramFilesX86] {
-        if let Some(path) = unsafe { known_folder(&fid) } {
+        if let Some(path) = crate::win32::known_folder(&fid) {
             roots.push(InstallRoot {
                 path,
                 kind: WatchKind::Products,
             });
         }
     }
-    if let Some(local) = unsafe { known_folder(&FOLDERID_LocalAppData) } {
+    if let Some(local) = crate::win32::known_folder(&FOLDERID_LocalAppData) {
         roots.push(InstallRoot {
             path: local.join("Programs"),
             kind: WatchKind::Products,
@@ -428,13 +428,13 @@ impl ScanCtx {
             (FOLDERID_PublicDocuments, "documents", 3, 400),
             (FOLDERID_Profile, "profile", 1, 100),
         ] {
-            if let Some(dir) = unsafe { known_folder(&fid) } {
+            if let Some(dir) = crate::win32::known_folder(&fid) {
                 self.scan_shortcut_dir(&dir, source, depth, cap);
             }
         }
         // Taskbar pins and the classic Quick Launch area live under the
         // profile's AppData; both are small, curated shortcut stores.
-        if let Some(profile) = unsafe { known_folder(&FOLDERID_Profile) } {
+        if let Some(profile) = crate::win32::known_folder(&FOLDERID_Profile) {
             let quick = profile
                 .join("AppData")
                 .join("Roaming")
@@ -1298,11 +1298,11 @@ impl ScanCtx {
     fn scan_program_files(&mut self) {
         let mut roots = Vec::new();
         for fid in [FOLDERID_ProgramFiles, FOLDERID_ProgramFilesX86] {
-            if let Some(dir) = unsafe { known_folder(&fid) } {
+            if let Some(dir) = crate::win32::known_folder(&fid) {
                 roots.push(dir);
             }
         }
-        if let Some(local) = unsafe { known_folder(&FOLDERID_LocalAppData) } {
+        if let Some(local) = crate::win32::known_folder(&FOLDERID_LocalAppData) {
             roots.push(local.join("Programs"));
         }
         for root in roots {
@@ -2067,10 +2067,6 @@ fn find_exe_in(dir: &Path, display_name: &str) -> Option<PathBuf> {
 
 /* ---------------- string helpers ---------------- */
 
-fn wide(s: &str) -> Vec<u16> {
-    s.encode_utf16().chain(std::iter::once(0)).collect()
-}
-
 unsafe fn read_buf16(f: impl FnOnce(&mut [u16]) -> windows::core::Result<()>) -> String {
     let mut buf = [0u16; 2048];
     if f(&mut buf).is_ok() {
@@ -2149,12 +2145,7 @@ fn looks_virtual(target: &str) -> bool {
 }
 
 fn hash(s: &str) -> String {
-    let mut h: u64 = 0xcbf29ce484222325;
-    for byte in s.bytes() {
-        h ^= byte as u64;
-        h = h.wrapping_mul(0x100000001b3);
-    }
-    format!("{h:016x}")
+    format!("{:016x}", crate::fnv1a_64(s.as_bytes()))
 }
 
 fn png_data_url(bytes: &[u8]) -> String {
@@ -2180,17 +2171,6 @@ fn png_data_url(bytes: &[u8]) -> String {
         });
     }
     format!("data:image/png;base64,{out}")
-}
-
-unsafe fn known_folder(id: &GUID) -> Option<PathBuf> {
-    let path = SHGetKnownFolderPath(id, Default::default(), None).ok()?;
-    let text = path.to_string().unwrap_or_default();
-    CoTaskMemFree(Some(path.as_ptr() as *const c_void));
-    if text.is_empty() {
-        None
-    } else {
-        Some(PathBuf::from(text))
-    }
 }
 
 /// The icon cache sits next to `apps.json`, in the host's data folder.
@@ -2702,7 +2682,7 @@ fn taskbar_pin_state(path: &Path) -> Option<bool> {
 
 fn taskbar_pins_dir() -> Option<PathBuf> {
     Some(
-        unsafe { known_folder(&FOLDERID_RoamingAppData) }?
+        crate::win32::known_folder(&FOLDERID_RoamingAppData)?
             .join("Microsoft")
             .join("Internet Explorer")
             .join("Quick Launch")

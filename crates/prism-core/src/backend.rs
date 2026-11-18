@@ -13,7 +13,7 @@ use crate::settings::{
     validate_state, STATE_VERSION, WIN_SHORTCUT,
 };
 use crate::{
-    apps, audio_hook, audio_osd, files, perf, power, query, start_menu, taskbar,
+    apps, audio_hook, audio_osd, catalog, perf, power, query, start_menu, taskbar,
     taskbar_alignment, taskbar_customization, theme, win_key, windows_tools,
 };
 
@@ -29,7 +29,7 @@ pub struct Backend {
     /// install-folder mtimes so a long-running session can pick up new apps.
     apps_indexed_at: Mutex<Option<SystemTime>>,
     apps_scan_lock: tokio::sync::Mutex<()>,
-    file_index: files::FileIndex,
+    file_index: catalog::FileIndex,
     intent: query::IntentStore,
     launches: query::LaunchStore,
     shortcut: Mutex<String>,
@@ -44,7 +44,7 @@ pub fn backend() -> &'static Backend {
         apps_cache: Mutex::new(None),
         apps_indexed_at: Mutex::new(None),
         apps_scan_lock: tokio::sync::Mutex::new(()),
-        file_index: files::FileIndex::default(),
+        file_index: catalog::FileIndex::default(),
         intent: query::IntentStore::new(),
         launches: query::LaunchStore::new(),
         shortcut: Mutex::new(String::new()),
@@ -116,7 +116,7 @@ impl Backend {
         let app_data_dir = crate::host::app_data_dir_or_cwd();
         self.intent.set_path(app_data_dir.join("intent-cache.db"));
         self.launches.set_path(app_data_dir.join("launch-counts.json"));
-        files::warm(self.file_index.clone(), app_data_dir);
+        catalog::warm(self.file_index.clone(), app_data_dir);
         crate::runtime::spawn_blocking(windows_tools::warm);
         crate::runtime::spawn_blocking(crate::settings_index::warm);
         self.warm_apps();
@@ -427,7 +427,7 @@ impl Backend {
         &self,
         query: String,
         limit: Option<usize>,
-    ) -> Result<files::FileSearchResponse, String> {
+    ) -> Result<catalog::types::FileSearchResponse, String> {
         let timer = perf::start();
         let query_length = query.chars().count();
         let index = self.file_index.clone();
@@ -456,15 +456,15 @@ impl Backend {
     }
 
     pub async fn get_file_thumbnails(&self, paths: Vec<String>) -> Vec<Option<String>> {
-        crate::runtime::spawn_blocking(move || files::file_thumbnails(paths))
+        crate::runtime::spawn_blocking(move || catalog::file_thumbnails(paths))
             .await
             .unwrap_or_default()
     }
 
-    pub async fn get_quick_access(&self) -> Vec<files::QuickAccessEntry> {
+    pub async fn get_quick_access(&self) -> Vec<catalog::types::QuickAccessEntry> {
         // Known-folder resolution and is_dir checks can block on redirected or
         // network locations; keep the startup path off the UI thread.
-        crate::runtime::spawn_blocking(files::quick_access)
+        crate::runtime::spawn_blocking(catalog::quick_access)
             .await
             .unwrap_or_default()
     }
@@ -743,5 +743,5 @@ pub fn persist_state_value(dir: &Path, value: &serde_json::Value) -> Result<(), 
     let final_path = dir.join("prism.json");
     let tmp_path = dir.join("prism.json.tmp");
     std::fs::write(&tmp_path, text).map_err(|e| format!("failed to save state: {e}"))?;
-    files::replace_file(&tmp_path, &final_path).map_err(|e| format!("failed to commit state: {e}"))
+    crate::win32::replace_file(&tmp_path, &final_path).map_err(|e| format!("failed to commit state: {e}"))
 }

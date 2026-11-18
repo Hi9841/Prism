@@ -21,7 +21,6 @@ pub mod volume;
 pub mod walk;
 
 use std::collections::{HashMap, HashSet};
-use std::ffi::c_void;
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, AtomicUsize, Ordering};
@@ -31,11 +30,9 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use base64::Engine;
-use windows::core::GUID;
-use windows::Win32::System::Com::CoTaskMemFree;
 use windows::Win32::UI::Shell::{
     FOLDERID_Desktop, FOLDERID_Documents, FOLDERID_Downloads, FOLDERID_Music, FOLDERID_Pictures,
-    FOLDERID_Profile, FOLDERID_Videos, SHGetKnownFolderPath,
+    FOLDERID_Profile, FOLDERID_Videos,
 };
 
 pub use types::{
@@ -1341,21 +1338,8 @@ pub(super) fn known_locations() -> Vec<(&'static str, PathBuf, &'static str)> {
         ("Videos", &FOLDERID_Videos, "videos"),
     ]
     .into_iter()
-    .filter_map(|(name, id, kind)| known_folder(id).map(|path| (name, path, kind)))
+    .filter_map(|(name, id, kind)| crate::win32::known_folder(id).map(|path| (name, path, kind)))
     .collect()
-}
-
-fn known_folder(id: &GUID) -> Option<PathBuf> {
-    unsafe {
-        let path = SHGetKnownFolderPath(id, Default::default(), None).ok()?;
-        let text = path.to_string().unwrap_or_default();
-        CoTaskMemFree(Some(path.as_ptr() as *const c_void));
-        if text.is_empty() {
-            None
-        } else {
-            Some(PathBuf::from(text))
-        }
-    }
 }
 
 const THUMBNAIL_MAX_BYTES: u64 = 32 * 1024 * 1024;
