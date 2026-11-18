@@ -52,5 +52,5 @@ fn write_icon_file(path: &Path, pixels: &RgbaImage) -> Result<(), String> {
 }
 
 fn icon_path() -> PathBuf {
-    crate::host::data_dir().join(START_ICON_FILE)
+    crate::shell_protocol::icon_file_path().unwrap_or_else(|| PathBuf::from(START_ICON_FILE))
 }

@@ -57,10 +57,8 @@ pub fn emit(event: CoreEvent) {
     }
 }
 
-/// `%APPDATA%\app.prism.launcher` (the Tauri app's identifier), or the working
-/// directory without `%APPDATA%`: Prism's data folder. The Explorer bridge DLL
-/// reads its files there too.
+/// Prism's data folder (`shell_protocol::data_dir`), or the working directory
+/// without `%APPDATA%`. The Explorer bridge DLL reads its files there too.
 pub fn data_dir() -> PathBuf {
-    std::env::var_os("APPDATA")
-        .map_or_else(|| PathBuf::from("."), |base| PathBuf::from(base).join(crate::shell_protocol::DATA_DIR_NAME))
+    crate::shell_protocol::data_dir().unwrap_or_else(|| PathBuf::from("."))
 }

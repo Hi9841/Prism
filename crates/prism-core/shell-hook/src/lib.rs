@@ -2,7 +2,6 @@
 
 use std::ffi::c_void;
 use std::io::Write;
-use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, Ordering};
 use std::sync::{Mutex, OnceLock};
 
@@ -523,10 +522,6 @@ fn intercept_search_hotkey(message: &mut Msg, notified: bool) -> bool {
 
 fn bridge_message_id() -> u32 {
     *BRIDGE_MESSAGE_ID.get_or_init(|| unsafe { RegisterWindowMessageW(BRIDGE_MESSAGE.as_ptr()) })
-}
-
-fn icon_file_path() -> Option<PathBuf> {
-    std::env::var_os("APPDATA").map(|path| PathBuf::from(path).join(DATA_DIR_NAME).join(START_ICON_FILE))
 }
 
 fn load_icon_pixels() -> Result<(u32, u32, Vec<u8>), isize> {

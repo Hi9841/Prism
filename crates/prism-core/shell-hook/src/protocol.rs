@@ -35,17 +35,37 @@ pub const EVENT_SHELL_START_COMMAND: usize = 25;
 pub const EVENT_SHELL_SEARCH_COMMAND: usize = 26;
 pub const EVENT_TASKBAR_POINTER: usize = 27;
 
-/// Prism's data folder under `%APPDATA%` (the Tauri app's identifier). The
-/// pin request file uses `%LOCALAPPDATA%` first, then `%APPDATA%`.
+/// Prism's folders. Each path lives in one place:
+///
+/// - `%APPDATA%\app.prism.launcher` (`data_dir`): settings, the file index
+///   snapshot, the app cache and icons, the taskbar markers, the Start icon.
+/// - `%LOCALAPPDATA%\app.prism.launcher`: the bridge DLL (`shell-hook\`,
+///   `shell_bridge`) and the pin request file (`pin_target_path`).
+/// - `%LOCALAPPDATA%\Prism\logs`: the always-on logs (`logs::dir`).
+/// - `%TEMP%\Prism`: the debug trace (`logs::debug_trace`) and the pin request
+///   file when neither `%LOCALAPPDATA%` nor `%APPDATA%` is set.
+///
+/// `app.prism.launcher` is the Tauri app's identifier.
 pub const DATA_DIR_NAME: &str = "app.prism.launcher";
+
+/// `%APPDATA%\app.prism.launcher`, when `%APPDATA%` is set.
+pub fn data_dir() -> Option<std::path::PathBuf> {
+    std::env::var_os("APPDATA").map(|base| std::path::PathBuf::from(base).join(DATA_DIR_NAME))
+}
+
+/// The custom Start icon file that Prism writes and the DLL draws.
+pub fn icon_file_path() -> Option<std::path::PathBuf> {
+    data_dir().map(|dir| dir.join(START_ICON_FILE))
+}
 /// The custom Start icon: `ICON_MAGIC`, width and height (u32 LE), RGBA pixels.
 pub const START_ICON_FILE: &str = "taskbar-start-icon.rgba";
 pub const ICON_MAGIC: &[u8] = b"PRISICON1";
 /// The path to pin or unpin, written before `CONTROL_TASKBAR_PIN` / `_UNPIN`.
 pub const PIN_TARGET_FILE: &str = "taskbar-pin-target.txt";
 
-/// Where Prism writes the pin target and the DLL reads it: the data folder
-/// under `%LOCALAPPDATA%` (else `%APPDATA%`), else `%TEMP%\Prism`.
+/// Where Prism writes the pin target and the DLL reads it:
+/// `%LOCALAPPDATA%\app.prism.launcher` (else the same folder under
+/// `%APPDATA%`), else `%TEMP%\Prism`.
 pub fn pin_target_path() -> Option<std::path::PathBuf> {
     let base = std::env::var_os("LOCALAPPDATA").or_else(|| std::env::var_os("APPDATA"));
     match base {
