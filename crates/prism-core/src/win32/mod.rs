@@ -7,6 +7,8 @@ use std::os::windows::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
 use windows::core::{GUID, PCWSTR};
+use windows::Win32::Foundation::HWND;
+use windows::Win32::UI::WindowsAndMessaging::{GetAncestor, GetClassNameW, GA_ROOT};
 use windows::Win32::Storage::FileSystem::{MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH};
 use windows::Win32::System::Com::{CoInitializeEx, CoTaskMemFree, CoUninitialize, COINIT_APARTMENTTHREADED};
 use windows::Win32::UI::Shell::SHGetKnownFolderPath;
@@ -129,4 +131,23 @@ impl Drop for ComGuard {
             unsafe { CoUninitialize() }
         }
     }
+}
+
+/// A taskbar window (primary or secondary monitor). Uses the root window, so a
+/// child of the taskbar (the XAML host) counts too.
+pub(crate) fn is_taskbar_window(hwnd: HWND) -> bool {
+    if hwnd.0.is_null() {
+        return false;
+    }
+    unsafe {
+        let root = GetAncestor(hwnd, GA_ROOT);
+        let target = if !root.0.is_null() { root } else { hwnd };
+        let mut class_name = [0u16; 64];
+        let len = GetClassNameW(target, &mut class_name);
+        if len > 0 {
+            let class_str = String::from_utf16_lossy(&class_name[..len as usize]);
+            return class_str == "Shell_TrayWnd" || class_str == "Shell_SecondaryTrayWnd";
+        }
+    }
+    false
 }

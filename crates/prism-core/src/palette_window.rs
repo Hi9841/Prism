@@ -9,7 +9,7 @@ use windows::Win32::System::Threading::GetCurrentProcessId;
 use windows::Win32::UI::HiDpi::{GetDpiForMonitor, GetDpiForWindow, MDT_EFFECTIVE_DPI};
 use windows::Win32::UI::Input::KeyboardAndMouse::{SetActiveWindow, SetFocus};
 use windows::Win32::UI::WindowsAndMessaging::{
-    AllowSetForegroundWindow, BringWindowToTop, GetClassNameW, GetCursorPos, GetForegroundWindow,
+    AllowSetForegroundWindow, BringWindowToTop, GetCursorPos, GetForegroundWindow,
     GetWindowThreadProcessId, LockSetForegroundWindow, SetForegroundWindow, SetWindowPos,
     HWND_TOPMOST, LSFW_UNLOCK, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW,
 };
@@ -318,7 +318,7 @@ pub fn foreground_window() -> isize {
 /// a taskbar (a Start click activates it).
 pub fn focus_moved_away(origin: isize) -> bool {
     let current = foreground_window();
-    moved_away(origin, current, is_prism_foreground, || is_taskbar_window(HWND(current as *mut _)))
+    moved_away(origin, current, is_prism_foreground, || crate::win32::is_taskbar_window(HWND(current as *mut _)))
 }
 
 fn moved_away(
@@ -328,13 +328,6 @@ fn moved_away(
     is_taskbar: impl FnOnce() -> bool,
 ) -> bool {
     current != 0 && current != origin && !is_prism() && !is_taskbar()
-}
-
-fn is_taskbar_window(window: HWND) -> bool {
-    let mut class = [0u16; 32];
-    let length = unsafe { GetClassNameW(window, &mut class) }.max(0) as usize;
-    let class = String::from_utf16_lossy(&class[..length]);
-    class == "Shell_TrayWnd" || class == "Shell_SecondaryTrayWnd"
 }
 
 /// Ask Windows for keyboard focus. Deliberately does not use

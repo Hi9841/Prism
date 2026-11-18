@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 use windows::core::Interface;
-use windows::Win32::Foundation::{CloseHandle, HWND, POINT};
+use windows::Win32::Foundation::{CloseHandle, POINT};
 use windows::Win32::Media::Audio::Endpoints::IAudioEndpointVolume;
 use windows::Win32::Media::Audio::{
     eMultimedia, eRender, IAudioSessionControl2, IAudioSessionEnumerator, IAudioSessionManager2,
@@ -17,9 +17,7 @@ use windows::Win32::System::Threading::{
     OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
 };
 use windows::Win32::UI::Accessibility::{CUIAutomation, IUIAutomation};
-use windows::Win32::UI::WindowsAndMessaging::{
-    GetAncestor, GetClassNameW, WindowFromPoint, GA_ROOT,
-};
+use windows::Win32::UI::WindowsAndMessaging::WindowFromPoint;
 
 /// Owns COM initialization for the dedicated audio worker thread.
 pub struct ComApartment;
@@ -359,7 +357,7 @@ pub fn identify_taskbar_target_at(point: POINT) -> TaskbarTarget {
         // the honest fallback: never silently do nothing when hovering the taskbar.
         unsafe {
             let hwnd = WindowFromPoint(point);
-            if is_taskbar_window(hwnd) {
+            if crate::win32::is_taskbar_window(hwnd) {
                 return TaskbarTarget::Master;
             }
         }
@@ -709,24 +707,6 @@ fn taskbar_osd_title(target: &TaskbarTarget) -> String {
     }
 }
 
-/// Uses the root window, so a hit on a child of the taskbar (the XAML host)
-/// counts too, on the primary and the secondary-monitor taskbars.
-pub fn is_taskbar_window(hwnd: HWND) -> bool {
-    if hwnd.0.is_null() {
-        return false;
-    }
-    unsafe {
-        let root = GetAncestor(hwnd, GA_ROOT);
-        let target = if !root.0.is_null() { root } else { hwnd };
-        let mut class_name = [0u16; 64];
-        let len = GetClassNameW(target, &mut class_name);
-        if len > 0 {
-            let class_str = String::from_utf16_lossy(&class_name[..len as usize]);
-            return class_str == "Shell_TrayWnd" || class_str == "Shell_SecondaryTrayWnd";
-        }
-    }
-    false
-}
 
 #[derive(Debug, Clone)]
 pub struct VolumeChangeResult {

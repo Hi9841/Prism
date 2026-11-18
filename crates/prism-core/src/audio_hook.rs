@@ -207,7 +207,7 @@ unsafe extern "system" fn low_level_mouse_proc(
         let pt = mouse.pt;
         let hwnd = WindowFromPoint(pt);
 
-        if crate::audio::is_taskbar_window(hwnd) {
+        if crate::win32::is_taskbar_window(hwnd) {
             let mouse_data = (mouse.mouseData >> 16) as i16;
             if let Some(delta) = wheel_delta(mouse_data) {
                 let request = AudioRequest {
