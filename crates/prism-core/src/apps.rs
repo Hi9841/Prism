@@ -2264,15 +2264,13 @@ pub fn launch_path_elevated(
     })
 }
 
+/// The lowercase extensions that "Run as administrator" accepts.
+pub const ELEVATABLE_EXTENSIONS: [&str; 8] = ["exe", "com", "bat", "cmd", "ps1", "vbs", "js", "wsf"];
+
 pub fn is_elevatable_path(path: &Path) -> bool {
     path.extension()
         .and_then(|value| value.to_str())
-        .is_some_and(|extension| {
-            matches!(
-                extension.to_ascii_lowercase().as_str(),
-                "exe" | "com" | "bat" | "cmd" | "ps1" | "vbs" | "js" | "wsf"
-            )
-        })
+        .is_some_and(|extension| ELEVATABLE_EXTENSIONS.contains(&extension.to_ascii_lowercase().as_str()))
 }
 
 fn elevated_command(path: &str, extension: &str, args: Option<&str>) -> (String, Option<String>) {

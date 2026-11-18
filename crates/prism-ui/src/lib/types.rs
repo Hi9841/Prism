@@ -232,13 +232,12 @@ fn file_extension(path: Option<&str>) -> Option<String> {
     (boundary > 0).then(|| filename[boundary + 1..].to_lowercase())
 }
 
-const ELEVATABLE_EXTENSIONS: [&str; 8] = ["exe", "com", "bat", "cmd", "ps1", "vbs", "js", "wsf"];
 const PINNABLE_EXTENSIONS: [&str; 5] = ["exe", "lnk", "bat", "cmd", "msc"];
 pub const PICTURE_EXTENSIONS: [&str; 12] =
     ["jpg", "jpeg", "png", "gif", "webp", "bmp", "svg", "ico", "tiff", "tif", "avif", "heic"];
 
 pub fn is_elevatable_path(path: Option<&str>) -> bool {
-    file_extension(path).is_some_and(|ext| ELEVATABLE_EXTENSIONS.contains(&ext.as_str()))
+    file_extension(path).is_some_and(|ext| prism_core::apps::ELEVATABLE_EXTENSIONS.contains(&ext.as_str()))
 }
 
 /// Windows' taskbar-pin shell verb applies to launchable targets only.
