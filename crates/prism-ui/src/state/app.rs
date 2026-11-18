@@ -295,7 +295,7 @@ mod provider {
     const LOAD_ERROR_SUFFIX: &str = ". Repair prism.json, then retry. Saving is paused to preserve your file.";
 
     fn load_error_message(error: &str) -> String {
-        format!("{LOAD_ERROR_PREFIX}{}{LOAD_ERROR_SUFFIX}", error.to_string())
+        format!("{LOAD_ERROR_PREFIX}{}{LOAD_ERROR_SUFFIX}", error)
     }
 
     fn settings_json(settings: &Settings) -> Map<String, Value> {
@@ -456,7 +456,7 @@ mod provider {
             if let Err(error) = bridge::shell(cx).set_always_on_top(self.settings.always_on_top, cx) {
                 self.show_toast(
                     "Always on top not applied",
-                    Some(format!("Toggle the setting to retry. {}", error.to_string())),
+                    Some(format!("Toggle the setting to retry. {}", error)),
                     ToastKind::Error,
                     cx,
                 );
@@ -483,7 +483,7 @@ mod provider {
                 if let Err(error) = bridge::shell(cx).set_window_width(target, cx) {
                     self.show_toast(
                         "Window width not applied",
-                        Some(format!("Try selecting the width again. {}", error.to_string())),
+                        Some(format!("Try selecting the width again. {}", error)),
                         ToastKind::Error,
                         cx,
                     );
@@ -513,7 +513,7 @@ mod provider {
                                 {
                                     this.show_toast(
                                         "Window width not applied",
-                                        Some(format!("Try selecting the width again. {}", error.to_string())),
+                                        Some(format!("Try selecting the width again. {}", error)),
                                         ToastKind::Error,
                                         cx,
                                     );
@@ -616,7 +616,7 @@ mod provider {
                     if let Err(error) = bridge::save_state(state).await {
                         let message = format!(
                             "Could not save settings: {}. Free disk space or check folder permissions, then retry.",
-                            error.to_string()
+                            error
                         );
                         let _ = this.update(cx, |this, cx| {
                             this.persist_request = None;
@@ -831,20 +831,20 @@ mod provider {
                             this.update_settings(cx, |s| s.shortcut = shortcut);
                         });
                         let taskbar = alignment_rollback_error
-                            .map(|e| format!(" Taskbar restoration failed: {}.", e.to_string()))
+                            .map(|e| format!(" Taskbar restoration failed: {}.", e))
                             .unwrap_or_default();
                         return Err(format!(
                             "Reset stopped: {}. Shortcut restoration also failed: {}. The shortcut remains {}.{taskbar}",
-                            error.to_string(),
-                            rollback_error.to_string(),
+                            error,
+                            rollback_error,
                             defaults.shortcut
                         ));
                     }
                     if let Some(rollback_error) = alignment_rollback_error {
                         return Err(format!(
                             "Reset stopped: {}. Could not restore taskbar alignment: {}. Select the alignment again to retry.",
-                            error.to_string(),
-                            rollback_error.to_string()
+                            error,
+                            rollback_error
                         ));
                     }
                     return Err(error);
@@ -939,7 +939,7 @@ mod provider {
                     let _ = this.update(cx, |this, cx| {
                         this.show_toast(
                             "Could not quit Prism",
-                            Some(format!("Your changes are still open. {}", error.to_string())),
+                            Some(format!("Your changes are still open. {}", error)),
                             ToastKind::Error,
                             cx,
                         );

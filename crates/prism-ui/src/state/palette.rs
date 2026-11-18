@@ -883,7 +883,7 @@ impl PaletteState {
                     Err(error) => {
                         toast(
                             "Power plan changed",
-                            format!("Could not refresh the list: {}", error.to_string()),
+                            format!("Could not refresh the list: {}", error),
                             ToastKind::Success,
                             cx,
                         );
@@ -901,7 +901,7 @@ impl PaletteState {
             if result.is_ok() && !clipboard_item && ticket.is_current() {
                 let hidden = cx.update(|cx| bridge::shell(cx).hide_palette(false, cx));
                 if let Ok(Err(error)) = hidden {
-                    eprintln!("Prism could not hide the palette after a launch: {}", error.to_string());
+                    eprintln!("Prism could not hide the palette after a launch: {}", error);
                 }
             }
             // The launch and hide are done: history and intent writes need no gate.
@@ -921,7 +921,7 @@ impl PaletteState {
                 }
                 Err(error) => toast(
                     "Couldn\u{2019}t open item",
-                    format!("{}: {}", item.title, error.to_string()),
+                    format!("{}: {}", item.title, error),
                     ToastKind::Error,
                     cx,
                 ),
