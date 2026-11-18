@@ -114,6 +114,3 @@ pub fn app_hit_palette_item(
     Some(item)
 }
 
-pub fn is_command_action(hit: &Phase1Hit) -> bool {
-    hit.kind == "action" && hit.uri.as_deref().is_none_or(str::is_empty)
-}

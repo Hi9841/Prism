@@ -117,8 +117,9 @@ impl Backend {
         self.intent.set_path(app_data_dir.join("intent-cache.db"));
         self.launches.set_path(app_data_dir.join("launch-counts.json"));
         catalog::warm(self.file_index.clone(), app_data_dir);
-        crate::runtime::spawn_blocking(windows_tools::warm);
-        crate::runtime::spawn_blocking(crate::settings_index::warm);
+        for warm in query::ACTION_SOURCES.iter().filter_map(|source| source.warm) {
+            crate::runtime::spawn_blocking(warm);
+        }
         self.warm_apps();
     }
 

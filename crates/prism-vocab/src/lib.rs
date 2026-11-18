@@ -22,6 +22,28 @@ pub fn source_rank(source: &str) -> i32 {
 /// The `source` of a Phase 1 hit that lists with the Windows tools.
 pub const WINDOWS_TOOL_SOURCE: &str = "windows-tool";
 
+/// The search section of a Phase 1 action hit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ActionSection {
+    WindowsTools,
+    Commands,
+    Settings,
+}
+
+impl ActionSection {
+    /// A hit with `WINDOWS_TOOL_SOURCE` lists with the Windows tools; an action
+    /// with no URI is a command; the rest are Settings pages.
+    pub fn of(kind: &str, source: Option<&str>, uri: Option<&str>) -> Self {
+        if source == Some(WINDOWS_TOOL_SOURCE) {
+            Self::WindowsTools
+        } else if kind == "action" && uri.is_none_or(str::is_empty) {
+            Self::Commands
+        } else {
+            Self::Settings
+        }
+    }
+}
+
 /// The lowercase extensions that "Run as administrator" accepts.
 pub const ELEVATABLE_EXTENSIONS: [&str; 8] = ["exe", "com", "bat", "cmd", "ps1", "vbs", "js", "wsf"];
 

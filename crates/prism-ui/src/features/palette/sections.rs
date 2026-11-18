@@ -7,11 +7,11 @@
 
 use std::collections::{HashMap, HashSet};
 
-use prism_vocab::WINDOWS_TOOL_SOURCE;
+use prism_vocab::ActionSection;
 use serde_json::json;
 
 use crate::features::palette::phase1::{
-    action_palette_item, app_hit_palette_item, is_command_action, power_plan_palette_item, window_palette_item,
+    action_palette_item, app_hit_palette_item, power_plan_palette_item, window_palette_item,
 };
 use crate::js;
 use crate::lib::emoji::sort_apps;
@@ -252,15 +252,20 @@ pub fn build_sections(sources: &PaletteSources) -> BuiltSections {
         if file_path_browse && !file_items.is_empty() {
             out.push(Section::new("files", "Folder Contents", file_items.clone()));
         }
-        let actions = |keep: fn(&crate::lib::query::Phase1Hit) -> bool| -> Vec<PaletteItem> {
+        let actions = |section: ActionSection| -> Vec<PaletteItem> {
             browse_phase1
-                .map(|p| p.actions.iter().filter(|hit| keep(hit)).map(action_palette_item).collect())
+                .map(|p| {
+                    p.actions
+                        .iter()
+                        .filter(|hit| ActionSection::of(&hit.kind, hit.source.as_deref(), hit.uri.as_deref()) == section)
+                        .map(action_palette_item)
+                        .collect()
+                })
                 .unwrap_or_default()
         };
-        let is_tool = |hit: &crate::lib::query::Phase1Hit| hit.source.as_deref() == Some(WINDOWS_TOOL_SOURCE);
-        let settings_items = actions(|hit| hit.source.as_deref() != Some(WINDOWS_TOOL_SOURCE) && !is_command_action(hit));
-        let tool_items = actions(is_tool);
-        let command_items = actions(|hit| hit.source.as_deref() != Some(WINDOWS_TOOL_SOURCE) && is_command_action(hit));
+        let settings_items = actions(ActionSection::Settings);
+        let tool_items = actions(ActionSection::WindowsTools);
+        let command_items = actions(ActionSection::Commands);
         if let Some(apps_section) = build_apps_section(&app_hits, app_groups, SEARCH_APPS_LIMIT) {
             out.push(apps_section);
         } else if !phase1_app_items.is_empty() {

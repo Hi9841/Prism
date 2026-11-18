@@ -114,14 +114,67 @@ pub fn phase1(
     }
 }
 
+/// A source of action hits. Phase 1 search, `execute` and the backend start
+/// all walk `ACTION_SOURCES`, so a new source is one entry there. The ids of
+/// the sources do not overlap (`settings.*`, `windows.*` / `control-panel::*`,
+/// `settings-index::*`).
+pub(crate) struct ActionSource {
+    /// Builds the source's index at start, off the UI thread.
+    pub(crate) warm: Option<fn()>,
+    /// Adds the source's hits for one query.
+    search: fn(&score::Query, &mut Vec<Phase1Hit>),
+    /// Runs the source's action `id`; `None` when `id` is not the source's.
+    execute: fn(&str) -> Option<Result<(), String>>,
+}
+
+/// In search order: on an equal score and title, the earlier source's hit stays.
+pub(crate) const ACTION_SOURCES: [ActionSource; 3] = [
+    ActionSource { warm: None, search: search_catalog, execute: execute_catalog },
+    ActionSource { warm: Some(crate::windows_tools::warm), search: search_tools, execute: crate::windows_tools::execute },
+    ActionSource {
+        warm: Some(crate::settings_index::warm),
+        search: search_settings,
+        execute: crate::settings_index::execute,
+    },
+];
+
 pub fn execute(action_id: &str) -> Result<(), String> {
-    if let Some(action) = catalog::get(action_id) {
-        return catalog::execute(action);
+    ACTION_SOURCES
+        .iter()
+        .find_map(|source| (source.execute)(action_id))
+        .unwrap_or_else(|| Err(format!("unknown Windows tool '{action_id}'")))
+}
+
+fn execute_catalog(action_id: &str) -> Option<Result<(), String>> {
+    catalog::get(action_id).map(catalog::execute)
+}
+
+fn search_catalog(query: &score::Query, hits: &mut Vec<Phase1Hit>) {
+    hits.extend(catalog::search(query, ACTION_LIMIT).into_iter().map(|(action, score)| action_hit(action, score, false)));
+}
+
+fn search_tools(query: &score::Query, hits: &mut Vec<Phase1Hit>) {
+    if let Some(tools) = crate::windows_tools::cached() {
+        for tool in tools.iter() {
+            if let Some(score) = query.score_with_keywords(&tool.title, &tool.keywords) {
+                hits.push(tool_hit(tool, score));
+            }
+        }
     }
-    if let Some(result) = crate::settings_index::execute(action_id) {
-        return result;
+}
+
+fn search_settings(query: &score::Query, hits: &mut Vec<Phase1Hit>) {
+    if let Some(settings) = crate::settings_index::cached() {
+        for setting in settings.iter() {
+            let title = query.score(&setting.title);
+            let keyword = query
+                .score_with_keywords("", &setting.keywords)
+                .map(|score| score.min(SETTING_KEYWORD_CAP));
+            if let Some(score) = title.max(keyword) {
+                hits.push(setting_hit(setting, score));
+            }
+        }
     }
-    crate::windows_tools::execute(action_id)
 }
 
 pub fn accept_intent(query: &str, action_id: &str, store: &IntentStore) -> Result<(), String> {
@@ -133,28 +186,9 @@ pub fn focus_window(hwnd: i64) -> Result<(), String> {
 }
 
 fn search_actions(query: &score::Query, intent_id: Option<&str>) -> Vec<Phase1Hit> {
-    let mut hits: Vec<Phase1Hit> = catalog::search(query, ACTION_LIMIT)
-        .into_iter()
-        .map(|(action, score)| action_hit(action, score, false))
-        .collect();
-
-    if let Some(tools) = crate::windows_tools::cached() {
-        for tool in tools.iter() {
-            if let Some(score) = query.score_with_keywords(&tool.title, &tool.keywords) {
-                hits.push(tool_hit(tool, score));
-            }
-        }
-    }
-    if let Some(settings) = crate::settings_index::cached() {
-        for setting in settings.iter() {
-            let title = query.score(&setting.title);
-            let keyword = query
-                .score_with_keywords("", &setting.keywords)
-                .map(|score| score.min(SETTING_KEYWORD_CAP));
-            if let Some(score) = title.max(keyword) {
-                hits.push(setting_hit(setting, score));
-            }
-        }
+    let mut hits: Vec<Phase1Hit> = Vec::new();
+    for source in &ACTION_SOURCES {
+        (source.search)(query, &mut hits);
     }
     hits.sort_by(|left, right| {
         right

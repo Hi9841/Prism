@@ -107,13 +107,11 @@ pub fn snapshot() -> Arc<Vec<WindowsTool>> {
     refresh()
 }
 
-pub fn execute(id: &str) -> Result<(), String> {
+/// Runs the tool `id`; `None` when no tool has that id.
+pub fn execute(id: &str) -> Option<Result<(), String>> {
     let tools = snapshot();
-    let tool = tools
-        .iter()
-        .find(|tool| tool.id == id)
-        .ok_or_else(|| format!("unknown Windows tool '{id}'"))?;
-    execute_target(&tool.target)
+    let tool = tools.iter().find(|tool| tool.id == id)?;
+    Some(execute_target(&tool.target))
 }
 
 struct ComGuard {
