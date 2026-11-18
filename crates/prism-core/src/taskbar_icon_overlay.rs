@@ -7,8 +7,7 @@ use std::path::{Path, PathBuf};
 
 use image::RgbaImage;
 
-const ICON_FILE_NAME: &str = "taskbar-start-icon.rgba";
-const ICON_MAGIC: &[u8] = b"PRISICON1";
+use crate::shell_protocol::{ICON_MAGIC, START_ICON_FILE};
 
 pub struct OverlayIcon {
     pub pixels: RgbaImage,
@@ -56,6 +55,6 @@ fn write_icon_file(path: &Path, pixels: &RgbaImage) -> Result<(), String> {
 
 fn icon_path() -> Result<PathBuf, String> {
     crate::host::app_data_dir()
-        .map(|path| path.join(ICON_FILE_NAME))
+        .map(|path| path.join(START_ICON_FILE))
         .map_err(|error| error.to_string())
 }

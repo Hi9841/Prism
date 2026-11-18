@@ -20,6 +20,8 @@ pub mod power;
 pub mod query;
 pub mod runtime;
 pub mod settings_index;
+#[path = "../shell-hook/src/protocol.rs"]
+pub(crate) mod shell_protocol;
 pub mod start_menu;
 pub mod taskbar;
 pub mod taskbar_alignment;

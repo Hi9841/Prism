@@ -6,6 +6,9 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, Ordering};
 use std::sync::{Mutex, OnceLock};
 
+mod protocol;
+use protocol::*;
+
 type Hhook = *mut c_void;
 type Hwnd = *mut c_void;
 type Hbitmap = *mut c_void;
@@ -89,32 +92,6 @@ const STM_SETIMAGE: u32 = 0x0172;
 const STM_GETIMAGE: u32 = 0x0173;
 const IMAGE_BITMAP: usize = 0;
 const SC_TASKLIST: usize = 0xF130;
-const CONTROL_DISABLE_WIN_HOTKEY: usize = 1;
-const EVENT_HOTKEY_DISABLED: usize = 2;
-const CONTROL_START_RECT_LEFT: usize = 4;
-const CONTROL_START_RECT_TOP: usize = 5;
-const CONTROL_START_RECT_RIGHT: usize = 6;
-const CONTROL_START_RECT_BOTTOM: usize = 7;
-const EVENT_START_RECT_CONFIGURED: usize = 8;
-const EVENT_TASKBAR_START_CLICK_X: usize = 9;
-const EVENT_TASKBAR_START_CLICK_Y: usize = 10;
-const CONTROL_START_ICON_REFRESH: usize = 11;
-const CONTROL_START_ICON_SHUTDOWN: usize = 12;
-const EVENT_START_ICON_SHUTDOWN: usize = 13;
-const EVENT_START_ICON_REFRESHED: usize = 14;
-const CONTROL_SEARCH_RECT_LEFT: usize = 15;
-const CONTROL_SEARCH_RECT_TOP: usize = 16;
-const CONTROL_SEARCH_RECT_RIGHT: usize = 17;
-const CONTROL_SEARCH_RECT_BOTTOM: usize = 18;
-const EVENT_SEARCH_RECT_CONFIGURED: usize = 19;
-const CONTROL_TASKBAR_PIN: usize = 20;
-const CONTROL_TASKBAR_UNPIN: usize = 21;
-const EVENT_TASKBAR_PIN_COMPLETED: usize = 22;
-const CONTROL_FOREGROUND_WINDOW: usize = 23;
-const EVENT_FOREGROUND_RESULT: usize = 24;
-const EVENT_SHELL_START_COMMAND: usize = 25;
-const EVENT_SHELL_SEARCH_COMMAND: usize = 26;
-const EVENT_TASKBAR_POINTER: usize = 27;
 /// The pointer report is a hint to re-read the Start rect; a few per second
 /// keep the rect current without loading Explorer's input thread.
 const TASKBAR_POINTER_INTERVAL_MS: u32 = 200;
@@ -143,7 +120,6 @@ const DIB_RGB_COLORS: u32 = 0;
 const BI_RGB: u32 = 0;
 const SRCCOPY: u32 = 0x00cc_0020;
 const CAPTUREBLT: u32 = 0x4000_0000;
-const ICON_MAGIC: &[u8] = b"PRISICON1";
 const ICON_TARGET_EDGE: i32 = 24;
 static BRIDGE_MESSAGE_ID: OnceLock<u32> = OnceLock::new();
 static START_RECT_LEFT: AtomicI32 = AtomicI32::new(0);
@@ -166,13 +142,20 @@ static ICON_WINDOW: Mutex<usize> = Mutex::new(0);
 static ICON_BITMAP: Mutex<usize> = Mutex::new(0);
 static ICON_BACKGROUND: Mutex<Option<(i32, i32, Vec<u8>)>> = Mutex::new(None);
 
-const BRIDGE_MESSAGE: &[u16] = &[
-    80, 114, 105, 115, 109, 46, 83, 104, 101, 108, 108, 66, 114, 105, 100, 103, 101, 46, 118, 49, 0,
-];
-const OBSERVER_CLASS: &[u16] = &[
-    80, 114, 105, 115, 109, 82, 97, 119, 75, 101, 121, 98, 111, 97, 114, 100, 79, 98, 115, 101,
-    114, 118, 101, 114, 0,
-];
+const BRIDGE_MESSAGE: &[u16] = &ascii_wide::<{ BRIDGE_MESSAGE_NAME.len() + 1 }>(BRIDGE_MESSAGE_NAME);
+const OBSERVER_CLASS: &[u16] = &ascii_wide::<{ OBSERVER_CLASS_NAME.len() + 1 }>(OBSERVER_CLASS_NAME);
+
+/// A NUL-terminated UTF-16 copy of an ASCII name, made at compile time.
+const fn ascii_wide<const N: usize>(name: &str) -> [u16; N] {
+    let bytes = name.as_bytes();
+    let mut wide = [0u16; N];
+    let mut index = 0;
+    while index < bytes.len() {
+        wide[index] = bytes[index] as u16;
+        index += 1;
+    }
+    wide
+}
 
 const STATIC_CLASS: &[u16] = &[83, 116, 97, 116, 105, 99, 0];
 const ICON_WINDOW_TITLE: &[u16] = &[
@@ -208,7 +191,6 @@ extern "system" {
     fn DestroyWindow(window: Hwnd) -> i32;
     fn FindWindowW(class_name: *const u16, window_name: *const u16) -> Hwnd;
     fn GetDC(window: Hwnd) -> *mut c_void;
-    fn GetWindowRect(window: Hwnd, rect: *mut Rect) -> i32;
     fn InvalidateRect(window: Hwnd, rect: *const Rect, erase: i32) -> i32;
     fn ReleaseDC(window: Hwnd, dc: *mut c_void) -> i32;
     fn SendMessageW(window: Hwnd, message: u32, wparam: usize, lparam: isize) -> isize;
@@ -368,13 +350,9 @@ fn debug_log(message: &str) {
 
 fn handle_taskbar_pin(pinned: bool) -> isize {
     let target_file = match std::env::var_os("LOCALAPPDATA").or_else(|| std::env::var_os("APPDATA")) {
-        Some(appdata) => PathBuf::from(appdata)
-            .join("app.prism.launcher")
-            .join("taskbar-pin-target.txt"),
+        Some(appdata) => PathBuf::from(appdata).join(DATA_DIR_NAME).join(PIN_TARGET_FILE),
         None => match std::env::var_os("TEMP") {
-            Some(temp) => PathBuf::from(temp)
-                .join("Prism")
-                .join("taskbar-pin-target.txt"),
+            Some(temp) => PathBuf::from(temp).join("Prism").join(PIN_TARGET_FILE),
             None => return 0,
         },
     };
@@ -552,10 +530,7 @@ fn bridge_message_id() -> u32 {
 }
 
 fn icon_file_path() -> Option<PathBuf> {
-    std::env::var_os("APPDATA").map(PathBuf::from).map(|path| {
-        path.join("app.prism.launcher")
-            .join("taskbar-start-icon.rgba")
-    })
+    std::env::var_os("APPDATA").map(|path| PathBuf::from(path).join(DATA_DIR_NAME).join(START_ICON_FILE))
 }
 
 fn load_icon_pixels() -> Result<(u32, u32, Vec<u8>), isize> {

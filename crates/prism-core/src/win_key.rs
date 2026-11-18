@@ -70,6 +70,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WM_SYSKEYUP, WM_WTSSESSION_CHANGE, WNDCLASSW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_POPUP,
 };
 
+use crate::shell_protocol::*;
+
 const ACTION_MESSAGE: u32 = WM_APP + 1;
 const TOGGLE_DEBOUNCE_MS: u64 = 80;
 const WIN_TOGGLE_RELEASE_GRACE: Duration = Duration::from_millis(30);
@@ -80,33 +82,6 @@ const WIN_TOGGLE_QUIET_MIN: Duration = Duration::from_millis(3);
 /// The Start button rect only needs refreshing occasionally; the UIA query is
 /// expensive and runs on Explorer's side.
 const START_RECT_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
-const SHELL_BRIDGE_MESSAGE_NAME: &str = "Prism.ShellBridge.v1";
-const SHELL_CONTROL_DISABLE_WIN_HOTKEY: usize = 1;
-const SHELL_EVENT_HOTKEY_DISABLED: usize = 2;
-const SHELL_CONTROL_START_RECT_LEFT: usize = 4;
-const SHELL_CONTROL_START_RECT_TOP: usize = 5;
-const SHELL_CONTROL_START_RECT_RIGHT: usize = 6;
-const SHELL_CONTROL_START_RECT_BOTTOM: usize = 7;
-const SHELL_EVENT_START_RECT_CONFIGURED: usize = 8;
-const SHELL_EVENT_TASKBAR_START_CLICK_X: usize = 9;
-const SHELL_EVENT_TASKBAR_START_CLICK_Y: usize = 10;
-const SHELL_CONTROL_START_ICON_REFRESH: usize = 11;
-const SHELL_CONTROL_START_ICON_SHUTDOWN: usize = 12;
-const SHELL_EVENT_START_ICON_SHUTDOWN: usize = 13;
-const SHELL_EVENT_START_ICON_REFRESHED: usize = 14;
-const SHELL_CONTROL_SEARCH_RECT_LEFT: usize = 15;
-const SHELL_CONTROL_SEARCH_RECT_TOP: usize = 16;
-const SHELL_CONTROL_SEARCH_RECT_RIGHT: usize = 17;
-const SHELL_CONTROL_SEARCH_RECT_BOTTOM: usize = 18;
-const SHELL_EVENT_SEARCH_RECT_CONFIGURED: usize = 19;
-const SHELL_CONTROL_TASKBAR_PIN: usize = 20;
-const SHELL_CONTROL_TASKBAR_UNPIN: usize = 21;
-const SHELL_EVENT_TASKBAR_PIN_COMPLETED: usize = 22;
-const SHELL_CONTROL_FOREGROUND_WINDOW: usize = 23;
-const SHELL_EVENT_FOREGROUND_RESULT: usize = 24;
-const SHELL_EVENT_SHELL_START_COMMAND: usize = 25;
-const SHELL_EVENT_SHELL_SEARCH_COMMAND: usize = 26;
-const SHELL_EVENT_TASKBAR_POINTER: usize = 27;
 /// A shell Start command toggles immediately. The normal case is already
 /// de-duplicated: a raw Win-down sets `LAST_RAW_TOGGLE_MS` ~100 ms before the
 /// Win-up shell command, and a late raw toggle is dropped by the debounce.
@@ -553,7 +528,7 @@ pub fn notify_start_icon_changed() {
             let _ = PostThreadMessageW(
                 taskbar_thread,
                 message,
-                WPARAM(SHELL_CONTROL_START_ICON_REFRESH),
+                WPARAM(CONTROL_START_ICON_REFRESH),
                 LPARAM(0),
             );
         }
@@ -575,15 +550,8 @@ pub fn shell_bridge_taskbar_pin(path: &Path, pinned: bool) -> Result<(), String>
     let target_file = std::env::var_os("LOCALAPPDATA")
         .or_else(|| std::env::var_os("APPDATA"))
         .map(PathBuf::from)
-        .map(|path| {
-            path.join("app.prism.launcher")
-                .join("taskbar-pin-target.txt")
-        })
-        .unwrap_or_else(|| {
-            std::env::temp_dir()
-                .join("Prism")
-                .join("taskbar-pin-target.txt")
-        });
+        .map(|path| path.join(DATA_DIR_NAME).join(PIN_TARGET_FILE))
+        .unwrap_or_else(|| std::env::temp_dir().join("Prism").join(PIN_TARGET_FILE));
     if let Some(parent) = target_file.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|error| format!("failed to create pin request directory: {error}"))?;
@@ -593,9 +561,9 @@ pub fn shell_bridge_taskbar_pin(path: &Path, pinned: bool) -> Result<(), String>
 
     SHELL_TASKBAR_PIN_ACK.store(0, Ordering::Release);
     let control = if pinned {
-        SHELL_CONTROL_TASKBAR_PIN
+        CONTROL_TASKBAR_PIN
     } else {
-        SHELL_CONTROL_TASKBAR_UNPIN
+        CONTROL_TASKBAR_UNPIN
     };
     unsafe {
         PostThreadMessageW(
@@ -650,7 +618,7 @@ pub fn request_foreground(hwnd: isize) -> bool {
         PostThreadMessageW(
             taskbar_thread,
             message,
-            WPARAM(SHELL_CONTROL_FOREGROUND_WINDOW),
+            WPARAM(CONTROL_FOREGROUND_WINDOW),
             LPARAM(hwnd),
         )
         .is_ok()
@@ -1254,7 +1222,7 @@ impl ShellBridge {
         if let Err(error) = PostThreadMessageW(
             app_manager_thread,
             message,
-            WPARAM(SHELL_CONTROL_DISABLE_WIN_HOTKEY),
+            WPARAM(CONTROL_DISABLE_WIN_HOTKEY),
             LPARAM(0),
         ) {
             if let Some(hook) = app_manager_hook {
@@ -1498,10 +1466,10 @@ fn same_rect(left: RECT, right: RECT) -> bool {
 
 fn post_start_button_rect(thread: u32, message: u32, rect: RECT) -> Result<(), String> {
     for (control, coordinate) in [
-        (SHELL_CONTROL_START_RECT_LEFT, rect.left),
-        (SHELL_CONTROL_START_RECT_TOP, rect.top),
-        (SHELL_CONTROL_START_RECT_RIGHT, rect.right),
-        (SHELL_CONTROL_START_RECT_BOTTOM, rect.bottom),
+        (CONTROL_START_RECT_LEFT, rect.left),
+        (CONTROL_START_RECT_TOP, rect.top),
+        (CONTROL_START_RECT_RIGHT, rect.right),
+        (CONTROL_START_RECT_BOTTOM, rect.bottom),
     ] {
         unsafe {
             PostThreadMessageW(
@@ -1519,10 +1487,10 @@ fn post_start_button_rect(thread: u32, message: u32, rect: RECT) -> Result<(), S
 fn post_search_button_rect(thread: u32, message: u32, rect: Option<RECT>) -> Result<(), String> {
     let rect = rect.unwrap_or_default();
     for (control, coordinate) in [
-        (SHELL_CONTROL_SEARCH_RECT_LEFT, rect.left),
-        (SHELL_CONTROL_SEARCH_RECT_TOP, rect.top),
-        (SHELL_CONTROL_SEARCH_RECT_RIGHT, rect.right),
-        (SHELL_CONTROL_SEARCH_RECT_BOTTOM, rect.bottom),
+        (CONTROL_SEARCH_RECT_LEFT, rect.left),
+        (CONTROL_SEARCH_RECT_TOP, rect.top),
+        (CONTROL_SEARCH_RECT_RIGHT, rect.right),
+        (CONTROL_SEARCH_RECT_BOTTOM, rect.bottom),
     ] {
         unsafe {
             PostThreadMessageW(
@@ -1728,7 +1696,7 @@ fn request_start_icon_shutdown(thread: u32) {
         let _ = PostThreadMessageW(
             thread,
             message,
-            WPARAM(SHELL_CONTROL_START_ICON_SHUTDOWN),
+            WPARAM(CONTROL_START_ICON_SHUTDOWN),
             LPARAM(0),
         );
     }
@@ -1743,7 +1711,7 @@ unsafe fn cleanup_shell_hook(hook: HHOOK, module: HMODULE) {
 fn shell_bridge_message() -> Result<u32, String> {
     BRIDGE_MESSAGE_ID
         .get_or_init(|| {
-            let name = wide(SHELL_BRIDGE_MESSAGE_NAME);
+            let name = wide(BRIDGE_MESSAGE_NAME);
             let message = unsafe { RegisterWindowMessageW(PCWSTR(name.as_ptr())) };
             if message == 0 {
                 Err("register Explorer bridge message failed".to_string())
@@ -1881,14 +1849,13 @@ fn fnv1a_64(bytes: &[u8]) -> u64 {
     bytes.iter().fold(0xcbf2_9ce4_8422_2325, |hash, &byte| (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3))
 }
 
-const RAW_INPUT_WINDOW_CLASS: &str = "PrismRawKeyboardObserver";
 
 unsafe fn ensure_raw_input_class() -> Result<(), String> {
     RAW_INPUT_CLASS
         .get_or_init(|| {
             let module =
                 GetModuleHandleW(None).map_err(|error| format!("get Prism module: {error}"))?;
-            let class_name = wide(RAW_INPUT_WINDOW_CLASS);
+            let class_name = wide(OBSERVER_CLASS_NAME);
             let class = WNDCLASSW {
                 hInstance: HINSTANCE(module.0),
                 lpfnWndProc: Some(raw_input_window_proc),
@@ -1910,7 +1877,7 @@ unsafe fn create_observer_window(watch_keyboard: bool) -> Result<HWND, String> {
     ensure_raw_input_class()?;
     let module = GetModuleHandleW(None).map_err(|error| format!("get Prism module: {error}"))?;
     let instance = HINSTANCE(module.0);
-    let class_name = wide(RAW_INPUT_WINDOW_CLASS);
+    let class_name = wide(OBSERVER_CLASS_NAME);
     // Message-only windows stop receiving keyboard INPUTSINK reports while an
     // elevated app (for example Task Manager) holds focus, so the Win key never
     // reaches Prism until focus leaves that window. A hidden top-level tool
@@ -2244,40 +2211,40 @@ unsafe extern "system" fn raw_input_window_proc(
     }
     if shell_bridge_message().is_ok_and(|bridge_message| message == bridge_message) {
         match wparam.0 {
-            SHELL_EVENT_HOTKEY_DISABLED => {
+            EVENT_HOTKEY_DISABLED => {
                 SHELL_BRIDGE_ACK.store(if lparam.0 != 0 { 2 } else { 1 }, Ordering::Release);
             }
-            SHELL_EVENT_START_RECT_CONFIGURED => {
+            EVENT_START_RECT_CONFIGURED => {
                 SHELL_START_RECT_ACK.store(if lparam.0 != 0 { 2 } else { 1 }, Ordering::Release);
             }
-            SHELL_EVENT_SEARCH_RECT_CONFIGURED => {
+            EVENT_SEARCH_RECT_CONFIGURED => {
                 SHELL_SEARCH_RECT_ACK.store(if lparam.0 != 0 { 2 } else { 1 }, Ordering::Release);
             }
-            SHELL_EVENT_START_ICON_SHUTDOWN => {
+            EVENT_START_ICON_SHUTDOWN => {
                 SHELL_ICON_SHUTDOWN_ACK.store(if lparam.0 != 0 { 2 } else { 1 }, Ordering::Release);
             }
-            SHELL_EVENT_START_ICON_REFRESHED => {
+            EVENT_START_ICON_REFRESHED => {
                 debug_trace(&format!("start-icon-refresh {}", lparam.0));
             }
-            SHELL_EVENT_TASKBAR_PIN_COMPLETED => {
+            EVENT_TASKBAR_PIN_COMPLETED => {
                 SHELL_TASKBAR_PIN_ACK.store(if lparam.0 != 0 { 2 } else { 1 }, Ordering::Release);
             }
-            SHELL_EVENT_FOREGROUND_RESULT => {
+            EVENT_FOREGROUND_RESULT => {
                 SHELL_FOREGROUND_ACK.store(if lparam.0 != 0 { 2 } else { 1 }, Ordering::Release);
             }
-            SHELL_EVENT_SHELL_START_COMMAND => {
+            EVENT_SHELL_START_COMMAND => {
                 note_shell_start_command();
             }
-            SHELL_EVENT_SHELL_SEARCH_COMMAND => {
+            EVENT_SHELL_SEARCH_COMMAND => {
                 note_shell_search_command();
             }
-            SHELL_EVENT_TASKBAR_POINTER => {
+            EVENT_TASKBAR_POINTER => {
                 request_start_rect_refresh();
             }
-            SHELL_EVENT_TASKBAR_START_CLICK_X => {
+            EVENT_TASKBAR_START_CLICK_X => {
                 SHELL_START_CLICK_X.store(lparam.0 as i32, Ordering::Release);
             }
-            SHELL_EVENT_TASKBAR_START_CLICK_Y
+            EVENT_TASKBAR_START_CLICK_Y
                 if ACTIVE.load(Ordering::Acquire)
                     && OBSERVER_ACTIVE.load(Ordering::Acquire)
                     && SHELL_BRIDGE_ACTIVE.load(Ordering::Acquire) =>

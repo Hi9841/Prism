@@ -8,7 +8,7 @@ fn main() {
 /// Builds the Explorer bridge DLL that `win_key` injects, and exposes its path
 /// to the crate as `PRISM_SHELL_HOOK_DLL`.
 fn build_shell_hook() {
-    println!("cargo:rerun-if-changed=shell-hook/src/lib.rs");
+    println!("cargo:rerun-if-changed=shell-hook/src");
 
     let target = std::env::var("TARGET").expect("Cargo did not provide TARGET");
     if !target.contains("windows") {
