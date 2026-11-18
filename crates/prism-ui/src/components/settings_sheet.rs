@@ -11,10 +11,8 @@ use gpui::{
 use crate::components::taskbar_customization::TaskbarCustomization;
 use crate::components::text_input::{Changed, InputStyle, TextInput};
 use crate::components::focus;
-use crate::components::ui::{
-    SegmentOption, row_icon, segmented, settings_row, theme, title_tooltip, toggle,
-    truncate, weight,
-};
+use crate::components::ui::{SegmentOption, row_icon, segmented, settings_row, title_tooltip, toggle, truncate, weight};
+use crate::state::app::theme;
 use crate::gfx::{Tween, icon, icon_stroke, r, reduced_motion, zoomed};
 use crate::lib::bridge;
 use crate::lib::emoji::locale_compare;
@@ -533,7 +531,7 @@ impl SettingsSheet {
             let opacity = transition::number(&key, "opacity", if disabled { 0.35 } else { 1.0 }, Timing::PRESS, window, cx);
             let button = transition::press(div().id(key.clone()), &key, !disabled, window, cx);
             focus::button(button, !disabled, &t)
-                .tooltip(title_tooltip(title))
+                .tooltip(title_tooltip(title, t.mode))
                 .flex()
                 .items_center()
                 .justify_center()
@@ -691,7 +689,7 @@ impl SettingsSheet {
                     let paint = transition::hover_paint(&key, (t.accent, t.accent), (t.accent_soft, t.surface_hover), Timing::PRESS, window, cx);
                     let button = transition::press(div().id(key.clone()), &key, true, window, cx);
                     focus::button(button, true, &t)
-                        .tooltip(title_tooltip("Create app collection"))
+                        .tooltip(title_tooltip("Create app collection", t.mode))
                         .flex()
                         .flex_none()
                         .items_center()
@@ -831,7 +829,7 @@ impl SettingsSheet {
                         let paint = transition::hover_paint(&key, (t.fg, t.fg), (t.accent_soft, t.surface_hover), Timing::PRESS, window, cx);
                         let button = transition::press(div().id(key.clone()), &key, true, window, cx);
                         focus::button(button, true, &t)
-                            .tooltip(title_tooltip(format!("Remove {}", entry.name)))
+                            .tooltip(title_tooltip(format!("Remove {}", entry.name), t.mode))
                             .flex()
                             .max_w_full()
                             .items_center()
@@ -876,7 +874,7 @@ impl SettingsSheet {
         let opacity = transition::number(&id, "opacity", if disabled { 0.25 } else { 1.0 }, Timing::PRESS, window, cx);
         let button = transition::press(div().id(id.clone()), &id, !disabled, window, cx);
         focus::button(button, !disabled, &t)
-            .tooltip(title_tooltip(title))
+            .tooltip(title_tooltip(title, t.mode))
             .flex()
             .items_center()
             .justify_center()
@@ -928,7 +926,7 @@ impl SettingsSheet {
                         transition::hover_paint(&key, (t.fg_secondary, t.fg), (TRANSPARENT, t.surface_hover), Timing::tw(100), window, cx)
                     };
                     focus::button(div().id(("picker-app", index)), !disabled, &t)
-                        .when(disabled, |d| d.tooltip(title_tooltip(format!("{} is full", group.name))))
+                        .when(disabled, |d| d.tooltip(title_tooltip(format!("{} is full", group.name), t.mode)))
                         .flex()
                         .min_h(r(40.))
                         .w_full()
@@ -1018,7 +1016,7 @@ impl SettingsSheet {
                     .when(has_query, |d| {
                         d.child(
                             focus::button(div().id("clear-app-filter"), true, &t)
-                                .tooltip(title_tooltip("Clear filter"))
+                                .tooltip(title_tooltip("Clear filter", t.mode))
                                 .group("clear-filter")
                                 .flex()
                                 .flex_none()

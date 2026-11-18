@@ -17,7 +17,8 @@ use crate::components::settings_sheet::display_shortcut;
 use crate::components::text_input::{Changed, TextInput};
 use crate::components::focus;
 use crate::components::power_menu::PowerMenu;
-use crate::components::ui::{IconButtonProps, icon_button, kbd, row_icon, section_label, theme, title_tooltip, truncate, weight};
+use crate::components::ui::{IconButtonProps, icon_button, kbd, row_icon, section_label, title_tooltip, truncate, weight};
+use crate::state::app::theme;
 use crate::features::palette::palette_search_input::{
     SearchInputProps, SearchKey, input_style, render_search_input, search_key,
 };
@@ -1087,7 +1088,7 @@ impl Palette {
                     .justify_center()
                     .size(r(32.))
                     .rounded(r(8.))
-                    .tooltip(title_tooltip(format!("Reorder {}", item.title)))
+                    .tooltip(title_tooltip(format!("Reorder {}", item.title), t.mode))
                     .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _, cx| {
                         let direction = match event.keystroke.key.as_str() {
                             "up" => -1,
@@ -1126,7 +1127,7 @@ impl Palette {
             let opacity = transition::number(&key, "opacity", if show_affordance { 1.0 } else { 0.0 }, Timing::tw(150), window, cx);
             let button = transition::active_scale(square(("remove-recent", index)), &key, 0.96, Timing::NONE, true, window, cx);
             focus::button(button, selected, t)
-                .tooltip(title_tooltip("Remove from Recent"))
+                .tooltip(title_tooltip("Remove from Recent", t.mode))
                 .opacity(opacity)
                 .bg(hsla(background))
                 .on_click(cx.listener(move |_, _, _, cx| {
@@ -1163,7 +1164,7 @@ impl Palette {
             let button = transition::press(square(("pin-toggle", index)), &key, true, window, cx);
             trailing = trailing.child(
                 focus::button(button, selected, t)
-                    .tooltip(title_tooltip(format!("{} {}", if pinned { "Unpin" } else { "Pin" }, item.title)))
+                    .tooltip(title_tooltip(format!("{} {}", if pinned { "Unpin" } else { "Pin" }, item.title), t.mode))
                     .opacity(opacity)
                     .bg(hsla(background))
                     .on_click(cx.listener(move |this, _, window, cx| {
@@ -1218,7 +1219,7 @@ impl Palette {
                     })
                     .child(
                         focus::button(square(("file-grip", index)), selected, t)
-                            .tooltip(title_tooltip(format!("Drag {} into another app (Discord, Explorer, etc.)", item.title)))
+                            .tooltip(title_tooltip(format!("Drag {} into another app (Discord, Explorer, etc.)", item.title), t.mode))
                             .opacity(opacity)
                             .cursor_grab()
                             .bg(hsla(background))
@@ -1269,7 +1270,7 @@ impl Palette {
             .size(r(28.))
             .rounded(r(7.))
             .when(margin_right, |d| d.mr(r(14.)))
-            .tooltip(title_tooltip(format!("Reorder {label}")))
+            .tooltip(title_tooltip(format!("Reorder {label}"), t.mode))
             .cursor_grab()
             .hover(|s| s.bg(hsla(t.surface_hover)))
             .on_mouse_down(
@@ -1935,7 +1936,7 @@ impl Palette {
                 .text_size(r(11.))
                 .line_height(relative(1.45))
                 .text_color(hsla(t.fg_quiet))
-                .child(spinning_icon("refresh-cw", 12., t.fg_quiet))
+                .child(crate::gfx::spinning_icon("refresh-cw", 12., t.fg_quiet))
                 .child(truncate(label))
         };
         div()
@@ -1987,7 +1988,7 @@ impl Palette {
                     .child(self.update_control.clone())
                     .when(!apps_loaded && query_empty, |d| d.child(spinner("indexing apps")))
                     .when(file_indexing && apps_loaded, |d| {
-                        d.child(spinner("indexing files").id("file-indexing").tooltip(title_tooltip(indexing_title)))
+                        d.child(spinner("indexing files").id("file-indexing").tooltip(title_tooltip(indexing_title, t.mode)))
                     })
                     .when(apps_error && query_empty, |d| {
                         d.child(
@@ -2032,16 +2033,6 @@ fn drop_ring(t: &Theme) -> gpui::Div {
 
 fn is_path_subtitle(subtitle: &str) -> bool {
     subtitle.contains('\\') || subtitle.contains('/')
-}
-
-/// `animate-spin`: one turn per `SPIN_MS`, linear.
-pub fn spinning_icon(name: &str, size: f32, color: Rgba) -> gpui::AnimationElement<gpui::Svg> {
-    use gpui::{Animation, AnimationExt, Transformation, percentage};
-    icon(name, size, color).with_animation(
-        gpui::ElementId::Name(format!("spin-{name}").into()),
-        Animation::new(Duration::from_millis(motion::SPIN_MS)).repeat(),
-        |svg, delta| svg.with_transformation(Transformation::rotate(percentage(delta))),
-    )
 }
 
 impl Render for Palette {

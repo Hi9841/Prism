@@ -10,14 +10,7 @@ use crate::gfx::{Tween, data_url_image, icon, r, zoomed};
 use crate::transition::{self, Timing};
 use crate::lib::emoji::{hue_for_name, name_to_monogram};
 use crate::lib::types::PaletteIcon;
-use crate::state::app::app_state;
 use crate::theme::{Theme, hsla, motion, shadow, shadow_tile, white};
-
-/// The resolved theme and the view zoom factor for this frame.
-pub fn theme(cx: &App) -> (Theme, f32) {
-    let app = app_state(cx).read(cx);
-    (app.theme.clone(), (app.settings.view_zoom / 100.0) as f32)
-}
 
 pub fn weight(w: f32) -> FontWeight {
     FontWeight(w)
@@ -38,12 +31,15 @@ pub fn truncate(text: impl Into<SharedString>) -> gpui::Div {
 
 /// The `title` attribute. WebView2 shows the Windows tooltip control after the
 /// hover delay, below the pointer, in system metrics (the view zoom does not apply).
-/// Use with `.tooltip(title_tooltip(..))`.
-pub fn title_tooltip(text: impl Into<SharedString>) -> impl Fn(&mut Window, &mut App) -> gpui::AnyView + 'static {
+/// Use with `.tooltip(title_tooltip(.., t.mode))`.
+pub fn title_tooltip(
+    text: impl Into<SharedString>,
+    mode: crate::theme::Mode,
+) -> impl Fn(&mut Window, &mut App) -> gpui::AnyView + 'static {
     let text: SharedString = text.into();
+    let dark = mode == crate::theme::Mode::Dark;
     move |_, cx| {
-        let dark = theme(cx).0.mode == crate::theme::Mode::Dark;
-        // Headless Chrome does not capture the native tooltip: parity captures skip it.
+        // Parity captures leave the tooltip out, as the captures of the original app did.
         let text = if crate::gfx::parity().is_some() { SharedString::default() } else { text.clone() };
         cx.new(|_| TitleTooltip { text, dark }).into()
     }
@@ -530,7 +526,7 @@ pub fn icon_button(
         })
         // An open panel or menu (`active`) would sit under its button's
         // tooltip: a native tooltip hides on the click that opens it.
-        .when(!active, |d| d.tooltip(title_tooltip(label)))
+        .when(!active, |d| d.tooltip(title_tooltip(label, t.mode)))
         .child(icon(icon_name, icon_size, glyph))
         .child(hover)
 }

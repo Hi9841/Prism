@@ -56,6 +56,16 @@ pub fn icon(name: &str, size: f32, color: Rgba) -> Svg {
     svg().path(SharedString::from(format!("icons/{name}.svg"))).size(r(size)).flex_none().text_color(hsla(color))
 }
 
+/// `animate-spin`: one turn per `SPIN_MS`, linear.
+pub fn spinning_icon(name: &str, size: f32, color: Rgba) -> gpui::AnimationElement<gpui::Svg> {
+    use gpui::{Animation, AnimationExt, percentage};
+    icon(name, size, color).with_animation(
+        gpui::ElementId::Name(format!("spin-{name}").into()),
+        Animation::new(Duration::from_millis(crate::theme::motion::SPIN_MS)).repeat(),
+        |svg, delta| svg.with_transformation(Transformation::rotate(percentage(delta))),
+    )
+}
+
 /// An icon with a non-default stroke width (`check@3`).
 pub fn icon_stroke(name: &str, stroke: f32, size: f32, color: Rgba) -> Svg {
     let suffix = format!("{stroke}").replace('.', "_");

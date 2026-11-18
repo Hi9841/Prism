@@ -5,7 +5,8 @@ use std::time::Duration;
 
 use gpui::{Context, Entity, ParentElement, Render, Styled, Task, Timer, Window, div, prelude::*, relative};
 
-use crate::components::ui::{theme, title_tooltip, truncate, weight};
+use crate::components::ui::{title_tooltip, truncate, weight};
+use crate::state::app::theme;
 use crate::features::updater::update_policy::should_check_for_update;
 use crate::features::updater::update_progress::update_percent;
 use crate::features::updater::updater::{self, DownloadEvent, Update};
@@ -266,7 +267,7 @@ impl Render for UpdateControl {
             let paint = transition::hover_paint(&key, (t.fg_quiet, t.fg), (TRANSPARENT, t.surface_hover), Timing::PRESS, window, cx);
             let button = transition::press(div().id(key.clone()), &key, true, window, cx);
             return crate::components::focus::button(button, true, &t)
-                .tooltip(title_tooltip("Check for updates"))
+                .tooltip(title_tooltip("Check for updates", t.mode))
                 .flex()
                 .flex_none()
                 .items_center()
@@ -326,7 +327,7 @@ impl Render for UpdateControl {
         let icon_color = paint.text;
         let button = transition::press(div().id(key.clone()), &key, !busy, window, cx);
         crate::components::focus::button(button, !busy, &t)
-            .tooltip(title_tooltip(title))
+            .tooltip(title_tooltip(title, t.mode))
             .flex()
             .flex_none()
             .items_center()

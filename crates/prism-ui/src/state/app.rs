@@ -960,6 +960,12 @@ mod provider {
         cx.global::<AppStateHandle>().0.clone()
     }
 
+    /// The resolved theme and the view zoom factor for this frame.
+    pub fn theme(cx: &App) -> (Theme, f32) {
+        let app = app_state(cx).read(cx);
+        (app.theme.clone(), (app.settings.view_zoom / 100.0) as f32)
+    }
+
     pub fn install(cx: &mut App) -> Entity<AppState> {
         let entity = cx.new(AppState::new);
         cx.set_global(AppStateHandle(entity.clone()));

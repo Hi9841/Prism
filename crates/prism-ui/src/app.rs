@@ -10,7 +10,7 @@ use gpui::{
 
 use crate::components::settings_sheet::SettingsSheet;
 use crate::components::toast::render_toast_stack;
-use crate::components::ui::theme;
+use crate::state::app::theme;
 use crate::features::palette::palette::Palette;
 use crate::gfx::{Tween, r};
 use crate::lib::bridge::{self, BackendEvent};

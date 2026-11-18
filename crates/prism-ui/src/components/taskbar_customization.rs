@@ -11,7 +11,8 @@ use gpui::{
 
 use prism_core::taskbar_customization::{BUILTIN_START_ICONS, COMBINE_BUTTONS, THICKNESSES};
 
-use crate::components::ui::{SegmentOption, segmented, settings_row, shadow_sm, theme, title_tooltip, toggle, weight};
+use crate::components::ui::{SegmentOption, segmented, settings_row, shadow_sm, title_tooltip, toggle, weight};
+use crate::state::app::theme;
 use crate::gfx::{icon, png_image, r, zoomed};
 use crate::lib::bridge::{self, TaskbarSettings};
 use crate::state::app::{AppState, ToastKind, app_state};
@@ -213,7 +214,7 @@ impl Render for TaskbarCustomization {
                 .min_h(r(48.))
                 .items_center()
                 .justify_center()
-                .child(crate::features::palette::palette::spinning_icon("loader-circle", 16., t.fg_tertiary))
+                .child(crate::gfx::spinning_icon("loader-circle", 16., t.fg_tertiary))
                 .into_any_element();
         };
         let busy = self.busy.is_some();
@@ -296,7 +297,7 @@ impl Render for TaskbarCustomization {
             let (tile, _) = icon_tile(("start-icon", index), selected, busy, &t, window, cx);
             tiles = tiles.child(
                 tile
-                    .tooltip(title_tooltip(label))
+                    .tooltip(title_tooltip(label, t.mode))
                     .when(!busy, |d| {
                         d.on_click(cx.listener(move |this, _, _, cx| {
                             this.apply(BusyControl::Icon, bridge::set_taskbar_start_icon(value.clone()), cx)
@@ -309,7 +310,7 @@ impl Render for TaskbarCustomization {
         let (tile, glyph) = icon_tile("start-icon-custom", false, busy, &t, window, cx);
         tiles = tiles.child(
             tile
-                .tooltip(title_tooltip("Add custom PNG"))
+                .tooltip(title_tooltip("Add custom PNG", t.mode))
                 .when(!busy, |d| d.on_click(cx.listener(|this, _, _, cx| this.choose_icon(cx))))
                 .child(div().flex().flex_shrink_0().size(r(24.)).items_center().justify_center().child(icon("image-up", 16., glyph)))
                 .child("Custom"),
@@ -330,7 +331,7 @@ impl Render for TaskbarCustomization {
                     .min_w(r(46.))
                     .child(
                         tile
-                            .tooltip(title_tooltip(format!("Custom icon {}", index + 1)))
+                            .tooltip(title_tooltip(format!("Custom icon {}", index + 1), t.mode))
                             .when(!busy, |d| {
                                 d.on_click(cx.listener(move |this, _, _, cx| {
                                     this.apply(BusyControl::Icon, bridge::select_custom_start_icon(select_id.clone()), cx)
@@ -348,7 +349,7 @@ impl Render for TaskbarCustomization {
                             .occlude()
                             .tab_index(0)
                             .tab_stop(!busy)
-                            .tooltip(title_tooltip(format!("Remove custom icon {}", index + 1)))
+                            .tooltip(title_tooltip(format!("Remove custom icon {}", index + 1), t.mode))
                             .absolute()
                             .top(r(-4.))
                             .right(r(-4.))

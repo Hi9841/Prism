@@ -10,7 +10,8 @@ use gpui::{
 };
 
 use crate::components::menu::{self, Tone};
-use crate::components::ui::{IconButtonProps, icon_button, theme};
+use crate::components::ui::{IconButtonProps, icon_button};
+use crate::state::app::theme;
 use crate::gfx::{Tween, r, reduced_motion, scale_from};
 use crate::lib::bridge::{self, BackendEvent};
 use crate::lib::launcher_motion::POPOVER_MOTION_MS;

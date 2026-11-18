@@ -8,7 +8,7 @@ use gpui::{
 };
 
 use crate::components::menu::{self, Tone};
-use crate::components::ui::theme;
+use crate::state::app::theme;
 use crate::gfx::{Tween, r, reduced_motion, scale_from};
 use crate::lib::bridge;
 use crate::lib::launcher_motion::POPOVER_MOTION_MS;
