@@ -148,10 +148,8 @@ fn wait_for_taskbar_state(path: &Path, pinned: bool) -> bool {
 }
 
 /// Pins or unpins a launch target and returns success only after the taskbar
-/// pin store reflects the requested state.
-/// Sentinel returned when Windows refuses to pin programmatically. The
-/// frontend turns this into the manual taskbar instruction.
-
+/// pin store reflects the requested state. When Windows refuses to pin from
+/// code, the error is `MANUAL_PIN_REQUIRED` and the UI asks the user to pin.
 pub fn set_taskbar_pinned(path: &Path, pinned: bool) -> Result<(), String> {
     if !path.exists() {
         return Err(format!("{} does not exist", path.display()));
