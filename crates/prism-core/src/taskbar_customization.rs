@@ -41,6 +41,13 @@ const PREVIEW_EDGE: u32 = 96;
 const GEM_ICON: &[u8] = include_bytes!("../assets/taskbar-icons/gem.png");
 const DIAMOND_ICON: &[u8] = include_bytes!("../assets/taskbar-icons/diamond.png");
 
+/// The icon density choices of `set_thickness`.
+pub const THICKNESSES: [&str; 3] = ["compact", "default", "adaptive"];
+/// The button grouping choices of `set_combine_buttons`, in the order of their registry codes.
+pub const COMBINE_BUTTONS: [&str; 3] = ["always", "whenFull", "never"];
+/// The built-in Start icons of `set_start_icon`; `"custom"` selects a user image.
+pub const BUILTIN_START_ICONS: [&str; 3] = ["system", "gem", "diamond"];
+
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 enum StartIcon {
@@ -165,12 +172,10 @@ pub fn set_auto_hide(enabled: bool) -> Result<(), String> {
 }
 
 pub fn set_combine_buttons(value: &str) -> Result<(), String> {
-    let code = match value {
-        "always" => 0,
-        "whenFull" => 1,
-        "never" => 2,
-        _ => return Err(format!("unsupported taskbar grouping '{value}'")),
-    };
+    let code = COMBINE_BUTTONS
+        .iter()
+        .position(|&known| known == value)
+        .ok_or_else(|| format!("unsupported taskbar grouping '{value}'"))? as u32;
     write_advanced_dword(COMBINE_VALUE, code)?;
     write_advanced_dword(SECONDARY_COMBINE_VALUE, code)?;
     crate::taskbar_alignment::notify_taskbars("TraySettings");
@@ -407,11 +412,7 @@ fn thickness_name(legacy_value: u32, icon_preference: u32) -> &'static str {
 }
 
 fn combine_name(value: u32) -> &'static str {
-    match value {
-        1 => "whenFull",
-        2 => "never",
-        _ => "always",
-    }
+    COMBINE_BUTTONS.get(value as usize).copied().unwrap_or(COMBINE_BUTTONS[0])
 }
 
 fn write_advanced_dword(name: &str, value: u32) -> Result<(), String> {

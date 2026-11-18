@@ -9,6 +9,8 @@ use gpui::{
     img, prelude::*, relative,
 };
 
+use prism_core::taskbar_customization::{BUILTIN_START_ICONS, COMBINE_BUTTONS, THICKNESSES};
+
 use crate::components::ui::{SegmentOption, segmented, settings_row, shadow_sm, theme, title_tooltip, toggle, weight};
 use crate::gfx::{icon, png_image, r, zoomed};
 use crate::lib::bridge::{self, TaskbarSettings};
@@ -219,11 +221,11 @@ impl Render for TaskbarCustomization {
         let density = segmented(
             "taskbar-density",
             &settings.thickness,
-            vec![
-                SegmentOption { value: "compact".into(), label: "Compact".into() },
-                SegmentOption { value: "default".into(), label: "Default".into() },
-                SegmentOption { value: "adaptive".into(), label: "When full".into() },
-            ],
+            THICKNESSES
+                .iter()
+                .zip(["Compact", "Default", "When full"])
+                .map(|(value, label)| SegmentOption { value: (*value).into(), label: label.into() })
+                .collect(),
             busy,
             &t,
             zoom,
@@ -247,11 +249,11 @@ impl Render for TaskbarCustomization {
         let combine = segmented(
             "taskbar-combine",
             &settings.combine_buttons,
-            vec![
-                SegmentOption { value: "always".into(), label: "Always".into() },
-                SegmentOption { value: "whenFull".into(), label: "When full".into() },
-                SegmentOption { value: "never".into(), label: "Never".into() },
-            ],
+            COMBINE_BUTTONS
+                .iter()
+                .zip(["Always", "When full", "Never"])
+                .map(|(value, label)| SegmentOption { value: (*value).into(), label: label.into() })
+                .collect(),
             busy,
             &t,
             zoom,
@@ -267,14 +269,14 @@ impl Render for TaskbarCustomization {
             },
         );
 
-        let options: [(&str, &str); 3] = [("system", "System"), ("gem", "Gem"), ("diamond", "Diamond")];
+        let options = BUILTIN_START_ICONS.into_iter().zip(["System", "Gem", "Diamond"]);
         // CSS sizes a wrapping flex box to its one-line width, clamped to `max-w-65`, so wrapped
         // lines align right in the full 260 px. Taffy sizes it to its longest line instead. The
         // four fixed tiles fit (227 px); one more tile (at least 46 px + gap) wraps.
         let wraps = !self.custom_images.is_empty();
         let mut tiles = div().flex().max_w(r(260.)).when(wraps, |d| d.w(r(260.))).flex_wrap().justify_end().gap(r(6.));
-        for (index, (value, label)) in options.iter().enumerate() {
-            let selected = settings.start_icon == *value;
+        for (index, (value, label)) in options.enumerate() {
+            let selected = settings.start_icon == value;
             let value = value.to_string();
             let glyph: AnyElement = match index {
                 0 => windows_glyph(&t),
@@ -294,14 +296,14 @@ impl Render for TaskbarCustomization {
             let (tile, _) = icon_tile(("start-icon", index), selected, busy, &t, window, cx);
             tiles = tiles.child(
                 tile
-                    .tooltip(title_tooltip(*label))
+                    .tooltip(title_tooltip(label))
                     .when(!busy, |d| {
                         d.on_click(cx.listener(move |this, _, _, cx| {
                             this.apply(BusyControl::Icon, bridge::set_taskbar_start_icon(value.clone()), cx)
                         }))
                     })
                     .child(div().flex().flex_shrink_0().size(r(24.)).items_center().justify_center().child(glyph))
-                    .child(*label),
+                    .child(label),
             );
         }
         let (tile, glyph) = icon_tile("start-icon-custom", false, busy, &t, window, cx);
