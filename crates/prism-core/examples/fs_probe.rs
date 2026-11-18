@@ -52,8 +52,7 @@ fn main() {
 
 /// The exclusions the app uses by default, with the app data folder of Prism.
 fn exclusions() -> Exclusions {
-    let data = std::env::var("APPDATA").unwrap_or_default();
-    Exclusions::default_list(&Path::new(&data).join("app.prism.launcher"))
+    Exclusions::default_list(&prism_core::host::data_dir())
 }
 
 fn walk(root: &str, threads: Option<&String>) -> Result<i32, String> {
