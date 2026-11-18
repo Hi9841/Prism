@@ -90,7 +90,7 @@ impl Inner {
             return Ok(());
         };
         let json = serde_json::to_vec(&self.counts).map_err(|error| error.to_string())?;
-        write_atomic(path, &json)
+        crate::win32::write_atomic(path, &json)
     }
 }
 
@@ -118,18 +118,6 @@ fn trim(counts: &mut HashMap<String, u32>, keep: &str) {
     for (_, id) in order.into_iter().take(excess) {
         counts.remove(&id);
     }
-}
-
-/// Writes to a temporary file in the same folder, then renames it over `path`.
-fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
-    let mut temp = path.as_os_str().to_owned();
-    temp.push(".tmp");
-    let temp = PathBuf::from(temp);
-    fs::write(&temp, bytes).map_err(|error| error.to_string())?;
-    fs::rename(&temp, path).map_err(|error| {
-        let _ = fs::remove_file(&temp);
-        error.to_string()
-    })
 }
 
 #[cfg(test)]

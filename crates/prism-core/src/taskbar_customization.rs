@@ -5,7 +5,7 @@
 //! reads from or writes to third-party shell-provider settings.
 
 use std::io::Cursor;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use base64::Engine;
@@ -203,7 +203,7 @@ pub fn set_custom_start_icon(base64_png: &str) -> Result<(), String> {
         ));
     }
     let id = new_custom_icon_id();
-    write_file_atomically(&custom_icon_path_for_id(&id)?, &preview)?;
+    crate::win32::write_atomic(&custom_icon_path_for_id(&id)?, &preview)?;
     let settings = IconSettings {
         version: 1,
         start_icon: StartIcon::Custom,
@@ -324,7 +324,7 @@ fn read_icon_settings() -> Result<IconSettings, String> {
 
 fn write_icon_settings(settings: &IconSettings) -> Result<(), String> {
     let bytes = serde_json::to_vec(&settings).map_err(|error| error.to_string())?;
-    write_file_atomically(&icon_settings_path(), &bytes)
+    crate::win32::write_atomic(&icon_settings_path(), &bytes)
 }
 
 fn selected_custom_id(settings: &IconSettings) -> Option<String> {
@@ -492,17 +492,6 @@ fn write_dword(key: HKEY, name: &str, value: u32) -> Result<(), String> {
     }
 }
 
-fn write_file_atomically(path: &Path, bytes: &[u8]) -> Result<(), String> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| "taskbar customization path has no parent".to_string())?;
-    std::fs::create_dir_all(parent)
-        .map_err(|error| format!("create taskbar customization directory: {error}"))?;
-    let temp = path.with_extension("tmp");
-    std::fs::write(&temp, bytes)
-        .map_err(|error| format!("write taskbar customization file: {error}"))?;
-    crate::win32::replace_file(&temp, path)
-}
 
 fn icon_settings_path() -> PathBuf {
     crate::host::data_dir().join(ICON_SETTINGS_NAME)

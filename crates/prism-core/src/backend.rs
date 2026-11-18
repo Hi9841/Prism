@@ -736,10 +736,6 @@ pub fn load_state_value() -> Result<Option<serde_json::Value>, String> {
 
 
 pub fn persist_state_value(dir: &Path, value: &serde_json::Value) -> Result<(), String> {
-    std::fs::create_dir_all(dir).map_err(|e| format!("failed to create data dir: {e}"))?;
     let text = serde_json::to_string_pretty(&value).map_err(|e| e.to_string())?;
-    let final_path = dir.join("prism.json");
-    let tmp_path = dir.join("prism.json.tmp");
-    std::fs::write(&tmp_path, text).map_err(|e| format!("failed to save state: {e}"))?;
-    crate::win32::replace_file(&tmp_path, &final_path).map_err(|e| format!("failed to commit state: {e}"))
+    crate::win32::write_atomic(&dir.join("prism.json"), text.as_bytes()).map_err(|e| format!("failed to save state: {e}"))
 }

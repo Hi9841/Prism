@@ -37,20 +37,13 @@ fn sync_file(icon: Option<&OverlayIcon>) -> Result<(), String> {
 }
 
 fn write_icon_file(path: &Path, pixels: &RgbaImage) -> Result<(), String> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| "taskbar icon path has no parent".to_string())?;
-    std::fs::create_dir_all(parent)
-        .map_err(|error| format!("create taskbar icon directory: {error}"))?;
     let raw_pixels = pixels.as_raw();
     let mut bytes = Vec::with_capacity(ICON_MAGIC.len() + 8 + raw_pixels.len());
     bytes.extend_from_slice(ICON_MAGIC);
     bytes.extend_from_slice(&pixels.width().to_le_bytes());
     bytes.extend_from_slice(&pixels.height().to_le_bytes());
     bytes.extend_from_slice(raw_pixels);
-    let temp = path.with_extension("tmp");
-    std::fs::write(&temp, bytes).map_err(|error| format!("write taskbar icon file: {error}"))?;
-    crate::win32::replace_file(&temp, path)
+    crate::win32::write_atomic(path, &bytes).map_err(|error| format!("write taskbar icon file: {error}"))
 }
 
 fn icon_path() -> PathBuf {

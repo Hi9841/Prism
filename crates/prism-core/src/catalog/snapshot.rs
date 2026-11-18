@@ -30,8 +30,8 @@
 //! caller builds the store again.
 
 use std::fs::File;
-use std::io::{BufReader, Read, Write};
-use std::path::{Path, PathBuf};
+use std::io::{BufReader, Read};
+use std::path::Path;
 
 use super::store::{Names, Segment, Variants, VolumeBackend, VolumeMeta};
 
@@ -181,12 +181,6 @@ impl Out {
     }
 }
 
-fn tmp_path(path: &Path) -> PathBuf {
-    let mut name = path.as_os_str().to_os_string();
-    name.push(".tmp");
-    PathBuf::from(name)
-}
-
 fn put_text(out: &mut Vec<u8>, text: &str) {
     out.extend_from_slice(&(text.len() as u32).to_le_bytes());
     out.extend_from_slice(text.as_bytes());
@@ -315,25 +309,8 @@ fn serialize_legacy(segments: &[&Segment], version: u32) -> Result<Vec<u8>, Stri
 /// Writes `bytes` to `<path>.tmp`, flushes it to disk, and renames it over
 /// `path`. Returns the size in bytes.
 pub(super) fn write_file(path: &Path, bytes: &[u8]) -> Result<u64, String> {
-    let tmp = tmp_path(path);
-    if let Some(folder) = path.parent().filter(|folder| !folder.as_os_str().is_empty()) {
-        std::fs::create_dir_all(folder).map_err(|e| e.to_string())?;
-    }
-    let result = write_tmp(&tmp, bytes).and_then(|()| {
-        std::fs::rename(&tmp, path).map_err(|e| e.to_string())?;
-        Ok(bytes.len() as u64)
-    });
-    if result.is_err() {
-        let _ = std::fs::remove_file(&tmp);
-    }
-    result
-}
-
-fn write_tmp(tmp: &Path, bytes: &[u8]) -> Result<(), String> {
-    let mut file = File::create(tmp).map_err(|e| e.to_string())?;
-    file.write_all(bytes).map_err(|e| e.to_string())?;
-    file.flush().map_err(|e| e.to_string())?;
-    file.sync_all().map_err(|e| e.to_string())
+    crate::win32::write_atomic_synced(path, bytes)?;
+    Ok(bytes.len() as u64)
 }
 
 struct In {

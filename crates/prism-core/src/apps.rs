@@ -188,12 +188,9 @@ fn write_cache(path: &Path, apps: &[AppEntry], scanned_at: SystemTime) {
         "apps": apps,
     });
     let text = serde_json::to_string(&value).unwrap_or_default();
-    let _ = std::fs::create_dir_all(path.parent().unwrap_or(Path::new("")));
-    // Atomic commit (temp file + replace) so a crash mid-write can never
-    // corrupt the cache and force a full rescan.
-    let temp = path.with_extension("json.tmp");
-    if std::fs::write(&temp, text).is_ok() {
-        let _ = crate::win32::replace_file(&temp, path);
+    // Atomic: a crash mid-write can never corrupt the cache and force a full rescan.
+    if let Err(error) = crate::win32::write_atomic(path, text.as_bytes()) {
+        crate::logs::debug_trace(&format!("apps-cache-write-error {error}"));
     }
 }
 

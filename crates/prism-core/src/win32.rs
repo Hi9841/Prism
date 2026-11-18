@@ -1,5 +1,6 @@
 //! Small helpers that Win32 calls across the backend share.
 
+use std::io::Write;
 use std::os::windows::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
@@ -24,8 +25,42 @@ pub(crate) fn wide_path(path: &Path) -> Vec<u16> {
     path.as_os_str().encode_wide().chain(Some(0)).collect()
 }
 
-/// Moves `temp` over `destination` in one step (the atomic save of a data file).
-pub(crate) fn replace_file(temp: &Path, destination: &Path) -> Result<(), String> {
+/// Saves `bytes` as `path` in one step: a reader sees the old file or the new
+/// one, never a part. The bytes go to `<path>.tmp` first.
+pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    write_through_temp(path, bytes, false)
+}
+
+/// As `write_atomic`, and the bytes are on the disk before the replace, so a
+/// crash or power loss keeps a whole file (the restore journal, the file
+/// index snapshot). The flush costs about 2 ms, so caches and settings do not.
+pub(crate) fn write_atomic_synced(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    write_through_temp(path, bytes, true)
+}
+
+fn write_through_temp(path: &Path, bytes: &[u8], sync: bool) -> Result<(), String> {
+    if let Some(folder) = path.parent().filter(|folder| !folder.as_os_str().is_empty()) {
+        std::fs::create_dir_all(folder).map_err(|error| error.to_string())?;
+    }
+    let mut temp = path.as_os_str().to_owned();
+    temp.push(".tmp");
+    let temp = PathBuf::from(temp);
+    let written = std::fs::File::create(&temp).and_then(|mut file| {
+        file.write_all(bytes)?;
+        if sync {
+            file.sync_all()?;
+        }
+        Ok(())
+    });
+    let result = written.map_err(|error| error.to_string()).and_then(|()| replace_file(&temp, path));
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temp);
+    }
+    result
+}
+
+/// Moves `temp` over `destination` in one step.
+fn replace_file(temp: &Path, destination: &Path) -> Result<(), String> {
     let (from, to) = (wide_path(temp), wide_path(destination));
     unsafe {
         MoveFileExW(PCWSTR(from.as_ptr()), PCWSTR(to.as_ptr()), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)
