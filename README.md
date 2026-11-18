@@ -108,6 +108,7 @@ crates/
   prism-ui/       views and state
   prism-core/     backend: Windows integration, file index, search, taskbar, audio
   prism-judge/    JSON adapter that the behavior judge drives
+  prism-vocab/    values the backend and the UI share (settings lists, app sources, markers)
 vendor/gpui/      GPUI 0.2.2 with Prism's patches (PRISM-PATCHES.md)
 packaging/        installer build, NSIS script, version check, release publisher
 migration/        behavior judge, design rulebook, records of the port from React/Tauri
