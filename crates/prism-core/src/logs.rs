@@ -32,6 +32,23 @@ pub(crate) fn append(dir: &Path, name: &str, record: &impl Serialize) {
     }
 }
 
+/// Records an error that has no caller to report it to (start-up and
+/// background work) in `errors.log`.
+pub(crate) fn error(context: &str, error: &str) {
+    #[derive(Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Record<'a> {
+        unix_ms: u128,
+        version: &'a str,
+        context: &'a str,
+        error: &'a str,
+    }
+    debug_trace(&format!("{context}: {error}"));
+    if let Some(dir) = dir() {
+        append(&dir, "errors", &Record { unix_ms: unix_ms(), version: env!("CARGO_PKG_VERSION"), context, error });
+    }
+}
+
 /// Debug builds only: one line in `%TEMP%\Prism\semantic-debug.log`.
 #[cfg(debug_assertions)]
 pub fn debug_trace(message: &str) {

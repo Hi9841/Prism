@@ -97,12 +97,16 @@ fn join_error(context: &str, error: tokio::task::JoinError) -> String {
 impl Backend {
     /// The backend part of app setup. Requires an installed host.
     pub fn start(&'static self, persisted: Option<&serde_json::Value>) {
-        let _ = start_menu::recover_stale();
+        if let Err(error) = start_menu::recover_stale() {
+            crate::logs::error("restore the Start provider setting of a crashed run", &error);
+        }
         // Repair the taskbar band if a previous instance crashed while
         // the palette was open.
         crate::runtime::spawn_blocking(taskbar::recover);
         let alignment = startup_taskbar_alignment(persisted);
-        let _ = taskbar_alignment::initialize(&alignment);
+        if let Err(error) = taskbar_alignment::initialize(&alignment) {
+            crate::logs::error("apply the taskbar alignment at start", &error);
+        }
         schedule_startup_taskbar_alignment();
         crate::runtime::spawn_blocking(taskbar_customization::init);
         audio_hook::init();
@@ -695,7 +699,9 @@ fn schedule_startup_taskbar_alignment() {
         }
         tokio::time::sleep(STARTUP_ALIGNMENT_DELAY).await;
         let _ = crate::runtime::spawn_blocking(move || {
-            let _ = taskbar_alignment::reapply_current();
+            if let Err(error) = taskbar_alignment::reapply_current() {
+                crate::logs::error("apply the taskbar alignment once Explorer runs", &error);
+            }
         })
         .await;
     });
