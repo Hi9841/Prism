@@ -264,10 +264,9 @@ impl Palette {
             let text = event.0.to_string();
             this.palette.update(cx, |palette, cx| palette.set_query(&text, cx));
         });
-        let palette_sub = cx.subscribe(&palette, |this, palette, event: &PaletteEvent, cx| match event {
+        let palette_sub = cx.subscribe(&palette, |this, _, event: &PaletteEvent, cx| match event {
             PaletteEvent::SelectionChanged => {
                 this.reveal_pending = true;
-                let _ = palette;
                 cx.notify();
             }
         });
@@ -279,11 +278,10 @@ impl Palette {
             cx.notify();
         });
         let observe_app = cx.observe(&app, |_, _, cx| cx.notify());
-        let app_sub = cx.subscribe(&app, |this, _, event: &AppEvent, cx| {
+        let app_sub = cx.subscribe(&app, |_, _, event: &AppEvent, cx| {
             if matches!(event, AppEvent::SettingsChanged { .. }) {
                 cx.notify();
             }
-            let _ = this;
         });
         let hub = bridge::event_hub(cx);
         let hub_sub = cx.subscribe(&hub, |this, _, event: &BackendEvent, cx| {
@@ -357,7 +355,7 @@ impl Palette {
 
     /* ---------------- commands ---------------- */
 
-    fn dismiss(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn dismiss(&mut self, cx: &mut Context<Self>) {
         let (open_settings, query_empty) =
             (self.app.read(cx).open_settings, self.palette.read(cx).query.is_empty());
         if open_settings {
@@ -367,7 +365,6 @@ impl Palette {
         } else {
             bridge::emit_event(BackendEvent::CloseRequested, cx);
         }
-        let _ = window;
     }
 
     fn on_search_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
@@ -390,7 +387,7 @@ impl Palette {
             SearchKey::Move(delta) => self.palette.update(cx, |p, cx| p.move_selection(delta, cx)),
             SearchKey::RunSelected => self.palette.update(cx, |p, cx| p.run_selected(cx)),
             SearchKey::OpenSelectedMenu => self.open_selected_menu(window, cx),
-            SearchKey::Dismiss => self.dismiss(window, cx),
+            SearchKey::Dismiss => self.dismiss(cx),
             SearchKey::Close => bridge::emit_event(BackendEvent::CloseRequested, cx),
             SearchKey::ClearQuery => self.palette.update(cx, |p, cx| p.set_query("", cx)),
         }
@@ -1851,7 +1848,6 @@ impl Palette {
         let (w, h) = (208.0 * zoom, 48.0 * zoom);
         let x = clamp(f32::from(drag.pos.x) + 14.0 * zoom, 8.0 * zoom, vw - w - 8.0 * zoom);
         let y = clamp(f32::from(drag.pos.y) - h / 2.0, 8.0 * zoom, vh - h - 8.0 * zoom);
-        let _ = cx;
         // `.category-drag-preview` has no exit animation: it unmounts on drop.
         let (opacity, scale) = preview_motion(drag.picked_at, None, window);
         Some(

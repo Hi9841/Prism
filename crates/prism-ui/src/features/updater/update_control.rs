@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use gpui::{Context, Entity, ParentElement, Render, Styled, Task, Timer, Window, div, prelude::*, relative};
 
-use crate::components::ui::{text_width, theme, title_tooltip, truncate, weight};
+use crate::components::ui::{theme, title_tooltip, truncate, weight};
 use crate::features::updater::update_policy::should_check_for_update;
 use crate::features::updater::update_progress::update_percent;
 use crate::features::updater::updater::{self, DownloadEvent, Update};
@@ -305,7 +305,6 @@ impl Render for UpdateControl {
             ViewState::Installing { .. } => "Installing".into(),
             _ => "Retry update".into(),
         };
-        let _ = text_width;
         let title = if failed {
             format!("Retry Prism v{version} update")
         } else if busy {

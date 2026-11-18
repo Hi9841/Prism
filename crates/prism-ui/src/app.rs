@@ -61,8 +61,8 @@ impl Launcher {
         });
         // Keep zoom shortcuts global so they work from both search and settings (A5).
         let weak = cx.weak_entity();
-        let intercept = cx.intercept_keystrokes(move |event, window, cx| {
-            let handled = weak.update(cx, |this, cx| this.zoom_key(&event.keystroke, window, cx)).unwrap_or(false);
+        let intercept = cx.intercept_keystrokes(move |event, _window, cx| {
+            let handled = weak.update(cx, |this, cx| this.zoom_key(&event.keystroke, cx)).unwrap_or(false);
             if handled {
                 cx.stop_propagation();
             }
@@ -86,7 +86,7 @@ impl Launcher {
         this
     }
 
-    fn zoom_key(&mut self, keystroke: &Keystroke, window: &mut Window, cx: &mut Context<Self>) -> bool {
+    fn zoom_key(&mut self, keystroke: &Keystroke, cx: &mut Context<Self>) -> bool {
         if !self.app.read(cx).ready {
             return false;
         }
@@ -104,7 +104,6 @@ impl Launcher {
             "down" | "-" | "_" => Some(-1),
             _ => None,
         };
-        let _ = window;
         if keystroke.key == "0" {
             self.app.update(cx, |app, cx| app.reset_view_zoom(cx));
             true

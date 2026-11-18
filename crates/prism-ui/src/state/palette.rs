@@ -214,7 +214,7 @@ impl PaletteState {
                     let _ = this.update(cx, |this, cx| {
                         match result {
                             Ok(list) => {
-                                this.set_apps(list, cx);
+                                this.set_apps(list);
                                 this.apps_error = false;
                                 this.apps_loaded = true;
                                 this.apps_revision += 1;
@@ -304,7 +304,7 @@ impl PaletteState {
             let _ = this.update(cx, |this, cx| {
                 match result {
                     Ok(list) => {
-                        this.set_apps(list, cx);
+                        this.set_apps(list);
                         this.apps_error = false;
                     }
                     Err(_) => this.apps_error = true,
@@ -329,10 +329,9 @@ impl PaletteState {
         .detach();
     }
 
-    fn set_apps(&mut self, list: Vec<AppEntry>, cx: &mut Context<Self>) {
+    fn set_apps(&mut self, list: Vec<AppEntry>) {
         self.apps = list;
         self.visible_apps = dedupe_apps(&self.apps);
-        let _ = cx;
     }
 
     /// Recomputes the memoized inputs that depend on settings.
@@ -988,7 +987,7 @@ impl PaletteState {
             let _ = this.update(cx, |this, cx| {
                 match result {
                     Ok(list) => {
-                        this.set_apps(list, cx);
+                        this.set_apps(list);
                         this.apps_error = false;
                     }
                     Err(_) => this.apps_error = true,

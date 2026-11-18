@@ -222,7 +222,6 @@ fn point_of(value: &Value) -> Point<gpui::Pixels> {
 }
 
 async fn run_steps(steps: Vec<Value>, window: AnyWindowHandle, shell: Rc<ParityShell>, out: PathBuf, cx: &mut AsyncApp) -> Result<(), String> {
-    let mut mouse = point(px(-10.), px(-10.));
     let mut pressed = false;
     for step in steps {
         if let Some(ms) = step.get("wait").and_then(Value::as_u64) {
@@ -248,19 +247,19 @@ async fn run_steps(steps: Vec<Value>, window: AnyWindowHandle, shell: Rc<ParityS
             let spec = spec.to_owned();
             cx.update_window(window, |_, window, cx| key_event(window, &spec, cx)).map_err(|e| e.to_string())?;
         } else if let Some(position) = step.get("move") {
-            mouse = point_of(position);
+            let mouse = point_of(position);
             post_mouse(shell.hwnd(), WM_MOUSEMOVE, if pressed { MK_LBUTTON.0 as usize } else { 0 }, mouse);
         } else if let Some(position) = step.get("down") {
-            mouse = point_of(position);
+            let mouse = point_of(position);
             pressed = true;
             post_mouse(shell.hwnd(), WM_MOUSEMOVE, 0, mouse);
             post_mouse(shell.hwnd(), WM_LBUTTONDOWN, MK_LBUTTON.0 as usize, mouse);
         } else if let Some(position) = step.get("up") {
-            mouse = point_of(position);
+            let mouse = point_of(position);
             pressed = false;
             post_mouse(shell.hwnd(), WM_LBUTTONUP, 0, mouse);
         } else if let Some(position) = step.get("click") {
-            mouse = point_of(position);
+            let mouse = point_of(position);
             let right = step.get("button").and_then(Value::as_str) == Some("right");
             let (down, up, flag) =
                 if right { (WM_RBUTTONDOWN, WM_RBUTTONUP, MK_RBUTTON.0) } else { (WM_LBUTTONDOWN, WM_LBUTTONUP, MK_LBUTTON.0) };
@@ -272,7 +271,7 @@ async fn run_steps(steps: Vec<Value>, window: AnyWindowHandle, shell: Rc<ParityS
             // Chromium deltaY in CSS px: one notch (120) is 100 px.
             let delta_y = wheel.get(2).and_then(Value::as_f64).unwrap_or(0.0);
             let ctrl = step.get("ctrl").and_then(Value::as_bool).unwrap_or(false);
-            mouse = point_of(wheel);
+            let mouse = point_of(wheel);
             let notches = (-delta_y / 100.0 * 120.0).round() as i16;
             let mut screen = POINT { x: f32::from(mouse.x) as i32, y: f32::from(mouse.y) as i32 };
             unsafe {
@@ -306,7 +305,6 @@ async fn run_steps(steps: Vec<Value>, window: AnyWindowHandle, shell: Rc<ParityS
             let image = capture(shell.hwnd())?;
             image.save(out.join(format!("{name}.png"))).map_err(|e| e.to_string())?;
         }
-        let _ = mouse;
         Timer::after(Duration::from_millis(30)).await;
     }
     Ok(())

@@ -133,8 +133,7 @@ fn main() {
         let window_size = shell::initial_window_size();
         let bounds = Bounds::centered(None, window_size, cx);
         let window_shell = shell.clone();
-        let window = cx
-            .open_window(
+        cx.open_window(
                 WindowOptions {
                     window_bounds: Some(WindowBounds::Windowed(bounds)),
                     titlebar: None,
@@ -158,7 +157,6 @@ fn main() {
                 },
             )
             .expect("open the palette window");
-        let _ = window;
         shell::remove_frame(HWND(shell.hwnd_raw() as *mut _));
 
         backend().start(persisted.as_ref());

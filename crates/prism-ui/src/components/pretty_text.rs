@@ -179,7 +179,7 @@ impl gpui::Element for PrettyText {
         _id: Option<&GlobalElementId>,
         _inspector_id: Option<&gpui::InspectorElementId>,
         window: &mut Window,
-        cx: &mut App,
+        _cx: &mut App,
     ) -> (LayoutId, Metrics) {
         let text_style = window.text_style();
         let font_size = text_style.font_size.to_pixels(window.rem_size());
@@ -207,7 +207,6 @@ impl gpui::Element for PrettyText {
             };
             size(width, measured.line_height * lines.len().max(1) as f32)
         });
-        let _ = cx;
         (layout_id, metrics)
     }
 
