@@ -3,7 +3,7 @@
 //! the window commands the UI calls through [`prism_ui::lib::bridge::Shell`].
 
 use std::cell::Cell;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -17,7 +17,7 @@ use prism_core::{drag, shell_bridge, taskbar, taskbar_alignment};
 use prism_ui::lib::bridge::{self, BackendEvent, BridgeResult};
 use windows::Win32::Foundation::{HWND, POINT, RECT};
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetWindowRect, HWND_NOTOPMOST, HWND_TOPMOST, IsWindowVisible, SW_HIDE, SW_SHOW, SWP_NOACTIVATE, SWP_NOMOVE,
+    GetWindowRect, HWND_NOTOPMOST, HWND_TOPMOST, IsWindowVisible, SW_HIDE, SW_SHOW, SW_SHOWNA, SWP_NOACTIVATE, SWP_NOMOVE,
     SWP_NOSIZE, SWP_NOZORDER, SetWindowPos, ShowWindow,
 };
 
@@ -40,6 +40,11 @@ static PALETTE_TOOK_FOREGROUND: AtomicBool = AtomicBool::new(false);
 static FOREGROUND_AT_MS: AtomicU64 = AtomicU64::new(0);
 /// Explorer bridge requests posted in this open.
 static EXPLORER_REQUESTS: AtomicU32 = AtomicU32::new(0);
+/// The window that had the foreground when this open began.
+static OPEN_ORIGIN: AtomicIsize = AtomicIsize::new(0);
+/// The user brought another window forward during this open: no retry or
+/// Explorer request of this open may take the focus back.
+static USER_MOVED_FOCUS: AtomicBool = AtomicBool::new(false);
 /// After the last raise retry: an open still without the foreground here is
 /// the "opened but takes no keys" state, and the focus log records it.
 const FOCUS_VERDICT_MS: u64 = 800;
@@ -177,9 +182,9 @@ impl GpuiShell {
         unsafe { IsWindowVisible(self.hwnd()) }.as_bool()
     }
 
-    fn show(&self) {
+    fn show(&self, activate: bool) {
         unsafe {
-            let _ = ShowWindow(self.hwnd(), SW_SHOW);
+            let _ = ShowWindow(self.hwnd(), if activate { SW_SHOW } else { SW_SHOWNA });
         }
         self.palette_visible.store(true, Ordering::Release);
     }
@@ -324,6 +329,8 @@ impl GpuiShell {
             PALETTE_TOOK_FOREGROUND.store(false, Ordering::Release);
             FOREGROUND_AT_MS.store(0, Ordering::Release);
             EXPLORER_REQUESTS.store(0, Ordering::Release);
+            OPEN_ORIGIN.store(palette_window::foreground_window(), Ordering::Release);
+            USER_MOVED_FOCUS.store(false, Ordering::Release);
             backend().schedule_installed_apps_refresh();
             self.arm_focus_grace(transition, cx);
             PRESENTATION_ANCHOR.lock().map(|mut value| *value = anchor).ok();
@@ -402,14 +409,16 @@ impl GpuiShell {
         if self.reconcile_palette_position(anchor).is_err() {
             self.position_palette(anchor);
         }
-        self.show();
+        self.show(!user_moved_focus());
         // A transient focus denial must not fail the presentation after the
         // window is already shown; the bridge and the retries finish the job.
-        let _ = self.raise_palette();
+        if !user_moved_focus() {
+            let _ = self.raise_palette();
+        }
         if !self.always_on_top.get() {
             let _ = self.apply_topmost();
         }
-        if !is_prism_foreground() {
+        if !is_prism_foreground() && !user_moved_focus() {
             ask_explorer_for_foreground(self.hwnd.get());
             prism_core::logs::debug_trace(&format!("explorer-fg self={}", is_prism_foreground()));
         }
@@ -441,6 +450,21 @@ fn palette_raise_still_wanted(transition: u64) -> bool {
     PALETTE_OPEN.load(Ordering::Acquire)
         && PALETTE_TRANSITION.load(Ordering::Acquire) == transition
         && !PALETTE_TOOK_FOREGROUND.load(Ordering::Acquire)
+        && !user_moved_focus()
+}
+
+/// True once the user brought another window forward in this open. Explorer
+/// grants its foreground permission early, at the Win press or Start click;
+/// a retry that used it after the user moved on would steal the focus.
+fn user_moved_focus() -> bool {
+    if USER_MOVED_FOCUS.load(Ordering::Acquire) {
+        return true;
+    }
+    let moved = palette_window::focus_moved_away(OPEN_ORIGIN.load(Ordering::Acquire));
+    if moved && !USER_MOVED_FOCUS.swap(true, Ordering::AcqRel) {
+        prism_core::logs::debug_trace("raise-stopped user-moved-focus");
+    }
+    moved
 }
 
 fn begin_palette_close() -> u64 {

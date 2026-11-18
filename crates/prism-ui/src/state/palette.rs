@@ -2,12 +2,12 @@
 //! the derived sections, the selection, and running results.
 
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::ops::Range;
 use std::rc::Rc;
 use std::time::Duration;
 
 use gpui::{App, AppContext, Context, Entity, EventEmitter, Task, Timer};
 use prism_core::catalog::THUMBNAIL_BATCH_CAP;
-use prism_vocab::THUMBNAIL_EXTENSIONS;
 use prism_core::catalog::search::MAX_LIMIT as MAX_FILE_RESULTS;
 
 use crate::features::palette::sections::{
@@ -15,12 +15,12 @@ use crate::features::palette::sections::{
     quick_access_palette_item,
 };
 use crate::js;
-use crate::lib::bridge::{self, BackendEvent};
+use crate::lib::bridge::{self, BackendEvent, FileStamp, Thumbnail};
 use crate::lib::launch_gate::LaunchGate;
 use crate::lib::query::{Phase1Response, PowerPlanHit};
 use crate::lib::search::dedupe_apps;
 use crate::lib::types::{
-    AppEntry, FileEntry, FileSearchError, FileSearchResponse, PaletteItem, QuickAccessEntry, RowAction,
+    AppEntry, FileEntry, FileSearchError, FileSearchResponse, PaletteIcon, PaletteItem, QuickAccessEntry, RowAction,
     VolumeCoverage,
 };
 use crate::state::app::{AppEvent, AppState, ToastKind, app_state};
@@ -39,21 +39,26 @@ const FILE_SEARCH_DELAY_MS: u64 = 35;
 /// How long the list of the last query stays while the Phase 1 reply of a new
 /// query is on its way. The reply takes a few ms; this bounds a slow backend.
 const PHASE1_WAIT_MS: u64 = 150;
+/// The rows that get previews before the view reports the rows it shows.
+const ROWS_BEFORE_PAINT: Range<usize> = 0..12;
 
 /// Insertion-ordered thumbnail cache; a cached `None` marks a known-iconless file.
 #[derive(Default)]
 struct ThumbnailCache {
     map: HashMap<String, Option<String>>,
+    /// The file version that each entry was read from (`None`: unreadable).
+    stamps: HashMap<String, Option<FileStamp>>,
     order: VecDeque<String>,
-    /// Entries from before the last index update: still shown, fetched again.
-    /// Clearing them instead made every visible image fall back to its tile
-    /// icon on each watcher tick (750 ms), a flash.
+    /// Entries that the file may have changed since: still shown, and
+    /// checked against the file's stamp when their row shows. Clearing them
+    /// instead made every visible image fall back to its tile icon on each
+    /// index update, a flash.
     stale: HashSet<String>,
 }
 
 impl ThumbnailCache {
     /// Returns true when the cached value changed.
-    fn remember(&mut self, path: &str, thumbnail: Option<String>) -> bool {
+    fn remember(&mut self, path: &str, stamp: Option<FileStamp>, thumbnail: Option<String>) -> bool {
         self.stale.remove(path);
         // Refresh insertion order so recently shown images survive eviction.
         let previous = self.map.remove(path);
@@ -62,13 +67,24 @@ impl ThumbnailCache {
         }
         let changed = previous.as_ref() != Some(&thumbnail);
         self.map.insert(path.to_owned(), thumbnail);
+        self.stamps.insert(path.to_owned(), stamp);
         self.order.push_back(path.to_owned());
         while self.map.len() > THUMBNAIL_CACHE_LIMIT {
             let Some(oldest) = self.order.pop_front() else { break };
             self.map.remove(&oldest);
+            self.stamps.remove(&oldest);
             self.stale.remove(&oldest);
         }
         changed
+    }
+
+    /// The file still has `stamp`: the entry is current again. A stamp that
+    /// is not the entry's any more (the entry was read again since the
+    /// check was asked for) proves nothing.
+    fn confirm(&mut self, path: &str, stamp: Option<FileStamp>) {
+        if self.stamps.get(path) == Some(&stamp) {
+            self.stale.remove(path);
+        }
     }
 
     fn get(&self, path: &str) -> Option<&Option<String>> {
@@ -83,19 +99,26 @@ impl ThumbnailCache {
         self.has(path) && !self.stale.contains(path)
     }
 
+    /// The stamp to send with a check of a cached entry.
+    fn stamp(&self, path: &str) -> Option<FileStamp> {
+        self.stamps.get(path).copied().flatten()
+    }
+
     fn mark_stale(&mut self) {
         self.stale.extend(self.map.keys().cloned());
     }
 }
 
-fn picture_extension(path: &str, split_dots_and_slashes: bool) -> Option<String> {
-    let last = if split_dots_and_slashes {
-        path.rsplit(['\\', '/', '.']).next()
-    } else {
-        path.rsplit('.').next()
-    }?;
-    let extension = last.to_lowercase();
-    THUMBNAIL_EXTENSIONS.contains(&extension.as_str()).then_some(extension)
+/// What a file-index update asks the palette to read again. A later level
+/// includes the earlier ones.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+enum IndexUpdate {
+    #[default]
+    None,
+    /// Only the status (ready, indexing, coverage) may have changed.
+    Status,
+    /// Entries that a search can return changed.
+    Content,
 }
 
 /// Volume status fields that matter to the rendered UI.
@@ -114,8 +137,8 @@ pub enum PaletteEvent {
 
 pub struct PaletteState {
     app: Entity<AppState>,
-    /// A file-index update arrived while the palette was hidden.
-    index_update_pending: bool,
+    /// The file-index updates that arrived while the palette was hidden.
+    index_update_pending: IndexUpdate,
     /// The text in the search field.
     pub query: String,
     /// The query that `sections` show. It trails `query` while the Phase 1
@@ -152,7 +175,13 @@ pub struct PaletteState {
     selection_target: Option<String>,
     thumbnails: ThumbnailCache,
     thumbnails_in_flight: HashSet<String>,
+    /// Counts content updates of the index: a preview reply from before one
+    /// may hold an old image.
     thumbnail_epoch: u64,
+    /// The rows in view, and the rows within half a view of it (see
+    /// [`PaletteState::show_rows`]).
+    rows_shown: Range<usize>,
+    rows_ahead: Range<usize>,
     file_status_known: bool,
     index_status: (bool, bool),
     // Derived (the useMemo values).
@@ -166,6 +195,7 @@ pub struct PaletteState {
     phase1_task: Option<Task<()>>,
     power_task: Option<Task<()>>,
     file_task: Option<Task<()>>,
+    status_task: Option<Task<()>>,
     history_paths_task: Option<Task<()>>,
     /// One launch at a time: repeat presses during a slow launch are ignored.
     launch_gate: LaunchGate,
@@ -175,18 +205,62 @@ pub struct PaletteState {
 impl EventEmitter<PaletteEvent> for PaletteState {}
 
 impl PaletteState {
+    fn apply_index_update(&mut self, update: IndexUpdate, cx: &mut Context<Self>) {
+        match update {
+            IndexUpdate::None => {}
+            IndexUpdate::Status => self.refresh_index_status(cx),
+            IndexUpdate::Content => self.refresh_after_index_update(cx),
+        }
+    }
+
     fn refresh_after_index_update(&mut self, cx: &mut Context<Self>) {
-        self.index_update_pending = false;
+        self.index_update_pending = IndexUpdate::None;
         // Replies started before the update may hold old images: drop them.
         self.thumbnail_epoch += 1;
         self.thumbnails.mark_stale();
         self.thumbnails_in_flight.clear();
         // A refresh may have flipped ready/indexing; re-query the status.
         self.file_status_known = false;
+        self.status_task = None;
         self.validate_history_paths(cx);
-        self.load_history_thumbnails(cx);
         self.search_files(cx);
         self.rebuild(cx);
+    }
+
+    /// An update that changed no entry (build churn in excluded folders, a
+    /// start from the snapshot): reads the status only, and the results and
+    /// previews stay. A change of ready or indexing can change what a search
+    /// answers, so it refreshes the results too.
+    fn refresh_index_status(&mut self, cx: &mut Context<Self>) {
+        self.index_update_pending = IndexUpdate::None;
+        self.status_task = Some(cx.spawn(async move |this, cx| {
+            match bridge::file_index_status().await {
+                Ok(response) => {
+                    let _ = this.update(cx, |this, cx| {
+                        let state_changed =
+                            !this.file_status_known || (response.ready, response.indexing) != this.index_status;
+                        let coverage_changed = !same_volume_coverage(&this.volumes, &response.volumes)
+                            || this.total_indexed != response.total_indexed;
+                        this.apply_file_status(&response);
+                        if state_changed {
+                            this.refresh_after_index_update(cx);
+                        } else if coverage_changed {
+                            this.rebuild(cx);
+                        }
+                    });
+                }
+                Err(error) => eprintln!("Prism could not read the file index status: {error}"),
+            }
+        }));
+    }
+
+    /// The files may have changed while nobody looked (the palette was
+    /// hidden, or another app had the focus): each cached preview is checked
+    /// against its file when its row shows. The journal reports no edit in
+    /// place, so an index update alone would miss one.
+    fn revalidate_thumbnails(&mut self, cx: &mut Context<Self>) {
+        self.thumbnails.mark_stale();
+        self.request_visible_thumbnails(cx);
     }
 }
 
@@ -200,7 +274,6 @@ impl PaletteState {
             }
             AppEvent::HistoryChanged => {
                 this.validate_history_paths(cx);
-                this.load_history_thumbnails(cx);
                 this.rebuild(cx);
             }
             AppEvent::OpenSettingsChanged => {}
@@ -228,23 +301,28 @@ impl PaletteState {
                 })
                 .detach();
             }
-            BackendEvent::FileIndexUpdated => {
-                // The watcher reports disk activity every 750 ms. While the
+            BackendEvent::FileIndexUpdated { content } => {
+                // The index reports changes at most every 2 s. While the
                 // palette is hidden nobody sees the refresh: defer it to the
                 // next open instead of re-validating and re-querying each time.
                 // "Open" is the toggle state: the window shows one task after
                 // the open, and an update in between must not be deferred.
+                let update = if *content { IndexUpdate::Content } else { IndexUpdate::Status };
                 let shell = bridge::shell(cx);
                 if shell.palette_held_open() || shell.is_window_visible(cx) {
-                    this.refresh_after_index_update(cx);
+                    this.apply_index_update(update, cx);
                 } else {
-                    this.index_update_pending = true;
+                    this.index_update_pending = this.index_update_pending.max(update);
                 }
             }
-            BackendEvent::Toggle { open: true } if this.index_update_pending => {
-                this.refresh_after_index_update(cx);
+            BackendEvent::Toggle { open: true } => {
+                this.apply_index_update(this.index_update_pending, cx);
+                this.revalidate_thumbnails(cx);
             }
-            BackendEvent::WindowFocused(true) => this.validate_history_paths(cx),
+            BackendEvent::WindowFocused(true) => {
+                this.validate_history_paths(cx);
+                this.revalidate_thumbnails(cx);
+            }
             _ => {}
         });
         let mut this = Self {
@@ -267,7 +345,7 @@ impl PaletteState {
             files_error: false,
             file_error: None,
             file_index_ready: false,
-            index_update_pending: false,
+            index_update_pending: IndexUpdate::None,
             file_indexing: true,
             file_path_browse: false,
             phase1: None,
@@ -279,6 +357,8 @@ impl PaletteState {
             thumbnails: ThumbnailCache::default(),
             thumbnails_in_flight: HashSet::new(),
             thumbnail_epoch: 0,
+            rows_shown: ROWS_BEFORE_PAINT,
+            rows_ahead: ROWS_BEFORE_PAINT,
             file_status_known: false,
             index_status: (false, true),
             visible_apps: Vec::new(),
@@ -288,6 +368,7 @@ impl PaletteState {
             phase1_task: None,
             power_task: None,
             file_task: None,
+            status_task: None,
             history_paths_task: None,
             launch_gate: LaunchGate::default(),
             _subscriptions: vec![app_sub, event_sub],
@@ -415,6 +496,7 @@ impl PaletteState {
         let BuiltSections { sections, flat_items } = build_sections(&sources);
         self.sections = sections.into();
         self.flat_items = flat_items;
+        self.request_visible_thumbnails(cx);
 
         // Clamp the selection to the list, then honor a pending selection target.
         let clamped = self.selected.min(self.flat_items.len().saturating_sub(1));
@@ -461,59 +543,12 @@ impl PaletteState {
                 Ok(existing) => {
                     let _ = this.update(cx, |this, cx| {
                         this.existing_history_paths = existing.into_iter().collect();
-                        this.load_history_thumbnails(cx);
                         this.rebuild(cx);
                     });
                 }
                 Err(error) => eprintln!("Prism could not check recent file paths: {error}"),
             }
         }));
-    }
-
-    fn load_history_thumbnails(&mut self, cx: &mut Context<Self>) {
-        let mut image_paths: Vec<String> = Vec::new();
-        for entry in &self.app.read(cx).history {
-            if !entry.id.starts_with("file::f::") {
-                continue;
-            }
-            let Some(path) = history_file_path(&entry.id) else { continue };
-            if !self.existing_history_paths.contains(path) {
-                continue;
-            }
-            if picture_extension(path, true).is_some() && !image_paths.iter().any(|p| p == path) {
-                image_paths.push(path.to_owned());
-            }
-        }
-        let pending: Vec<String> = image_paths
-            .into_iter()
-            .filter(|path| !self.thumbnails.is_fresh(path) && !self.thumbnails_in_flight.contains(path))
-            .collect();
-        if pending.is_empty() {
-            return;
-        }
-        self.thumbnails_in_flight.extend(pending.iter().cloned());
-        let epoch = self.thumbnail_epoch;
-        cx.spawn(async move |this, cx| {
-            let result = bridge::get_file_thumbnails(pending.clone()).await;
-            let _ = this.update(cx, |this, cx| {
-                if epoch != this.thumbnail_epoch {
-                    return;
-                }
-                for path in &pending {
-                    this.thumbnails_in_flight.remove(path);
-                }
-                if let Ok(thumbnails) = result {
-                    let mut changed = false;
-                    for (path, thumbnail) in pending.iter().zip(thumbnails) {
-                        changed |= this.thumbnails.remember(path, thumbnail);
-                    }
-                    if changed {
-                        this.rebuild(cx);
-                    }
-                }
-            });
-        })
-        .detach();
     }
 
     fn query_phase1(&mut self, cx: &mut Context<Self>) {
@@ -671,7 +706,6 @@ impl PaletteState {
                         this.file_error = response.error.clone();
                         this.files_error = response.error.is_some()
                             || (!response.path_browse && !response.ready && !response.indexing);
-                        this.request_result_thumbnails(&items, cx);
                         this.file_results = items;
                     }
                     Err(error) => {
@@ -694,66 +728,101 @@ impl PaletteState {
         }));
     }
 
-    fn request_result_thumbnails(&mut self, items: &[FileEntry], cx: &mut Context<Self>) {
-        let pending: Vec<String> = items
-            .iter()
-            .filter(|entry| {
-                // A thumbnail on an uncached entry came with the search reply.
-                !entry.is_directory
-                    && (entry.thumbnail.as_deref().is_none_or(str::is_empty) || self.thumbnails.has(&entry.path))
-                    && !self.thumbnails.is_fresh(&entry.path)
-                    && picture_extension(&entry.name, false).is_some()
-                    && !self.thumbnails_in_flight.contains(&entry.path)
-            })
-            .map(|entry| entry.path.clone())
-            .collect();
-        if pending.is_empty() {
+    /// The view reports the rows it shows (`shown`) and the rows within half
+    /// a view of it (`ahead`), as flat-list indices. Only these rows get
+    /// previews: a page holds 50 file rows, and most are never scrolled to.
+    pub fn show_rows(&mut self, shown: Range<usize>, ahead: Range<usize>, cx: &mut Context<Self>) {
+        if self.rows_shown == shown && self.rows_ahead == ahead {
             return;
         }
-        self.thumbnails_in_flight.extend(pending.iter().cloned());
+        self.rows_shown = shown;
+        self.rows_ahead = ahead;
+        self.request_visible_thumbnails(cx);
+    }
+
+    /// Asks for the previews of the picture rows in view, then of the rows
+    /// ahead. A cached preview goes with its stamp: the backend decodes it
+    /// again only when the file changed.
+    fn request_visible_thumbnails(&mut self, cx: &mut Context<Self>) {
+        let (shown, ahead) = (self.rows_shown.clone(), self.rows_ahead.clone());
+        let end = self.flat_items.len();
+        let order = shown.clone().chain(ahead.start..shown.start.min(ahead.end)).chain(shown.end.max(ahead.start)..ahead.end);
+        let mut first: Vec<(String, Option<FileStamp>)> = Vec::new();
+        let mut later: Vec<(String, Option<FileStamp>)> = Vec::new();
+        for index in order.filter(|&index| index < end) {
+            let item = &self.flat_items[index];
+            let Some(path) = item.shell_path.as_deref().filter(|_| item.is_picture == Some(true)) else { continue };
+            // A preview that came with the search reply needs no request.
+            let from_reply = matches!(item.icon, PaletteIcon::Image { .. }) && !self.thumbnails.has(path);
+            if from_reply
+                || self.thumbnails.is_fresh(path)
+                || self.thumbnails_in_flight.contains(path)
+                || first.iter().chain(&later).any(|(p, _)| p == path)
+            {
+                continue;
+            }
+            let request = (path.to_owned(), self.thumbnails.stamp(path));
+            if shown.contains(&index) { first.push(request) } else { later.push(request) }
+        }
+        if first.is_empty() && later.is_empty() {
+            return;
+        }
+        self.thumbnails_in_flight.extend(first.iter().chain(&later).map(|(path, _)| path.clone()));
         let epoch = self.thumbnail_epoch;
         cx.spawn(async move |this, cx| {
-            // The backend answers at most THUMBNAIL_BATCH_CAP paths per call
-            // and pads the rest with None, which would mark them iconless.
-            for batch in pending.chunks(THUMBNAIL_BATCH_CAP) {
+            // The rows in view first. The backend answers at most
+            // THUMBNAIL_BATCH_CAP paths per call.
+            for batch in first.chunks(THUMBNAIL_BATCH_CAP).chain(later.chunks(THUMBNAIL_BATCH_CAP)) {
                 let result = bridge::get_file_thumbnails(batch.to_vec()).await;
-                let current = this.update(cx, |this, cx| {
-                    if epoch != this.thumbnail_epoch {
-                        return false;
-                    }
-                    let Ok(thumbnails) = result else {
-                        for path in batch {
-                            this.thumbnails_in_flight.remove(path);
-                        }
-                        return true;
-                    };
-                    let mut by_path = HashMap::new();
-                    for (path, thumbnail) in batch.iter().zip(thumbnails) {
-                        this.thumbnails.remember(path, thumbnail.clone());
-                        this.thumbnails_in_flight.remove(path);
-                        by_path.insert(path, thumbnail.filter(|t| !t.is_empty()));
-                    }
-                    // An unchanged image keeps its data URL, so its row does not change.
-                    let mut changed = false;
-                    for entry in &mut this.file_results {
-                        if let Some(thumbnail) = by_path.get(&entry.path)
-                            && entry.thumbnail != *thumbnail
-                        {
-                            entry.thumbnail = thumbnail.clone();
-                            changed = true;
-                        }
-                    }
-                    if changed {
-                        this.rebuild(cx);
-                    }
-                    true
-                });
+                let current = this.update(cx, |this, cx| this.apply_thumbnails(epoch, batch, result, cx));
                 if !matches!(current, Ok(true)) {
                     break;
                 }
             }
         })
         .detach();
+    }
+
+    /// Stores one preview reply. Returns false when the reply is from before
+    /// a content update of the index (the caller stops).
+    fn apply_thumbnails(
+        &mut self,
+        epoch: u64,
+        requests: &[(String, Option<FileStamp>)],
+        result: Result<Vec<Thumbnail>, String>,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if epoch != self.thumbnail_epoch {
+            return false;
+        }
+        for (path, _) in requests {
+            self.thumbnails_in_flight.remove(path);
+        }
+        let Ok(replies) = result else { return true };
+        let mut changed = false;
+        let mut by_path = HashMap::new();
+        for ((path, sent), reply) in requests.iter().zip(replies) {
+            match reply {
+                Thumbnail::Unchanged => self.thumbnails.confirm(path, *sent),
+                Thumbnail::Read { stamp, image } => {
+                    changed |= self.thumbnails.remember(path, stamp, image.clone());
+                    by_path.insert(path.as_str(), image.filter(|t| !t.is_empty()));
+                }
+            }
+        }
+        // An unchanged image keeps its data URL, so its row does not change.
+        for entry in &mut self.file_results {
+            if let Some(thumbnail) = by_path.get(entry.path.as_str())
+                && entry.thumbnail != *thumbnail
+            {
+                entry.thumbnail = thumbnail.clone();
+                changed = true;
+            }
+        }
+        if changed {
+            self.rebuild(cx);
+        }
+        true
     }
 
     pub fn set_query(&mut self, next: &str, cx: &mut Context<Self>) {
@@ -977,7 +1046,7 @@ impl PaletteState {
 
     pub fn retry_file_search(&mut self, cx: &mut Context<Self>) {
         self.search_files(cx);
-        self.load_history_thumbnails(cx);
+        self.request_visible_thumbnails(cx);
     }
 
     pub fn refresh_apps(&mut self, cx: &mut Context<Self>) {

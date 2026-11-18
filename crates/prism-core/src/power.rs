@@ -5,14 +5,18 @@ use std::process::Command;
 
 use std::mem::size_of;
 
+use windows::core::GUID;
 use windows::Win32::Foundation::{
-    CloseHandle, GetLastError, SetLastError, ERROR_NOT_ALL_ASSIGNED, ERROR_SUCCESS, HANDLE, LUID,
+    CloseHandle, GetLastError, LocalFree, SetLastError, ERROR_MORE_DATA, ERROR_NOT_ALL_ASSIGNED,
+    ERROR_NO_MORE_ITEMS, ERROR_SUCCESS, HANDLE, HLOCAL, LUID, WIN32_ERROR,
 };
 use windows::Win32::Security::{
     AdjustTokenPrivileges, LookupPrivilegeValueW, LUID_AND_ATTRIBUTES, SE_PRIVILEGE_ENABLED,
     SE_SHUTDOWN_NAME, TOKEN_ADJUST_PRIVILEGES, TOKEN_PRIVILEGES, TOKEN_QUERY,
 };
-use windows::Win32::System::Power::SetSuspendState;
+use windows::Win32::System::Power::{
+    PowerEnumerate, PowerGetActiveScheme, PowerReadFriendlyName, SetSuspendState, ACCESS_SCHEME,
+};
 use windows::Win32::System::Shutdown::LockWorkStation;
 use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
@@ -205,6 +209,116 @@ pub fn list_power_plans() -> Result<Vec<PowerPlan>, String> {
     }
 }
 
+/// The installed plans from the power API, in the same form as
+/// [`list_power_plans`]: one child process less per query. The names are the
+/// ones `powercfg /list` prints (custom names as typed, built-in names in the
+/// display language).
+fn read_power_plans() -> Result<Vec<PowerPlan>, String> {
+    let active = active_scheme()?;
+    let mut seen = HashSet::new();
+    let mut plans = Vec::new();
+    // A system has a handful of plans: the bound only stops a broken API.
+    for index in 0..1024 {
+        let mut scheme = GUID::zeroed();
+        let mut size = size_of::<GUID>() as u32;
+        let status = unsafe {
+            PowerEnumerate(
+                None,
+                None,
+                None,
+                ACCESS_SCHEME,
+                index,
+                Some((&raw mut scheme).cast()),
+                &mut size,
+            )
+        };
+        if status == ERROR_NO_MORE_ITEMS {
+            break;
+        }
+        check(status, "enumerate power plans")?;
+        let guid = format_guid(&scheme);
+        if !seen.insert(guid.clone()) {
+            continue;
+        }
+        let name = friendly_name(&scheme)?
+            .filter(|name| !name.trim().is_empty())
+            .unwrap_or_else(|| known_power_plan_name(&guid).to_string());
+        plans.push(PowerPlan { guid, name, active: scheme == active });
+    }
+    Ok(plans)
+}
+
+fn check(status: WIN32_ERROR, what: &str) -> Result<(), String> {
+    if status == ERROR_SUCCESS {
+        Ok(())
+    } else {
+        Err(format!("{what}: {}", windows::core::Error::from(status.to_hresult())))
+    }
+}
+
+fn active_scheme() -> Result<GUID, String> {
+    let mut pointer: *mut GUID = std::ptr::null_mut();
+    check(unsafe { PowerGetActiveScheme(None, &mut pointer) }, "read the active power plan")?;
+    if pointer.is_null() {
+        return Err("read the active power plan: no plan".to_string());
+    }
+    // The API allocates the GUID; LocalFree releases it.
+    let active = unsafe { pointer.read() };
+    unsafe {
+        let _ = LocalFree(Some(HLOCAL(pointer.cast())));
+    }
+    Ok(active)
+}
+
+/// The plan's display name, or `None` when the plan has none.
+fn friendly_name(scheme: &GUID) -> Result<Option<String>, String> {
+    let mut size = 0u32;
+    let status = unsafe { PowerReadFriendlyName(None, Some(scheme), None, None, None, &mut size) };
+    if status != ERROR_SUCCESS && status != ERROR_MORE_DATA {
+        check(status, "read a power plan name")?;
+    }
+    if size == 0 {
+        return Ok(None);
+    }
+    // The size is in bytes of UTF-16 text with its terminating NUL.
+    let mut buffer = vec![0u16; (size as usize).div_ceil(2)];
+    let mut bytes = (buffer.len() * 2) as u32;
+    check(
+        unsafe {
+            PowerReadFriendlyName(
+                None,
+                Some(scheme),
+                None,
+                None,
+                Some(buffer.as_mut_ptr().cast()),
+                &mut bytes,
+            )
+        },
+        "read a power plan name",
+    )?;
+    let text = &buffer[..(bytes as usize / 2).min(buffer.len())];
+    let end = text.iter().position(|&unit| unit == 0).unwrap_or(text.len());
+    Ok(Some(String::from_utf16_lossy(&text[..end])))
+}
+
+/// The lower-case text form that `powercfg` prints and [`normalize_guid`] gives.
+fn format_guid(guid: &GUID) -> String {
+    format!(
+        "{:08x}-{:04x}-{:04x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+        guid.data1,
+        guid.data2,
+        guid.data3,
+        guid.data4[0],
+        guid.data4[1],
+        guid.data4[2],
+        guid.data4[3],
+        guid.data4[4],
+        guid.data4[5],
+        guid.data4[6],
+        guid.data4[7]
+    )
+}
+
 pub fn set_active_power_plan(guid: &str) -> Result<(), String> {
     let normalized = ensure_in_catalog(guid, &list_power_plans()?)?;
     let executable = powercfg_executable()?;
@@ -323,8 +437,17 @@ pub struct PowerPlanHit {
     pub picker_intent: bool,
 }
 
+/// Runs for each typed query: the power API answers in about 2 ms, the
+/// `powercfg` process in about 20 ms. `powercfg` stays the fallback.
 pub fn search(query: &str) -> Result<Vec<PowerPlanHit>, String> {
-    let plans = list_power_plans()?;
+    let plans = match read_power_plans() {
+        Ok(plans) if !plans.is_empty() => plans,
+        Ok(_) => list_power_plans()?,
+        Err(error) => {
+            eprintln!("Prism could not read power plans from the power API: {error}");
+            list_power_plans()?
+        }
+    };
     Ok(rank(query, &plans))
 }
 
@@ -400,5 +523,28 @@ fn shutdown_executable() -> Result<PathBuf, String> {
             "Windows shutdown tool is missing: {}",
             path.display()
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_power_api_lists_the_plans_that_powercfg_lists() {
+        let mut native = read_power_plans().expect("the power API lists the plans");
+        let mut command = list_power_plans().expect("powercfg lists the plans");
+        native.sort_by(|left, right| left.guid.cmp(&right.guid));
+        command.sort_by(|left, right| left.guid.cmp(&right.guid));
+        assert_eq!(native, command);
+        assert_eq!(native.iter().filter(|plan| plan.active).count(), 1);
+    }
+
+    #[test]
+    fn a_guid_has_the_text_form_of_powercfg() {
+        let balanced = GUID::from_u128(0x381b4222_f694_41f0_9685_ff5bb260df2e);
+        let text = format_guid(&balanced);
+        assert_eq!(text, "381b4222-f694-41f0-9685-ff5bb260df2e");
+        assert_eq!(normalize_guid(&text.to_ascii_uppercase()), Some(text));
     }
 }

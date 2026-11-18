@@ -9,7 +9,7 @@ use windows::Win32::System::Threading::GetCurrentProcessId;
 use windows::Win32::UI::HiDpi::{GetDpiForMonitor, GetDpiForWindow, MDT_EFFECTIVE_DPI};
 use windows::Win32::UI::Input::KeyboardAndMouse::{SetActiveWindow, SetFocus};
 use windows::Win32::UI::WindowsAndMessaging::{
-    AllowSetForegroundWindow, BringWindowToTop, GetCursorPos, GetForegroundWindow,
+    AllowSetForegroundWindow, BringWindowToTop, GetClassNameW, GetCursorPos, GetForegroundWindow,
     GetWindowThreadProcessId, LockSetForegroundWindow, SetForegroundWindow, SetWindowPos,
     HWND_TOPMOST, LSFW_UNLOCK, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW,
 };
@@ -306,6 +306,37 @@ pub fn is_prism_foreground() -> bool {
     }
 }
 
+/// The window that has the foreground now (0: none, as during a switch).
+pub fn foreground_window() -> isize {
+    unsafe { GetForegroundWindow() }.0 as isize
+}
+
+/// The user put another window in front while an open still waited for the
+/// foreground (a click, Alt-Tab, a launch). A raise after that would take the
+/// focus back from the user. Not a move: no foreground (a switch is under
+/// way), Prism, the window that had the foreground when the open began, or
+/// a taskbar (a Start click activates it).
+pub fn focus_moved_away(origin: isize) -> bool {
+    let current = foreground_window();
+    moved_away(origin, current, is_prism_foreground, || is_taskbar_window(HWND(current as *mut _)))
+}
+
+fn moved_away(
+    origin: isize,
+    current: isize,
+    is_prism: impl FnOnce() -> bool,
+    is_taskbar: impl FnOnce() -> bool,
+) -> bool {
+    current != 0 && current != origin && !is_prism() && !is_taskbar()
+}
+
+fn is_taskbar_window(window: HWND) -> bool {
+    let mut class = [0u16; 32];
+    let length = unsafe { GetClassNameW(window, &mut class) }.max(0) as usize;
+    let class = String::from_utf16_lossy(&class[..length]);
+    class == "Shell_TrayWnd" || class == "Shell_SecondaryTrayWnd"
+}
+
 /// Ask Windows for keyboard focus. Deliberately does not use
 /// `AttachThreadInput`: attaching to an elevated foreground thread is blocked
 /// by UIPI (and can deadlock the UI thread), so it silently failed whenever
@@ -381,3 +412,24 @@ pub fn log_foreground(tag: &str) {
 
 #[cfg(not(debug_assertions))]
 pub fn log_foreground(_tag: &str) {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_a_window_the_user_brought_forward_stops_the_raise() {
+        let (origin, other) = (0x100, 0x200);
+        let no = || false;
+        let yes = || true;
+        // The app that had the focus when the Win key went up.
+        assert!(!moved_away(origin, origin, no, no));
+        // A switch is under way.
+        assert!(!moved_away(origin, 0, no, no));
+        // Prism itself, or the taskbar of a Start click.
+        assert!(!moved_away(origin, other, yes, no));
+        assert!(!moved_away(origin, other, no, yes));
+        // A click on another app, Alt-Tab, a launch.
+        assert!(moved_away(origin, other, no, no));
+    }
+}

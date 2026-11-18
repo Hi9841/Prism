@@ -168,7 +168,7 @@ fn main() {
                 let _ = cx.update(|cx| match message {
                     HostMessage::Emit(event) => {
                         let event = match event {
-                            CoreEvent::FileIndexUpdated => BackendEvent::FileIndexUpdated,
+                            CoreEvent::FileIndexUpdated { content } => BackendEvent::FileIndexUpdated { content },
                             CoreEvent::AppsUpdated => BackendEvent::AppsUpdated,
                             CoreEvent::SystemThemeChanged { light } => {
                                 BackendEvent::SystemThemeChanged(if light { "light" } else { "dark" }.to_owned())

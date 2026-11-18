@@ -613,6 +613,20 @@ impl FileIndex {
         )
     }
 
+    /// Reads coverage without taking the generation of an active search.
+    pub fn status_response(&self) -> FileSearchResponse {
+        let (volumes, total_indexed) = self.status(&self.store());
+        FileSearchResponse {
+            items: Vec::new(),
+            ready: self.core.ready.load(Ordering::Relaxed) || total_indexed > 0,
+            indexing: self.indexing(),
+            path_browse: false,
+            volumes,
+            total_indexed,
+            error: None,
+        }
+    }
+
     /// Builds every volume again from a walk (the UI's "rebuild index"
     /// action). The old entries stay searchable until the new ones are ready.
     pub fn rebuild(&self) {
@@ -643,8 +657,12 @@ impl FileIndex {
         self.save_snapshot("exit", true);
     }
 
-    fn emit_updated(&self) {
-        crate::host::emit(crate::host::CoreEvent::FileIndexUpdated);
+    /// Tells the UI that the index changed. `content`: entries that a
+    /// search can return changed, so the shown results and previews are
+    /// refreshed. Without it only the status (ready, indexing, coverage) may
+    /// have changed.
+    fn emit_updated(&self, content: bool) {
+        crate::host::emit(crate::host::CoreEvent::FileIndexUpdated { content });
     }
 
     // -----------------------------------------------------------------------
@@ -887,7 +905,9 @@ impl FileIndex {
         if state != VolumeState::Error {
             ctl.shared.built.store(true, Ordering::SeqCst);
         }
-        self.emit_updated();
+        // A start from the snapshot changes only the status. A walk that
+        // failed left the old entries.
+        self.emit_updated(rebuilt && state == VolumeState::Ready);
         self.finish_migration_if_ready();
     }
 
@@ -1129,7 +1149,7 @@ impl FileIndex {
                         if unannounced && last_emit.elapsed() >= EMIT_GAP {
                             unannounced = false;
                             last_emit = Instant::now();
-                            self.emit_updated();
+                            self.emit_updated(true);
                         }
                         // Poll: a stop ends the pause, and the loop handles it.
                         ctl.sleep(EMPTY_READ_PAUSE);
@@ -1138,8 +1158,11 @@ impl FileIndex {
                     let accepts = |record: u64| store.accepts_children(slot, record);
                     let changes = journal.changes(&batch, &accepts, &exclusions.matcher);
                     let folders = folders_to_walk(&changes, &accepts);
-                    if folders.is_empty() {
-                        store.apply_and_checkpoint(slot, &changes, journal_id, batch.next_usn);
+                    // Most batches of build churn are records in excluded
+                    // folders: they change no entry, and the UI keeps its
+                    // results and previews.
+                    let changed = if folders.is_empty() {
+                        store.apply_and_checkpoint(slot, &changes, journal_id, batch.next_usn)
                     } else {
                         // The cursor moves only after the walks end well. When
                         // a walk fails or stops, the folders go out of the
@@ -1162,17 +1185,19 @@ impl FileIndex {
                             continue;
                         }
                         store.advance_checkpoint(slot, journal_id, batch.next_usn);
-                    }
+                        // Each walked folder was new to the store.
+                        true
+                    };
                     backoff = BACKOFF_START;
                     self.core.cursor_moved.store(true, Ordering::SeqCst);
                     cursor = batch.next_usn;
                     published = cursor;
                     last_publish = Instant::now();
-                    unannounced = true;
-                    if last_emit.elapsed() >= EMIT_GAP {
+                    unannounced |= changed;
+                    if unannounced && last_emit.elapsed() >= EMIT_GAP {
                         unannounced = false;
                         last_emit = Instant::now();
-                        self.emit_updated();
+                        self.emit_updated(true);
                     }
                 }
                 Err(JournalError::HistoryLost(message) | JournalError::NotActive(message)) => {
@@ -1361,25 +1386,57 @@ fn thumbnail_dimensions_within_limit(width: u32, height: u32) -> bool {
         && u64::from(width) * u64::from(height) <= THUMBNAIL_MAX_PIXELS
 }
 
-fn file_thumbnail(path: &str) -> Option<String> {
-    let path = Path::new(path);
-    if !path.is_absolute() {
-        return None;
-    }
-    let metadata = std::fs::metadata(path).ok()?;
-    if metadata.is_dir() {
-        return None;
-    }
-    image_thumbnail(path, metadata.len())
+/// One version of a file, as its preview sees it. An edit in place changes
+/// the size or the write time; a replacement also changes the creation time.
+/// The journal reports neither data writes nor (with the same name) a
+/// replacement, so a preview is checked against this instead.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FileStamp {
+    len: u64,
+    modified: Option<std::time::SystemTime>,
+    created: Option<std::time::SystemTime>,
 }
 
-/// Thumbnails for a batch of paths, returned in input order. One IPC round
-/// trip per result page replaces a per-file request storm.
-pub fn file_thumbnails(paths: Vec<String>) -> Vec<Option<String>> {
-    paths
+impl FileStamp {
+    fn of(metadata: &std::fs::Metadata) -> Self {
+        Self { len: metadata.len(), modified: metadata.modified().ok(), created: metadata.created().ok() }
+    }
+}
+
+/// The answer for one path of [`file_thumbnails`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Thumbnail {
+    /// The file still has the stamp that the caller knows: no decode.
+    Unchanged,
+    /// The preview of the file as it is now. `stamp` is `None` when the file
+    /// cannot be read; `image` is `None` when it has no preview.
+    Read { stamp: Option<FileStamp>, image: Option<String> },
+}
+
+fn file_thumbnail(path: &str, known: Option<FileStamp>) -> Thumbnail {
+    let path = Path::new(path);
+    let metadata = if path.is_absolute() { std::fs::metadata(path).ok() } else { None };
+    let Some(metadata) = metadata.filter(|metadata| !metadata.is_dir()) else {
+        return Thumbnail::Read { stamp: None, image: None };
+    };
+    let stamp = FileStamp::of(&metadata);
+    if known == Some(stamp) {
+        return Thumbnail::Unchanged;
+    }
+    // The stamp is read before the decode: a write during the decode leaves
+    // an older stamp, and the next check reads the file again.
+    Thumbnail::Read { stamp: Some(stamp), image: image_thumbnail(path, metadata.len()) }
+}
+
+/// Previews for a batch of paths, returned in input order. Each path comes
+/// with the stamp of the preview that the caller holds, if any: a file that
+/// still has it is not decoded again. One IPC round trip per batch replaces
+/// a per-file request storm.
+pub fn file_thumbnails(requests: Vec<(String, Option<FileStamp>)>) -> Vec<Thumbnail> {
+    requests
         .into_iter()
         .take(THUMBNAIL_BATCH_CAP)
-        .map(|path| file_thumbnail(&path))
+        .map(|(path, known)| file_thumbnail(&path, known))
         .collect()
 }
 
@@ -1649,9 +1706,55 @@ mod tests {
     }
 
     #[test]
+    fn a_status_read_does_not_supersede_an_active_search() {
+        let index = FileIndex::default();
+        let generation = index.begin_search();
+
+        assert!(index.status_response().items.is_empty());
+        assert_eq!(index.core.search_generation.load(Ordering::Acquire), generation);
+    }
+
+    #[test]
     fn the_mount_text_has_one_trailing_backslash() {
         assert_eq!(mount_text(Path::new(r"C:\")), r"C:\");
         assert_eq!(mount_text(Path::new("C:")), r"C:\");
         assert_eq!(mount_text(Path::new(r"D:\Mounts\Disk1")), r"D:\Mounts\Disk1\");
+    }
+
+    // --- previews ---
+
+    fn write_png(path: &Path, size: u32) {
+        image::RgbaImage::from_pixel(size, size, image::Rgba([200, 40, 40, 255]))
+            .save_with_format(path, image::ImageFormat::Png)
+            .unwrap();
+    }
+
+    #[test]
+    fn a_preview_is_decoded_again_only_when_the_file_changed() {
+        let dir = data_dir("preview-stamp");
+        let path = dir.join("photo.png");
+        write_png(&path, 32);
+        let text = path.to_string_lossy().to_string();
+        let Thumbnail::Read { stamp: Some(stamp), image: Some(_) } = file_thumbnail(&text, None) else {
+            panic!("a new picture is decoded");
+        };
+        assert_eq!(file_thumbnail(&text, Some(stamp)), Thumbnail::Unchanged);
+
+        // An edit in place (the journal reports no data writes).
+        write_png(&path, 48);
+        let Thumbnail::Read { stamp: Some(edited), image: Some(_) } = file_thumbnail(&text, Some(stamp)) else {
+            panic!("an edited picture is decoded again");
+        };
+        assert_ne!(edited, stamp);
+
+        // A replacement with the same name.
+        let other = dir.join("other.png");
+        write_png(&other, 48);
+        std::fs::rename(&other, &path).unwrap();
+        assert!(matches!(file_thumbnail(&text, Some(edited)), Thumbnail::Read { image: Some(_), .. }));
+
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(file_thumbnail(&text, Some(edited)), Thumbnail::Read { stamp: None, image: None });
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

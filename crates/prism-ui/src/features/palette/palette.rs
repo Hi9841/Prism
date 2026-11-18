@@ -182,6 +182,30 @@ fn stable_rows(old: &[(u64, usize)], new: &[(u64, usize)]) -> usize {
     stable
 }
 
+/// The rows that last frame placed in the view (content y from `top`, `height`
+/// tall), and the rows within half a view of it, as flat-list index ranges.
+/// `rows` are window bounds; `origin` is the window y of content y 0.
+fn rows_in_view(
+    rows: &HashMap<usize, Bounds<Pixels>>,
+    origin: Pixels,
+    top: Pixels,
+    height: Pixels,
+) -> Option<(std::ops::Range<usize>, std::ops::Range<usize>)> {
+    let within = |from: Pixels, to: Pixels| {
+        let mut range: Option<(usize, usize)> = None;
+        for (&index, bounds) in rows {
+            let row_top = bounds.origin.y - origin;
+            if row_top + bounds.size.height > from && row_top < to {
+                range = Some(range.map_or((index, index), |(low, high)| (low.min(index), high.max(index))));
+            }
+        }
+        range.map(|(low, high)| low..high + 1)
+    };
+    let shown = within(top, top + height)?;
+    let ahead = within(top - height * 0.5, top + height * 1.5).unwrap_or_else(|| shown.clone());
+    Some((shown, ahead))
+}
+
 /// Rows far from the view render as empty boxes of their measured height:
 /// a frame that built every app (or 500 files) took 16-30 ms. A box holds the
 /// row's place, so the layout, the scroll range, and the hit targets stay the
@@ -1351,6 +1375,7 @@ impl Palette {
         let drop_target = self.reorder_drag.as_ref().filter(|d| d.active).and_then(|d| d.target_item_id.clone());
         let category = self.category_drag.clone();
 
+        let mut rows_seen = None;
         let culling = {
             let mut targets = self.targets.borrow_mut();
             let previous = std::mem::take(&mut targets.rows);
@@ -1366,6 +1391,9 @@ impl Palette {
             if let Some(viewport) = targets.viewport {
                 let height = viewport.size.height;
                 let top = px(0.) - self.scroll.offset().y;
+                if let Some((shown, ahead)) = rows_in_view(&previous, origin, top, height) {
+                    rows_seen = Some((shown, ahead));
+                }
                 keep.push((top - height * 0.5, top + height * 1.5));
                 if let Some(row) = previous.get(&selected) {
                     let y = row.origin.y - origin;
@@ -1374,6 +1402,10 @@ impl Palette {
             }
             RowCulling { previous, stable, selected, origin, keep }
         };
+        // Previews load for the rows in view (last frame's places).
+        if let Some((shown, ahead)) = rows_seen {
+            self.palette.update(cx, |palette, cx| palette.show_rows(shown, ahead, cx));
+        }
         let targets = self.targets.clone();
         let painted_scroll = self.scroll.clone();
         let palette_state = self.palette.clone();
@@ -2116,5 +2148,27 @@ impl Render for Palette {
             .children(previews)
             .child(footer)
             .children(listeners)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::{point, size};
+
+    #[test]
+    fn rows_in_view_are_the_rows_that_cross_the_view_and_half_a_view_around_it() {
+        // Rows of 40 px from content y 0; the viewport starts at window y 100.
+        let rows: HashMap<usize, Bounds<Pixels>> = (0..50)
+            .map(|index| (index, Bounds::new(point(px(0.), px(100. + 40. * index as f32)), size(px(600.), px(40.)))))
+            .collect();
+        // Scrolled to content y 400, 200 px tall: rows 10 to 14 show.
+        let (shown, ahead) = rows_in_view(&rows, px(100.), px(400.), px(200.)).expect("rows");
+        assert_eq!(shown, 10..15);
+        assert_eq!(ahead, 7..18);
+        // At the top, nothing is ahead above the first row.
+        let (shown, ahead) = rows_in_view(&rows, px(100.), px(0.), px(200.)).expect("rows");
+        assert_eq!((shown, ahead), (0..5, 0..8));
+        assert!(rows_in_view(&HashMap::new(), px(100.), px(0.), px(200.)).is_none());
     }
 }

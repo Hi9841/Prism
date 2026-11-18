@@ -13,8 +13,10 @@ use windows::Win32::Foundation::{POINT, RECT};
 /// What the backend tells the UI.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CoreEvent {
-    /// The file index changed (at most one each watcher flush).
-    FileIndexUpdated,
+    /// The file index changed (at most one each watcher flush). `content`:
+    /// entries that a search can return changed; otherwise only the index
+    /// status (ready, indexing, coverage) may have changed.
+    FileIndexUpdated { content: bool },
     /// A rescan found new or changed apps.
     AppsUpdated,
     /// The Windows app theme changed.

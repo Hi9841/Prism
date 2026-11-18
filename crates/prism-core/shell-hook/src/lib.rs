@@ -206,6 +206,7 @@ extern "system" {
     fn SetForegroundWindow(window: Hwnd) -> i32;
     fn AllowSetForegroundWindow(process_id: u32) -> i32;
     fn GetWindowThreadProcessId(window: Hwnd, process_id: *mut u32) -> u32;
+    fn IsWindowVisible(window: Hwnd) -> i32;
 }
 
 #[link(name = "gdi32")]
@@ -478,6 +479,27 @@ unsafe fn observer_window() -> Hwnd {
 unsafe fn notify_observer(message: u32, event: usize, detail: isize) -> bool {
     let observer = observer_window();
     !observer.is_null() && PostMessageW(observer, message, event, detail) != 0
+}
+
+/// Lets Prism's process take the foreground. Call it only while Explorer
+/// handles the user's own Win press, Start click or Search key: Explorer
+/// holds the foreground permission then, and Windows keeps a grant only
+/// until the next input. It is a permission, not an activation: Prism uses it
+/// only if it opens the palette, and Windows can still refuse. It does not
+/// wait for Prism.
+unsafe fn grant_foreground_to_observer(observer: Hwnd) {
+    let mut process_id = 0u32;
+    if !observer.is_null() && GetWindowThreadProcessId(observer, &mut process_id) != 0 && process_id != 0 {
+        let _ = AllowSetForegroundWindow(process_id);
+    }
+}
+
+/// [`notify_observer`] for a user action that may open the palette: the
+/// grant comes first, so it is in place before Prism handles the event.
+unsafe fn notify_observer_of_open(message: u32, event: usize) -> bool {
+    let observer = observer_window();
+    grant_foreground_to_observer(observer);
+    !observer.is_null() && PostMessageW(observer, message, event, 0) != 0
 }
 
 fn is_start_command(message: &Msg) -> bool {
@@ -916,6 +938,7 @@ fn has_active_icon() -> bool {
 
 unsafe fn notify_start_click(message: u32, point: &Point) -> bool {
     let observer = observer_window();
+    grant_foreground_to_observer(observer);
     !observer.is_null()
         && PostMessageW(
             observer,
@@ -1064,7 +1087,11 @@ pub unsafe extern "system" fn PrismShellGetMessageHook(
                     let mut process_id = 0u32;
                     GetWindowThreadProcessId(target, &mut process_id);
                     let mut granted = false;
-                    if !target.is_null() && process_id != 0 {
+                    // A request that arrives after the palette closed again
+                    // must not activate the hidden window: it only grants.
+                    if !target.is_null() && process_id != 0 && IsWindowVisible(target) == 0 {
+                        let _ = AllowSetForegroundWindow(process_id);
+                    } else if !target.is_null() && process_id != 0 {
                         // Windows ignores a topmost request from a process that
                         // does not hold the foreground; Explorer's is accepted.
                         // Without it a palette opened in the background could
@@ -1093,7 +1120,7 @@ pub unsafe extern "system" fn PrismShellGetMessageHook(
             // here. Forward the keyboard path so Prism can toggle even when
             // raw input is blocked by an elevated foreground window (UIPI);
             // the app de-duplicates it against the raw observer.
-            let _ = notify_observer(message_id, EVENT_SHELL_START_COMMAND, 0);
+            let _ = notify_observer_of_open(message_id, EVENT_SHELL_START_COMMAND);
             message.message = WM_NULL;
         } else if START_HOTKEYS_RELEASED.load(Ordering::Acquire)
             && is_start_hotkey(message)
@@ -1105,14 +1132,14 @@ pub unsafe extern "system" fn PrismShellGetMessageHook(
             // press to Prism. Explorer keeps it if Prism cannot take it.
             let _ = UnregisterHotKey(message.hwnd, message.wparam as i32);
             debug_log("start hotkey came back; released again");
-            if notify_observer(message_id, EVENT_SHELL_START_COMMAND, 0) {
+            if notify_observer_of_open(message_id, EVENT_SHELL_START_COMMAND) {
                 message.message = WM_NULL;
             }
         } else if is_search_hotkey(message) {
             // Win+S / Win+Q consumed only after Prism was notified.
             let _ = intercept_search_hotkey(
                 message,
-                notify_observer(message_id, EVENT_SHELL_SEARCH_COMMAND, 0),
+                notify_observer_of_open(message_id, EVENT_SHELL_SEARCH_COMMAND),
             );
         } else if message.message == WM_SETTINGCHANGE && has_active_icon() {
             // Wallpaper, theme, or layout changes behind the Start button

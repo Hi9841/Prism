@@ -1383,8 +1383,10 @@ impl FileStore {
     /// folder marks it dead; its descendants are dead by ancestry. A remove
     /// whose `seq` is not the stored one is stale and does nothing; an upsert
     /// with another `seq` replaces the entry (the record was reused).
-    pub fn apply(&self, slot: VolumeSlot, changes: &[FsChange]) {
-        self.apply_inner(slot, changes, None);
+    /// Returns true when an entry changed. A compaction that the changes
+    /// start does not count: it changes no entry that a search can return.
+    pub fn apply(&self, slot: VolumeSlot, changes: &[FsChange]) -> bool {
+        self.apply_inner(slot, changes, None)
     }
 
     /// `apply`, and the journal checkpoint that the changes reach, in one
@@ -1395,15 +1397,15 @@ impl FileStore {
         changes: &[FsChange],
         journal_id: u64,
         next_usn: i64,
-    ) {
-        self.apply_inner(slot, changes, Some((journal_id, next_usn)));
+    ) -> bool {
+        self.apply_inner(slot, changes, Some((journal_id, next_usn)))
     }
 
-    fn apply_inner(&self, slot: VolumeSlot, changes: &[FsChange], checkpoint: Option<(u64, i64)>) {
+    fn apply_inner(&self, slot: VolumeSlot, changes: &[FsChange], checkpoint: Option<(u64, i64)>) -> bool {
         let (due, changed) = {
             let mut inner = self.write();
             let Some(segment) = inner.segment_mut(slot) else {
-                return;
+                return false;
             };
             let mut changed = false;
             for change in changes {
@@ -1426,6 +1428,7 @@ impl FileStore {
         if due {
             self.compact_slot(slot);
         }
+        changed
     }
 
     /// True when `record` is a live, non-excluded folder, or the volume root.
