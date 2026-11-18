@@ -1,9 +1,9 @@
 //! The seam between the backend and the app that hosts the palette window.
 //!
-//! The Tauri app and the GPUI app each install one `Host` at startup. Backend
-//! modules use it for the few things only the app can do: deliver events to
-//! the UI, name the data folder, report the palette window state, toggle the
-//! palette from the Win-key pump, and register global shortcuts.
+//! The app installs one `Host` at startup. Backend modules use it for the few
+//! things only the app can do: deliver events to the UI, name the data folder,
+//! report the palette window state, toggle the palette from the Win-key pump,
+//! and register global shortcuts.
 
 use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};

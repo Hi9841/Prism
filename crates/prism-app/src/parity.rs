@@ -3,8 +3,7 @@
 //! Runs the real views on fixture data, with no backend hooks (no Win key, no
 //! taskbar), in a window that is never activated and sits off-screen. The
 //! script drives the window through GPUI's normal input path and captures
-//! PNGs with PrintWindow. `migration/parity/run.mjs` runs the same script
-//! against the original in headless Chrome.
+//! PNGs with PrintWindow, and writes the backend calls it recorded.
 
 use std::cell::Cell;
 use std::path::PathBuf;

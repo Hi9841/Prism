@@ -95,7 +95,7 @@ Check:
 ```powershell
 cargo check --workspace --all-targets
 cargo build -p prism-judge
-bun migration/judge/judge.mjs     # 277 behavior scenarios
+bun migration/judge/judge.mjs     # 269 behavior scenarios
 ```
 
 `PRISM_ADAPTER_CMD=<exe>` runs the judge against a different adapter.

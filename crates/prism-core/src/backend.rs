@@ -1,7 +1,6 @@
-//! The command bodies of the palette backend (RULEBOOK A4). Each public
-//! method here is one former `#[tauri::command]` body; the Tauri app keeps
-//! thin wrappers and the GPUI app calls the methods directly. Effects that
-//! need the window or the event loop go through [`crate::host`].
+//! The commands of the palette backend (RULEBOOK A4). Each public method is
+//! one former `#[tauri::command]` body, and the UI calls it directly. Effects
+//! that need the window or the event loop go through [`crate::host`].
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};

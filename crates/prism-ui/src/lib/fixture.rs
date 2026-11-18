@@ -1,7 +1,5 @@
-//! Parity fixture: canned backend answers for side-by-side captures of the
-//! original (headless Chrome with a mocked Tauri layer, `migration/parity`)
-//! and the port. Port infrastructure; the shipping app never installs one.
-//! Both sides read the same JSON, so they see the same data.
+//! Parity fixture: canned backend answers for `prism --parity` captures. The
+//! shipping app never installs one.
 
 use std::collections::HashMap;
 use std::sync::OnceLock;

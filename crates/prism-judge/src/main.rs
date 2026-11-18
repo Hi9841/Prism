@@ -1,6 +1,7 @@
 //! Judge adapter for the port: one JSON call on stdin, one JSON result on stdout.
-//! The contract (ops, input markers, number encoding, action records) is the
-//! header of `migration/judge/adapter.mjs`. No expected values live here.
+//! The calls and their expected results are in `migration/judge/scenarios.mjs`
+//! and `golden-scenarios.mjs` (numbers JSON cannot carry are `{"$num": ...}`).
+//! No expected values live here.
 
 use std::collections::{HashMap, HashSet};
 use std::io::Read;
@@ -226,7 +227,7 @@ fn run(call: &Value) -> Result<Value, Failure> {
     })
 }
 
-/// Mirrors the provider (src/state/palette.tsx), as `paletteSources` in adapter.mjs does.
+/// Mirrors the provider (src/state/palette.tsx) of the original app.
 fn palette_sections(raw: &Value) -> Result<Value, Failure> {
     let settings = sanitize_settings(raw.get("settings"));
     // The original fetched icons per rendered row (`appIcons`). The port's app
