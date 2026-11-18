@@ -20,6 +20,7 @@ pub mod query;
 pub mod runtime;
 pub mod settings;
 pub mod settings_index;
+pub(crate) mod shell_icon;
 #[path = "../shell-hook/src/protocol.rs"]
 pub(crate) mod shell_protocol;
 pub mod start_menu;

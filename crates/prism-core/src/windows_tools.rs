@@ -983,7 +983,7 @@ unsafe fn shell_control_panel_item(item: &IShellItem) -> Option<WindowsTool> {
     let pidl_pointer = SHGetIDListFromObject(item).ok()?;
     let pidl = copy_pidl(pidl_pointer);
     ILFree(Some(pidl_pointer));
-    let icon = crate::apps::shell_item_icon_data_url(item);
+    let icon = crate::shell_icon::shell_item_icon_data_url(item);
     Some(WindowsTool {
         id: format!("control-panel::shell-{}", slug(&title)),
         title: title.clone(),

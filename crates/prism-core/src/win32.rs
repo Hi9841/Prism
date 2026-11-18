@@ -13,6 +13,12 @@ pub(crate) fn wide(value: &str) -> Vec<u16> {
     value.encode_utf16().chain(Some(0)).collect()
 }
 
+/// The text of a UTF-16 buffer up to its first NUL, trimmed.
+pub(crate) fn wide_trim(buf: &[u16]) -> String {
+    let end = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
+    String::from_utf16_lossy(&buf[..end]).trim().to_string()
+}
+
 /// NUL-terminated UTF-16 of a path.
 pub(crate) fn wide_path(path: &Path) -> Vec<u16> {
     path.as_os_str().encode_wide().chain(Some(0)).collect()
