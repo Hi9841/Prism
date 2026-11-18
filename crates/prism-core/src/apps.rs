@@ -195,7 +195,9 @@ pub fn scan_force(cache_path: &Path) -> Result<AppIndex, String> {
     // Stamp the start, not the finish, so a shortcut created while the walk
     // is in progress stays newer than this index and is picked up next open.
     let scanned_at = SystemTime::now();
-    let apps = scan_raw()?;
+    // The icon cache sits next to `apps.json`.
+    let icon_dir = cache_path.parent().unwrap_or(Path::new(".")).join("icons");
+    let apps = scan_raw(icon_dir)?;
     write_cache(cache_path, &apps, scanned_at);
     Ok(AppIndex { apps, scanned_at })
 }
@@ -335,9 +337,9 @@ fn mtime_after(path: &Path, since: SystemTime) -> bool {
         .is_some_and(|modified| modified > since)
 }
 
-fn scan_raw() -> Result<Vec<AppEntry>, String> {
+fn scan_raw(icon_dir: PathBuf) -> Result<Vec<AppEntry>, String> {
     let _com = ComGuard::init();
-    let mut ctx = ScanCtx::new();
+    let mut ctx = ScanCtx::new(icon_dir);
     ctx.scan_shortcut_roots();
     ctx.scan_apps_folder();
     ctx.scan_registry();
@@ -359,9 +361,9 @@ struct ScanCtx {
 }
 
 impl ScanCtx {
-    fn new() -> Self {
+    fn new(icon_dir: PathBuf) -> Self {
         Self {
-            icons: IconCache::new(icon_cache_dir()),
+            icons: IconCache::new(icon_dir),
             packages: PackageVersions::load(),
             seen: HashMap::new(),
             apps: Vec::new(),
@@ -1712,11 +1714,6 @@ fn hash(s: &str) -> String {
     format!("{:016x}", crate::fnv1a_64(s.as_bytes()))
 }
 
-
-/// The icon cache sits next to `apps.json`, in the data folder.
-fn icon_cache_dir() -> PathBuf {
-    crate::host::data_dir().join("icons")
-}
 
 /// Reads a VT_LPWSTR out of a PROPVARIANT (windows-rs 0.61 exposes the raw
 /// union rather than helpers).
