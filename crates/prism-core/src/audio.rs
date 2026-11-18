@@ -402,7 +402,6 @@ fn is_taskbar_background(element: &InspectedElement) -> bool {
         return true;
     }
 
-    // System tray volume icon or tray controls.
     if name_lower.starts_with("volume")
         && (auto_id == "SystemTrayIcon" || class.contains("OmniButtonRight"))
     {

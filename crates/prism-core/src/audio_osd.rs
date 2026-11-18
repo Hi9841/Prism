@@ -273,7 +273,6 @@ unsafe fn render_and_position(hwnd: HWND, state: &OsdState) {
         SWP_NOACTIVATE,
     );
 
-    // Render 32-bit ARGB DIB with rounded pill background and typography
     render_osd_surface(hwnd, state, width, height);
     let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
 }
@@ -417,10 +416,8 @@ unsafe fn render_osd_surface(hwnd: HWND, state: &OsdState, width: i32, height: i
 }
 
 unsafe fn render_osd_pixels(pixel_slice: &mut [u32], state: &OsdState) {
-    // 1. Draw Liquid Glass Pill background (concentric 16px radius, subtle vertical gradient, specular highlight rim)
-    draw_liquid_glass_pill(pixel_slice, OSD_WIDTH, OSD_HEIGHT);
+    draw_pill_background(pixel_slice, OSD_WIDTH, OSD_HEIGHT);
 
-    // 2. Draw Anti-Aliased Vector Speaker Icon
     draw_speaker_icon(
         pixel_slice,
         OSD_WIDTH,
@@ -430,7 +427,6 @@ unsafe fn render_osd_pixels(pixel_slice: &mut [u32], state: &OsdState) {
         state.percentage,
     );
 
-    // 3. Draw Capsule Progress Bar
     draw_progress_bar(
         pixel_slice,
         OSD_WIDTH,
@@ -445,7 +441,6 @@ unsafe fn render_osd_pixels(pixel_slice: &mut [u32], state: &OsdState) {
         state.title.ends_with("(No Audio)"),
     );
 
-    // 4. Render and composite typography with pure grayscale antialiasing (no ClearType chromatic fringe)
     render_typography(pixel_slice, OSD_WIDTH, OSD_HEIGHT, state);
 }
 
@@ -513,7 +508,7 @@ fn pack_premultiplied(r: u8, g: u8, b: u8, a: u8) -> u32 {
     ((a as u32) << 24) | (pr << 16) | (pg << 8) | pb
 }
 
-fn draw_liquid_glass_pill(pixels: &mut [u32], width: i32, height: i32) {
+fn draw_pill_background(pixels: &mut [u32], width: i32, height: i32) {
     // Raycast-style surface: one flat near-black panel with a soft 1px
     // light border. No gradient, no specular rim.
     let radius = 12.0f32;
@@ -608,7 +603,6 @@ fn draw_speaker_icon(
                             inside = false;
                         }
                     } else if percentage > 0 {
-                        // Wave 1 arc
                         let dx1 = px - 4.5;
                         let dy1 = py - 8.0;
                         let r1 = (dx1 * dx1 + dy1 * dy1).sqrt();
@@ -616,7 +610,6 @@ fn draw_speaker_icon(
                             inside = true;
                         }
 
-                        // Wave 2 arc (if volume > 35%)
                         if percentage > 35 {
                             let r2 = r1;
                             if (9.6..=11.2).contains(&r2) && dy1.abs() <= dx1 * 0.95 && px > 8.0 {
@@ -676,7 +669,6 @@ fn draw_progress_bar(
                 continue;
             }
 
-            // Distance to capsule track
             let px = x_f.clamp(x_left, x_right);
             let py = y_center;
             let dx = x_f - px;
@@ -688,7 +680,6 @@ fn draw_progress_bar(
                 // Subtle 14% white translucent track (premultiplied: no blow-out!)
                 pixels[idx] = blend_over(pixels[idx], (255, 255, 255), (35.0 * track_alpha) as u8);
 
-                // Fill with rounded tip
                 if fill_w > 0.0 {
                     let f_px = x_f.clamp(x_left, fill_right);
                     let f_dx = x_f - f_px;
@@ -763,7 +754,6 @@ unsafe fn render_typography(pixels: &mut [u32], width: i32, _height: i32, state:
         &state.title
     };
 
-    // 1. Draw Title text
     let display_title = truncate_string(clean_title, if is_no_audio { 15 } else { 19 });
     let mut wide_title: Vec<u16> = display_title.encode_utf16().collect();
     let mut title_rect = RECT {
@@ -782,7 +772,6 @@ unsafe fn render_typography(pixels: &mut [u32], width: i32, _height: i32, state:
             | windows::Win32::Graphics::Gdi::DT_END_ELLIPSIS,
     );
 
-    // Composite Title with pure crisp white (255, 255, 255)
     for ty in 8..28 {
         for tx in 36..(width - 50) {
             let t_idx = (ty * width + tx) as usize;
@@ -796,8 +785,7 @@ unsafe fn render_typography(pixels: &mut [u32], width: i32, _height: i32, state:
         }
     }
 
-    // 2. Clear buffer for Percentage/Status text. The percentage is always
-    // shown; muted state is conveyed by the rose color and the speaker slash.
+    // The percentage always shows; the rose color and the speaker slash show mute.
     text_slice.fill(0);
 
     let (pct_text, text_color) = if is_no_audio {
@@ -824,7 +812,6 @@ unsafe fn render_typography(pixels: &mut [u32], width: i32, _height: i32, state:
             | windows::Win32::Graphics::Gdi::DT_VCENTER,
     );
 
-    // Composite Percentage/Status text
     for ty in 8..28 {
         for tx in (width - 86)..(width - 14) {
             let t_idx = (ty * width + tx) as usize;

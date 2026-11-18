@@ -205,7 +205,6 @@ impl Backend {
 
     pub async fn get_apps(&self) -> Result<Vec<apps::AppEntry>, String> {
         let timer = perf::start();
-        // Fast path: already scanned this session.
         if let Some(list) = self.apps_cache.lock().map_err(|e| e.to_string())?.clone() {
             perf::finish(timer, "get_apps_cache", || format!("count={}", list.len()));
             return Ok(list);
@@ -607,7 +606,6 @@ impl Backend {
             return Err("shortcut request was superseded".to_string());
         }
         if *prev == combo {
-            // Idempotent: already active.
             return Ok(());
         }
         let release_previous = |prev: &str| {

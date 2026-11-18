@@ -36,7 +36,6 @@ pub fn search_with_generation(
     let query_trimmed = query.trim();
     let limit = clamp_limit(limit);
 
-    // Direct absolute path browsing
     if is_cancelled(search_generation, generation) {
         return response(
             Vec::new(),
@@ -272,7 +271,6 @@ pub fn name_score(
 ) -> Option<i32> {
     let directory_bonus = if is_directory { 20 } else { 0 };
 
-    // Highest priority: Exact filename match (e.g. "gemini_revisions_unverified.md")
     if lower_name == full_query {
         return Some(10_000 + directory_bonus);
     }
@@ -450,7 +448,6 @@ pub fn target_score(query: &str, target: &str) -> Option<i32> {
         return Some(3_000 - (position.min(100) as i32 * 2) + if boundary { 500 } else { 0 });
     }
 
-    // Byte-level subsequence matching
     let query_bytes = query.as_bytes();
     let target_bytes = target.as_bytes();
     let query_length = query_bytes.len() as i32;
