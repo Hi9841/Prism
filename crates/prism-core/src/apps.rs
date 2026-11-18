@@ -2047,7 +2047,9 @@ pub fn launch_path_elevated(
 }
 
 /// The rank of an app's `source` when two entries are the same app: the
-/// curated shortcut stores first, the raw install folders last.
+/// curated shortcut stores first, the raw install folders last. Inline: the
+/// UI search in prism-ui calls it for each app on each keystroke.
+#[inline]
 pub fn source_rank(source: &str) -> i32 {
     match source {
         "taskbar" => 6,
