@@ -865,5 +865,3 @@ mod tests {
         assert_eq!(utf8_index_at_utf16("aあ", 2), "aあ".len());
     }
 }
-
-// PORT STATUS: confidence=medium todos=0

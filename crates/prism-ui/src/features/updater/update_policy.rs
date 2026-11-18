@@ -10,5 +10,3 @@ pub fn should_check_for_update(last_check_at: f64, now: f64, force: bool) -> boo
     let interval = if force { MIN_FORCED_CHECK_INTERVAL_MS } else { MIN_BACKGROUND_CHECK_INTERVAL_MS };
     now - last_check_at >= interval
 }
-
-// PORT STATUS: confidence=high todos=0

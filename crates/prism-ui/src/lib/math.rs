@@ -294,5 +294,3 @@ pub fn is_math_like(input: &str) -> bool {
     }
     true
 }
-
-// PORT STATUS: confidence=high todos=0

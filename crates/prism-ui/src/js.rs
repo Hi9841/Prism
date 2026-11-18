@@ -179,5 +179,3 @@ pub fn truthy(value: Option<&Value>) -> bool {
         Some(Value::Array(_)) | Some(Value::Object(_)) => true,
     }
 }
-
-// PORT STATUS: confidence=high todos=0

@@ -273,5 +273,3 @@ impl Render for PowerMenu {
             .child(trigger.when(expanded, |d| d))
     }
 }
-
-// PORT STATUS: confidence=medium todos=0

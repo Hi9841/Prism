@@ -155,5 +155,3 @@ pub fn install(update: &Update, bytes: &[u8]) -> Result<(), String> {
     }
     std::process::exit(0);
 }
-
-// PORT STATUS: confidence=medium todos=0

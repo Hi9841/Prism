@@ -8,5 +8,3 @@ pub fn update_percent(downloaded_bytes: f64, total_bytes: Option<f64>) -> Option
     let percent = js::round(js::max(0.0, downloaded_bytes) / total * 100.0);
     Some(js::min(100.0, percent))
 }
-
-// PORT STATUS: confidence=high todos=0

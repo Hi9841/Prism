@@ -185,5 +185,3 @@ pub fn settings_trigger(cx: &mut App) -> FocusHandle {
     }
     cx.global::<SettingsTrigger>().0.clone()
 }
-
-// PORT STATUS: confidence=medium todos=0

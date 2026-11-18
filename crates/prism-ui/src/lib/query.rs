@@ -61,5 +61,3 @@ pub fn phase1_matches_query(phase1: Option<&Phase1Response>, query: &str) -> boo
     };
     js::trim(&phase1.query).to_lowercase() == js::trim(query).to_lowercase()
 }
-
-// PORT STATUS: confidence=high todos=0

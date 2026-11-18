@@ -204,5 +204,3 @@ pub fn number(id: &ElementId, prop: &'static str, target: f32, timing: Timing, w
     }
     state.read(cx).animate(window)
 }
-
-// PORT STATUS: confidence=medium todos=0

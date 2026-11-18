@@ -282,5 +282,3 @@ fn match_target(lower_target: &[u16], tokens: &[Vec<u16>]) -> Option<f64> {
 fn normalize_text(s: &str) -> String {
     s.to_lowercase().chars().filter(|c| c.is_ascii_lowercase() || c.is_ascii_digit()).collect()
 }
-
-// PORT STATUS: confidence=high todos=0

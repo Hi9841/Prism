@@ -61,5 +61,3 @@ pub fn sort_apps(apps: &[AppEntry]) -> Vec<&AppEntry> {
     sorted.sort_by(|a, b| locale_compare(&a.name, &b.name));
     sorted
 }
-
-// PORT STATUS: confidence=high todos=0

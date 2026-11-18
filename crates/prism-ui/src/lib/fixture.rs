@@ -100,5 +100,3 @@ impl Fixture {
         paths.iter().filter(|p| self.existing_paths.contains(p)).cloned().collect()
     }
 }
-
-// PORT STATUS: confidence=high todos=0

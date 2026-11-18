@@ -104,5 +104,3 @@ pub fn render_search_input(
     )
     .into_any_element()
 }
-
-// PORT STATUS: confidence=medium todos=0

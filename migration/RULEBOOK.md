@@ -17,8 +17,9 @@ agents consistent. The kit's bakeoff does not apply (README, "If you're redesign
 - **Unit of work:** a subsystem (§5), not a file. Files inside a subsystem are translated together.
 - **Referee:** `cargo check` is the in-loop typecheck (Step 4 dissolved: 1.3 s incremental). The parity judge
   (`PRISM_ADAPTER_CMD=prism-judge`) and running the real app verify behavior. **No unit tests** (owner, 2026-10-09).
-- **Markers:** `TODO(port):`, `PERF(port):`, `BUG(port):` only. Every translated file ends with
-  `// PORT STATUS: confidence=<high|medium|low> todos=<N>`, and N equals the TODO(port) count.
+- **Markers:** `TODO(port):`, `PERF(port):`, `BUG(port):` only. During the port every translated file ended
+  with `// PORT STATUS: confidence=<high|medium|low> todos=<N>`; those footers left the code on 2026-11-18
+  (all said `todos=0`).
 - **The BUG rule:** reproduce defective source behavior and mark it `BUG(port):`. Fixes wait for Step 6.
 
 ## 1. Architecture

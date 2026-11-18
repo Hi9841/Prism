@@ -376,6 +376,3 @@ impl Default for Settings {
         }
     }
 }
-
-
-// PORT STATUS: confidence=high todos=0

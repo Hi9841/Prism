@@ -1035,5 +1035,3 @@ pub fn install(cx: &mut App) -> Entity<PaletteState> {
     cx.set_global(PaletteStateHandle(entity.clone()));
     entity
 }
-
-// PORT STATUS: confidence=medium todos=0

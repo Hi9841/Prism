@@ -2127,5 +2127,3 @@ impl Render for Palette {
             .children(listeners)
     }
 }
-
-// PORT STATUS: confidence=medium todos=0

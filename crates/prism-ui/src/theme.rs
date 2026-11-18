@@ -532,5 +532,3 @@ pub fn tabular_nums<E: Styled>(mut element: E) -> E {
 pub const FONT_SANS: &str = "Segoe UI Variable Text";
 pub const FONT_SANS_FALLBACK: &str = "Segoe UI";
 pub const FONT_MONO: &str = "Cascadia Code";
-
-// PORT STATUS: confidence=medium todos=0

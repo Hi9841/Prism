@@ -406,5 +406,3 @@ pub fn load_state() -> Reply<serde_json::Value> {
 pub fn save_state(state: serde_json::Value) -> Reply<()> {
     command("save_state", serde_json::json!({ "state": state.clone() }), async move { backend().save_state(state) })
 }
-
-// PORT STATUS: confidence=high todos=0

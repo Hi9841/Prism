@@ -301,5 +301,3 @@ impl Render for ResultContextMenu {
 pub fn menu_position_for(point: Point<Pixels>, item: &PaletteItem, zoom: f32, viewport: (f32, f32)) -> ContextMenuPosition {
     clamp_context_menu_position(f32::from(point.x) / zoom, f32::from(point.y) / zoom, menu_height(item), viewport)
 }
-
-// PORT STATUS: confidence=medium todos=0

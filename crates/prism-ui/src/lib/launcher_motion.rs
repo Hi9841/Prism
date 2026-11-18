@@ -140,5 +140,3 @@ pub fn hide_palette_invocation(origin: HideOrigin, next_phase: LauncherPhase) ->
         _ => HideInvocation::None,
     }
 }
-
-// PORT STATUS: confidence=high todos=0

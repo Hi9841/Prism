@@ -272,5 +272,3 @@ impl gpui::Element for PrettyText {
 pub fn into_any(text: PrettyText) -> AnyElement {
     text.into_any_element()
 }
-
-// PORT STATUS: confidence=high todos=0

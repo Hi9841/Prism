@@ -620,5 +620,3 @@ pub fn sheet_panel_shadow(shadows: Vec<BoxShadow>, radii: gpui::Corners<gpui::Pi
     .absolute()
     .size_full()
 }
-
-// PORT STATUS: confidence=medium todos=0

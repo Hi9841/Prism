@@ -358,5 +358,3 @@ impl Render for UpdateControl {
             .into_any_element()
     }
 }
-
-// PORT STATUS: confidence=medium todos=0

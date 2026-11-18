@@ -590,5 +590,3 @@ fn rehydrate(
         thumbnail: file_thumbnails.get(path).cloned().flatten(),
     }))
 }
-
-// PORT STATUS: confidence=high todos=1
