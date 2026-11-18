@@ -1,6 +1,6 @@
 //! The contract between Prism and the bridge DLL inside Explorer: the window
 //! message, its codes, the observer window class, and the files both sides
-//! read. The DLL and `prism-core` (`crate::shell_protocol`) compile this one
+//! read. Std only: the DLL has no dependencies. The DLL and `prism-core` (`crate::shell_protocol`) compile this one
 //! file, so a change here reaches both sides.
 
 /// The registered window message that carries every code below (`wParam`).
@@ -43,3 +43,13 @@ pub const START_ICON_FILE: &str = "taskbar-start-icon.rgba";
 pub const ICON_MAGIC: &[u8] = b"PRISICON1";
 /// The path to pin or unpin, written before `CONTROL_TASKBAR_PIN` / `_UNPIN`.
 pub const PIN_TARGET_FILE: &str = "taskbar-pin-target.txt";
+
+/// Where Prism writes the pin target and the DLL reads it: the data folder
+/// under `%LOCALAPPDATA%` (else `%APPDATA%`), else `%TEMP%\Prism`.
+pub fn pin_target_path() -> Option<std::path::PathBuf> {
+    let base = std::env::var_os("LOCALAPPDATA").or_else(|| std::env::var_os("APPDATA"));
+    match base {
+        Some(base) => Some(std::path::PathBuf::from(base).join(DATA_DIR_NAME).join(PIN_TARGET_FILE)),
+        None => std::env::var_os("TEMP").map(|temp| std::path::PathBuf::from(temp).join("Prism").join(PIN_TARGET_FILE)),
+    }
+}

@@ -224,11 +224,7 @@ pub fn taskbar_pin(path: &Path, pinned: bool) -> Result<(), String> {
         return Err("shell taskbar thread not available".into());
     }
 
-    let target_file = std::env::var_os("LOCALAPPDATA")
-        .or_else(|| std::env::var_os("APPDATA"))
-        .map(PathBuf::from)
-        .map(|path| path.join(DATA_DIR_NAME).join(PIN_TARGET_FILE))
-        .unwrap_or_else(|| std::env::temp_dir().join("Prism").join(PIN_TARGET_FILE));
+    let target_file = pin_target_path().ok_or("no folder for the pin request")?;
     if let Some(parent) = target_file.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|error| format!("failed to create pin request directory: {error}"))?;

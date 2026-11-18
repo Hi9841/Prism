@@ -349,12 +349,8 @@ fn debug_log(message: &str) {
 }
 
 fn handle_taskbar_pin(pinned: bool) -> isize {
-    let target_file = match std::env::var_os("LOCALAPPDATA").or_else(|| std::env::var_os("APPDATA")) {
-        Some(appdata) => PathBuf::from(appdata).join(DATA_DIR_NAME).join(PIN_TARGET_FILE),
-        None => match std::env::var_os("TEMP") {
-            Some(temp) => PathBuf::from(temp).join("Prism").join(PIN_TARGET_FILE),
-            None => return 0,
-        },
+    let Some(target_file) = pin_target_path() else {
+        return 0;
     };
     let target = match std::fs::read_to_string(&target_file) {
         Ok(value) if !value.trim().is_empty() => value.trim().to_string(),
