@@ -19,9 +19,8 @@ release 1.0.11 it also measured the original React/Tauri app; that app left the 
 | `threads.py` | Read-only thread census of one process: name, start module, CPU time, and the CPU of each thread over a watch period. |
 | `uiidle.py` | UI layer at rest in parity mode: context switches and CPU (cycle counters) while the palette is open and while it is hidden. |
 | `uiframes.py` | Exact frame counts and frame time for the first open, the typed keys and a second open (parity mode, `ZED_MEASUREMENTS=1`). |
-| `churn_ab.py` | Interleaved A/B of `churn_bench` builds: the catalog's cost while files change (a built-in script, or a replay with `--recording`). |
 | `fsevents.py` | Records file name events below a folder (read-only) and tells how long new entries live. |
-| `catalog_ab.py`, `sweep_check.py`, `launch_ab.py`, `launch_e2e.py` | The A/B drivers of sessions C and D (index load and search, sweep check, app launch). |
+| `launch_ab.py`, `launch_e2e.py` | The A/B drivers of session D (app launch). The catalog drivers of sessions C to H (`catalog_ab.py`, `churn_ab.py`, `sweep_check.py`) left with their harnesses in catalog v2 (`c7c237c`). |
 
 ## Safety rules of the bench
 
@@ -124,7 +123,7 @@ clicks and wheel steps. It does not send global input.
 These run beside the owner's Prism and do not stop it. The backend benches are examples of `prism-core`
 (`cargo build --release -p prism-core --example <name>`); they read and write only a copy of the app data.
 
-1. Copy the app data once (catalog with the SQLite backup API, `apps.json`, `prism.json`, icons) into
+1. Copy the app data once (`file-index.bin`, `apps.json`, `prism.json`, icons) into
    `target/tmp/bench/data`.
 2. Keep the baseline binaries of the session (`target/oploop/<session>/base/`), and give each candidate its
    own copy: an A/B needs both exe files.
@@ -133,12 +132,4 @@ These run beside the owner's Prism and do not stop it. The backend benches are e
 |---|---|
 | UI at rest | `uv run oploop/bench/uiidle.py --a <base prism.exe> --b <prism.exe> --rounds 3` |
 | Frames for a query | `python -I oploop/bench/uiframes.py --a <base prism.exe> --b <prism.exe> --query report [--fixture FILE]` |
-| Phase 1 of a keystroke | `query_bench.exe target/tmp/bench/data [results.tsv or --verify]` |
-| Index load, search, first append | `uv run oploop/bench/catalog_ab.py --a <base catalog_bench.exe> --b <catalog_bench.exe> --db target/tmp/bench/data/catalog.db --rounds 3` |
-| File churn (built-in script) | `uv run oploop/bench/churn_ab.py --a <base churn_bench.exe> --b <churn_bench.exe> --rounds 3` |
-| File churn (real events) | the same with `--recording <slice.jsonl>` (from `fsevents.py record`, cut to the seconds to replay) |
-
-- A churn A/B of 12 runs takes about 14 minutes (16 for the replay of 8 runs). Do not compile while it runs.
-- `churn_bench` ends with exit code 1 when the catalog rows of the test tree differ from the disk. That
-  check is the correctness test of each watcher change.
-- The replay prints `REPLAY <n> operations done, <m> failed`: a replay with many failures measures less work.
+| File index load, memory and search | `index_mem_bench.exe target/tmp/bench/data/file-index.bin <results.txt> [reps]`: run the A and B builds in turns; the two results files must be equal. |
