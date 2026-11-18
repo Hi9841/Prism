@@ -367,7 +367,7 @@ pub fn raise(hwnd: HWND) -> Result<(), String> {
         .map_err(|error| error.to_string())?;
         force_foreground(hwnd);
         let foreground = GetForegroundWindow();
-        crate::win_key::debug_trace(&format!(
+        crate::logs::debug_trace(&format!(
             "raise fg_self={} fg={:p}",
             foreground == hwnd,
             foreground.0
@@ -383,7 +383,7 @@ pub fn log_foreground(tag: &str) {
     unsafe {
         let foreground = GetForegroundWindow();
         if foreground.0.is_null() {
-            crate::win_key::debug_trace(&format!("{tag} fg=null"));
+            crate::logs::debug_trace(&format!("{tag} fg=null"));
             return;
         }
         let mut pid = 0u32;
@@ -395,7 +395,7 @@ pub fn log_foreground(tag: &str) {
             foreground,
             windows::Win32::UI::WindowsAndMessaging::GWL_EXSTYLE,
         ) as u32;
-        crate::win_key::debug_trace(&format!(
+        crate::logs::debug_trace(&format!(
             "{tag} fg_pid={pid} self={} topmost={} class={class}",
             pid == GetCurrentProcessId(),
             ex_style & 0x8 != 0

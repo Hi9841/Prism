@@ -2557,7 +2557,7 @@ pub fn set_taskbar_pinned(path: &Path, pinned: bool) -> Result<(), String> {
     if current.is_none() {
         return Err("Could not read the current taskbar pin state.".to_string());
     }
-    crate::win_key::debug_trace(&format!(
+    crate::logs::debug_trace(&format!(
         "set-pin begin path={} pinned={pinned}",
         path.display()
     ));
@@ -2573,7 +2573,7 @@ pub fn set_taskbar_pinned(path: &Path, pinned: bool) -> Result<(), String> {
 
     let mut result = crate::win_key::shell_bridge_taskbar_pin(&target, pinned);
     if result.is_ok() && wait_for_taskbar_state(path, pinned) {
-        crate::win_key::debug_trace("set-pin bridge ok");
+        crate::logs::debug_trace("set-pin bridge ok");
         return Ok(());
     }
 
@@ -2585,7 +2585,7 @@ pub fn set_taskbar_pinned(path: &Path, pinned: bool) -> Result<(), String> {
         };
         unsafe { ILFree(Some(pidl)) };
         if result.is_ok() && wait_for_taskbar_state(path, pinned) {
-            crate::win_key::debug_trace("set-pin app-com ok");
+            crate::logs::debug_trace("set-pin app-com ok");
             return Ok(());
         }
     }
@@ -2594,7 +2594,7 @@ pub fn set_taskbar_pinned(path: &Path, pinned: bool) -> Result<(), String> {
         // Windows 11 (24H2/25H2+) blocks programmatic pinning: Modify returns
         // S_OK but does nothing and no shell verb is exposed. Ask the user to
         // confirm from the taskbar instead of reporting a false success.
-        crate::win_key::debug_trace("set-pin manual required");
+        crate::logs::debug_trace("set-pin manual required");
         Err(MANUAL_PIN_REQUIRED.to_string())
     } else {
         Err("Windows did not unpin this item.".to_string())

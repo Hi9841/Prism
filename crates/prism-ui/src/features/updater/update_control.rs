@@ -115,7 +115,7 @@ impl UpdateControl {
                             this.update = Some(update);
                         }
                         Err(error) => {
-                            prism_core::win_key::debug_trace(&format!("update-check-failed {error}"));
+                            prism_core::logs::debug_trace(&format!("update-check-failed {error}"));
                             this.view = ViewState::Failed { version: "latest".into() };
                         }
                     }

@@ -11,7 +11,7 @@ pub mod catalog;
 pub mod drag;
 pub mod files;
 pub mod focus_log;
-pub(crate) mod logs;
+pub mod logs;
 pub mod ui_stall;
 pub mod host;
 pub mod palette_window;

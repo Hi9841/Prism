@@ -312,7 +312,7 @@ impl GpuiShell {
             && !self.visible()
             && now.saturating_sub(LAST_OPEN_MS.load(Ordering::Acquire)) > STALE_OPEN_MS
         {
-            win_key::debug_trace("palette-toggle resync stale open");
+            prism_core::logs::debug_trace("palette-toggle resync stale open");
             PALETTE_OPEN.store(false, Ordering::Release);
         }
         let opening = !PALETTE_OPEN.fetch_xor(true, Ordering::AcqRel);
@@ -321,7 +321,7 @@ impl GpuiShell {
         }
         let transition = PALETTE_TRANSITION.fetch_add(1, Ordering::AcqRel) + 1;
         log_foreground(if opening { "toggle-open-before" } else { "toggle-close-before" });
-        win_key::debug_trace(&format!("palette-toggle open={opening}"));
+        prism_core::logs::debug_trace(&format!("palette-toggle open={opening}"));
         let _ = source;
         if opening {
             PALETTE_TOOK_FOREGROUND.store(false, Ordering::Release);
@@ -414,7 +414,7 @@ impl GpuiShell {
         }
         if !is_prism_foreground() {
             ask_explorer_for_foreground(self.hwnd.get());
-            win_key::debug_trace(&format!("explorer-fg self={}", is_prism_foreground()));
+            prism_core::logs::debug_trace(&format!("explorer-fg self={}", is_prism_foreground()));
         }
         if is_prism_foreground() {
             mark_took_foreground();
@@ -464,7 +464,7 @@ impl bridge::Shell for GpuiShell {
     }
 
     fn hide_palette(&self, defer: bool, cx: &mut App) -> BridgeResult<()> {
-        win_key::debug_trace(&format!("palette-hide-command defer={defer}"));
+        prism_core::logs::debug_trace(&format!("palette-hide-command defer={defer}"));
         let transition = begin_palette_close();
         if defer {
             self.schedule_palette_hide(transition, cx);
@@ -566,7 +566,7 @@ impl bridge::Shell for GpuiShell {
             // activates the window inside its own thread but denies the
             // foreground. Only a real foreground stops the raise retries.
             if !is_prism_foreground() {
-                win_key::debug_trace("activate-without-foreground");
+                prism_core::logs::debug_trace("activate-without-foreground");
                 return;
             }
             mark_took_foreground();
@@ -581,7 +581,7 @@ impl bridge::Shell for GpuiShell {
             return;
         }
         if ACTIVATION_FOCUS_PENDING.swap(false, Ordering::AcqRel) {
-            win_key::debug_trace("palette-blur-in-grace");
+            prism_core::logs::debug_trace("palette-blur-in-grace");
             return;
         }
         self.dismiss_on_blur("palette-hide-blur", cx);
@@ -596,7 +596,7 @@ impl GpuiShell {
             return;
         }
         let transition = begin_palette_close();
-        win_key::debug_trace(trace);
+        prism_core::logs::debug_trace(trace);
         bridge::emit_event(BackendEvent::Toggle { open: false }, cx);
         self.schedule_palette_hide(transition, cx);
     }

@@ -1,6 +1,6 @@
 //! Always-on JSON-line logs in `%LOCALAPPDATA%\Prism\logs`. Each log keeps at
 //! most `MAX_BYTES`; past that it moves to `<name>.old.log` and starts again.
-//! File I/O: call these off the UI thread.
+//! File I/O: call these off the UI thread. `debug_trace` is the debug-build trace.
 
 use std::fs::OpenOptions;
 use std::io::Write;
@@ -31,6 +31,19 @@ pub(crate) fn append(dir: &Path, name: &str, record: &impl Serialize) {
         let _ = file.write_all(&line);
     }
 }
+
+/// Debug builds only: one line in `%TEMP%\Prism\semantic-debug.log`.
+#[cfg(debug_assertions)]
+pub fn debug_trace(message: &str) {
+    if let Ok(mut file) =
+        OpenOptions::new().create(true).append(true).open(std::env::temp_dir().join("Prism").join("semantic-debug.log"))
+    {
+        let _ = writeln!(file, "{} {message}", unix_ms());
+    }
+}
+
+#[cfg(not(debug_assertions))]
+pub fn debug_trace(_message: &str) {}
 
 pub(crate) fn unix_ms() -> u128 {
     std::time::SystemTime::now()

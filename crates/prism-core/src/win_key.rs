@@ -749,7 +749,7 @@ unsafe fn run_pump(ready: HookReady) {
             bridge
         }
         Err(error) => {
-            debug_trace(&format!("bridge-install-error {error}"));
+            crate::logs::debug_trace(&format!("bridge-install-error {error}"));
             OBSERVER_ACTIVE.store(false, Ordering::Release);
             destroy_observer_window(observer_window);
             let detail = error.clone();
@@ -764,7 +764,7 @@ unsafe fn run_pump(ready: HookReady) {
     SHELL_TASKBAR_THREAD.store(shell_bridge.taskbar_thread, Ordering::Release);
     notify_start_icon_changed();
     let _ = ready.send(Ok(()));
-    debug_trace("bridge-install-ok");
+    crate::logs::debug_trace("bridge-install-ok");
     /// Bridge reinstall retries: the first after half a second, then doubling.
     const REINSTALL_FIRST_DELAY: Duration = Duration::from_millis(500);
     const REINSTALL_MAX_DELAY: Duration = Duration::from_secs(30);
@@ -802,7 +802,7 @@ unsafe fn run_pump(ready: HookReady) {
                     }
                     match action {
                         Action::ToggleWin(_side) => {
-                            debug_trace("action-toggle-win");
+                            crate::logs::debug_trace("action-toggle-win");
                             if let Some(host) = crate::host::get() {
                                 host.toggle_from_win(shell_bridge.start_rect());
                             }
@@ -813,7 +813,7 @@ unsafe fn run_pump(ready: HookReady) {
                             }
                         }
                         Action::ActivateSearch => {
-                            debug_trace("action-activate-search");
+                            crate::logs::debug_trace("action-activate-search");
                             if let Some(host) = crate::host::get() {
                                 host.activate();
                             }
@@ -836,12 +836,12 @@ unsafe fn run_pump(ready: HookReady) {
                     reinstall_at = None;
                     SHELL_TASKBAR_THREAD.store(shell_bridge.taskbar_thread, Ordering::Release);
                     notify_start_icon_changed();
-                    debug_trace("bridge-reinstalled after taskbar restart");
+                    crate::logs::debug_trace("bridge-reinstalled after taskbar restart");
                 }
                 Err(error) => {
                     // Explorer may still be starting, or may be gone for good
                     // (a shell replacement): retry, less and less often.
-                    debug_trace(&format!("bridge-reinstall-error {error}"));
+                    crate::logs::debug_trace(&format!("bridge-reinstall-error {error}"));
                     TASKBAR_RESTARTED.store(true, Ordering::Release);
                     reinstall_at = Some(Instant::now() + reinstall_delay);
                     reinstall_delay = (reinstall_delay * 2).min(REINSTALL_MAX_DELAY);
@@ -898,27 +898,10 @@ unsafe fn run_pump(ready: HookReady) {
 }
 
 /// Safe recovery path: stop observing and tell the frontend so the user can react.
-#[cfg(debug_assertions)]
-pub fn debug_trace(message: &str) {
-    if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(
-        std::env::temp_dir()
-            .join("Prism")
-            .join("semantic-debug.log"),
-    ) {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default();
-        let _ = writeln!(file, "{} {message}", now.as_millis());
-    }
-}
-
-#[cfg(not(debug_assertions))]
-pub fn debug_trace(_message: &str) {}
-
 /// `detail` is the underlying error; release builds have no `debug_trace`, so it goes to the
 /// always-on `%LOCALAPPDATA%\Prism\logs\win-key.log` too (this runs on the hook thread).
 fn disable_observation(reason: &str, detail: &str) {
-    debug_trace(&format!("observation-disabled {reason}: {detail}"));
+    crate::logs::debug_trace(&format!("observation-disabled {reason}: {detail}"));
     // Startup retries the install every 250 ms for up to 2 minutes: log each cause once.
     static LAST_LOGGED: Mutex<String> = Mutex::new(String::new());
     let key = format!("{reason}: {detail}");
@@ -1301,7 +1284,7 @@ impl ShellBridge {
             if !same_rect(rect, self.start_rect)
                 && post_start_button_rect(self.taskbar_thread, message, rect).is_ok()
             {
-                debug_trace(&format!(
+                crate::logs::debug_trace(&format!(
                     "start-rect {},{},{},{} requested={requested}",
                     rect.left, rect.top, rect.right, rect.bottom
                 ));
@@ -1936,7 +1919,7 @@ unsafe fn create_observer_window(watch_keyboard: bool) -> Result<HWND, String> {
     // it, reconciling at the next key-down still recovers, so a failure here
     // is not fatal.
     if let Err(error) = WTSRegisterSessionNotification(window, NOTIFY_FOR_THIS_SESSION) {
-        debug_trace(&format!("session-notification-error {error}"));
+        crate::logs::debug_trace(&format!("session-notification-error {error}"));
     }
     Ok(window)
 }
@@ -2052,7 +2035,7 @@ fn note_shell_search_command() {
     }
     cancel_pending_win_toggle();
     LAST_RAW_TOGGLE_MS.store(toggle_clock_ms(), Ordering::Release);
-    debug_trace("shell-search-activate");
+    crate::logs::debug_trace("shell-search-activate");
     queue_action(Action::ActivateSearch);
 }
 
@@ -2077,10 +2060,10 @@ fn note_shell_start_command() {
     // be dropped as if it were the earlier raw press.
     let last_raw = LAST_RAW_TOGGLE_MS.swap(0, Ordering::AcqRel);
     if last_raw != 0 && now.saturating_sub(last_raw) < SHELL_START_DEDUPE_MS {
-        debug_trace("shell-start-skipped (raw recent)");
+        crate::logs::debug_trace("shell-start-skipped (raw recent)");
         return;
     }
-    debug_trace("shell-start-armed");
+    crate::logs::debug_trace("shell-start-armed");
     SHELL_START_FALLBACK
         .lock()
         .map(|mut pending| pending.arm(Instant::now()))
@@ -2104,7 +2087,7 @@ fn flush_shell_start_fallback() {
         && OBSERVER_ACTIVE.load(Ordering::Acquire)
         && SHELL_BRIDGE_ACTIVE.load(Ordering::Acquire)
     {
-        debug_trace("shell-start-fallback-toggle");
+        crate::logs::debug_trace("shell-start-fallback-toggle");
         queue_action(Action::ToggleWin(WinSide::Left));
     }
 }
@@ -2129,7 +2112,7 @@ fn flush_pending_win_toggle() {
                 && SHELL_BRIDGE_ACTIVE.load(Ordering::Acquire)
             {
                 queue_action(Action::ToggleWin(side));
-                debug_trace("pending-toggle-queued");
+                crate::logs::debug_trace("pending-toggle-queued");
             }
         }
     }
@@ -2194,7 +2177,7 @@ unsafe extern "system" fn raw_input_window_proc(
     lparam: LPARAM,
 ) -> LRESULT {
     if message != 0 && message == taskbar_created_message() {
-        debug_trace("taskbar-created");
+        crate::logs::debug_trace("taskbar-created");
         TASKBAR_RESTARTED.store(true, Ordering::Release);
         return LRESULT(0);
     }
@@ -2202,7 +2185,7 @@ unsafe extern "system" fn raw_input_window_proc(
         // A lock, unlock or session switch: the releases of Win+L and every key
         // typed on the lock screen never reach this observer. Start clean, so
         // the first Win press after unlock is not taken as a held key.
-        debug_trace(&format!("session-change {}", wparam.0));
+        crate::logs::debug_trace(&format!("session-change {}", wparam.0));
         RAW_MACHINE.lock().map(|mut machine| machine.reset()).ok();
         cancel_pending_win_toggle();
         return LRESULT(0);
@@ -2222,7 +2205,7 @@ unsafe extern "system" fn raw_input_window_proc(
                 SHELL_ICON_SHUTDOWN_ACK.store(if lparam.0 != 0 { 2 } else { 1 }, Ordering::Release);
             }
             EVENT_START_ICON_REFRESHED => {
-                debug_trace(&format!("start-icon-refresh {}", lparam.0));
+                crate::logs::debug_trace(&format!("start-icon-refresh {}", lparam.0));
             }
             EVENT_TASKBAR_PIN_COMPLETED => {
                 SHELL_TASKBAR_PIN_ACK.store(if lparam.0 != 0 { 2 } else { 1 }, Ordering::Release);
@@ -2292,7 +2275,7 @@ unsafe extern "system" fn raw_input_window_proc(
                     })
                     .unwrap_or(Decision::Pass);
                 if matches!(kind, KeyKind::Win(_)) || matches!(decision, Decision::Toggle(_)) {
-                    debug_trace(&format!("raw-key {kind:?} down={is_down} -> {decision:?}"));
+                    crate::logs::debug_trace(&format!("raw-key {kind:?} down={is_down} -> {decision:?}"));
                     LAST_RAW_TOGGLE_MS.store(toggle_clock_ms(), Ordering::Release);
                     cancel_shell_start_fallback();
                 }

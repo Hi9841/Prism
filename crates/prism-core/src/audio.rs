@@ -261,7 +261,7 @@ fn adjust_app_volume(
             }
         }
 
-        crate::win_key::debug_trace(&format!(
+        crate::logs::debug_trace(&format!(
             "app-volume stem={executable_stem} matched={matched} sessions={seen_processes:?}"
         ));
         if matched {
@@ -361,7 +361,7 @@ pub enum TaskbarTarget {
 /// Identifies the application or taskbar element under the cursor point.
 pub fn identify_taskbar_target_at(point: POINT) -> TaskbarTarget {
     let target = classify_taskbar_element(inspect_element_at(point));
-    crate::win_key::debug_trace(&format!("audio-target {target:?}"));
+    crate::logs::debug_trace(&format!("audio-target {target:?}"));
     if matches!(target, TaskbarTarget::Unknown) {
         // If element inspection failed or was inconclusive, but the cursor point
         // is physically over a taskbar window, default to Master volume. This is
