@@ -21,8 +21,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
     SWP_NOSIZE, SWP_NOZORDER, SetWindowPos, ShowWindow,
 };
 
-/// Keep this >= the UI's LAUNCHER_MOTION_MS (110 ms) so the view can fade out.
-const PALETTE_HIDE_DELAY: Duration = Duration::ZERO;
+/// A deferred hide waits for the view's close motion.
+const PALETTE_HIDE_DELAY: Duration = Duration::from_millis(prism_ui::lib::launcher_motion::LAUNCHER_MOTION_MS);
 /// Reassert over ~500 ms, not once: the Explorer bridge grants foreground
 /// asynchronously and an elevated or fullscreen owner can deny the first
 /// SetForegroundWindow.
@@ -592,8 +592,7 @@ impl bridge::Shell for GpuiShell {
 }
 
 impl GpuiShell {
-    /// Clicking away dismisses the launcher; the window stays up for the hide
-    /// delay so the view plays the same exit as a Win-key close.
+    /// Clicking away dismisses the launcher, as a Win-key close does.
     fn dismiss_on_blur(&self, trace: &str, cx: &mut App) {
         if !self.visible() || drag::is_dragging() || is_prism_foreground() || !PALETTE_OPEN.load(Ordering::Acquire) {
             return;
