@@ -1,7 +1,8 @@
 //! Shared data shapes and the small pure helpers from `src/lib/types.ts`.
 //! Field names serialize in camelCase, as the TypeScript and the backend use them.
 
-use gpui::SharedString;
+use std::sync::Arc;
+
 use serde::{Deserialize, Serialize};
 
 use crate::js;
@@ -18,7 +19,7 @@ pub enum PaletteIcon {
     Emoji { char: String },
     Image { src: String, name: String },
     /// `icon` is a data URL. It is shared, not copied, by each rebuild of the list.
-    App { name: String, icon: Option<SharedString> },
+    App { name: String, icon: Option<Arc<str>> },
 }
 
 /// One backend call, named by the original Tauri command; `args` are the
@@ -147,7 +148,7 @@ pub struct AppEntry {
     /// Data URL of the app's icon. The app list carries it, so a row shows
     /// its icon in its first frame.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub icon: Option<SharedString>,
+    pub icon: Option<Arc<str>>,
     /// Lowercased, punctuation-stripped name for exact matching.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub normalized_name: Option<String>,
