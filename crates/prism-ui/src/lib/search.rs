@@ -33,7 +33,7 @@ fn is_upper_boundary(unit: u16) -> bool {
 /// `target`, or `None` when it isn't. Rewards prefix matches, camel-case
 /// boundaries, word starts and consecutive runs; penalizes gaps.
 pub fn fuzzy_score(query: &str, target: &str) -> Option<f64> {
-    fuzzy_score_core(&utf16(&js::lower(query)), &utf16(&js::lower(target)), Some(&utf16(target)))
+    fuzzy_score_core(&utf16(&query.to_lowercase()), &utf16(&target.to_lowercase()), Some(&utf16(target)))
 }
 
 /// Core scorer over pre-lowercased inputs. `boundary_target` carries the
@@ -161,7 +161,7 @@ pub fn fuzzy_apps<'a>(apps: &'a [AppEntry], query: &str, limit: usize, pre_dedup
     if q.is_empty() {
         return Vec::new();
     }
-    let lower = js::lower(q);
+    let lower = q.to_lowercase();
     let tokens: Vec<Vec<u16>> = js::split_whitespace(&lower).into_iter().map(utf16).collect();
     let normalized_query = normalize_text(&lower);
     let significant_length = js::len(&normalized_query) as f64;
@@ -241,7 +241,7 @@ fn app_score(app: &AppEntry, lower_query: &[u16], tokens: &[Vec<u16>], normalize
         return Some(100.0);
     }
 
-    let lower_name = utf16(&js::lower(&app.name));
+    let lower_name = utf16(&app.name.to_lowercase());
     if let Some(name_score) = match_target(&lower_name, tokens) {
         // Exact and prefix application-name matches rank first.
         if lower_name == lower_query {
@@ -256,7 +256,7 @@ fn app_score(app: &AppEntry, lower_query: &[u16], tokens: &[Vec<u16>], normalize
     // Fall back to metadata: exe names, folder names, publisher, aliases.
     let mut best: Option<f64> = None;
     for keyword in app.keywords.iter().flatten() {
-        if let Some(score) = match_target(&utf16(&js::lower(keyword)), tokens)
+        if let Some(score) = match_target(&utf16(&keyword.to_lowercase()), tokens)
             && best.is_none_or(|b| score > b)
         {
             best = Some(score);
@@ -280,7 +280,7 @@ fn match_target(lower_target: &[u16], tokens: &[Vec<u16>]) -> Option<f64> {
 
 /// `s.toLowerCase().replace(/[^a-z0-9]/g, "")`
 fn normalize_text(s: &str) -> String {
-    js::lower(s).chars().filter(|c| c.is_ascii_lowercase() || c.is_ascii_digit()).collect()
+    s.to_lowercase().chars().filter(|c| c.is_ascii_lowercase() || c.is_ascii_digit()).collect()
 }
 
 // PORT STATUS: confidence=high todos=0

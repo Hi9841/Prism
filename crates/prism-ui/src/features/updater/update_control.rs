@@ -11,7 +11,7 @@ use crate::features::updater::update_progress::update_percent;
 use crate::features::updater::updater::{self, DownloadEvent, Update};
 use crate::gfx::{Tween, icon, motion_ms, r};
 use crate::lib::bridge::{self, BackendEvent};
-use crate::state::app::{AppState, ToastKind, app_state, error_string};
+use crate::state::app::{AppState, ToastKind, app_state};
 use crate::theme::{TRANSPARENT, hsla, motion};
 use crate::transition::{self, Timing};
 
@@ -215,7 +215,7 @@ impl UpdateControl {
                 if let Err(error) = result {
                     this.view = ViewState::Failed { version: version.clone() };
                     let title = if saving { "Settings not saved" } else { "Update failed" };
-                    app.update(cx, |app, cx| app.show_toast(title, Some(error_string(&error)), ToastKind::Error, cx));
+                    app.update(cx, |app, cx| app.show_toast(title, Some(error.to_string()), ToastKind::Error, cx));
                 }
                 cx.notify();
             });

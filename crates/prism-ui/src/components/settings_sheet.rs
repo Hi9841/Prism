@@ -22,7 +22,7 @@ use crate::lib::types::{
     APP_GROUP_APP_LIMIT, APP_GROUP_LIMIT, AppEntry, AppGroup, PaletteIcon, QUICK_ACCESS_LIMIT, Settings,
     VIEW_ZOOM_LEVELS, step_view_zoom,
 };
-use crate::state::app::{AppEvent, AppState, THEME_LABELS, ToastKind, app_state, error_string, shortcut_label};
+use crate::state::app::{AppEvent, AppState, THEME_LABELS, ToastKind, app_state, shortcut_label};
 use crate::state::palette::{PaletteState, palette_state};
 use crate::theme::{Accent, Rgba, TRANSPARENT, Theme, fade, hsla, motion, shadow, tabular_nums, white};
 use crate::transition::{self, Timing};
@@ -209,7 +209,7 @@ impl SettingsSheet {
             });
             let _ = app.update(cx, |app, cx| match result {
                 Ok(()) => app.show_toast("Settings reset", Some("Prism is back to its defaults".into()), ToastKind::Success, cx),
-                Err(error) => app.show_toast("Settings not reset", Some(error_string(&error)), ToastKind::Error, cx),
+                Err(error) => app.show_toast("Settings not reset", Some(error.to_string()), ToastKind::Error, cx),
             });
         })
         .detach();
@@ -231,7 +231,7 @@ impl SettingsSheet {
             });
             if let Err(error) = result {
                 let _ = app.update(cx, |app, cx| {
-                    app.show_toast("Settings still not saved", Some(error_string(&error)), ToastKind::Error, cx)
+                    app.show_toast("Settings still not saved", Some(error.to_string()), ToastKind::Error, cx)
                 });
             }
         })
@@ -255,7 +255,7 @@ impl SettingsSheet {
                     app.update_settings(cx, |s| s.shortcut = value);
                     app.show_toast("Shortcut set", Some(display_shortcut(&combo)), ToastKind::Success, cx);
                 }
-                Err(error) => app.show_toast("Shortcut not changed", Some(error_string(&error)), ToastKind::Error, cx),
+                Err(error) => app.show_toast("Shortcut not changed", Some(error.to_string()), ToastKind::Error, cx),
             });
             let _ = this.update(cx, |this, cx| {
                 this.shortcut_busy = false;
@@ -273,7 +273,7 @@ impl SettingsSheet {
         let result = bridge::shell(cx).set_taskbar_alignment(&alignment, cx);
         self.app.update(cx, |app, cx| match result {
             Ok(()) => app.update_settings(cx, |s| s.taskbar_alignment = alignment),
-            Err(error) => app.show_toast("Taskbar not changed", Some(error_string(&error)), ToastKind::Error, cx),
+            Err(error) => app.show_toast("Taskbar not changed", Some(error.to_string()), ToastKind::Error, cx),
         });
         self.alignment_busy = false;
         cx.notify();
@@ -387,12 +387,12 @@ impl SettingsSheet {
     }
 
     fn filtered_apps(&self, cx: &App) -> Vec<AppEntry> {
-        let normalized = crate::js::lower(crate::js::trim(self.app_query.read(cx).text()));
+        let normalized = crate::js::trim(self.app_query.read(cx).text()).to_lowercase();
         let apps = self.available_apps(cx);
         if normalized.is_empty() {
             return apps;
         }
-        apps.into_iter().filter(|entry| crate::js::lower(&entry.name).contains(&normalized)).collect()
+        apps.into_iter().filter(|entry| entry.name.to_lowercase().contains(&normalized)).collect()
     }
 
     fn group_name_input(&mut self, group: &AppGroup, focused: bool, t: &Theme, cx: &mut Context<Self>) -> Entity<TextInput> {

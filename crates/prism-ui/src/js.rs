@@ -35,11 +35,6 @@ pub fn len(s: &str) -> usize {
     s.encode_utf16().count()
 }
 
-/// `String.prototype.toLowerCase` (full Unicode mapping, final sigma included).
-pub fn lower(s: &str) -> String {
-    s.to_lowercase()
-}
-
 /// `s.split(/\s+/).filter((t) => t.length > 0)`.
 pub fn split_whitespace(s: &str) -> Vec<&str> {
     s.split(is_whitespace).filter(|t| !t.is_empty()).collect()

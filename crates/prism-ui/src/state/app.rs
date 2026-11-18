@@ -295,12 +295,7 @@ mod provider {
     const LOAD_ERROR_SUFFIX: &str = ". Repair prism.json, then retry. Saving is paused to preserve your file.";
 
     fn load_error_message(error: &str) -> String {
-        format!("{LOAD_ERROR_PREFIX}{}{LOAD_ERROR_SUFFIX}", error_string(error))
-    }
-
-    /// `String(error)` of a rejected invoke: `Error: <message>` in the WebView.
-    pub fn error_string(message: &str) -> String {
-        message.to_owned()
+        format!("{LOAD_ERROR_PREFIX}{}{LOAD_ERROR_SUFFIX}", error.to_string())
     }
 
     fn settings_json(settings: &Settings) -> Map<String, Value> {
@@ -453,7 +448,7 @@ mod provider {
         fn apply_window_style(&mut self, cx: &mut Context<Self>) {
             let theme = self.effective_theme().to_owned();
             if let Err(error) = bridge::shell(cx).set_window_style(&theme, cx) {
-                self.show_toast("Appearance not applied", Some(error_string(&error)), ToastKind::Error, cx);
+                self.show_toast("Appearance not applied", Some(error.to_string()), ToastKind::Error, cx);
             }
         }
 
@@ -461,7 +456,7 @@ mod provider {
             if let Err(error) = bridge::shell(cx).set_always_on_top(self.settings.always_on_top, cx) {
                 self.show_toast(
                     "Always on top not applied",
-                    Some(format!("Toggle the setting to retry. {}", error_string(&error))),
+                    Some(format!("Toggle the setting to retry. {}", error.to_string())),
                     ToastKind::Error,
                     cx,
                 );
@@ -488,7 +483,7 @@ mod provider {
                 if let Err(error) = bridge::shell(cx).set_window_width(target, cx) {
                     self.show_toast(
                         "Window width not applied",
-                        Some(format!("Try selecting the width again. {}", error_string(&error))),
+                        Some(format!("Try selecting the width again. {}", error.to_string())),
                         ToastKind::Error,
                         cx,
                     );
@@ -518,7 +513,7 @@ mod provider {
                                 {
                                     this.show_toast(
                                         "Window width not applied",
-                                        Some(format!("Try selecting the width again. {}", error_string(&error))),
+                                        Some(format!("Try selecting the width again. {}", error.to_string())),
                                         ToastKind::Error,
                                         cx,
                                     );
@@ -621,7 +616,7 @@ mod provider {
                     if let Err(error) = bridge::save_state(state).await {
                         let message = format!(
                             "Could not save settings: {}. Free disk space or check folder permissions, then retry.",
-                            error_string(&error)
+                            error.to_string()
                         );
                         let _ = this.update(cx, |this, cx| {
                             this.persist_request = None;
@@ -836,20 +831,20 @@ mod provider {
                             this.update_settings(cx, |s| s.shortcut = shortcut);
                         });
                         let taskbar = alignment_rollback_error
-                            .map(|e| format!(" Taskbar restoration failed: {}.", error_string(&e)))
+                            .map(|e| format!(" Taskbar restoration failed: {}.", e.to_string()))
                             .unwrap_or_default();
                         return Err(format!(
                             "Reset stopped: {}. Shortcut restoration also failed: {}. The shortcut remains {}.{taskbar}",
-                            error_string(&error),
-                            error_string(&rollback_error),
+                            error.to_string(),
+                            rollback_error.to_string(),
                             defaults.shortcut
                         ));
                     }
                     if let Some(rollback_error) = alignment_rollback_error {
                         return Err(format!(
                             "Reset stopped: {}. Could not restore taskbar alignment: {}. Select the alignment again to retry.",
-                            error_string(&error),
-                            error_string(&rollback_error)
+                            error.to_string(),
+                            rollback_error.to_string()
                         ));
                     }
                     return Err(error);
@@ -944,7 +939,7 @@ mod provider {
                     let _ = this.update(cx, |this, cx| {
                         this.show_toast(
                             "Could not quit Prism",
-                            Some(format!("Your changes are still open. {}", error_string(&error))),
+                            Some(format!("Your changes are still open. {}", error.to_string())),
                             ToastKind::Error,
                             cx,
                         );

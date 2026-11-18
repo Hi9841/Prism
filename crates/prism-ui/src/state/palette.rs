@@ -22,7 +22,7 @@ use crate::lib::types::{
     AppEntry, FileEntry, FileSearchError, FileSearchResponse, PaletteItem, QuickAccessEntry, RowAction,
     VolumeCoverage,
 };
-use crate::state::app::{AppEvent, AppState, ToastKind, app_state, error_string};
+use crate::state::app::{AppEvent, AppState, ToastKind, app_state};
 
 /// Bounds the retained thumbnail data URLs; the palette lives for weeks. It
 /// holds a full result list and the recent rows: a smaller cache evicted the
@@ -93,7 +93,7 @@ fn picture_extension(path: &str, split_dots_and_slashes: bool) -> Option<String>
     } else {
         path.rsplit('.').next()
     }?;
-    let extension = js::lower(last);
+    let extension = last.to_lowercase();
     THUMBNAIL_EXTENSIONS.contains(&extension.as_str()).then_some(extension)
 }
 
@@ -379,7 +379,7 @@ impl PaletteState {
         // While the next file search runs, the rows of the last one stay, for
         // the same reason.
         let file_result_query = if self.files_searching {
-            js::lower(js::trim(&self.query))
+            js::trim(&self.query).to_lowercase()
         } else {
             self.file_result_query.clone()
         };
@@ -591,7 +591,7 @@ impl PaletteState {
     /// reply can rank new rows above rows the user already scrolled past.
     fn run_file_search(&mut self, append: bool, cx: &mut Context<Self>) {
         let search_text = js::trim(&self.query).to_owned();
-        let normalized = js::lower(&search_text);
+        let normalized = search_text.to_lowercase();
         if js::len(&normalized) < 2 {
             self.file_results.clear();
             self.file_more = false;
@@ -683,7 +683,7 @@ impl PaletteState {
                         this.file_indexing = false;
                         this.file_path_browse = false;
                         this.file_error =
-                            Some(FileSearchError { kind: "indexQuery".into(), message: error_string(&error) });
+                            Some(FileSearchError { kind: "indexQuery".into(), message: error.to_string() });
                         this.files_error = true;
                     }
                 }
@@ -807,7 +807,7 @@ impl PaletteState {
     /// runs, after a reply that did not fill its page (no more matches), or at
     /// the cap. The current rows stay, and the reply adds rows after them.
     pub fn load_more_files(&mut self, cx: &mut Context<Self>) {
-        let query = js::lower(js::trim(&self.query));
+        let query = js::trim(&self.query).to_lowercase();
         if self.files_searching
             || self.file_result_query != query
             || !self.file_more
@@ -857,7 +857,7 @@ impl PaletteState {
                 // The plan is set: the list refresh below needs no gate.
                 drop(ticket);
                 if let Err(error) = result {
-                    toast("Power plan not changed", error_string(&error), ToastKind::Error, cx);
+                    toast("Power plan not changed", error.to_string(), ToastKind::Error, cx);
                     return;
                 }
                 let current = this.update(cx, |this, _| js::trim(&this.query).to_owned()).unwrap_or_default();
@@ -883,7 +883,7 @@ impl PaletteState {
                     Err(error) => {
                         toast(
                             "Power plan changed",
-                            format!("Could not refresh the list: {}", error_string(&error)),
+                            format!("Could not refresh the list: {}", error.to_string()),
                             ToastKind::Success,
                             cx,
                         );
@@ -901,7 +901,7 @@ impl PaletteState {
             if result.is_ok() && !clipboard_item && ticket.is_current() {
                 let hidden = cx.update(|cx| bridge::shell(cx).hide_palette(false, cx));
                 if let Ok(Err(error)) = hidden {
-                    eprintln!("Prism could not hide the palette after a launch: {}", error_string(&error));
+                    eprintln!("Prism could not hide the palette after a launch: {}", error.to_string());
                 }
             }
             // The launch and hide are done: history and intent writes need no gate.
@@ -921,7 +921,7 @@ impl PaletteState {
                 }
                 Err(error) => toast(
                     "Couldn\u{2019}t open item",
-                    format!("{}: {}", item.title, error_string(&error)),
+                    format!("{}: {}", item.title, error.to_string()),
                     ToastKind::Error,
                     cx,
                 ),
@@ -950,7 +950,7 @@ impl PaletteState {
                 Ok(()) => app.push_history(&item.id, &item.history_title, cx),
                 Err(error) => app.show_toast(
                     "Could not run as administrator",
-                    Some(error_string(&error)),
+                    Some(error.to_string()),
                     ToastKind::Error,
                     cx,
                 ),

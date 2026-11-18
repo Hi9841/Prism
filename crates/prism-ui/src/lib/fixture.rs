@@ -63,7 +63,7 @@ impl Fixture {
 
     /// `search_files`: the canned response for the normalized query, else no matches.
     pub fn search_files(&self, query: &str) -> Value {
-        let key = crate::js::lower(crate::js::trim(query));
+        let key = crate::js::trim(query).to_lowercase();
         let status = self.status();
         let mut response = self.files.get(&key).cloned().unwrap_or_else(|| json!({ "items": [], "pathBrowse": false }));
         if let (Some(response), Some(status)) = (response.as_object_mut(), status.as_object()) {
@@ -77,7 +77,7 @@ impl Fixture {
     }
 
     pub fn phase1(&self, query: &str) -> Value {
-        let key = crate::js::lower(crate::js::trim(query));
+        let key = crate::js::trim(query).to_lowercase();
         let mut response = self
             .phase1
             .get(&key)
@@ -88,7 +88,7 @@ impl Fixture {
     }
 
     pub fn power_plans(&self, query: &str) -> Value {
-        let key = crate::js::lower(crate::js::trim(query));
+        let key = crate::js::trim(query).to_lowercase();
         self.power_plans.get(&key).cloned().unwrap_or_else(|| json!([]))
     }
 

@@ -128,7 +128,7 @@ pub fn build_sections(sources: &PaletteSources) -> BuiltSections {
     } = sources;
     let (file_path_browse, files_busy, files_error) = (*file_path_browse, *files_busy, *files_error);
     let normalized = js::trim(query);
-    let search_query = js::lower(normalized);
+    let search_query = normalized.to_lowercase();
     let mut out: Vec<Section> = Vec::new();
 
     if normalized.is_empty() {
@@ -210,13 +210,13 @@ pub fn build_sections(sources: &PaletteSources) -> BuiltSections {
         let mut app_paths: HashSet<String> = HashSet::new();
         for entry in &app_hits {
             if let Some(path) = truthy(entry.path.as_deref()) {
-                app_paths.insert(js::lower(path));
+                app_paths.insert(path.to_lowercase());
             }
         }
         if let Some(phase1) = phase1 {
             for hit in &phase1.apps {
                 if let Some(path) = truthy(hit.path.as_deref()) {
-                    app_paths.insert(js::lower(path));
+                    app_paths.insert(path.to_lowercase());
                 }
             }
         }
@@ -241,7 +241,7 @@ pub fn build_sections(sources: &PaletteSources) -> BuiltSections {
         }
 
         let deduped_files: Vec<&FileEntry> =
-            file_results.iter().filter(|entry| !app_paths.contains(&js::lower(&entry.path))).collect();
+            file_results.iter().filter(|entry| !app_paths.contains(&entry.path.to_lowercase())).collect();
         let file_items: Vec<PaletteItem> = if *file_result_query == search_query && !deduped_files.is_empty() {
             deduped_files.into_iter().map(file_palette_item).collect()
         } else {
@@ -536,7 +536,7 @@ fn file_appearance(entry: &FileEntry) -> (&'static str, TileTint) {
         return ("Folder", "azure");
     }
     // `name.split(".").pop()`: the text after the last dot, or the whole name.
-    let extension = js::lower(entry.name.rsplit('.').next().unwrap_or(""));
+    let extension = entry.name.rsplit('.').next().unwrap_or("").to_lowercase();
     let extension = extension.as_str();
     if IMAGE_EXTENSIONS.contains(&extension) {
         ("FileImage", "amber")

@@ -246,7 +246,7 @@ fn palette_sections(raw: &Value) -> Result<Value, Failure> {
     let thumbnail_pairs: Vec<(String, Option<String>)> = field_or_default(raw, "fileThumbnails")?;
     let thumbnails: HashMap<String, Option<String>> = thumbnail_pairs.into_iter().collect();
     let query = string(raw, "query")?;
-    let normalized = js::lower(js::trim(query));
+    let normalized = js::trim(query).to_lowercase();
     let short = js::len(&normalized) < 2;
     let files_searching = !short && truthy(raw, "filesSearching");
     let file_path_browse = !short && truthy(raw, "filePathBrowse");

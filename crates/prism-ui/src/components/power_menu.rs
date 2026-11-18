@@ -14,7 +14,7 @@ use crate::components::ui::{IconButtonProps, icon_button, theme};
 use crate::gfx::{Tween, r, reduced_motion, scale_from};
 use crate::lib::bridge::{self, BackendEvent};
 use crate::lib::launcher_motion::POPOVER_MOTION_MS;
-use crate::state::app::{AppEvent, AppState, ToastKind, app_state, error_string};
+use crate::state::app::{AppEvent, AppState, ToastKind, app_state};
 use crate::theme::motion;
 
 const ACTIONS: [(&str, &str, &str); 4] = [
@@ -137,7 +137,7 @@ impl PowerMenu {
                     Err(error) => {
                         let verb = if action == "shutdown" { "shut down" } else { action };
                         app.update(cx, |app, cx| {
-                            app.show_toast(format!("Could not {verb}"), Some(error_string(&error)), ToastKind::Error, cx)
+                            app.show_toast(format!("Could not {verb}"), Some(error.to_string()), ToastKind::Error, cx)
                         });
                     }
                 }

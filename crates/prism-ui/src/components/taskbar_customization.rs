@@ -12,7 +12,7 @@ use gpui::{
 use crate::components::ui::{SegmentOption, segmented, settings_row, shadow_sm, theme, title_tooltip, toggle, weight};
 use crate::gfx::{icon, png_image, r, zoomed};
 use crate::lib::bridge::{self, TaskbarSettings};
-use crate::state::app::{AppState, ToastKind, app_state, error_string};
+use crate::state::app::{AppState, ToastKind, app_state};
 use crate::theme::{Rgba, TRANSPARENT, Theme, fade, hsla};
 use crate::transition::{self, Timing};
 
@@ -60,7 +60,7 @@ impl TaskbarCustomization {
                 match result {
                     Ok(settings) => this.set_settings(settings),
                     Err(error) => app.update(cx, |app, cx| {
-                        app.show_toast("Taskbar settings unavailable", Some(error_string(&error)), ToastKind::Error, cx)
+                        app.show_toast("Taskbar settings unavailable", Some(error.to_string()), ToastKind::Error, cx)
                     }),
                 }
                 this.busy = None;
@@ -90,7 +90,7 @@ impl TaskbarCustomization {
                 match result {
                     Ok(settings) => this.set_settings(settings),
                     Err(error) => app.update(cx, |app, cx| {
-                        app.show_toast("Taskbar not changed", Some(error_string(&error)), ToastKind::Error, cx)
+                        app.show_toast("Taskbar not changed", Some(error.to_string()), ToastKind::Error, cx)
                     }),
                 }
                 this.busy = None;

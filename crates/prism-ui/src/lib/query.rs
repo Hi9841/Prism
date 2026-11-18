@@ -59,7 +59,7 @@ pub fn phase1_matches_query(phase1: Option<&Phase1Response>, query: &str) -> boo
     let Some(phase1) = phase1 else {
         return false;
     };
-    js::lower(js::trim(&phase1.query)) == js::lower(js::trim(query))
+    js::trim(&phase1.query).to_lowercase() == js::trim(query).to_lowercase()
 }
 
 // PORT STATUS: confidence=high todos=0

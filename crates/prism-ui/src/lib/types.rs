@@ -229,7 +229,7 @@ fn file_extension(path: Option<&str>) -> Option<String> {
     }
     let filename = path.rsplit(['\\', '/']).next().unwrap_or("");
     let boundary = filename.rfind('.')?;
-    (boundary > 0).then(|| js::lower(&filename[boundary + 1..]))
+    (boundary > 0).then(|| filename[boundary + 1..].to_lowercase())
 }
 
 const ELEVATABLE_EXTENSIONS: [&str; 8] = ["exe", "com", "bat", "cmd", "ps1", "vbs", "js", "wsf"];

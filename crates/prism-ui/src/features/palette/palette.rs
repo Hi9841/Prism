@@ -33,7 +33,7 @@ use crate::lib::types::{
     FileSearchError, PINNED_APP_LIMIT, PaletteItem, reorder_app_groups, reorder_pinned_apps, reorder_quick_access,
     reorder_sections,
 };
-use crate::state::app::{AppEvent, AppState, ToastKind, app_state, error_string};
+use crate::state::app::{AppEvent, AppState, ToastKind, app_state};
 use crate::state::palette::{PaletteEvent, PaletteState, palette_state, run_action};
 use crate::theme::{Rgba, TRANSPARENT, Theme, fade, hsla, motion, shadow, tabular_nums, white};
 use crate::transition::{self, Timing};
@@ -512,7 +512,7 @@ impl Palette {
                             cx,
                         ),
                         Err(error) => {
-                            let message = error_string(&error);
+                            let message = error.to_string();
                             if !was_pinned && message.contains("prism-manual-pin-required") {
                                 app.show_toast(
                                     "Windows blocks automatic pinning",
@@ -537,7 +537,7 @@ impl Palette {
                 cx.spawn(async move |_, cx| {
                     if let Err(error) = task.await {
                         let _ = app.update(cx, |app, cx| {
-                            app.show_toast("Could not open properties", Some(error_string(&error)), ToastKind::Error, cx)
+                            app.show_toast("Could not open properties", Some(error.to_string()), ToastKind::Error, cx)
                         });
                     }
                 })

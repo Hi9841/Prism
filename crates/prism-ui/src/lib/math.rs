@@ -66,7 +66,7 @@ fn rewrite_symbols(s: &str) -> String {
 }
 
 fn normalize(input: &str) -> Option<String> {
-    let s = js::lower(js::trim(input));
+    let s = js::trim(input).to_lowercase();
     let length = js::len(&s);
     if length == 0 || length > 120 {
         return None;
@@ -266,7 +266,7 @@ pub fn try_evaluate(input: &str) -> Option<EvalResult> {
 
 /// Returns true when a query is "math-like" enough to surface the calculator.
 pub fn is_math_like(input: &str) -> bool {
-    let s = js::lower(js::trim(input));
+    let s = js::trim(input).to_lowercase();
     let length = js::len(&s);
     if length == 0 || length > 120 {
         return false;
