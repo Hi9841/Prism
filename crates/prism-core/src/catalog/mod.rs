@@ -1440,9 +1440,12 @@ pub fn file_thumbnails(requests: Vec<(String, Option<FileStamp>)>) -> Vec<Thumbn
         .collect()
 }
 
+/// The lowercase extensions that get a file thumbnail.
+const THUMBNAIL_EXTENSIONS: [&str; 6] = ["png", "jpg", "jpeg", "gif", "bmp", "webp"];
+
 fn image_thumbnail(path: &Path, len: u64) -> Option<String> {
     let extension = path.extension()?.to_string_lossy().to_lowercase();
-    if !prism_vocab::THUMBNAIL_EXTENSIONS.contains(&extension.as_str()) {
+    if !THUMBNAIL_EXTENSIONS.contains(&extension.as_str()) {
         return None;
     }
     if len > THUMBNAIL_MAX_BYTES {

@@ -47,8 +47,5 @@ impl ActionSection {
 /// The lowercase extensions that "Run as administrator" accepts.
 pub const ELEVATABLE_EXTENSIONS: [&str; 8] = ["exe", "com", "bat", "cmd", "ps1", "vbs", "js", "wsf"];
 
-/// The lowercase extensions that get a file thumbnail.
-pub const THUMBNAIL_EXTENSIONS: [&str; 6] = ["png", "jpg", "jpeg", "gif", "bmp", "webp"];
-
 /// The error text of a taskbar pin that Windows asks the user to confirm.
 pub const MANUAL_PIN_REQUIRED: &str = "prism-manual-pin-required";
