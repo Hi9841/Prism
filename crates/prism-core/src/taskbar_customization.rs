@@ -41,11 +41,65 @@ const GEM_ICON: &[u8] = include_bytes!("../assets/taskbar-icons/gem.png");
 const DIAMOND_ICON: &[u8] = include_bytes!("../assets/taskbar-icons/diamond.png");
 
 /// The icon density choices of `set_thickness`.
-pub const THICKNESSES: [&str; 3] = ["compact", "default", "adaptive"];
+pub const THICKNESSES: [&str; 3] = {
+    let mut names = [""; 3];
+    let mut index = 0;
+    while index < names.len() {
+        names[index] = Thickness::ALL[index].name();
+        index += 1;
+    }
+    names
+};
 /// The button grouping choices of `set_combine_buttons`, in the order of their registry codes.
 pub const COMBINE_BUTTONS: [&str; 3] = ["always", "whenFull", "never"];
 /// The built-in Start icons of `set_start_icon`; `"custom"` selects a user image.
-pub const BUILTIN_START_ICONS: [&str; 3] = ["system", "gem", "diamond"];
+pub const BUILTIN_START_ICONS: [&str; 3] = {
+    let mut names = [""; 3];
+    let mut index = 0;
+    while index < names.len() {
+        names[index] = StartIcon::BUILTIN[index].name();
+        index += 1;
+    }
+    names
+};
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Thickness {
+    Compact,
+    Default,
+    Adaptive,
+}
+
+impl Thickness {
+    const ALL: [Self; 3] = [Self::Compact, Self::Default, Self::Adaptive];
+
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Compact => "compact",
+            Self::Default => "default",
+            Self::Adaptive => "adaptive",
+        }
+    }
+
+    /// The `TaskbarSi` (legacy size) and `IconSizePreference` values.
+    const fn registry_values(self) -> (u32, u32) {
+        match self {
+            Self::Compact => (0, 0),
+            Self::Default => (1, 1),
+            Self::Adaptive => (1, 2),
+        }
+    }
+
+    fn from_registry(legacy_value: u32, icon_preference: u32) -> Self {
+        if icon_preference == 0 || legacy_value == 0 {
+            Self::Compact
+        } else if icon_preference == 2 {
+            Self::Adaptive
+        } else {
+            Self::Default
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -58,17 +112,17 @@ enum StartIcon {
 }
 
 impl StartIcon {
+    const BUILTIN: [Self; 3] = [Self::System, Self::Gem, Self::Diamond];
+
     fn parse(value: &str) -> Result<Self, String> {
-        match value {
-            "system" => Ok(Self::System),
-            "gem" => Ok(Self::Gem),
-            "diamond" => Ok(Self::Diamond),
-            "custom" => Ok(Self::Custom),
-            _ => Err(format!("unsupported Start icon '{value}'")),
-        }
+        Self::BUILTIN
+            .into_iter()
+            .chain([Self::Custom])
+            .find(|icon| icon.name() == value)
+            .ok_or_else(|| format!("unsupported Start icon '{value}'"))
     }
 
-    fn name(self) -> &'static str {
+    const fn name(self) -> &'static str {
         match self {
             Self::System => "system",
             Self::Gem => "gem",
@@ -123,10 +177,11 @@ pub fn settings() -> Result<TaskbarSettings, String> {
             .unwrap_or(fallback)
     };
     Ok(TaskbarSettings {
-        thickness: thickness_name(
+        thickness: Thickness::from_registry(
             read_advanced(TASKBAR_SIZE_VALUE, 1),
             read_advanced(ICON_SIZE_PREFERENCE_VALUE, 1),
-        ),
+        )
+        .name(),
         auto_hide: taskbar_auto_hide(),
         combine_buttons: combine_name(read_advanced(COMBINE_VALUE, 0)),
         start_icon: icon_settings.start_icon.name(),
@@ -136,12 +191,11 @@ pub fn settings() -> Result<TaskbarSettings, String> {
 }
 
 pub fn set_thickness(value: &str) -> Result<(), String> {
-    let (legacy_size, icon_preference) = match value {
-        "compact" => (0, 0),
-        "default" => (1, 1),
-        "adaptive" => (1, 2),
-        _ => return Err(format!("unsupported taskbar thickness '{value}'")),
-    };
+    let (legacy_size, icon_preference) = Thickness::ALL
+        .into_iter()
+        .find(|thickness| thickness.name() == value)
+        .ok_or_else(|| format!("unsupported taskbar thickness '{value}'"))?
+        .registry_values();
     write_advanced_dword(TASKBAR_SIZE_VALUE, legacy_size)?;
     write_advanced_dword(ICON_SIZE_PREFERENCE_VALUE, icon_preference)?;
     crate::taskbar_alignment::notify_taskbars("TraySettings");
@@ -397,16 +451,6 @@ fn taskbar_auto_hide() -> bool {
         ..Default::default()
     };
     unsafe { SHAppBarMessage(ABM_GETSTATE, &mut data) as u32 & ABS_AUTOHIDE != 0 }
-}
-
-fn thickness_name(legacy_value: u32, icon_preference: u32) -> &'static str {
-    if icon_preference == 0 || legacy_value == 0 {
-        "compact"
-    } else if icon_preference == 2 {
-        "adaptive"
-    } else {
-        "default"
-    }
 }
 
 fn combine_name(value: u32) -> &'static str {
