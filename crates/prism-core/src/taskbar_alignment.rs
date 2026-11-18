@@ -311,14 +311,12 @@ fn start_alignment_watcher() {
     });
 }
 
-fn shared_alignment_path() -> Option<PathBuf> {
-    crate::host::installed_data_dir().map(|dir| dir.join(ALIGNMENT_MARKER_FILE))
+fn shared_alignment_path() -> PathBuf {
+    crate::host::data_dir().join(ALIGNMENT_MARKER_FILE)
 }
 
 fn write_shared_alignment(alignment: Alignment) -> Result<(), String> {
-    let Some(path) = shared_alignment_path() else {
-        return Ok(());
-    };
+    let path = shared_alignment_path();
     let Some(parent) = path.parent() else {
         return Ok(());
     };
@@ -328,8 +326,7 @@ fn write_shared_alignment(alignment: Alignment) -> Result<(), String> {
 }
 
 fn shared_alignment() -> Option<Alignment> {
-    let path = shared_alignment_path()?;
-    let value = std::fs::read_to_string(path).ok()?;
+    let value = std::fs::read_to_string(shared_alignment_path()).ok()?;
     Alignment::parse(value.trim()).ok()
 }
 

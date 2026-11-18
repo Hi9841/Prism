@@ -25,7 +25,7 @@ pub fn set(icon: Option<OverlayIcon>) -> Result<(), String> {
 }
 
 fn sync_file(icon: Option<&OverlayIcon>) -> Result<(), String> {
-    let path = icon_path()?;
+    let path = icon_path();
     match icon {
         Some(icon) => write_icon_file(&path, &icon.pixels),
         None => match std::fs::remove_file(path) {
@@ -53,8 +53,6 @@ fn write_icon_file(path: &Path, pixels: &RgbaImage) -> Result<(), String> {
     crate::win32::replace_file(&temp, path)
 }
 
-fn icon_path() -> Result<PathBuf, String> {
-    crate::host::app_data_dir()
-        .map(|path| path.join(START_ICON_FILE))
-        .map_err(|error| error.to_string())
+fn icon_path() -> PathBuf {
+    crate::host::data_dir().join(START_ICON_FILE)
 }

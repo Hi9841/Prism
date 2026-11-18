@@ -87,7 +87,7 @@ pub fn autostart_disabled_by_user() -> bool {
 }
 
 fn apps_cache_path() -> PathBuf {
-    crate::host::app_data_dir_or_cwd().join("apps.json")
+    crate::host::data_dir().join("apps.json")
 }
 
 fn join_error(context: &str, error: tokio::task::JoinError) -> String {
@@ -113,7 +113,7 @@ impl Backend {
         // activation never waits on the UI. The Explorer bridge is
         // initialized off the UI thread.
         self.apply_startup_shortcut(startup_shortcut(persisted));
-        let app_data_dir = crate::host::app_data_dir_or_cwd();
+        let app_data_dir = crate::host::data_dir();
         self.intent.set_path(app_data_dir.join("intent-cache.db"));
         self.launches.set_path(app_data_dir.join("launch-counts.json"));
         catalog::warm(self.file_index.clone(), app_data_dir);
@@ -666,7 +666,7 @@ impl Backend {
         validate_state(&state)?;
         let mut value = state;
         value["version"] = serde_json::json!(STATE_VERSION);
-        let dir = crate::host::app_data_dir()?;
+        let dir = crate::host::data_dir();
         persist_state_value(&dir, &value)
     }
 
@@ -717,7 +717,7 @@ pub fn filter_existing_paths(paths: Vec<String>) -> Vec<String> {
 /// Version 2 settings are preserved except for the shortcut, which the 0.3.3
 /// installer contract intentionally changes to the new Win default.
 pub fn load_state_value() -> Result<Option<serde_json::Value>, String> {
-    let dir = crate::host::app_data_dir()?;
+    let dir = crate::host::data_dir();
     let path = dir.join("prism.json");
     if !path.exists() {
         return Ok(None);

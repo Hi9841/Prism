@@ -414,18 +414,16 @@ fn place(taskbar: HWND, insert_after: HWND, show: bool) {
     }
 }
 
-fn marker_path() -> Option<PathBuf> {
-    crate::host::installed_data_dir().map(|dir| dir.join(TOPMOST_MARKER))
+fn marker_path() -> PathBuf {
+    crate::host::data_dir().join(TOPMOST_MARKER)
 }
 
 fn marker_present() -> bool {
-    marker_path().is_some_and(|path| path.is_file())
+    marker_path().is_file()
 }
 
 fn write_marker(present: bool) {
-    let Some(path) = marker_path() else {
-        return;
-    };
+    let path = marker_path();
     if present {
         if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);

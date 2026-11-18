@@ -53,7 +53,7 @@ struct RestoreJournal {
 
 /// Restores an override left by a previous abnormal termination.
 pub fn recover_stale() -> Result<(), String> {
-    restore_from_journal(&journal_path()?)
+    restore_from_journal(&journal_path())
 }
 
 /// Makes the installed provider consume standalone Win. Returns `false` when
@@ -68,7 +68,7 @@ pub fn enable() -> Result<bool, String> {
         return Ok(false);
     }
 
-    let journal_path = journal_path()?;
+    let journal_path = journal_path();
     if journal_path.exists() {
         restore_from_journal(&journal_path)?;
     }
@@ -110,7 +110,7 @@ pub fn enable() -> Result<bool, String> {
 /// Restores the exact value (including absence) that existed before Prism
 /// claimed Win.
 pub fn restore() -> Result<(), String> {
-    let result = restore_from_journal(&journal_path()?);
+    let result = restore_from_journal(&journal_path());
     if result.is_ok() {
         OVERRIDE_ACTIVE.store(false, Ordering::Release);
     }
@@ -258,10 +258,8 @@ fn journal_has_token(path: &Path, token: u64) -> bool {
         .is_some_and(|journal| journal.version == 2 && journal.token == token)
 }
 
-fn journal_path() -> Result<PathBuf, String> {
-    crate::host::app_data_dir()
-        .map(|path| path.join(JOURNAL_NAME))
-        .map_err(|error| error.to_string())
+fn journal_path() -> PathBuf {
+    crate::host::data_dir().join(JOURNAL_NAME)
 }
 
 fn write_journal(path: &Path, journal: &RestoreJournal) -> Result<(), String> {

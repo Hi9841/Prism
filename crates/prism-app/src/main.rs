@@ -95,7 +95,6 @@ fn main() {
     let hotkeys = hotkey::Hotkeys::start(sender.clone());
     prism_core::host::install(Arc::new(GpuiHost {
         sender: sender.clone(),
-        app_data_dir: host::app_data_dir(),
         hotkeys,
         palette_visible: palette_visible.clone(),
     }));

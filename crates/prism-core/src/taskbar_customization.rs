@@ -307,7 +307,7 @@ fn encode_png(image: &RgbaImage) -> Result<Vec<u8>, String> {
 }
 
 fn read_icon_settings() -> Result<IconSettings, String> {
-    let path = icon_settings_path()?;
+    let path = icon_settings_path();
     if !path.exists() {
         return Ok(IconSettings::default());
     }
@@ -324,7 +324,7 @@ fn read_icon_settings() -> Result<IconSettings, String> {
 
 fn write_icon_settings(settings: &IconSettings) -> Result<(), String> {
     let bytes = serde_json::to_vec(&settings).map_err(|error| error.to_string())?;
-    write_file_atomically(&icon_settings_path()?, &bytes)
+    write_file_atomically(&icon_settings_path(), &bytes)
 }
 
 fn selected_custom_id(settings: &IconSettings) -> Option<String> {
@@ -332,8 +332,7 @@ fn selected_custom_id(settings: &IconSettings) -> Option<String> {
         return None;
     }
     settings.selected_custom_icon.clone().or_else(|| {
-        custom_icon_path()
-            .ok()
+        Some(custom_icon_path())
             .filter(|path| path.is_file())
             .map(|_| "legacy".to_string())
     })
@@ -341,14 +340,14 @@ fn selected_custom_id(settings: &IconSettings) -> Option<String> {
 
 fn custom_start_icons() -> Result<Vec<CustomStartIcon>, String> {
     let mut icons = Vec::new();
-    let legacy = custom_icon_path()?;
+    let legacy = custom_icon_path();
     if let Ok(preview) = std::fs::read(legacy) {
         icons.push(CustomStartIcon {
             id: "legacy".to_string(),
             preview: encode_base64(&preview),
         });
     }
-    let directory = custom_icon_dir()?;
+    let directory = custom_icon_dir();
     let entries = match std::fs::read_dir(directory) {
         Ok(entries) => entries,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(icons),
@@ -505,29 +504,23 @@ fn write_file_atomically(path: &Path, bytes: &[u8]) -> Result<(), String> {
     crate::win32::replace_file(&temp, path)
 }
 
-fn icon_settings_path() -> Result<PathBuf, String> {
-    crate::host::app_data_dir()
-        .map(|path| path.join(ICON_SETTINGS_NAME))
-        .map_err(|error| error.to_string())
+fn icon_settings_path() -> PathBuf {
+    crate::host::data_dir().join(ICON_SETTINGS_NAME)
 }
 
-fn custom_icon_path() -> Result<PathBuf, String> {
-    crate::host::app_data_dir()
-        .map(|path| path.join(CUSTOM_ICON_PNG))
-        .map_err(|error| error.to_string())
+fn custom_icon_path() -> PathBuf {
+    crate::host::data_dir().join(CUSTOM_ICON_PNG)
 }
 
-fn custom_icon_dir() -> Result<PathBuf, String> {
-    crate::host::app_data_dir()
-        .map(|path| path.join(CUSTOM_ICON_DIR))
-        .map_err(|error| error.to_string())
+fn custom_icon_dir() -> PathBuf {
+    crate::host::data_dir().join(CUSTOM_ICON_DIR)
 }
 
 fn custom_icon_path_for_settings(settings: &IconSettings,
 ) -> Result<PathBuf, String> {
     match settings.selected_custom_icon.as_deref() {
         Some(id) => custom_icon_path_for_id(id),
-        None => custom_icon_path(),
+        None => Ok(custom_icon_path()),
     }
 }
 
@@ -536,9 +529,9 @@ fn custom_icon_path_for_id(id: &str) -> Result<PathBuf, String> {
         return Err("Invalid custom icon identifier".to_string());
     }
     if id == "legacy" {
-        custom_icon_path()
+        Ok(custom_icon_path())
     } else {
-        custom_icon_dir().map(|directory| directory.join(format!("{id}.png")))
+        Ok(custom_icon_dir().join(format!("{id}.png")))
     }
 }
 

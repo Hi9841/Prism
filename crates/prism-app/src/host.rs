@@ -1,7 +1,6 @@
 //! The `prism-core` host for the GPUI app: backend calls arrive on any thread
 //! and are forwarded to the UI thread through a channel.
 
-use std::path::PathBuf;
 
 use futures::channel::mpsc::UnboundedSender;
 use windows::Win32::Foundation::{POINT, RECT};
@@ -18,7 +17,6 @@ pub enum HostMessage {
 
 pub struct GpuiHost {
     pub sender: UnboundedSender<HostMessage>,
-    pub app_data_dir: PathBuf,
     pub hotkeys: crate::hotkey::Hotkeys,
     pub palette_visible: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
@@ -26,10 +24,6 @@ pub struct GpuiHost {
 impl prism_core::host::Host for GpuiHost {
     fn emit(&self, event: prism_core::host::CoreEvent) {
         let _ = self.sender.unbounded_send(HostMessage::Emit(event));
-    }
-
-    fn app_data_dir(&self) -> Result<PathBuf, String> {
-        Ok(self.app_data_dir.clone())
     }
 
     fn palette_visible(&self) -> bool {
@@ -59,6 +53,4 @@ impl prism_core::host::Host for GpuiHost {
     }
 }
 
-pub fn app_data_dir() -> PathBuf {
-    prism_core::host::installed_data_dir().unwrap_or_else(|| PathBuf::from("."))
-}
+

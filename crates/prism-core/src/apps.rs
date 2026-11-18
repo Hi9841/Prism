@@ -1935,12 +1935,9 @@ fn hash(s: &str) -> String {
 }
 
 
-/// The icon cache sits next to `apps.json`, in the host's data folder.
+/// The icon cache sits next to `apps.json`, in the data folder.
 fn icon_cache_dir() -> PathBuf {
-    crate::host::app_data_dir()
-        .ok()
-        .or_else(crate::host::installed_data_dir)
-        .map_or_else(|| PathBuf::from("."), |dir| dir.join("icons"))
+    crate::host::data_dir().join("icons")
 }
 
 /// Reads a VT_LPWSTR out of a PROPVARIANT (windows-rs 0.61 exposes the raw
