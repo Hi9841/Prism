@@ -3,7 +3,7 @@
 
 use std::sync::Arc;
 
-use prism_core::settings;
+use prism_vocab::settings;
 
 use serde::{Deserialize, Serialize};
 
@@ -193,7 +193,7 @@ pub struct FileEntry {
     pub thumbnail: Option<String>,
 }
 
-pub use prism_core::settings::{
+pub use prism_vocab::settings::{
     APP_GROUP_APP_LIMIT, APP_GROUP_LIMIT, PINNED_APP_LIMIT, QUICK_ACCESS_KINDS, QUICK_ACCESS_LIMIT,
     SECTION_IDS as DEFAULT_SECTION_ORDER,
 };
@@ -237,7 +237,7 @@ pub const PICTURE_EXTENSIONS: [&str; 12] =
     ["jpg", "jpeg", "png", "gif", "webp", "bmp", "svg", "ico", "tiff", "tif", "avif", "heic"];
 
 pub fn is_elevatable_path(path: Option<&str>) -> bool {
-    file_extension(path).is_some_and(|ext| prism_core::apps::ELEVATABLE_EXTENSIONS.contains(&ext.as_str()))
+    file_extension(path).is_some_and(|ext| prism_vocab::ELEVATABLE_EXTENSIONS.contains(&ext.as_str()))
 }
 
 /// Windows' taskbar-pin shell verb applies to launchable targets only.

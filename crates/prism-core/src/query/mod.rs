@@ -34,8 +34,6 @@ pub enum Phase1Kind {
     Action,
 }
 
-/// The `source` of a Phase 1 hit that lists with the Windows tools.
-pub const WINDOWS_TOOL_SOURCE: &str = "windows-tool";
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -194,7 +192,7 @@ fn search_apps(query: &score::Query, apps: &[AppEntry], launches: &LaunchStore) 
         let Some(score) = query.score_with_keywords(&app.name, &app.keywords) else {
             continue;
         };
-        ranked.push((app, score, crate::apps::source_rank(&app.source)));
+        ranked.push((app, score, prism_vocab::source_rank(&app.source)));
     }
     ranked.sort_by(|a, b| {
         a.0.normalized_name
@@ -257,7 +255,7 @@ fn tool_hit(tool: &crate::windows_tools::WindowsTool, score: i32) -> Phase1Hit {
         uri: None,
         icon_key: Some(tool.icon_key.to_string()),
         icon: tool.icon.clone(),
-        source: Some(WINDOWS_TOOL_SOURCE.to_string()),
+        source: Some(prism_vocab::WINDOWS_TOOL_SOURCE.to_string()),
     }
 }
 
@@ -278,7 +276,7 @@ fn setting_hit(setting: &crate::settings_index::SettingEntry, score: i32) -> Pha
         uri: setting.uri().map(str::to_string),
         icon_key: Some(setting.icon_key.to_string()),
         icon: None,
-        source: task.then(|| WINDOWS_TOOL_SOURCE.to_string()),
+        source: task.then(|| prism_vocab::WINDOWS_TOOL_SOURCE.to_string()),
     }
 }
 

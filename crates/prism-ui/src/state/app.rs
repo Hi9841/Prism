@@ -4,7 +4,7 @@
 
 use std::collections::HashSet;
 
-use prism_core::settings::{
+use prism_vocab::settings::{
     ACCENTS, APP_GROUP_ID_MAX, APP_GROUP_NAME_MAX, HISTORY_LIMIT as HISTORY_CAP, HISTORY_TITLE_MAX, ID_MAX,
     SHORTCUTS, TASKBAR_ALIGNMENTS, THEMES, WIDTHS, WIN_SHORTCUT,
 };
@@ -571,7 +571,7 @@ mod provider {
 
         fn persisted_state(&self) -> Value {
             integralize(json!({
-                "version": prism_core::settings::STATE_VERSION,
+                "version": prism_vocab::settings::STATE_VERSION,
                 "settings": self.settings,
                 "history": self.history,
             }))

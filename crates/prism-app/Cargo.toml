@@ -12,6 +12,7 @@ path = "src/main.rs"
 gpui.workspace = true
 prism-ui = { path = "../prism-ui" }
 prism-core = { path = "../prism-core" }
+prism-vocab = { path = "../prism-vocab" }
 serde_json.workspace = true
 futures = "0.3"
 raw-window-handle = "0.6"

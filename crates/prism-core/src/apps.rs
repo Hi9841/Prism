@@ -2046,29 +2046,10 @@ pub fn launch_path_elevated(
     })
 }
 
-/// The rank of an app's `source` when two entries are the same app: the
-/// curated shortcut stores first, the raw install folders last. Inline: the
-/// UI search in prism-ui calls it for each app on each keystroke.
-#[inline]
-pub fn source_rank(source: &str) -> i32 {
-    match source {
-        "taskbar" => 6,
-        "startMenu" => 5,
-        "desktop" => 4,
-        "appsFolder" => 3,
-        "registry" | "appPaths" | "applications" => 2,
-        "programs" => 1,
-        _ => 0,
-    }
-}
-
-/// The lowercase extensions that "Run as administrator" accepts.
-pub const ELEVATABLE_EXTENSIONS: [&str; 8] = ["exe", "com", "bat", "cmd", "ps1", "vbs", "js", "wsf"];
-
 pub fn is_elevatable_path(path: &Path) -> bool {
     path.extension()
         .and_then(|value| value.to_str())
-        .is_some_and(|extension| ELEVATABLE_EXTENSIONS.contains(&extension.to_ascii_lowercase().as_str()))
+        .is_some_and(|extension| prism_vocab::ELEVATABLE_EXTENSIONS.contains(&extension.to_ascii_lowercase().as_str()))
 }
 
 fn elevated_command(path: &str, extension: &str, args: Option<&str>) -> (String, Option<String>) {
@@ -2298,7 +2279,6 @@ fn wait_for_taskbar_state(path: &Path, pinned: bool) -> bool {
 /// pin store reflects the requested state.
 /// Sentinel returned when Windows refuses to pin programmatically. The
 /// frontend turns this into the manual taskbar instruction.
-pub const MANUAL_PIN_REQUIRED: &str = "prism-manual-pin-required";
 
 pub fn set_taskbar_pinned(path: &Path, pinned: bool) -> Result<(), String> {
     if !path.exists() {
@@ -2351,7 +2331,7 @@ pub fn set_taskbar_pinned(path: &Path, pinned: bool) -> Result<(), String> {
         // S_OK but does nothing and no shell verb is exposed. Ask the user to
         // confirm from the taskbar instead of reporting a false success.
         crate::logs::debug_trace("set-pin manual required");
-        Err(MANUAL_PIN_REQUIRED.to_string())
+        Err(prism_vocab::MANUAL_PIN_REQUIRED.to_string())
     } else {
         Err("Windows did not unpin this item.".to_string())
     }

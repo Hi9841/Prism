@@ -6,7 +6,8 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use gpui::{App, AppContext, Context, Entity, EventEmitter, Task, Timer};
-use prism_core::catalog::{THUMBNAIL_BATCH_CAP, THUMBNAIL_EXTENSIONS};
+use prism_core::catalog::THUMBNAIL_BATCH_CAP;
+use prism_vocab::THUMBNAIL_EXTENSIONS;
 use prism_core::catalog::search::MAX_LIMIT as MAX_FILE_RESULTS;
 
 use crate::features::palette::sections::{

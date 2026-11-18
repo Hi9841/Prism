@@ -486,7 +486,7 @@ impl SettingsSheet {
                     )
                     .child(icon("keyboard", 14., t.fg_tertiary)),
             )
-            .child(div().flex().flex_wrap().justify_end().gap(r(6.)).children(prism_core::settings::SHORTCUTS.iter().enumerate().map(
+            .child(div().flex().flex_wrap().justify_end().gap(r(6.)).children(prism_vocab::settings::SHORTCUTS.iter().enumerate().map(
                 |(index, option)| {
                     let active = settings.shortcut == *option;
                     let value = (*option).to_owned();
@@ -499,7 +499,7 @@ impl SettingsSheet {
                         .child(shortcut_label(option))
                 },
             )))
-            .when(settings.shortcut == prism_core::settings::WIN_SHORTCUT, |d| {
+            .when(settings.shortcut == prism_vocab::settings::WIN_SHORTCUT, |d| {
                 d.child(
                     div()
                         .max_w(r(250.))
@@ -1138,7 +1138,7 @@ impl Render for SettingsSheet {
         let reset_confirming = self.reset_confirming;
         let reset_busy = self.reset_busy;
         let app_entity = self.app.clone();
-        let theme_options: Vec<SegmentOption> = prism_core::settings::THEMES
+        let theme_options: Vec<SegmentOption> = prism_vocab::settings::THEMES
             .iter()
             .zip(THEME_LABELS)
             .map(|(value, label)| SegmentOption { value: (*value).into(), label: label.into() })
@@ -1150,7 +1150,7 @@ impl Render for SettingsSheet {
         let width = segmented(
             "window-width",
             &crate::js::number_to_string(settings.width),
-            prism_core::settings::WIDTHS
+            prism_vocab::settings::WIDTHS
                 .iter()
                 .zip(["S", "M", "L"])
                 .map(|(width, label)| SegmentOption { value: width.to_string().into(), label: label.into() })
@@ -1163,7 +1163,7 @@ impl Render for SettingsSheet {
             {
                 let app = app_entity.clone();
                 move |value: SharedString, _, cx| {
-                    let width: f64 = value.parse().unwrap_or(f64::from(prism_core::settings::DEFAULT_WIDTH));
+                    let width: f64 = value.parse().unwrap_or(f64::from(prism_vocab::settings::DEFAULT_WIDTH));
                     app.update(cx, |app, cx| app.update_settings(cx, |s| s.width = width))
                 }
             },

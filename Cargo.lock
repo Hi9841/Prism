@@ -3948,6 +3948,7 @@ dependencies = [
  "image",
  "prism-core",
  "prism-ui",
+ "prism-vocab",
  "raw-window-handle",
  "serde_json",
  "windows 0.61.3",
@@ -3960,6 +3961,7 @@ dependencies = [
  "base64",
  "image",
  "neo_frizbee",
+ "prism-vocab",
  "rusqlite",
  "serde",
  "serde_json",
@@ -3988,6 +3990,7 @@ dependencies = [
  "icu_locale_core",
  "minisign-verify",
  "prism-core",
+ "prism-vocab",
  "raw-window-handle",
  "regex",
  "ryu-js",
@@ -3999,6 +4002,10 @@ dependencies = [
  "ureq",
  "windows 0.61.3",
 ]
+
+[[package]]
+name = "prism-vocab"
+version = "1.0.31"
 
 [[package]]
 name = "proc-macro-crate"

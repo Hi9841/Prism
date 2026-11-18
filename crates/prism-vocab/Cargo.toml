@@ -1,0 +1,6 @@
+[package]
+name = "prism-vocab"
+description = "The values the backend and the UI share: settings, app sources, extension lists, markers"
+edition.workspace = true
+version.workspace = true
+publish.workspace = true

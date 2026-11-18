@@ -7,7 +7,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use prism_core::query::WINDOWS_TOOL_SOURCE;
+use prism_vocab::WINDOWS_TOOL_SOURCE;
 use serde_json::json;
 
 use crate::features::palette::phase1::{

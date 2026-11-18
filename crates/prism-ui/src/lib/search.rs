@@ -220,7 +220,7 @@ pub fn dedupe_apps(apps: &[AppEntry]) -> Vec<AppEntry> {
 }
 
 fn source_priority(source: Option<&str>) -> i32 {
-    source.map_or(0, prism_core::apps::source_rank)
+    source.map_or(0, prism_vocab::source_rank)
 }
 
 fn app_score(app: &AppEntry, lower_query: &[u16], tokens: &[Vec<u16>], normalized_query: &str) -> Option<f64> {

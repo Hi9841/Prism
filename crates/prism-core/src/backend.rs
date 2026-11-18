@@ -9,8 +9,9 @@ use std::time::{Duration, SystemTime};
 
 use crate::settings::{
     migrate_state_value, startup_shortcut, startup_taskbar_alignment, validate_shortcut,
-    validate_state, STATE_VERSION, WIN_SHORTCUT,
+    validate_state,
 };
+use prism_vocab::settings::{STATE_VERSION, WIN_SHORTCUT};
 use crate::{
     apps, audio_hook, audio_osd, catalog, perf, power, query, start_menu, taskbar,
     taskbar_alignment, taskbar_customization, theme, win_key, windows_tools,

@@ -61,7 +61,7 @@ pub static LOGICAL_WIDTH: AtomicU32 = AtomicU32::new(DEFAULT_LOGICAL_WIDTH);
 /// The window at creation: the widest setting by the palette height. Each
 /// presentation sizes it again for the width setting and the monitor.
 pub fn initial_window_size() -> gpui::Size<gpui::Pixels> {
-    let widest = prism_core::settings::WIDTHS[prism_core::settings::WIDTHS.len() - 1];
+    let widest = prism_vocab::settings::WIDTHS[prism_vocab::settings::WIDTHS.len() - 1];
     gpui::size(gpui::px(widest as f32), gpui::px(palette_window::DEFAULT_LOGICAL_HEIGHT as f32))
 }
 
@@ -489,7 +489,7 @@ impl bridge::Shell for GpuiShell {
     fn set_window_width(&self, width: u32, cx: &mut App) -> BridgeResult<()> {
         // Persisted choices remain the three presets; intermediate values are
         // accepted only inside their bounds so the UI can animate the width.
-        if !prism_core::settings::is_window_width(width) {
+        if !prism_vocab::settings::is_window_width(width) {
             return Err(format!("unsupported width '{width}'"));
         }
         LOGICAL_WIDTH.store(width, Ordering::Release);
