@@ -2149,28 +2149,8 @@ fn hash(s: &str) -> String {
 }
 
 fn png_data_url(bytes: &[u8]) -> String {
-    const TABLE: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
-    for chunk in bytes.chunks(3) {
-        let b = [
-            chunk[0],
-            chunk.get(1).copied().unwrap_or(0),
-            chunk.get(2).copied().unwrap_or(0),
-        ];
-        out.push(TABLE[(b[0] >> 2) as usize] as char);
-        out.push(TABLE[((b[0] & 0x03) << 4 | b[1] >> 4) as usize] as char);
-        out.push(if chunk.len() > 1 {
-            TABLE[((b[1] & 0x0f) << 2 | b[2] >> 6) as usize] as char
-        } else {
-            '='
-        });
-        out.push(if chunk.len() > 2 {
-            TABLE[(b[2] & 0x3f) as usize] as char
-        } else {
-            '='
-        });
-    }
-    format!("data:image/png;base64,{out}")
+    use base64::Engine;
+    format!("data:image/png;base64,{}", base64::engine::general_purpose::STANDARD.encode(bytes))
 }
 
 /// The icon cache sits next to `apps.json`, in the host's data folder.
