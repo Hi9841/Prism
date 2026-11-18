@@ -13,9 +13,7 @@ use std::time::{Duration, Instant};
 
 use windows::core::{PCWSTR, PWSTR};
 use windows::Win32::Foundation::HWND;
-use windows::Win32::System::Com::{
-    CoInitializeEx, CoTaskMemFree, CoUninitialize, COINIT_APARTMENTTHREADED,
-};
+use windows::Win32::System::Com::CoTaskMemFree;
 use windows::Win32::System::Registry::{
     RegEnumValueW,
     HKEY_CLASSES_ROOT, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, REG_EXPAND_SZ, REG_SZ,
@@ -28,7 +26,7 @@ use windows::Win32::UI::Shell::{
     SHCONTF_NONFOLDERS, SHELLEXECUTEINFOW, SIGDN_DESKTOPABSOLUTEPARSING, SIGDN_NORMALDISPLAY,
 };
 use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
-use crate::win32::{registry, wide};
+use crate::win32::{registry, wide, ComGuard};
 
 #[derive(Clone, Debug)]
 pub struct WindowsTool {
@@ -112,26 +110,6 @@ pub fn execute(id: &str) -> Option<Result<(), String>> {
     let tools = snapshot();
     let tool = tools.iter().find(|tool| tool.id == id)?;
     Some(execute_target(&tool.target))
-}
-
-struct ComGuard {
-    initialized: bool,
-}
-
-impl ComGuard {
-    fn init() -> Self {
-        Self {
-            initialized: unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) }.is_ok(),
-        }
-    }
-}
-
-impl Drop for ComGuard {
-    fn drop(&mut self) {
-        if self.initialized {
-            unsafe { CoUninitialize() };
-        }
-    }
 }
 
 fn discover() -> Vec<WindowsTool> {
