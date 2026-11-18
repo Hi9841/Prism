@@ -513,7 +513,7 @@ impl Palette {
                         ),
                         Err(error) => {
                             let message = error.to_string();
-                            if !was_pinned && message.contains("prism-manual-pin-required") {
+                            if !was_pinned && message.contains(prism_core::apps::MANUAL_PIN_REQUIRED) {
                                 app.show_toast(
                                     "Windows blocks automatic pinning",
                                     Some(format!(

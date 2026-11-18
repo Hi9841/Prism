@@ -34,6 +34,9 @@ pub enum Phase1Kind {
     Action,
 }
 
+/// The `source` of a Phase 1 hit that lists with the Windows tools.
+pub const WINDOWS_TOOL_SOURCE: &str = "windows-tool";
+
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Phase1Hit {
@@ -191,7 +194,7 @@ fn search_apps(query: &score::Query, apps: &[AppEntry], launches: &LaunchStore) 
         let Some(score) = query.score_with_keywords(&app.name, &app.keywords) else {
             continue;
         };
-        ranked.push((app, score, source_rank(&app.source)));
+        ranked.push((app, score, crate::apps::source_rank(&app.source)));
     }
     ranked.sort_by(|a, b| {
         a.0.normalized_name
@@ -254,7 +257,7 @@ fn tool_hit(tool: &crate::windows_tools::WindowsTool, score: i32) -> Phase1Hit {
         uri: None,
         icon_key: Some(tool.icon_key.to_string()),
         icon: tool.icon.clone(),
-        source: Some("windows-tool".to_string()),
+        source: Some(WINDOWS_TOOL_SOURCE.to_string()),
     }
 }
 
@@ -275,7 +278,7 @@ fn setting_hit(setting: &crate::settings_index::SettingEntry, score: i32) -> Pha
         uri: setting.uri().map(str::to_string),
         icon_key: Some(setting.icon_key.to_string()),
         icon: None,
-        source: task.then(|| "windows-tool".to_string()),
+        source: task.then(|| WINDOWS_TOOL_SOURCE.to_string()),
     }
 }
 
@@ -317,18 +320,6 @@ fn window_hit(window: &OpenWindow, score: i32) -> Phase1Hit {
         icon_key: Some("window".to_string()),
         icon: None,
         source: None,
-    }
-}
-
-fn source_rank(source: &str) -> i32 {
-    match source {
-        "taskbar" => 6,
-        "startMenu" => 5,
-        "desktop" => 4,
-        "appsFolder" => 3,
-        "registry" | "appPaths" | "applications" => 2,
-        "programs" => 1,
-        _ => 0,
     }
 }
 

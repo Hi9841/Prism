@@ -220,15 +220,7 @@ pub fn dedupe_apps(apps: &[AppEntry]) -> Vec<AppEntry> {
 }
 
 fn source_priority(source: Option<&str>) -> i32 {
-    match source {
-        Some("taskbar") => 6,
-        Some("startMenu") => 5,
-        Some("desktop") => 4,
-        Some("appsFolder") => 3,
-        Some("registry" | "appPaths" | "applications") => 2,
-        Some("programs") => 1,
-        _ => 0,
-    }
+    source.map_or(0, prism_core::apps::source_rank)
 }
 
 fn app_score(app: &AppEntry, lower_query: &[u16], tokens: &[Vec<u16>], normalized_query: &str) -> Option<f64> {

@@ -2264,6 +2264,20 @@ pub fn launch_path_elevated(
     })
 }
 
+/// The rank of an app's `source` when two entries are the same app: the
+/// curated shortcut stores first, the raw install folders last.
+pub fn source_rank(source: &str) -> i32 {
+    match source {
+        "taskbar" => 6,
+        "startMenu" => 5,
+        "desktop" => 4,
+        "appsFolder" => 3,
+        "registry" | "appPaths" | "applications" => 2,
+        "programs" => 1,
+        _ => 0,
+    }
+}
+
 /// The lowercase extensions that "Run as administrator" accepts.
 pub const ELEVATABLE_EXTENSIONS: [&str; 8] = ["exe", "com", "bat", "cmd", "ps1", "vbs", "js", "wsf"];
 

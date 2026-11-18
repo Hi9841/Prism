@@ -7,6 +7,7 @@
 
 use std::collections::{HashMap, HashSet};
 
+use prism_core::query::WINDOWS_TOOL_SOURCE;
 use serde_json::json;
 
 use crate::features::palette::phase1::{
@@ -256,10 +257,10 @@ pub fn build_sections(sources: &PaletteSources) -> BuiltSections {
                 .map(|p| p.actions.iter().filter(|hit| keep(hit)).map(action_palette_item).collect())
                 .unwrap_or_default()
         };
-        let is_tool = |hit: &crate::lib::query::Phase1Hit| hit.source.as_deref() == Some("windows-tool");
-        let settings_items = actions(|hit| hit.source.as_deref() != Some("windows-tool") && !is_command_action(hit));
+        let is_tool = |hit: &crate::lib::query::Phase1Hit| hit.source.as_deref() == Some(WINDOWS_TOOL_SOURCE);
+        let settings_items = actions(|hit| hit.source.as_deref() != Some(WINDOWS_TOOL_SOURCE) && !is_command_action(hit));
         let tool_items = actions(is_tool);
-        let command_items = actions(|hit| hit.source.as_deref() != Some("windows-tool") && is_command_action(hit));
+        let command_items = actions(|hit| hit.source.as_deref() != Some(WINDOWS_TOOL_SOURCE) && is_command_action(hit));
         if let Some(apps_section) = build_apps_section(&app_hits, app_groups, SEARCH_APPS_LIMIT) {
             out.push(apps_section);
         } else if !phase1_app_items.is_empty() {
