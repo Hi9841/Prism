@@ -1783,7 +1783,7 @@ fn wait_for_ack(acknowledgement: &AtomicU32, timeout: Duration) -> u32 {
 /// Explorer. Antivirus tools flag that pattern. The uninstaller removes this folder.
 fn shell_hook_library() -> Result<PathBuf, String> {
     let local = std::env::var_os("LOCALAPPDATA").ok_or("LOCALAPPDATA is not set")?;
-    let directory = PathBuf::from(local).join("app.prism.launcher").join("shell-hook");
+    let directory = PathBuf::from(local).join(DATA_DIR_NAME).join("shell-hook");
     // Files that versions before 1.0.30 left in %TEMP%.
     remove_stale_shell_hooks(&std::env::temp_dir().join("Prism").join("shell-hooks"), "");
     install_shell_hook_library(&directory, include_bytes!(env!("PRISM_SHELL_HOOK_DLL")))

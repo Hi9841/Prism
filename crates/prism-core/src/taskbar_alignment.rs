@@ -312,9 +312,7 @@ fn start_alignment_watcher() {
 }
 
 fn shared_alignment_path() -> Option<PathBuf> {
-    std::env::var_os("APPDATA")
-        .map(PathBuf::from)
-        .map(|dir| dir.join("app.prism.launcher").join(ALIGNMENT_MARKER_FILE))
+    crate::host::installed_data_dir().map(|dir| dir.join(ALIGNMENT_MARKER_FILE))
 }
 
 fn write_shared_alignment(alignment: Alignment) -> Result<(), String> {

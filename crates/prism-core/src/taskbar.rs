@@ -415,9 +415,7 @@ fn place(taskbar: HWND, insert_after: HWND, show: bool) {
 }
 
 fn marker_path() -> Option<PathBuf> {
-    std::env::var_os("APPDATA")
-        .map(PathBuf::from)
-        .map(|dir| dir.join("app.prism.launcher").join(TOPMOST_MARKER))
+    crate::host::installed_data_dir().map(|dir| dir.join(TOPMOST_MARKER))
 }
 
 fn marker_present() -> bool {

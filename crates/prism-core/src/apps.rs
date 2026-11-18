@@ -2195,19 +2195,10 @@ unsafe fn known_folder(id: &GUID) -> Option<PathBuf> {
 
 /// The icon cache sits next to `apps.json`, in the host's data folder.
 fn icon_cache_dir() -> PathBuf {
-    icon_cache_dir_in(crate::host::app_data_dir().ok())
-}
-
-fn icon_cache_dir_in(app_data_dir: Option<PathBuf>) -> PathBuf {
-    if let Some(dir) = app_data_dir {
-        return dir.join("icons");
-    }
-    unsafe {
-        if let Some(appdata) = known_folder(&FOLDERID_RoamingAppData) {
-            return appdata.join("app.prism.launcher").join("icons");
-        }
-    }
-    PathBuf::from(".")
+    crate::host::app_data_dir()
+        .ok()
+        .or_else(crate::host::installed_data_dir)
+        .map_or_else(|| PathBuf::from("."), |dir| dir.join("icons"))
 }
 
 /// Reads a VT_LPWSTR out of a PROPVARIANT (windows-rs 0.61 exposes the raw

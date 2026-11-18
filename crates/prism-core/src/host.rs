@@ -52,6 +52,13 @@ pub fn app_data_dir() -> Result<PathBuf, String> {
         .app_data_dir()
 }
 
+/// `%APPDATA%\app.prism.launcher`: the data folder of the installed app (the
+/// Tauri app's identifier). The GPUI host returns it, and the Explorer bridge
+/// DLL reads its files there, so both use this one path.
+pub fn installed_data_dir() -> Option<PathBuf> {
+    std::env::var_os("APPDATA").map(|base| PathBuf::from(base).join(crate::shell_protocol::DATA_DIR_NAME))
+}
+
 /// The data folder, or the working directory when the host cannot name one.
 pub fn app_data_dir_or_cwd() -> PathBuf {
     app_data_dir().unwrap_or_else(|_| PathBuf::from("."))

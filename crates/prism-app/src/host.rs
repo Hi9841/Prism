@@ -59,7 +59,6 @@ impl prism_core::host::Host for GpuiHost {
     }
 }
 
-/// `%APPDATA%\app.prism.launcher`, the Tauri app's data folder (same identifier).
 pub fn app_data_dir() -> PathBuf {
-    std::env::var_os("APPDATA").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(".")).join("app.prism.launcher")
+    prism_core::host::installed_data_dir().unwrap_or_else(|| PathBuf::from("."))
 }
