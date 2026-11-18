@@ -19,14 +19,14 @@ use windows::Win32::Storage::FileSystem::{
     GetFileVersionInfoSizeW, GetFileVersionInfoW, VerQueryValueW, VS_FIXEDFILEINFO,
 };
 use windows::Win32::System::Registry::{
-    RegCloseKey, RegDeleteValueW, RegOpenKeyExW, RegQueryValueExW, RegSetValueExW, HKEY,
-    HKEY_CURRENT_USER, KEY_QUERY_VALUE, KEY_SET_VALUE, REG_DWORD, REG_VALUE_TYPE,
+    RegDeleteValueW, HKEY,
+    HKEY_CURRENT_USER, KEY_QUERY_VALUE, KEY_SET_VALUE,
 };
 use windows::Win32::System::Threading::{OpenProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE};
 use windows::Win32::UI::WindowsAndMessaging::{
     FindWindowW, SendMessageTimeoutW, SMTO_ABORTIFHUNG, WM_SETTINGCHANGE,
 };
-use crate::win32::wide;
+use crate::win32::{registry, wide};
 
 const KEY_PATH: &str = r"Software\StartIsBack";
 const VALUE_NAME: &str = "WinkeyFunction";
@@ -71,10 +71,9 @@ pub fn enable() -> Result<bool, String> {
         restore_from_journal(&journal_path)?;
     }
 
-    let Some((key, original)) = open_provider_key()? else {
+    let Some((key_guard, original)) = open_provider_key()? else {
         return Ok(false);
     };
-    let key_guard = RegistryKey(key);
     if original == Some(DO_NOTHING) {
         return Ok(true);
     }
@@ -127,7 +126,7 @@ fn restore_from_journal(path: &Path) -> Result<(), String> {
         return Err("unsupported Start restore journal".to_string());
     }
 
-    let Some((key, current)) = open_provider_key()? else {
+    let Some((key_guard, current)) = open_provider_key()? else {
         // The provider was uninstalled while Prism was active. There is no
         // setting left to restore, so retire the journal and let its watchdog
         // exit instead of retrying forever.
@@ -135,7 +134,6 @@ fn restore_from_journal(path: &Path) -> Result<(), String> {
             .map_err(|error| format!("remove obsolete Start restore journal: {error}"))?;
         return Ok(());
     };
-    let key_guard = RegistryKey(key);
     // A settings UI may have changed this while Prism was running. Only undo
     // the value Prism itself installed; otherwise preserve the user's choice.
     if current == Some(DO_NOTHING) {
@@ -266,31 +264,13 @@ fn write_journal(path: &Path, journal: &RestoreJournal) -> Result<(), String> {
     crate::win32::write_atomic_synced(path, &bytes).map_err(|error| format!("persist Start restore journal: {error}"))
 }
 
-fn open_provider_key() -> Result<Option<(HKEY, Option<u32>)>, String> {
-    let key_path = wide(KEY_PATH);
-    let mut key = HKEY::default();
-    let error = unsafe {
-        RegOpenKeyExW(
-            HKEY_CURRENT_USER,
-            PCWSTR(key_path.as_ptr()),
-            None,
-            KEY_QUERY_VALUE | KEY_SET_VALUE,
-            &mut key,
-        )
-    };
-    if error.0 == 2 {
+fn open_provider_key() -> Result<Option<(registry::Key, Option<u32>)>, String> {
+    let key = registry::Key::open(HKEY_CURRENT_USER, KEY_PATH, KEY_QUERY_VALUE | KEY_SET_VALUE)
+        .map_err(|code| format!("open Start provider registry key: Win32 error {code}"))?;
+    let Some(key) = key else {
         return Ok(None);
-    }
-    if error.0 != 0 || key.0.is_null() {
-        return Err(format!(
-            "open Start provider registry key: Win32 error {}",
-            error.0
-        ));
-    }
-    let key_guard = RegistryKey(key);
-    let value = read_dword(key_guard.0)?;
-    let key = key_guard.0;
-    std::mem::forget(key_guard);
+    };
+    let value = read_dword(key.0)?;
     Ok(Some((key, value)))
 }
 
@@ -353,54 +333,14 @@ fn file_version(path: &Path) -> Option<(u16, u16, u16, u16)> {
 }
 
 fn read_dword(key: HKEY) -> Result<Option<u32>, String> {
-    let value_name = wide(VALUE_NAME);
-    let mut value_type = REG_VALUE_TYPE::default();
-    let mut size = 4u32;
-    let mut bytes = [0u8; 4];
-    let error = unsafe {
-        RegQueryValueExW(
-            key,
-            PCWSTR(value_name.as_ptr()),
-            None,
-            Some(&mut value_type),
-            Some(bytes.as_mut_ptr()),
-            Some(&mut size),
-        )
-    };
-    if error.0 == 2 {
-        return Ok(None);
-    }
-    if error.0 != 0 {
-        return Err(format!(
-            "read Start provider setting: Win32 error {}",
-            error.0
-        ));
-    }
-    if value_type != REG_DWORD || size != 4 {
-        return Err("Start provider setting is not a DWORD".to_string());
-    }
-    Ok(Some(u32::from_le_bytes(bytes)))
+    registry::dword(key, VALUE_NAME).map_err(|error| match error {
+        registry::DwordError::Win32(code) => format!("read Start provider setting: Win32 error {code}"),
+        registry::DwordError::NotDword => "Start provider setting is not a DWORD".to_string(),
+    })
 }
 
 fn set_dword(key: HKEY, value: u32) -> Result<(), String> {
-    let value_name = wide(VALUE_NAME);
-    let error = unsafe {
-        RegSetValueExW(
-            key,
-            PCWSTR(value_name.as_ptr()),
-            None,
-            REG_DWORD,
-            Some(&value.to_le_bytes()),
-        )
-    };
-    if error.0 == 0 {
-        Ok(())
-    } else {
-        Err(format!(
-            "write Start provider setting: Win32 error {}",
-            error.0
-        ))
-    }
+    registry::set_dword(key, VALUE_NAME, value).map_err(|code| format!("write Start provider setting: Win32 error {code}"))
 }
 
 fn restore_value(key: HKEY, journal: &RestoreJournal) -> Result<(), String> {
@@ -444,12 +384,3 @@ fn notify_provider() -> Result<(), String> {
     }
 }
 
-struct RegistryKey(HKEY);
-
-impl Drop for RegistryKey {
-    fn drop(&mut self) {
-        unsafe {
-            let _ = RegCloseKey(self.0);
-        }
-    }
-}

@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, SystemTime};
 
-use windows::core::{w, Interface, GUID, PCWSTR, PWSTR};
+use windows::core::{w, Interface, GUID, PCWSTR};
 use windows::Win32::Foundation::{FILETIME, HWND};
 use windows::Win32::Storage::EnhancedStorage::PKEY_AppUserModel_ID;
 use windows::Win32::System::Com::StructuredStorage::{PropVariantClear, PROPVARIANT};
@@ -23,9 +23,9 @@ use windows::Win32::System::Com::{
     IPersistFile, CLSCTX_INPROC_SERVER, CLSCTX_LOCAL_SERVER, COINIT_APARTMENTTHREADED, STGM_READ,
 };
 use windows::Win32::System::Registry::{
-    RegCloseKey, RegEnumKeyExW, RegOpenKeyExW, RegQueryInfoKeyW, RegQueryValueExW, HKEY,
+    RegQueryInfoKeyW, HKEY,
     HKEY_CLASSES_ROOT, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_READ, KEY_WOW64_32KEY,
-    KEY_WOW64_64KEY, REG_DWORD, REG_EXPAND_SZ, REG_SAM_FLAGS, REG_SZ, REG_VALUE_TYPE,
+    KEY_WOW64_64KEY, REG_SAM_FLAGS,
 };
 use windows::Win32::System::Variant::VT_LPWSTR;
 use windows::Win32::UI::Shell::Common::ITEMIDLIST;
@@ -41,7 +41,7 @@ use windows::Win32::UI::Shell::{
     SHCONTF_INCLUDEHIDDEN, SHCONTF_NONFOLDERS, SHELLEXECUTEINFOW, SIGDN_NORMALDISPLAY,
 };
 use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
-use crate::win32::{wide, wide_trim};
+use crate::win32::{registry, wide, wide_trim};
 
 const CACHE_TTL: Duration = Duration::from_secs(6 * 60 * 60);
 /// Bump when the scan output format changes so stale caches rescan.
@@ -970,142 +970,118 @@ impl ScanCtx {
     }
 
     fn scan_uninstall_hive(&mut self, hive: HKEY, view: REG_SAM_FLAGS) {
-        unsafe {
-            let Ok(root) = open_key(hive, UNINSTALL_SUBKEY, view) else {
-                return;
+        let Some(root) = open_key(hive, UNINSTALL_SUBKEY, view) else {
+            return;
+        };
+        for key_name in registry::subkeys(root.0) {
+            let Some(subkey) = open_key(root.0, &key_name, KEY_READ) else {
+                continue;
             };
-            let mut index = 0u32;
-            loop {
-                let mut name_buf = [0u16; 512];
-                let mut len = 512u32;
-                let err = RegEnumKeyExW(
-                    root,
-                    index,
-                    Some(PWSTR(name_buf.as_mut_ptr())),
-                    &mut len,
-                    None,
-                    None,
-                    None,
-                    None,
-                );
-                if err.0 != 0 {
-                    break;
-                }
-                index += 1;
-                let key_name = String::from_utf16_lossy(&name_buf[..len as usize]);
-                let Ok(subkey) = open_key(root, &key_name, KEY_READ) else {
-                    continue;
-                };
-                self.index_registry_entry(subkey);
-                let _ = RegCloseKey(subkey);
-            }
-            let _ = RegCloseKey(root);
+            self.index_registry_entry(subkey.0);
         }
     }
 
     fn index_registry_entry(&mut self, hk: HKEY) {
-        unsafe {
-            let Some(name) = reg_string(hk, "DisplayName") else {
-                return;
-            };
-            let name = name.trim().to_string();
-            if name.is_empty() {
-                return;
-            }
-            // Windows update / component bookkeeping, not launchable apps.
-            if reg_dword(hk, "SystemComponent") == Some(1) {
-                return;
-            }
-            if let Some(release_type) = reg_string(hk, "ReleaseType") {
-                let lower = release_type.to_lowercase();
-                if matches!(
-                    lower.as_str(),
-                    "security update"
-                        | "update"
-                        | "hotfix"
-                        | "update rollup"
-                        | "feature pack"
-                        | "critical update"
-                        | "service pack"
-                ) {
-                    return;
-                }
-            }
-            if reg_string(hk, "ParentKeyName").is_some() {
-                return;
-            }
-            let lower = name.to_lowercase();
-            if lower.starts_with("kb")
-                && lower.len() > 8
-                && lower[2..].chars().all(|c| c.is_ascii_digit())
-            {
-                return;
-            }
-            if REGISTRY_SKIP_FRAGMENTS
-                .iter()
-                .any(|frag| lower.contains(frag))
-            {
-                return;
-            }
-            let display_icon = reg_string(hk, "DisplayIcon").unwrap_or_default();
-            let install_location = reg_string(hk, "InstallLocation").unwrap_or_default();
-            let display_icon = expand_env(&display_icon);
-            let install_location = expand_env(&install_location);
-            // Many installers point DisplayIcon at the uninstaller or at
-            // setup.exe: that file is not the app ("Mozilla Maintenance
-            // Service" opened Uninstall.exe).
-            let exe = parse_icon_path(&display_icon).filter(|exe| !is_installer_exe(exe, &name)).or_else(|| {
-                if install_location.is_empty() {
-                    None
-                } else {
-                    find_exe_in(&PathBuf::from(&install_location), &name)
-                        .filter(|exe| !is_installer_exe(exe, &name))
-                }
-            });
-            let Some(exe) = exe else {
-                return;
-            };
-            if !exe
-                .extension()
-                .and_then(|e| e.to_str())
-                .map(|e| e.eq_ignore_ascii_case("exe"))
-                .unwrap_or(false)
-            {
-                return;
-            }
-            // Stale installs reference exes that no longer exist - drop them.
-            if !exe.exists() {
-                return;
-            }
-            let exe_str = exe.to_string_lossy().into_owned();
-            let key = format!("{}|", exe_str.to_lowercase());
-            if self.seen.contains_key(&key) {
-                return;
-            }
-            let mut keywords = Vec::new();
-            if let Some(stem) = exe.file_stem() {
-                keywords.push(stem.to_string_lossy().into_owned());
-            }
-            if let Some(publisher) = reg_string(hk, "Publisher") {
-                keywords.push(publisher);
-            }
-            if let Some(version) = reg_string(hk, "DisplayVersion") {
-                keywords.push(version);
-            }
-            self.push(AppEntry {
-                name: name.clone(),
-                normalized_name: normalize(&name),
-                app_id: key,
-                icon: self.icons.get(&exe_str),
-                path: Some(exe_str),
-                args: None,
-                working_directory: None,
-                location: None,
-                aumid: None,
-                source: "registry".to_string(),
-                keywords,
-            });
+        let Some(name) = registry::text(hk, "DisplayName") else {
+            return;
+        };
+        let name = name.trim().to_string();
+        if name.is_empty() {
+            return;
         }
+        // Windows update / component bookkeeping, not launchable apps.
+        if registry::dword(hk, "SystemComponent").ok().flatten() == Some(1) {
+            return;
+        }
+        if let Some(release_type) = registry::text(hk, "ReleaseType") {
+            let lower = release_type.to_lowercase();
+            if matches!(
+                lower.as_str(),
+                "security update"
+                    | "update"
+                    | "hotfix"
+                    | "update rollup"
+                    | "feature pack"
+                    | "critical update"
+                    | "service pack"
+            ) {
+                return;
+            }
+        }
+        if registry::text(hk, "ParentKeyName").is_some() {
+            return;
+        }
+        let lower = name.to_lowercase();
+        if lower.starts_with("kb")
+            && lower.len() > 8
+            && lower[2..].chars().all(|c| c.is_ascii_digit())
+        {
+            return;
+        }
+        if REGISTRY_SKIP_FRAGMENTS
+            .iter()
+            .any(|frag| lower.contains(frag))
+        {
+            return;
+        }
+        let display_icon = registry::text(hk, "DisplayIcon").unwrap_or_default();
+        let install_location = registry::text(hk, "InstallLocation").unwrap_or_default();
+        let display_icon = expand_env(&display_icon);
+        let install_location = expand_env(&install_location);
+        // Many installers point DisplayIcon at the uninstaller or at
+        // setup.exe: that file is not the app ("Mozilla Maintenance
+        // Service" opened Uninstall.exe).
+        let exe = parse_icon_path(&display_icon).filter(|exe| !is_installer_exe(exe, &name)).or_else(|| {
+            if install_location.is_empty() {
+                None
+            } else {
+                find_exe_in(&PathBuf::from(&install_location), &name)
+                    .filter(|exe| !is_installer_exe(exe, &name))
+            }
+        });
+        let Some(exe) = exe else {
+            return;
+        };
+        if !exe
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.eq_ignore_ascii_case("exe"))
+            .unwrap_or(false)
+        {
+            return;
+        }
+        // Stale installs reference exes that no longer exist - drop them.
+        if !exe.exists() {
+            return;
+        }
+        let exe_str = exe.to_string_lossy().into_owned();
+        let key = format!("{}|", exe_str.to_lowercase());
+        if self.seen.contains_key(&key) {
+            return;
+        }
+        let mut keywords = Vec::new();
+        if let Some(stem) = exe.file_stem() {
+            keywords.push(stem.to_string_lossy().into_owned());
+        }
+        if let Some(publisher) = registry::text(hk, "Publisher") {
+            keywords.push(publisher);
+        }
+        if let Some(version) = registry::text(hk, "DisplayVersion") {
+            keywords.push(version);
+        }
+        self.push(AppEntry {
+            name: name.clone(),
+            normalized_name: normalize(&name),
+            app_id: key,
+            icon: self.icons.get(&exe_str),
+            path: Some(exe_str),
+            args: None,
+            working_directory: None,
+            location: None,
+            aumid: None,
+            source: "registry".to_string(),
+            keywords,
+        });
     }
 }
 
@@ -1127,103 +1103,56 @@ impl ScanCtx {
     }
 
     fn scan_app_paths_hive(&mut self, hive: HKEY, view: REG_SAM_FLAGS) {
-        unsafe {
-            let Ok(root) = open_key(hive, APP_PATHS_SUBKEY, view) else {
-                return;
-            };
-            let mut index = 0u32;
-            loop {
-                let mut name_buf = [0u16; 512];
-                let mut len = name_buf.len() as u32;
-                let error = RegEnumKeyExW(
-                    root,
-                    index,
-                    Some(PWSTR(name_buf.as_mut_ptr())),
-                    &mut len,
-                    None,
-                    None,
-                    None,
-                    None,
-                );
-                if error.0 != 0 {
-                    break;
-                }
-                index += 1;
-                let key_name = String::from_utf16_lossy(&name_buf[..len as usize]);
-                if !key_name.to_lowercase().ends_with(".exe") {
-                    continue;
-                }
-                let Ok(key) = open_key(root, &key_name, KEY_READ) else {
-                    continue;
-                };
-                let executable = reg_string(key, "")
-                    .map(|value| expand_env(&value))
-                    .and_then(|value| parse_registered_executable(&value));
-                let _ = RegCloseKey(key);
-                if let Some(executable) = executable {
-                    self.index_registered_exe(executable, None, "appPaths", vec![key_name]);
-                }
+        let Some(root) = open_key(hive, APP_PATHS_SUBKEY, view) else {
+            return;
+        };
+        for key_name in registry::subkeys(root.0) {
+            if !key_name.to_lowercase().ends_with(".exe") {
+                continue;
             }
-            let _ = RegCloseKey(root);
+            let Some(key) = open_key(root.0, &key_name, KEY_READ) else {
+                continue;
+            };
+            let executable = registry::text(key.0, "")
+                .map(|value| expand_env(&value))
+                .and_then(|value| parse_registered_executable(&value));
+            drop(key);
+            if let Some(executable) = executable {
+                self.index_registered_exe(executable, None, "appPaths", vec![key_name]);
+            }
         }
     }
 
     fn scan_applications_registry(&mut self, view: REG_SAM_FLAGS) {
-        unsafe {
-            let Ok(root) = open_key(HKEY_CLASSES_ROOT, "Applications", view) else {
-                return;
-            };
-            let mut index = 0u32;
-            loop {
-                let mut name_buf = [0u16; 512];
-                let mut len = name_buf.len() as u32;
-                let error = RegEnumKeyExW(
-                    root,
-                    index,
-                    Some(PWSTR(name_buf.as_mut_ptr())),
-                    &mut len,
-                    None,
-                    None,
-                    None,
-                    None,
-                );
-                if error.0 != 0 {
-                    break;
-                }
-                index += 1;
-                let key_name = String::from_utf16_lossy(&name_buf[..len as usize]);
-                if !key_name.to_lowercase().ends_with(".exe") {
-                    continue;
-                }
-                let Ok(key) = open_key(root, &key_name, KEY_READ) else {
-                    continue;
-                };
-                if reg_value_exists(key, "NoStartPage") || reg_value_exists(key, "IsHostApp") {
-                    let _ = RegCloseKey(key);
-                    continue;
-                }
-                let friendly_name = reg_string(key, "FriendlyAppName")
-                    .filter(|name| !name.starts_with('@') && !name.trim().is_empty());
-                let executable = open_key(key, r"shell\open\command", KEY_READ)
-                    .ok()
-                    .and_then(|command_key| {
-                        let value = reg_string(command_key, "")
-                            .map(|value| expand_env(&value))
-                            .and_then(|value| parse_registered_executable(&value));
-                        let _ = RegCloseKey(command_key);
-                        value
-                    });
-                let _ = RegCloseKey(key);
-                if let Some(executable) = executable {
-                    self.index_registered_exe(
-                        executable,
-                        friendly_name,
-                        "applications",
-                        vec![key_name],
-                    );
-                }
+        let Some(root) = open_key(HKEY_CLASSES_ROOT, "Applications", view) else {
+            return;
+        };
+        for key_name in registry::subkeys(root.0) {
+            if !key_name.to_lowercase().ends_with(".exe") {
+                continue;
             }
-            let _ = RegCloseKey(root);
+            let Some(key) = open_key(root.0, &key_name, KEY_READ) else {
+                continue;
+            };
+            if registry::has_value(key.0, "NoStartPage") || registry::has_value(key.0, "IsHostApp") {
+                continue;
+            }
+            let friendly_name = registry::text(key.0, "FriendlyAppName")
+                .filter(|name| !name.starts_with('@') && !name.trim().is_empty());
+            let executable = open_key(key.0, r"shell\open\command", KEY_READ).and_then(|command_key| {
+                registry::text(command_key.0, "")
+                    .map(|value| expand_env(&value))
+                    .and_then(|value| parse_registered_executable(&value))
+            });
+            drop(key);
+            if let Some(executable) = executable {
+                self.index_registered_exe(
+                    executable,
+                    friendly_name,
+                    "applications",
+                    vec![key_name],
+                );
+            }
         }
     }
 
@@ -1551,7 +1480,7 @@ struct PackageVersions {
 impl PackageVersions {
     fn load() -> Self {
         let mut by_family: HashMap<String, Vec<String>> = HashMap::new();
-        for full_name in unsafe { package_full_names() } {
+        for full_name in package_full_names() {
             if let Some(family) = package_family(&full_name) {
                 by_family.entry(family).or_default().push(full_name);
             }
@@ -1583,57 +1512,20 @@ fn package_family(full_name: &str) -> Option<String> {
     (parts.len() == 5).then(|| format!("{}_{}", parts[0], parts[4]).to_lowercase())
 }
 
-unsafe fn package_full_names() -> Vec<String> {
-    let Some(key) = open_package_repository() else {
-        return Vec::new();
-    };
-    let mut names = Vec::new();
-    for index in 0.. {
-        let mut buffer = [0u16; 256];
-        let mut length = buffer.len() as u32;
-        let result = RegEnumKeyExW(
-            key,
-            index,
-            Some(PWSTR(buffer.as_mut_ptr())),
-            &mut length,
-            None,
-            None,
-            None,
-            None,
-        );
-        if result.0 != 0 {
-            break;
-        }
-        names.push(String::from_utf16_lossy(&buffer[..length as usize]));
-    }
-    let _ = RegCloseKey(key);
-    names
-}
-
-unsafe fn open_package_repository() -> Option<HKEY> {
-    let path = wide(PACKAGE_REPOSITORY);
-    let mut key = HKEY::default();
-    RegOpenKeyExW(
-        HKEY_CURRENT_USER,
-        PCWSTR(path.as_ptr()),
-        None,
-        KEY_READ,
-        &mut key,
-    )
-    .is_ok()
-    .then_some(key)
+fn package_full_names() -> Vec<String> {
+    registry::Key::open_read(HKEY_CURRENT_USER, PACKAGE_REPOSITORY).map_or_else(Vec::new, |key| registry::subkeys(key.0))
 }
 
 /// True when a package was installed, updated or removed after `since`:
 /// each change adds or deletes a subkey of the package repository.
 fn packages_changed_since(since: SystemTime) -> bool {
     unsafe {
-        let Some(key) = open_package_repository() else {
+        let Some(key) = registry::Key::open_read(HKEY_CURRENT_USER, PACKAGE_REPOSITORY) else {
             return false;
         };
         let mut written = FILETIME::default();
         let result = RegQueryInfoKeyW(
-            key,
+            key.0,
             None,
             None,
             None,
@@ -1646,7 +1538,7 @@ fn packages_changed_since(since: SystemTime) -> bool {
             None,
             Some(&mut written),
         );
-        let _ = RegCloseKey(key);
+        drop(key);
         if result.0 != 0 {
             return false;
         }
@@ -1690,93 +1582,9 @@ fn written_after(path: &Path, since: SystemTime) -> bool {
 
 /* ---------------- registry helpers ---------------- */
 
-unsafe fn open_key(parent: HKEY, path: &str, access: REG_SAM_FLAGS) -> Result<HKEY, ()> {
-    let wide_path = wide(path);
-    let mut key = HKEY(std::ptr::null_mut());
-    let err = RegOpenKeyExW(
-        parent,
-        PCWSTR(wide_path.as_ptr()),
-        None,
-        access | KEY_READ,
-        &mut key,
-    );
-    if err.0 != 0 || key.0.is_null() {
-        return Err(());
-    }
-    Ok(key)
-}
-
-/// Reads a REG_SZ / REG_EXPAND_SZ / REG_DWORD value as a string.
-unsafe fn reg_string(hk: HKEY, name: &str) -> Option<String> {
-    let wide_name = wide(name);
-    let mut value_type = REG_VALUE_TYPE(0);
-    let mut len = 0u32;
-    let err = RegQueryValueExW(
-        hk,
-        PCWSTR(wide_name.as_ptr()),
-        None,
-        Some(&mut value_type),
-        None,
-        Some(&mut len),
-    );
-    if err.0 != 0 || len == 0 {
-        return None;
-    }
-    let mut buf = vec![0u8; len as usize];
-    let err = RegQueryValueExW(
-        hk,
-        PCWSTR(wide_name.as_ptr()),
-        None,
-        Some(&mut value_type),
-        Some(buf.as_mut_ptr()),
-        Some(&mut len),
-    );
-    if err.0 != 0 {
-        return None;
-    }
-    if value_type.0 == REG_SZ.0 || value_type.0 == REG_EXPAND_SZ.0 {
-        let units: Vec<u16> = buf
-            .as_chunks::<2>()
-            .0
-            .iter()
-            .map(|c| u16::from_le_bytes([c[0], c[1]]))
-            .collect();
-        let end = units.iter().position(|&u| u == 0).unwrap_or(units.len());
-        Some(String::from_utf16_lossy(&units[..end]).trim().to_string())
-    } else if value_type.0 == REG_DWORD.0 {
-        // Registry values are third-party data; guard the slice so a
-        // malformed value length cannot panic the scan.
-        let value = u32::from_le_bytes(buf.get(..4)?.try_into().ok()?);
-        Some(value.to_string())
-    } else {
-        None
-    }
-}
-
-/// Reports whether a registry value exists without depending on its type or
-/// contents. Shell registrations use empty marker values such as NoStartPage.
-unsafe fn reg_value_exists(hk: HKEY, name: &str) -> bool {
-    let wide_name = wide(name);
-    RegQueryValueExW(hk, PCWSTR(wide_name.as_ptr()), None, None, None, None).0 == 0
-}
-
-unsafe fn reg_dword(hk: HKEY, name: &str) -> Option<u32> {
-    let wide_name = wide(name);
-    let mut value_type = REG_VALUE_TYPE(0);
-    let mut len = 4u32;
-    let mut buf = [0u8; 4];
-    let err = RegQueryValueExW(
-        hk,
-        PCWSTR(wide_name.as_ptr()),
-        None,
-        Some(&mut value_type),
-        Some(buf.as_mut_ptr()),
-        Some(&mut len),
-    );
-    if err.0 != 0 || value_type.0 != REG_DWORD.0 {
-        return None;
-    }
-    Some(u32::from_le_bytes(buf))
+/// A key for reading (`access` adds a registry view).
+fn open_key(parent: HKEY, path: &str, access: REG_SAM_FLAGS) -> Option<registry::Key> {
+    registry::Key::open(parent, path, access | KEY_READ).ok().flatten()
 }
 
 /// Strips quotes and a trailing ",index" from a DisplayIcon value.

@@ -1,5 +1,7 @@
 //! Small helpers that Win32 calls across the backend share.
 
+pub(crate) mod registry;
+
 use std::io::Write;
 use std::os::windows::ffi::OsStrExt;
 use std::path::{Path, PathBuf};

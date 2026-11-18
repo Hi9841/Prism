@@ -23,15 +23,14 @@ use windows::Win32::System::Power::{
     PlatformRoleMobile, PlatformRoleSlate, PowerDeterminePlatformRoleEx, POWER_PLATFORM_ROLE_V2,
 };
 use windows::Win32::System::Registry::{
-    RegCloseKey, RegQueryValueExW, HKEY, HKEY_CLASSES_ROOT, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE,
-    REG_DWORD, REG_VALUE_TYPE,
+    HKEY, HKEY_CLASSES_ROOT, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE,
 };
 use windows::Win32::UI::Shell::IsUserAnAdmin;
 use windows::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_DIGITIZER, SM_TABLETPC};
 
+use crate::win32::registry;
 use crate::windows_tools::{
-    expand_environment, is_windows_system_path, load_indirect_string, open_registry_key,
-    read_registry_string, shell_execute, slug, system32_path,
+    expand_environment, is_windows_system_path, load_indirect_string, shell_execute, slug, system32_path,
 };
 
 /// The Windows Security host. Its deep links are page names for the
@@ -653,40 +652,10 @@ fn split_registry_path(path: &str) -> Option<(HKEY, &str)> {
 }
 
 fn registry_key_exists(root: HKEY, path: &str) -> bool {
-    match unsafe { open_registry_key(root, path) } {
-        Some(key) => {
-            unsafe {
-                let _ = RegCloseKey(key);
-            }
-            true
-        }
-        None => false,
-    }
+    registry::Key::open_read(root, path).is_some()
 }
 
 /// A string or DWORD registry value as text.
 fn registry_value_text(root: HKEY, path: &str, name: &str) -> Option<String> {
-    let key = unsafe { open_registry_key(root, path) }?;
-    let value =
-        unsafe { read_registry_string(key, name) }.or_else(|| unsafe { read_dword(key, name) });
-    unsafe {
-        let _ = RegCloseKey(key);
-    }
-    value
-}
-
-unsafe fn read_dword(key: HKEY, name: &str) -> Option<String> {
-    let name = crate::win32::wide(name);
-    let mut value_type = REG_VALUE_TYPE(0);
-    let mut data = 0u32;
-    let mut length = std::mem::size_of::<u32>() as u32;
-    let result = RegQueryValueExW(
-        key,
-        PCWSTR(name.as_ptr()),
-        None,
-        Some(&mut value_type),
-        Some((&mut data as *mut u32).cast()),
-        Some(&mut length),
-    );
-    (result.0 == 0 && value_type == REG_DWORD).then(|| data.to_string())
+    registry::text(registry::Key::open_read(root, path)?.0, name)
 }

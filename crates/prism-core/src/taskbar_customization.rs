@@ -13,16 +13,15 @@ use image::codecs::png::PngDecoder;
 use image::imageops::{overlay, FilterType};
 use image::{DynamicImage, ImageDecoder, ImageFormat, RgbaImage};
 use serde::{Deserialize, Serialize};
-use windows::core::PCWSTR;
 use windows::Win32::Foundation::LPARAM;
 use windows::Win32::System::Registry::{
-    RegCloseKey, RegOpenKeyExW, RegQueryValueExW, RegSetValueExW, HKEY, HKEY_CURRENT_USER,
-    KEY_QUERY_VALUE, KEY_SET_VALUE, REG_DWORD, REG_SAM_FLAGS, REG_VALUE_TYPE,
+    HKEY, HKEY_CURRENT_USER,
+    KEY_QUERY_VALUE, KEY_SET_VALUE, REG_SAM_FLAGS,
 };
 use windows::Win32::UI::Shell::{
     SHAppBarMessage, ABM_GETSTATE, ABM_SETSTATE, ABS_ALWAYSONTOP, ABS_AUTOHIDE, APPBARDATA,
 };
-use crate::win32::wide;
+use crate::win32::registry;
 
 const EXPLORER_ADVANCED_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced";
 const TASKBAR_SIZE_VALUE: &str = "TaskbarSi";
@@ -420,76 +419,23 @@ fn write_advanced_dword(name: &str, value: u32) -> Result<(), String> {
     write_dword(key.0, name, value)
 }
 
-fn open_key(path: &str, access: REG_SAM_FLAGS) -> Result<Option<RegistryKey>, String> {
-    let path = wide(path);
-    let mut key = HKEY::default();
-    let error = unsafe {
-        RegOpenKeyExW(
-            HKEY_CURRENT_USER,
-            PCWSTR(path.as_ptr()),
-            None,
-            access,
-            &mut key,
-        )
-    };
-    if error.0 == 2 {
-        return Ok(None);
-    }
-    if error.0 != 0 || key.0.is_null() {
-        return Err(format!(
-            "open taskbar registry settings: Win32 error {}",
-            error.0
-        ));
-    }
-    Ok(Some(RegistryKey(key)))
+fn open_key(path: &str, access: REG_SAM_FLAGS) -> Result<Option<registry::Key>, String> {
+    registry::Key::open(HKEY_CURRENT_USER, path, access)
+        .map_err(|code| format!("open taskbar registry settings: Win32 error {code}"))
 }
 
 fn read_dword(key: HKEY, name: &str) -> Result<Option<u32>, String> {
-    let name = wide(name);
-    let mut value_type = REG_VALUE_TYPE::default();
-    let mut size = 4u32;
-    let mut bytes = [0u8; 4];
-    let error = unsafe {
-        RegQueryValueExW(
-            key,
-            PCWSTR(name.as_ptr()),
-            None,
-            Some(&mut value_type),
-            Some(bytes.as_mut_ptr()),
-            Some(&mut size),
-        )
-    };
-    if error.0 == 2 {
-        return Ok(None);
-    }
-    if error.0 != 0 || value_type != REG_DWORD || size != 4 {
-        return Err(format!(
-            "read taskbar registry setting: Win32 error {}",
-            error.0
-        ));
-    }
-    Ok(Some(u32::from_le_bytes(bytes)))
+    registry::dword(key, name).map_err(|error| {
+        let code = match error {
+            registry::DwordError::Win32(code) => code,
+            registry::DwordError::NotDword => 0,
+        };
+        format!("read taskbar registry setting: Win32 error {code}")
+    })
 }
 
 fn write_dword(key: HKEY, name: &str, value: u32) -> Result<(), String> {
-    let name = wide(name);
-    let error = unsafe {
-        RegSetValueExW(
-            key,
-            PCWSTR(name.as_ptr()),
-            None,
-            REG_DWORD,
-            Some(&value.to_le_bytes()),
-        )
-    };
-    if error.0 == 0 {
-        Ok(())
-    } else {
-        Err(format!(
-            "write taskbar registry setting: Win32 error {}",
-            error.0
-        ))
-    }
+    registry::set_dword(key, name, value).map_err(|code| format!("write taskbar registry setting: Win32 error {code}"))
 }
 
 
@@ -524,12 +470,3 @@ fn custom_icon_path_for_id(id: &str) -> Result<PathBuf, String> {
     }
 }
 
-struct RegistryKey(HKEY);
-
-impl Drop for RegistryKey {
-    fn drop(&mut self) {
-        unsafe {
-            let _ = RegCloseKey(self.0);
-        }
-    }
-}

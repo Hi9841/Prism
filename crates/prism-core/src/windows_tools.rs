@@ -17,9 +17,8 @@ use windows::Win32::System::Com::{
     CoInitializeEx, CoTaskMemFree, CoUninitialize, COINIT_APARTMENTTHREADED,
 };
 use windows::Win32::System::Registry::{
-    RegCloseKey, RegEnumKeyExW, RegEnumValueW, RegOpenKeyExW, RegQueryValueExW, HKEY,
-    HKEY_CLASSES_ROOT, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_READ, REG_EXPAND_SZ, REG_SZ,
-    REG_VALUE_TYPE,
+    RegEnumValueW,
+    HKEY_CLASSES_ROOT, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, REG_EXPAND_SZ, REG_SZ,
 };
 use windows::Win32::UI::Shell::Common::ITEMIDLIST;
 use windows::Win32::UI::Shell::{
@@ -29,7 +28,7 @@ use windows::Win32::UI::Shell::{
     SHCONTF_NONFOLDERS, SHELLEXECUTEINFOW, SIGDN_DESKTOPABSOLUTEPARSING, SIGDN_NORMALDISPLAY,
 };
 use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
-use crate::win32::wide;
+use crate::win32::{registry, wide};
 
 #[derive(Clone, Debug)]
 pub struct WindowsTool {
@@ -1020,30 +1019,13 @@ fn add_control_panel_applets(tools: &mut Vec<WindowsTool>) {
             r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Control Panel\Cpls",
         ),
     ] {
-        let Some(key) = (unsafe { open_registry_key(root, path) }) else {
+        let Some(key) = registry::Key::open_read(root, path) else {
             continue;
         };
+        let key = key.0;
 
-        for index in 0..256u32 {
-            let mut name_buffer = [0u16; 512];
-            let mut name_length = name_buffer.len() as u32;
-            let result = unsafe {
-                RegEnumKeyExW(
-                    key,
-                    index,
-                    Some(PWSTR(name_buffer.as_mut_ptr())),
-                    &mut name_length,
-                    None,
-                    None,
-                    None,
-                    None,
-                )
-            };
-            if result.0 != 0 {
-                break;
-            }
-            let name = String::from_utf16_lossy(&name_buffer[..name_length as usize]);
-            let default_value = unsafe { read_registry_string(key, "") };
+        for name in registry::subkeys(key).into_iter().take(256) {
+            let default_value = registry::string(key, "");
             add_cpl_candidate(tools, &titles, &name, default_value.as_deref());
         }
 
@@ -1071,13 +1053,10 @@ fn add_control_panel_applets(tools: &mut Vec<WindowsTool>) {
                 continue;
             }
             let name = String::from_utf16_lossy(&name_buffer[..name_length as usize]);
-            let value = unsafe { read_registry_string(key, &name) };
+            let value = registry::string(key, &name);
             if let Some(value) = value {
                 add_cpl_candidate(tools, &titles, &name, Some(&value));
             }
-        }
-        unsafe {
-            let _ = RegCloseKey(key);
         }
     }
 }
@@ -1200,25 +1179,21 @@ fn cpl_title(applet: &str, titles: &HashMap<String, String>) -> String {
 /// never called. A file with several applets keeps its lowest index, the one
 /// that opens when the file itself is run.
 fn control_panel_titles() -> HashMap<String, String> {
-    let Some(namespace) =
-        (unsafe { open_registry_key(HKEY_LOCAL_MACHINE, CONTROL_PANEL_NAMESPACE) })
-    else {
+    let Some(namespace) = registry::Key::open_read(HKEY_LOCAL_MACHINE, CONTROL_PANEL_NAMESPACE) else {
         return HashMap::new();
     };
-    let classes = unsafe { registry_subkeys(namespace) };
-    unsafe {
-        let _ = RegCloseKey(namespace);
-    }
+    let classes: Vec<String> = registry::subkeys(namespace.0).into_iter().take(1024).collect();
+    drop(namespace);
 
     let mut best: HashMap<String, (u32, String)> = HashMap::new();
     for clsid in classes {
         let class_path = format!(r"CLSID\{clsid}");
-        let localized = unsafe { read_class_string(&class_path, "LocalizedString") };
+        let localized = read_class_string(&class_path, "LocalizedString");
         let Some(localized) = localized.map(|value| expand_environment(&value)) else {
             continue;
         };
         let command =
-            unsafe { read_class_string(&format!(r"{class_path}\Shell\Open\Command"), "") };
+            read_class_string(&format!(r"{class_path}\Shell\Open\Command"), "");
         let Some((path, index)) = command
             .as_deref()
             .and_then(control_rundll_target)
@@ -1286,36 +1261,8 @@ pub(crate) fn load_indirect_string(source: &str) -> Option<String> {
     (!value.is_empty() && !value.starts_with('@')).then_some(value)
 }
 
-unsafe fn read_class_string(path: &str, name: &str) -> Option<String> {
-    let key = open_registry_key(HKEY_CLASSES_ROOT, path)?;
-    let value = read_registry_string(key, name);
-    let _ = RegCloseKey(key);
-    value
-}
-
-unsafe fn registry_subkeys(key: HKEY) -> Vec<String> {
-    let mut names = Vec::new();
-    for index in 0..1024u32 {
-        let mut name_buffer = [0u16; 256];
-        let mut name_length = name_buffer.len() as u32;
-        let result = RegEnumKeyExW(
-            key,
-            index,
-            Some(PWSTR(name_buffer.as_mut_ptr())),
-            &mut name_length,
-            None,
-            None,
-            None,
-            None,
-        );
-        if result.0 != 0 {
-            break;
-        }
-        names.push(String::from_utf16_lossy(
-            &name_buffer[..name_length as usize],
-        ));
-    }
-    names
+fn read_class_string(path: &str, name: &str) -> Option<String> {
+    registry::string(registry::Key::open_read(HKEY_CLASSES_ROOT, path)?.0, name)
 }
 
 fn friendly_cpl_name(path: &str) -> String {
@@ -1574,49 +1521,3 @@ pub(crate) fn system32_path(file: &str) -> PathBuf {
     PathBuf::from(root).join("System32").join(file)
 }
 
-pub(crate) unsafe fn open_registry_key(root: HKEY, path: &str) -> Option<HKEY> {
-    let wide_path = wide(path);
-    let mut key = HKEY(std::ptr::null_mut());
-    let result = RegOpenKeyExW(root, PCWSTR(wide_path.as_ptr()), None, KEY_READ, &mut key);
-    (result.0 == 0 && !key.0.is_null()).then_some(key)
-}
-
-pub(crate) unsafe fn read_registry_string(key: HKEY, name: &str) -> Option<String> {
-    let wide_name = wide(name);
-    let mut value_type = REG_VALUE_TYPE(0);
-    let mut length = 0u32;
-    let result = RegQueryValueExW(
-        key,
-        PCWSTR(wide_name.as_ptr()),
-        None,
-        Some(&mut value_type),
-        None,
-        Some(&mut length),
-    );
-    if result.0 != 0 || length == 0 {
-        return None;
-    }
-    let mut buffer = vec![0u8; length as usize];
-    let result = RegQueryValueExW(
-        key,
-        PCWSTR(wide_name.as_ptr()),
-        None,
-        Some(&mut value_type),
-        Some(buffer.as_mut_ptr()),
-        Some(&mut length),
-    );
-    if result.0 != 0 || (value_type.0 != REG_SZ.0 && value_type.0 != REG_EXPAND_SZ.0) {
-        return None;
-    }
-    let units = buffer
-        .as_chunks::<2>()
-        .0
-        .iter()
-        .map(|chunk| u16::from_le_bytes(*chunk))
-        .collect::<Vec<_>>();
-    let end = units
-        .iter()
-        .position(|value| *value == 0)
-        .unwrap_or(units.len());
-    Some(String::from_utf16_lossy(&units[..end]).trim().to_string())
-}
