@@ -3,6 +3,8 @@
 
 use std::sync::Arc;
 
+use prism_core::settings;
+
 use serde::{Deserialize, Serialize};
 
 use crate::js;
@@ -191,14 +193,20 @@ pub struct FileEntry {
     pub thumbnail: Option<String>,
 }
 
-pub const QUICK_ACCESS_KINDS: [&str; 7] = ["home", "desktop", "downloads", "documents", "pictures", "music", "videos"];
-pub const DEFAULT_QUICK_ACCESS: [&str; 6] = ["home", "desktop", "downloads", "documents", "pictures", "music"];
-pub const QUICK_ACCESS_LIMIT: usize = 6;
-pub const PINNED_APP_LIMIT: usize = 64;
-pub const APP_GROUP_LIMIT: usize = 16;
-pub const APP_GROUP_APP_LIMIT: usize = 64;
-pub const DEFAULT_SECTION_ORDER: [&str; 4] = ["pinned", "recent", "quick", "apps"];
-pub const SECTION_ORDER_LIMIT: usize = DEFAULT_SECTION_ORDER.len();
+pub use prism_core::settings::{
+    APP_GROUP_APP_LIMIT, APP_GROUP_LIMIT, PINNED_APP_LIMIT, QUICK_ACCESS_KINDS, QUICK_ACCESS_LIMIT,
+    SECTION_IDS as DEFAULT_SECTION_ORDER,
+};
+/// The first `QUICK_ACCESS_LIMIT` kinds.
+pub const DEFAULT_QUICK_ACCESS: [&str; QUICK_ACCESS_LIMIT] = {
+    let mut kinds = [""; QUICK_ACCESS_LIMIT];
+    let mut index = 0;
+    while index < QUICK_ACCESS_LIMIT {
+        kinds[index] = QUICK_ACCESS_KINDS[index];
+        index += 1;
+    }
+    kinds
+};
 
 /// `/^[a-z][a-z0-9+.-]*:\/\//i`
 fn has_url_scheme(path: &str) -> bool {
@@ -314,7 +322,15 @@ pub struct FileSearchResponse {
     pub error: Option<FileSearchError>,
 }
 
-pub const VIEW_ZOOM_LEVELS: [f64; 9] = [70.0, 80.0, 90.0, 100.0, 110.0, 120.0, 130.0, 140.0, 150.0];
+pub const VIEW_ZOOM_LEVELS: [f64; settings::VIEW_ZOOM_LEVELS.len()] = {
+    let mut levels = [0.0; settings::VIEW_ZOOM_LEVELS.len()];
+    let mut index = 0;
+    while index < levels.len() {
+        levels[index] = settings::VIEW_ZOOM_LEVELS[index] as f64;
+        index += 1;
+    }
+    levels
+};
 
 /// A level not in the list counts as index -1, as `indexOf` returns.
 pub fn step_view_zoom(current: f64, direction: i32) -> f64 {
@@ -344,14 +360,14 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            accent: "iris".into(),
-            width: 640.0,
-            view_zoom: 100.0,
-            shortcut: "Win".into(),
+            accent: settings::ACCENTS[0].into(),
+            width: f64::from(settings::DEFAULT_WIDTH),
+            view_zoom: f64::from(settings::DEFAULT_VIEW_ZOOM),
+            shortcut: settings::SHORTCUTS[0].into(),
             always_on_top: true,
-            taskbar_alignment: "center".into(),
+            taskbar_alignment: settings::TASKBAR_ALIGNMENTS[0].into(),
             taskbar_scroll_volume: true,
-            theme: "system".into(),
+            theme: settings::THEMES[0].into(),
             quick_access: DEFAULT_QUICK_ACCESS.iter().map(|s| s.to_string()).collect(),
             quick_access_collapsed: false,
             pinned_apps: Vec::new(),
@@ -361,12 +377,5 @@ impl Default for Settings {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct PersistedState {
-    /// Schema version for the state file; written by the backend.
-    pub version: u32,
-    pub settings: Settings,
-    pub history: Vec<HistoryEntry>,
-}
 
 // PORT STATUS: confidence=high todos=0

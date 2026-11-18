@@ -21,6 +21,7 @@ use gpui::{
 };
 use prism_core::backend::{autostart_disabled_by_user, backend, launched_for_autostart, load_state_value};
 use prism_core::host::CoreEvent;
+use prism_core::palette_window;
 use prism_ui::lib::bridge::{self, BackendEvent, ShellHandle};
 use windows::Win32::Foundation::{ERROR_ALREADY_EXISTS, GetLastError, HANDLE, HWND, WAIT_ABANDONED, WAIT_OBJECT_0};
 use windows::Win32::System::Threading::{CreateEventW, CreateMutexW, INFINITE, ResetEvent, SetEvent, WaitForSingleObject};
@@ -120,18 +121,16 @@ fn main() {
         cx.set_global(ShellHandle(shell.clone()));
 
         let persisted = load_state_value().ok().flatten();
-        if let Some(width) = persisted.as_ref().and_then(|v| v.pointer("/settings/width")).and_then(|v| v.as_u64())
-            && (560..=720).contains(&width)
-        {
-            LOGICAL_WIDTH.store(width as u32, Ordering::Release);
+        if let Some(width) = prism_core::settings::startup_width(persisted.as_ref()) {
+            LOGICAL_WIDTH.store(width, Ordering::Release);
         }
 
         prism_ui::state::app::install(cx);
         prism_ui::state::palette::install(cx);
 
-        // tauri.conf.json: 720x620 (min 480x400), transparent, undecorated, no
-        // taskbar entry (PopUp is a tool window), hidden, not resizable (A8).
-        let window_size = size(px(720.), px(620.));
+        // Transparent, undecorated, no taskbar entry (PopUp is a tool window),
+        // hidden, not resizable (A8).
+        let window_size = shell::initial_window_size();
         let bounds = Bounds::centered(None, window_size, cx);
         let window_shell = shell.clone();
         let window = cx
@@ -144,7 +143,10 @@ fn main() {
                     is_resizable: false,
                     is_minimizable: false,
                     window_background: WindowBackgroundAppearance::Transparent,
-                    window_min_size: Some(size(px(480.), px(400.))),
+                    window_min_size: Some(size(
+                        px(palette_window::MIN_LOGICAL_WIDTH as f32),
+                        px(palette_window::MIN_LOGICAL_HEIGHT as f32),
+                    )),
                     focus: false,
                     show: false,
                     app_id: Some("app.prism.launcher".into()),

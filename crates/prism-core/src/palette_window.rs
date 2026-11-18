@@ -21,7 +21,7 @@ use crate::taskbar_alignment::Alignment;
 /// fixed regardless of the monitor the palette lands on; the physical
 /// window size is derived per presentation from the target monitor's
 /// scale factor and work area.
-pub const DEFAULT_LOGICAL_WIDTH: u32 = 640;
+pub const DEFAULT_LOGICAL_WIDTH: u32 = crate::settings::DEFAULT_WIDTH;
 pub const DEFAULT_LOGICAL_HEIGHT: u32 = 620;
 pub const MIN_LOGICAL_WIDTH: u32 = 480;
 pub const MIN_LOGICAL_HEIGHT: u32 = 400;

@@ -22,7 +22,7 @@ use crate::lib::types::{
     APP_GROUP_APP_LIMIT, APP_GROUP_LIMIT, AppEntry, AppGroup, PaletteIcon, QUICK_ACCESS_LIMIT, Settings,
     VIEW_ZOOM_LEVELS, step_view_zoom,
 };
-use crate::state::app::{AppEvent, AppState, SHORTCUT_OPTIONS, THEME_OPTIONS, ToastKind, app_state, error_string};
+use crate::state::app::{AppEvent, AppState, THEME_LABELS, ToastKind, app_state, error_string, shortcut_label};
 use crate::state::palette::{PaletteState, palette_state};
 use crate::theme::{Accent, Rgba, TRANSPARENT, Theme, fade, hsla, motion, shadow, tabular_nums, white};
 use crate::transition::{self, Timing};
@@ -486,20 +486,20 @@ impl SettingsSheet {
                     )
                     .child(icon("keyboard", 14., t.fg_tertiary)),
             )
-            .child(div().flex().flex_wrap().justify_end().gap(r(6.)).children(SHORTCUT_OPTIONS.iter().enumerate().map(
+            .child(div().flex().flex_wrap().justify_end().gap(r(6.)).children(prism_core::settings::SHORTCUTS.iter().enumerate().map(
                 |(index, option)| {
-                    let active = settings.shortcut == option.value;
-                    let value = option.value.to_owned();
+                    let active = settings.shortcut == *option;
+                    let value = (*option).to_owned();
                     let key: gpui::ElementId = ("shortcut", index).into();
                     let opacity = transition::number(&key, "opacity", if busy { 0.5 } else { 1.0 }, Timing::PRESS, window, cx);
                     let chip = chip(key.clone(), active, t, window, cx);
                     transition::press(chip, &key, !busy, window, cx)
                         .opacity(opacity)
                         .when(!busy, |d| d.on_click(cx.listener(move |this, _, _, cx| this.apply_shortcut(value.clone(), cx))))
-                        .child(option.label)
+                        .child(shortcut_label(option))
                 },
             )))
-            .when(settings.shortcut == "Win", |d| {
+            .when(settings.shortcut == prism_core::settings::WIN_SHORTCUT, |d| {
                 d.child(
                     div()
                         .max_w(r(250.))
@@ -1138,9 +1138,10 @@ impl Render for SettingsSheet {
         let reset_confirming = self.reset_confirming;
         let reset_busy = self.reset_busy;
         let app_entity = self.app.clone();
-        let theme_options: Vec<SegmentOption> = THEME_OPTIONS
+        let theme_options: Vec<SegmentOption> = prism_core::settings::THEMES
             .iter()
-            .map(|o| SegmentOption { value: o.value.into(), label: o.label.into() })
+            .zip(THEME_LABELS)
+            .map(|(value, label)| SegmentOption { value: (*value).into(), label: label.into() })
             .collect();
         let appearance = segmented("appearance", &settings.theme, theme_options, false, &t, zoom, window, cx, {
             let app = app_entity.clone();
@@ -1149,11 +1150,11 @@ impl Render for SettingsSheet {
         let width = segmented(
             "window-width",
             &crate::js::number_to_string(settings.width),
-            vec![
-                SegmentOption { value: "560".into(), label: "S".into() },
-                SegmentOption { value: "640".into(), label: "M".into() },
-                SegmentOption { value: "720".into(), label: "L".into() },
-            ],
+            prism_core::settings::WIDTHS
+                .iter()
+                .zip(["S", "M", "L"])
+                .map(|(width, label)| SegmentOption { value: width.to_string().into(), label: label.into() })
+                .collect(),
             false,
             &t,
             zoom,
@@ -1162,7 +1163,7 @@ impl Render for SettingsSheet {
             {
                 let app = app_entity.clone();
                 move |value: SharedString, _, cx| {
-                    let width: f64 = value.parse().unwrap_or(640.0);
+                    let width: f64 = value.parse().unwrap_or(f64::from(prism_core::settings::DEFAULT_WIDTH));
                     app.update(cx, |app, cx| app.update_settings(cx, |s| s.width = width))
                 }
             },

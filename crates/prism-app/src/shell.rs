@@ -58,6 +58,13 @@ fn now_ms() -> u64 {
 }
 pub static LOGICAL_WIDTH: AtomicU32 = AtomicU32::new(DEFAULT_LOGICAL_WIDTH);
 
+/// The window at creation: the widest setting by the palette height. Each
+/// presentation sizes it again for the width setting and the monitor.
+pub fn initial_window_size() -> gpui::Size<gpui::Pixels> {
+    let widest = prism_core::settings::WIDTHS[prism_core::settings::WIDTHS.len() - 1];
+    gpui::size(gpui::px(widest as f32), gpui::px(palette_window::DEFAULT_LOGICAL_HEIGHT as f32))
+}
+
 /// GPUI gives popup windows the resize-border insets of a framed window
 /// (8 px left, right, and bottom). The palette has no frame: the client area
 /// must be the whole window, as for the Tauri window.
@@ -454,10 +461,6 @@ fn begin_palette_close() -> u64 {
     transition
 }
 
-fn is_animatable_window_width(width: u32) -> bool {
-    (560..=720).contains(&width)
-}
-
 impl bridge::Shell for GpuiShell {
     fn present_palette(&self, cx: &mut App) -> BridgeResult<bool> {
         self.present(cx)
@@ -496,7 +499,7 @@ impl bridge::Shell for GpuiShell {
     fn set_window_width(&self, width: u32, cx: &mut App) -> BridgeResult<()> {
         // Persisted choices remain the three presets; intermediate values are
         // accepted only inside their bounds so the UI can animate the width.
-        if !is_animatable_window_width(width) {
+        if !prism_core::settings::is_window_width(width) {
             return Err(format!("unsupported width '{width}'"));
         }
         LOGICAL_WIDTH.store(width, Ordering::Release);

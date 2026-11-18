@@ -4,42 +4,25 @@
 
 use std::collections::HashSet;
 
+use prism_core::settings::{
+    ACCENTS, APP_GROUP_ID_MAX, APP_GROUP_NAME_MAX, HISTORY_LIMIT as HISTORY_CAP, HISTORY_TITLE_MAX, ID_MAX,
+    SHORTCUTS, TASKBAR_ALIGNMENTS, THEMES, WIDTHS, WIN_SHORTCUT,
+};
 use serde_json::Value;
 
 use crate::js;
 use crate::lib::types::{
     APP_GROUP_APP_LIMIT, APP_GROUP_LIMIT, AppGroup, DEFAULT_QUICK_ACCESS, DEFAULT_SECTION_ORDER, HistoryEntry,
-    PINNED_APP_LIMIT, QUICK_ACCESS_KINDS, QUICK_ACCESS_LIMIT, SECTION_ORDER_LIMIT, Settings, VIEW_ZOOM_LEVELS,
+    PINNED_APP_LIMIT, QUICK_ACCESS_KINDS, QUICK_ACCESS_LIMIT, Settings, VIEW_ZOOM_LEVELS,
 };
 
-pub struct ShortcutOption {
-    pub value: &'static str,
-    pub label: &'static str,
+/// The label of a shortcut choice in Settings ("Ctrl + Alt + Space").
+pub fn shortcut_label(value: &str) -> String {
+    if value == WIN_SHORTCUT { "Win key".to_owned() } else { value.replace('+', " + ") }
 }
 
-pub const SHORTCUT_OPTIONS: [ShortcutOption; 8] = [
-    ShortcutOption { value: "Win", label: "Win key" },
-    ShortcutOption { value: "Ctrl+Alt+Space", label: "Ctrl + Alt + Space" },
-    ShortcutOption { value: "Ctrl+Alt+S", label: "Ctrl + Alt + S" },
-    ShortcutOption { value: "Ctrl+Alt+Shift+S", label: "Ctrl + Alt + Shift + S" },
-    ShortcutOption { value: "Ctrl+Alt+P", label: "Ctrl + Alt + P" },
-    ShortcutOption { value: "Ctrl+Alt+Shift+P", label: "Ctrl + Alt + Shift + P" },
-    ShortcutOption { value: "Ctrl+Alt+Enter", label: "Ctrl + Alt + Enter" },
-    ShortcutOption { value: "Ctrl+Alt+Shift+Enter", label: "Ctrl + Alt + Shift + Enter" },
-];
-
-pub struct ThemeOption {
-    pub value: &'static str,
-    pub label: &'static str,
-}
-
-pub const THEME_OPTIONS: [ThemeOption; 3] = [
-    ThemeOption { value: "system", label: "System" },
-    ThemeOption { value: "dark", label: "Dark" },
-    ThemeOption { value: "light", label: "Light" },
-];
-
-pub const HISTORY_CAP: usize = 20;
+/// The Appearance choices: the labels of `settings::THEMES`, in its order.
+pub const THEME_LABELS: [&str; THEMES.len()] = ["System", "Dark", "Light"];
 
 /// `allowed.includes(value) ? value : fallback` for string options.
 fn pick_str(value: Option<&Value>, allowed: &[&str], fallback: &str) -> String {
@@ -69,20 +52,16 @@ pub fn sanitize_settings(raw: Option<&Value>) -> Settings {
     let src = raw.and_then(Value::as_object);
     let field = |key: &str| src.and_then(|o| o.get(key));
     let defaults = Settings::default();
-    let shortcuts: Vec<&str> = SHORTCUT_OPTIONS.iter().map(|o| o.value).collect();
+    let widths = WIDTHS.map(f64::from);
     Settings {
-        accent: pick_str(field("accent"), &["iris", "azure", "mint", "amber", "rose"], &defaults.accent),
-        width: pick_num(field("width"), &[560.0, 640.0, 720.0], defaults.width),
+        accent: pick_str(field("accent"), &ACCENTS, &defaults.accent),
+        width: pick_num(field("width"), &widths, defaults.width),
         view_zoom: pick_num(field("viewZoom"), &VIEW_ZOOM_LEVELS, defaults.view_zoom),
-        shortcut: pick_str(field("shortcut"), &shortcuts, &defaults.shortcut),
+        shortcut: pick_str(field("shortcut"), &SHORTCUTS, &defaults.shortcut),
         always_on_top: pick_bool(field("alwaysOnTop"), defaults.always_on_top),
-        taskbar_alignment: pick_str(
-            field("taskbarAlignment"),
-            &["left", "center", "right"],
-            &defaults.taskbar_alignment,
-        ),
+        taskbar_alignment: pick_str(field("taskbarAlignment"), &TASKBAR_ALIGNMENTS, &defaults.taskbar_alignment),
         taskbar_scroll_volume: pick_bool(field("taskbarScrollVolume"), defaults.taskbar_scroll_volume),
-        theme: pick_str(field("theme"), &["system", "dark", "light"], &defaults.theme),
+        theme: pick_str(field("theme"), &THEMES, &defaults.theme),
         quick_access: sanitize_quick_access(field("quickAccess")),
         quick_access_collapsed: pick_bool(field("quickAccessCollapsed"), defaults.quick_access_collapsed),
         pinned_apps: sanitize_pinned_apps(field("pinnedApps")),
@@ -106,7 +85,7 @@ fn sanitize_section_order(raw: Option<&Value>) -> Vec<String> {
         }
         seen.insert(value);
         result.push(value.to_owned());
-        if result.len() >= SECTION_ORDER_LIMIT {
+        if result.len() >= DEFAULT_SECTION_ORDER.len() {
             break;
         }
     }
@@ -132,7 +111,12 @@ fn sanitize_app_groups(raw: Option<&Value>) -> Vec<AppGroup> {
         };
         let id = src.get("id").and_then(Value::as_str).map_or("", js::trim);
         let name = src.get("name").and_then(Value::as_str).map_or("", js::trim);
-        if id.is_empty() || js::len(id) > 96 || seen.contains(id) || name.is_empty() || js::len(name) > 64 {
+        if id.is_empty()
+            || js::len(id) > APP_GROUP_ID_MAX
+            || seen.contains(id)
+            || name.is_empty()
+            || js::len(name) > APP_GROUP_NAME_MAX
+        {
             continue;
         }
         let app_ids = sanitize_ids(src.get("appIds"), APP_GROUP_APP_LIMIT);
@@ -164,7 +148,7 @@ fn sanitize_ids(raw: Option<&Value>, limit: usize) -> Vec<String> {
         let Some(value) = value.as_str() else {
             continue;
         };
-        if value.is_empty() || js::len(value) > 4096 || seen.contains(value) {
+        if value.is_empty() || js::len(value) > ID_MAX || seen.contains(value) {
             continue;
         }
         seen.insert(value);
@@ -216,9 +200,9 @@ pub fn sanitize_history(raw: Option<&Value>) -> Vec<HistoryEntry> {
             continue;
         };
         if id.is_empty()
-            || js::len(id) > 4096
+            || js::len(id) > ID_MAX
             || title.is_empty()
-            || js::len(title) > 512
+            || js::len(title) > HISTORY_TITLE_MAX
             || !ts.is_finite()
             || seen.contains(id)
         {
@@ -592,7 +576,7 @@ mod provider {
 
         fn persisted_state(&self) -> Value {
             integralize(json!({
-                "version": 3,
+                "version": prism_core::settings::STATE_VERSION,
                 "settings": self.settings,
                 "history": self.history,
             }))

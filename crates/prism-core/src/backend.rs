@@ -8,27 +8,15 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, SystemTime};
 
+use crate::settings::{
+    migrate_state_value, startup_shortcut, startup_taskbar_alignment, validate_shortcut,
+    validate_state, STATE_VERSION, WIN_SHORTCUT,
+};
 use crate::{
     apps, audio_hook, audio_osd, files, perf, power, query, start_menu, taskbar,
     taskbar_alignment, taskbar_customization, theme, win_key, windows_tools,
 };
 
-/// The only accepted global shortcuts. Bare typing keys, reserved keys and
-/// known system/security combos are never accepted.
-pub const ALLOWED_SHORTCUTS: &[&str] = &[
-    "Win", // standalone Win-key interception and first-run default
-    "Ctrl+Alt+Space",
-    "Ctrl+Alt+S",
-    "Ctrl+Alt+Shift+S",
-    "Ctrl+Alt+P",
-    "Ctrl+Alt+Shift+P",
-    "Ctrl+Alt+Enter",
-    "Ctrl+Alt+Shift+Enter",
-];
-
-pub const DEFAULT_SHORTCUT: &str = "Win";
-pub const LEGACY_STATE_VERSION: u32 = 2;
-pub const STATE_VERSION: u32 = 3;
 const STARTUP_SHELL_RETRY_DELAY: Duration = Duration::from_millis(250);
 /// Two minutes of attempts while Explorer runs; a launch at sign-in can come
 /// long before Explorer's taskbar, and that wait does not count.
@@ -590,7 +578,7 @@ impl Backend {
                 // Explorer can be missing for longer than the retries (a
                 // stopped shell that the user starts again): wait for it,
                 // and count only the attempts made while it runs.
-                if combo == "Win" && !win_key::shell_windows_ready() {
+                if combo == WIN_SHORTCUT && !win_key::shell_windows_ready() {
                     continue;
                 }
                 attempts += 1;
@@ -624,12 +612,12 @@ impl Backend {
             return Ok(());
         }
         let release_previous = |prev: &str| {
-            if !prev.is_empty() && prev != "Win" {
+            if !prev.is_empty() && prev != WIN_SHORTCUT {
                 host.unregister_shortcut(prev);
             }
         };
 
-        if combo == "Win" {
+        if combo == WIN_SHORTCUT {
             // Standalone Win mode uses the native hook rather than a
             // registration. If the hook later fails, it self-disables and the
             // UI is notified.
@@ -726,53 +714,6 @@ pub fn filter_existing_paths(paths: Vec<String>) -> Vec<String> {
         .collect()
 }
 
-/// Validates a shortcut string against the whitelist.
-pub fn validate_shortcut(combo: &str) -> Result<(), String> {
-    if !ALLOWED_SHORTCUTS.contains(&combo) {
-        return Err(format!(
-            "shortcut '{combo}' is not supported; pick one of: {}",
-            ALLOWED_SHORTCUTS.join(", ")
-        ));
-    }
-    Ok(())
-}
-
-pub fn startup_shortcut(state: Option<&serde_json::Value>) -> String {
-    state
-        .and_then(|value| value.get("settings"))
-        .and_then(|settings| settings.get("shortcut"))
-        .and_then(|shortcut| shortcut.as_str())
-        .filter(|shortcut| validate_shortcut(shortcut).is_ok())
-        .unwrap_or(DEFAULT_SHORTCUT)
-        .to_string()
-}
-
-pub fn startup_taskbar_alignment(state: Option<&serde_json::Value>) -> String {
-    state
-        .and_then(|value| value.get("settings"))
-        .and_then(|settings| settings.get("taskbarAlignment"))
-        .and_then(|alignment| alignment.as_str())
-        .filter(|alignment| matches!(*alignment, "left" | "center" | "right"))
-        .unwrap_or("center")
-        .to_string()
-}
-
-/// "light" or "dark" for the window at startup: the persisted theme, else the system.
-pub fn startup_window_theme(
-    state: Option<&serde_json::Value>,
-    system_light: Option<bool>,
-) -> &'static str {
-    match state
-        .and_then(|value| value.get("settings"))
-        .and_then(|settings| settings.get("theme"))
-        .and_then(|theme| theme.as_str())
-    {
-        Some("light") => "light",
-        Some("dark") => "dark",
-        _ if system_light == Some(true) => "light",
-        _ => "dark",
-    }
-}
 
 /// Reads persisted state and performs the one-time 0.3.3 shortcut migration.
 /// Version 2 settings are preserved except for the shortcut, which the 0.3.3
@@ -795,26 +736,6 @@ pub fn load_state_value() -> Result<Option<serde_json::Value>, String> {
     Ok(Some(value))
 }
 
-pub fn migrate_state_value(
-    mut value: serde_json::Value,
-) -> Result<Option<(serde_json::Value, bool)>, String> {
-    let version = value.get("version").and_then(|v| v.as_u64());
-    if version == Some(STATE_VERSION as u64) {
-        return Ok(Some((value, false)));
-    }
-    if version != Some(LEGACY_STATE_VERSION as u64) {
-        return Ok(None);
-    }
-
-    let settings = value
-        .get_mut("settings")
-        .and_then(|settings| settings.as_object_mut())
-        .ok_or_else(|| "legacy state.settings must be an object".to_string())?;
-    settings.insert("shortcut".to_string(), serde_json::json!(DEFAULT_SHORTCUT));
-    value["version"] = serde_json::json!(STATE_VERSION);
-    validate_state(&value)?;
-    Ok(Some((value, true)))
-}
 
 pub fn persist_state_value(dir: &Path, value: &serde_json::Value) -> Result<(), String> {
     std::fs::create_dir_all(dir).map_err(|e| format!("failed to create data dir: {e}"))?;
@@ -823,199 +744,4 @@ pub fn persist_state_value(dir: &Path, value: &serde_json::Value) -> Result<(), 
     let tmp_path = dir.join("prism.json.tmp");
     std::fs::write(&tmp_path, text).map_err(|e| format!("failed to save state: {e}"))?;
     files::replace_file(&tmp_path, &final_path).map_err(|e| format!("failed to commit state: {e}"))
-}
-
-/// Validates the persisted state shape; returns Err on anything unexpected.
-pub fn validate_state(state: &serde_json::Value) -> Result<(), String> {
-    let obj = state.as_object().ok_or("state must be an object")?;
-    let settings = obj
-        .get("settings")
-        .and_then(|v| v.as_object())
-        .ok_or("state.settings must be an object")?;
-    if let Some(accent) = settings.get("accent").and_then(|v| v.as_str()) {
-        if !matches!(accent, "iris" | "azure" | "mint" | "amber" | "rose") {
-            return Err(format!("unknown accent '{accent}'"));
-        }
-    }
-    if let Some(theme) = settings.get("theme").and_then(|v| v.as_str()) {
-        if !matches!(theme, "system" | "dark" | "light") {
-            return Err(format!("unknown theme '{theme}'"));
-        }
-    }
-    if let Some(always_on_top) = settings.get("alwaysOnTop") {
-        if !always_on_top.is_boolean() {
-            return Err("state.settings.alwaysOnTop must be a boolean".to_string());
-        }
-    }
-    if let Some(scroll_vol) = settings.get("taskbarScrollVolume") {
-        if !scroll_vol.is_boolean() {
-            return Err("state.settings.taskbarScrollVolume must be a boolean".to_string());
-        }
-    }
-    if let Some(alignment) = settings.get("taskbarAlignment") {
-        let alignment = alignment
-            .as_str()
-            .ok_or("state.settings.taskbarAlignment must be a string")?;
-        if !matches!(alignment, "left" | "center" | "right") {
-            return Err(format!("unknown taskbar alignment '{alignment}'"));
-        }
-    }
-    if let Some(shortcut) = settings.get("shortcut").and_then(|v| v.as_str()) {
-        validate_shortcut(shortcut)?;
-    }
-    if let Some(width) = settings.get("width").and_then(|v| v.as_u64()) {
-        if !matches!(width, 560 | 640 | 720) {
-            return Err(format!("unsupported width '{width}'"));
-        }
-    }
-    if let Some(zoom) = settings.get("viewZoom") {
-        let zoom = zoom
-            .as_u64()
-            .ok_or("state.settings.viewZoom must be an integer")?;
-        if !(70..=150).contains(&zoom) || zoom % 10 != 0 {
-            return Err(format!("unsupported view zoom '{zoom}'"));
-        }
-    }
-    if let Some(quick_access) = settings.get("quickAccess") {
-        let entries = quick_access
-            .as_array()
-            .ok_or("state.settings.quickAccess must be an array")?;
-        if entries.len() > 6 {
-            return Err("state.settings.quickAccess has too many entries".to_string());
-        }
-        let mut seen = std::collections::HashSet::new();
-        for entry in entries {
-            let kind = entry
-                .as_str()
-                .ok_or("quick access entries must be strings")?;
-            if !matches!(
-                kind,
-                "home" | "desktop" | "downloads" | "documents" | "pictures" | "music" | "videos"
-            ) {
-                return Err(format!("unknown quick access entry '{kind}'"));
-            }
-            if !seen.insert(kind) {
-                return Err(format!("duplicate quick access entry '{kind}'"));
-            }
-        }
-    }
-    if let Some(collapsed) = settings.get("quickAccessCollapsed") {
-        if !collapsed.is_boolean() {
-            return Err("state.settings.quickAccessCollapsed must be a boolean".to_string());
-        }
-    }
-    if let Some(section_order) = settings.get("sectionOrder") {
-        let entries = section_order
-            .as_array()
-            .ok_or("state.settings.sectionOrder must be an array")?;
-        if entries.len() > 4 {
-            return Err("state.settings.sectionOrder has too many entries".to_string());
-        }
-        let mut seen = std::collections::HashSet::new();
-        for entry in entries {
-            let id = entry
-                .as_str()
-                .ok_or("section order entries must be strings")?;
-            if !matches!(id, "pinned" | "recent" | "quick" | "apps") {
-                return Err(format!("unknown section order entry '{id}'"));
-            }
-            if !seen.insert(id) {
-                return Err(format!("duplicate section order entry '{id}'"));
-            }
-        }
-    }
-    if let Some(pinned_apps) = settings.get("pinnedApps") {
-        let entries = pinned_apps
-            .as_array()
-            .ok_or("state.settings.pinnedApps must be an array")?;
-        if entries.len() > 64 {
-            return Err("state.settings.pinnedApps has too many entries".to_string());
-        }
-        let mut seen = std::collections::HashSet::new();
-        for entry in entries {
-            let app_id = entry
-                .as_str()
-                .filter(|value| !value.is_empty() && value.len() <= 4096)
-                .ok_or("pinned app ids must be non-empty strings")?;
-            if !seen.insert(app_id) {
-                return Err("state.settings.pinnedApps contains duplicates".to_string());
-            }
-        }
-    }
-    if let Some(app_groups) = settings.get("appGroups") {
-        let groups = app_groups
-            .as_array()
-            .ok_or("state.settings.appGroups must be an array")?;
-        if groups.len() > 16 {
-            return Err("state.settings.appGroups has too many entries".to_string());
-        }
-        let mut group_ids = std::collections::HashSet::new();
-        for group in groups {
-            let group = group
-                .as_object()
-                .ok_or("app group entries must be objects")?;
-            let id = group
-                .get("id")
-                .and_then(|value| value.as_str())
-                .filter(|value| !value.is_empty() && value.len() <= 96)
-                .ok_or("app group ids must be non-empty strings")?;
-            let name = group
-                .get("name")
-                .and_then(|value| value.as_str())
-                .filter(|value| !value.trim().is_empty() && value.len() <= 64)
-                .ok_or("app group names must be non-empty strings")?;
-            if !group_ids.insert(id) {
-                return Err("state.settings.appGroups contains duplicate ids".to_string());
-            }
-            if !group
-                .get("collapsed")
-                .is_some_and(serde_json::Value::is_boolean)
-            {
-                return Err("app group collapsed must be a boolean".to_string());
-            }
-            let app_ids = group
-                .get("appIds")
-                .and_then(|value| value.as_array())
-                .ok_or("app group appIds must be an array")?;
-            if app_ids.len() > 64 {
-                return Err(format!("app group '{name}' has too many apps"));
-            }
-            let mut seen = std::collections::HashSet::new();
-            for app_id in app_ids {
-                let app_id = app_id
-                    .as_str()
-                    .filter(|value| !value.is_empty() && value.len() <= 4096)
-                    .ok_or("app group app ids must be non-empty strings")?;
-                if !seen.insert(app_id) {
-                    return Err(format!("app group '{name}' contains duplicate apps"));
-                }
-            }
-        }
-    }
-    if let Some(history) = obj.get("history") {
-        let Some(entries) = history.as_array() else {
-            return Err("state.history must be an array".to_string());
-        };
-        if entries.len() > 20 {
-            return Err("state.history has too many entries".to_string());
-        }
-        for entry in entries {
-            let Some(entry) = entry.as_object() else {
-                return Err("history entries must be objects".to_string());
-            };
-            let valid_id = entry
-                .get("id")
-                .and_then(|value| value.as_str())
-                .is_some_and(|value| !value.is_empty() && value.len() <= 4096);
-            let valid_title = entry
-                .get("title")
-                .and_then(|value| value.as_str())
-                .is_some_and(|value| !value.is_empty() && value.len() <= 512);
-            let valid_timestamp = entry.get("ts").is_some_and(|value| value.is_u64());
-            if !valid_id || !valid_title || !valid_timestamp {
-                return Err("invalid history entry".to_string());
-            }
-        }
-    }
-    Ok(())
 }

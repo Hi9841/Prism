@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use gpui::{
     AnyWindowHandle, App, AppContext, Application, AsyncApp, Bounds, Keystroke, Modifiers, Point, Task, Timer,
-    WindowBackgroundAppearance, WindowBounds, WindowKind, WindowOptions, point, px, size,
+    WindowBackgroundAppearance, WindowBounds, WindowKind, WindowOptions, point, px,
 };
 use prism_ui::lib::bridge::{self, BackendEvent, BridgeResult, ShellHandle};
 use prism_ui::lib::fixture::{self, Fixture};
@@ -74,7 +74,8 @@ impl ParityShell {
 
 fn place(hwnd: HWND, width: i32) {
     unsafe {
-        let _ = SetWindowPos(hwnd, None, PARK_X, PARK_Y, width, 620, SWP_NOZORDER | SWP_NOACTIVATE);
+        let height = prism_core::palette_window::DEFAULT_LOGICAL_HEIGHT as i32;
+        let _ = SetWindowPos(hwnd, None, PARK_X, PARK_Y, width, height, SWP_NOZORDER | SWP_NOACTIVATE);
     }
 }
 
@@ -345,7 +346,7 @@ pub fn run(args: &[String]) {
                 WindowOptions {
                     window_bounds: Some(WindowBounds::Windowed(Bounds::new(
                         point(px(PARK_X as f32), px(PARK_Y as f32)),
-                        size(px(720.), px(620.)),
+                        crate::shell::initial_window_size(),
                     ))),
                     titlebar: None,
                     kind: WindowKind::PopUp,
