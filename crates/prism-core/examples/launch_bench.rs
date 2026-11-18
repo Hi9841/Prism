@@ -14,7 +14,7 @@
 use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
-use prism_core::apps::{self, AppEntry};
+use prism_core::apps::AppEntry;
 use prism_core::runtime::{block_on, spawn_blocking};
 use serde_json::{json, Value};
 use windows::core::{BOOL, PWSTR};
@@ -64,7 +64,7 @@ fn main() {
         // The palette's path: a pool thread blocks on the runtime, which runs
         // the launch on its blocking pool.
         let result = std::thread::spawn(move || {
-            block_on(async move { spawn_blocking(move || apps::launch(&launch_entry)).await })
+            block_on(async move { spawn_blocking(move || prism_core::launch::launch(&launch_entry)).await })
         })
         .join()
         .expect("launch thread");

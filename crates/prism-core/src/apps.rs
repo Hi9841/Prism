@@ -11,7 +11,6 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::ffi::c_void;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::time::{Duration, SystemTime};
 
 use windows::core::{w, Interface, GUID, PCWSTR};
@@ -19,8 +18,8 @@ use windows::Win32::Foundation::{FILETIME, HWND};
 use windows::Win32::Storage::EnhancedStorage::PKEY_AppUserModel_ID;
 use windows::Win32::System::Com::StructuredStorage::{PropVariantClear, PROPVARIANT};
 use windows::Win32::System::Com::{
-    CoAllowSetForegroundWindow, CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize,
-    IPersistFile, CLSCTX_INPROC_SERVER, CLSCTX_LOCAL_SERVER, COINIT_APARTMENTTHREADED, STGM_READ,
+    CoCreateInstance, CoTaskMemFree,
+    IPersistFile, CLSCTX_INPROC_SERVER, STGM_READ,
 };
 use windows::Win32::System::Registry::{
     RegQueryInfoKeyW, HKEY,
@@ -31,17 +30,14 @@ use windows::Win32::System::Variant::VT_LPWSTR;
 use windows::Win32::UI::Shell::Common::ITEMIDLIST;
 use windows::Win32::UI::Shell::PropertiesSystem::IPropertyStore;
 use windows::Win32::UI::Shell::{
-    ApplicationActivationManager, BHID_PropertyStore, BHID_SFObject, FOLDERID_CommonPrograms,
+    BHID_PropertyStore, BHID_SFObject, FOLDERID_CommonPrograms,
     FOLDERID_Desktop, FOLDERID_Documents, FOLDERID_LocalAppData, FOLDERID_Profile,
     FOLDERID_ProgramFiles, FOLDERID_ProgramFilesX86, FOLDERID_Programs, FOLDERID_PublicDesktop,
-    FOLDERID_PublicDocuments, FOLDERID_RoamingAppData, IApplicationActivationManager, IEnumIDList,
-    ILCreateFromPathW, ILFree, IShellFolder, IShellItem, IShellLinkW,
-    SHCreateItemFromParsingName, SHCreateItemWithParent, SHGetIDListFromObject, SHGetPathFromIDListW, SHOpenFolderAndSelectItems, SHParseDisplayName,
-    ShellExecuteExW, ShellExecuteW, AO_NONE, SEE_MASK_INVOKEIDLIST, SEE_MASK_NOASYNC,
-    SHCONTF_INCLUDEHIDDEN, SHCONTF_NONFOLDERS, SHELLEXECUTEINFOW, SIGDN_NORMALDISPLAY,
+    FOLDERID_PublicDocuments, IEnumIDList, ILFree, IShellFolder, IShellItem, IShellLinkW,
+    SHCreateItemFromParsingName, SHCreateItemWithParent, SHGetIDListFromObject, SHGetPathFromIDListW,
+    SHCONTF_INCLUDEHIDDEN, SHCONTF_NONFOLDERS, SIGDN_NORMALDISPLAY,
 };
-use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
-use crate::win32::{registry, wide, wide_trim};
+use crate::win32::{registry, wide, wide_trim, ComGuard};
 
 const CACHE_TTL: Duration = Duration::from_secs(6 * 60 * 60);
 /// Bump when the scan output format changes so stale caches rescan.
@@ -383,29 +379,6 @@ impl ScanCtx {
     }
 }
 
-struct ComGuard {
-    initialized: bool,
-}
-
-impl ComGuard {
-    fn init() -> Self {
-        Self {
-            initialized: unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) }.is_ok(),
-        }
-    }
-}
-
-impl Drop for ComGuard {
-    fn drop(&mut self) {
-        // CoUninitialize must only balance a successful CoInitializeEx call.
-        // In particular, RPC_E_CHANGED_MODE means this thread already belongs
-        // to a different apartment and must be left untouched.
-        if self.initialized {
-            unsafe { CoUninitialize() }
-        }
-    }
-}
-
 /* ---------------- shortcut sources (Start Menu / Desktop / Documents / profile) ---------------- */
 
 impl ScanCtx {
@@ -711,8 +684,8 @@ fn lnk_keywords(path: &Path, resolved: &ResolvedLnk, aumid: Option<&str>) -> Vec
 }
 
 /// Resolved IShellLink state for a single .lnk file.
-struct ResolvedLnk {
-    target: String,
+pub(crate) struct ResolvedLnk {
+    pub(crate) target: String,
     args: String,
     working_directory: String,
     description: String,
@@ -724,7 +697,7 @@ struct ResolvedLnk {
 /// Resolves a shortcut through the Windows Shell COM APIs
 /// (IShellLink + IPersistFile), returning its real target, arguments,
 /// working directory and description. Returns None for unreadable links.
-fn resolve_lnk(path: &Path) -> Option<ResolvedLnk> {
+pub(crate) fn resolve_lnk(path: &Path) -> Option<ResolvedLnk> {
     unsafe {
         let link: IShellLinkW =
             CoCreateInstance(&CLSID_SHELL_LINK, None, CLSCTX_INPROC_SERVER).ok()?;
@@ -766,7 +739,7 @@ fn resolve_lnk(path: &Path) -> Option<ResolvedLnk> {
 
 /// Reads System.AppUserModel.ID off a .lnk file so Store/UWP shortcuts are
 /// keyed (and launched) by their AUMID.
-fn read_lnk_aumid(path: &Path) -> Option<String> {
+pub(crate) fn read_lnk_aumid(path: &Path) -> Option<String> {
     unsafe {
         let wide_path = wide(&path.to_string_lossy());
         let store: IPropertyStore =
@@ -1756,577 +1729,6 @@ unsafe fn prop_lpwstr(value: &PROPVARIANT) -> Option<String> {
         }
     }
     None
-}
-
-/* ---------------- launch ---------------- */
-
-/// Launches an app the way the real Start menu would: shortcut-backed
-/// entries run through their .lnk/.url (so the shell applies the working
-/// directory, arguments and environment exactly as authored), packaged apps
-/// go through shell:AppsFolder by AUMID, everything else runs the resolved
-/// target directly.
-pub fn launch(app: &AppEntry) -> Result<(), String> {
-    unsafe {
-        if let Some(path) = app.path.as_deref().filter(|path| is_executable(path)) {
-            if shell_open(path, app.args.as_deref(), app.working_directory.as_deref()) {
-                return Ok(());
-            }
-        }
-        if let Some(location) = &app.location {
-            if !location.is_empty()
-                && Path::new(location).exists()
-                && shell_open(location, None, None)
-            {
-                return Ok(());
-            }
-        }
-        if let Some(aumid) = &app.aumid {
-            // Packaged app ids are `PackageFamilyName!AppId`. Activation always
-            // fails on a desktop app id, which only the Apps folder opens.
-            if aumid.contains('!') && activate_packaged_app(aumid).is_ok() {
-                return Ok(());
-            }
-            return explorer_arg(&format!("shell:AppsFolder\\{aumid}"));
-        }
-        if let Some(path) = &app.path {
-            if !path.is_empty()
-                && shell_open(path, app.args.as_deref(), app.working_directory.as_deref())
-            {
-                return Ok(());
-            }
-        }
-        Err(format!("failed to launch {}", app.name))
-    }
-}
-
-/// Launches a scanned desktop application or script through Windows' `runas`
-/// verb. Packaged apps have no local process target and are intentionally not
-/// eligible for elevation.
-pub fn launch_elevated(app: &AppEntry) -> Result<(), String> {
-    let path = app
-        .path
-        .as_deref()
-        .map(Path::new)
-        .filter(|path| path.is_absolute() && path.is_file())
-        .ok_or_else(|| format!("{} cannot be run as administrator", app.name))?;
-    launch_path_elevated(path, app.args.as_deref(), app.working_directory.as_deref())
-}
-
-pub fn launch_path_elevated(
-    path: &Path,
-    args: Option<&str>,
-    working_directory: Option<&str>,
-) -> Result<(), String> {
-    if !path.is_file() || !is_elevatable_path(path) {
-        return Err(format!(
-            "{} is not a supported application or script",
-            path.display()
-        ));
-    }
-
-    let path_text = path.to_string_lossy();
-    let extension = path
-        .extension()
-        .and_then(|value| value.to_str())
-        .unwrap_or_default()
-        .to_ascii_lowercase();
-    let fallback_directory = path.parent().map(|parent| parent.to_string_lossy());
-    let directory = working_directory
-        .filter(|value| !value.is_empty())
-        .or(fallback_directory.as_deref());
-    let (target, parameters) = elevated_command(&path_text, &extension, args);
-
-    unsafe { shell_execute("runas", &target, parameters.as_deref(), directory) }.map_err(|code| {
-        if code == 5 {
-            "Administrator permission was not granted".to_string()
-        } else {
-            format!(
-                "failed to run {} as administrator (Shell error {code})",
-                path.display()
-            )
-        }
-    })
-}
-
-pub fn is_elevatable_path(path: &Path) -> bool {
-    path.extension()
-        .and_then(|value| value.to_str())
-        .is_some_and(|extension| prism_vocab::ELEVATABLE_EXTENSIONS.contains(&extension.to_ascii_lowercase().as_str()))
-}
-
-fn elevated_command(path: &str, extension: &str, args: Option<&str>) -> (String, Option<String>) {
-    let clean_path = path.trim().trim_matches('"');
-    let trailing_args = args
-        .filter(|value| !value.trim().is_empty())
-        .map(|value| format!(" {value}"))
-        .unwrap_or_default();
-    match extension {
-        "bat" | "cmd" => (
-            "cmd.exe".to_string(),
-            Some(format!("/d /s /c \"\"{clean_path}\"{trailing_args}\"")),
-        ),
-        "ps1" => (
-            "powershell.exe".to_string(),
-            Some(format!(
-                "-NoLogo -NoProfile -File \"{clean_path}\"{trailing_args}"
-            )),
-        ),
-        "vbs" | "js" | "wsf" => (
-            "wscript.exe".to_string(),
-            Some(format!("//nologo \"{clean_path}\"{trailing_args}")),
-        ),
-        _ => (clean_path.to_string(), args.map(str::to_string)),
-    }
-}
-
-fn activate_packaged_app(aumid: &str) -> Result<(), String> {
-    let _com = ComGuard::init();
-    unsafe {
-        let manager: IApplicationActivationManager =
-            CoCreateInstance(&ApplicationActivationManager, None, CLSCTX_LOCAL_SERVER)
-                .map_err(|error| format!("failed to create app activation manager: {error}"))?;
-        // The app takes the foreground only with Prism's right to it; without
-        // it the app opens behind the window the user came from.
-        let _ = CoAllowSetForegroundWindow(&manager, None);
-        let app_id = wide(aumid);
-        manager
-            .ActivateApplication(PCWSTR(app_id.as_ptr()), PCWSTR::null(), AO_NONE)
-            .map(|_| ())
-            .map_err(|error| format!("failed to activate {aumid}: {error}"))
-    }
-}
-
-pub fn open_path(path: &Path) -> Result<(), String> {
-    let value = path.to_string_lossy();
-    if unsafe { shell_open(&value, None, None) } {
-        Ok(())
-    } else {
-        Err(format!("failed to open {}", path.display()))
-    }
-}
-
-pub fn open_path_location(path: &Path) -> Result<(), String> {
-    let _com = ComGuard::init();
-    let wide_path = wide(&path.to_string_lossy());
-    unsafe {
-        let item_idl = ILCreateFromPathW(PCWSTR(wide_path.as_ptr()));
-        if !item_idl.is_null() {
-            let hr = SHOpenFolderAndSelectItems(item_idl, None, 0);
-            ILFree(Some(item_idl));
-            if hr.is_ok() {
-                return Ok(());
-            }
-        }
-        let value = path.to_string_lossy();
-        if shell_execute(
-            "open",
-            "explorer.exe",
-            Some(&format!("/select,\"{value}\"")),
-            None,
-        )
-        .is_ok()
-        {
-            Ok(())
-        } else {
-            Err(format!("failed to locate {}", path.display()))
-        }
-    }
-}
-
-/// Opens the Windows Properties dialog for a file or folder through the
-/// shell's handler-backed `properties` verb.
-pub fn show_properties(path: &Path) -> Result<(), String> {
-    if !path.exists() {
-        return Err(format!("{} does not exist", path.display()));
-    }
-    unsafe { shell_execute_verb("properties", path) }.map_err(|code| {
-        format!(
-            "failed to open properties for {} (Shell error {code})",
-            path.display()
-        )
-    })
-}
-
-/// CLSID_TaskbandPin and IID_IPinnedList3: undocumented COM interface used by
-/// the Windows Shell (and browsers like Edge/Firefox) to pin and unpin items on the Taskbar.
-const CLSID_TASKBAND_PIN: GUID = GUID::from_u128(0x90aa3a4e_1cba_4233_b8bb_535773d48449);
-const IID_IPINNED_LIST3: GUID = GUID::from_u128(0x0dd79ae2_d156_45d4_9eeb_3b549769e940);
-const PLMC_INT_MAX: i32 = 0x7fff_ffff;
-
-#[repr(C)]
-#[allow(non_snake_case)]
-struct IPinnedList3Vtbl {
-    pub QueryInterface: unsafe extern "system" fn(
-        this: *mut c_void,
-        riid: *const GUID,
-        ppv: *mut *mut c_void,
-    ) -> windows::core::HRESULT,
-    pub AddRef: unsafe extern "system" fn(this: *mut c_void) -> u32,
-    pub Release: unsafe extern "system" fn(this: *mut c_void) -> u32,
-    /// Slots 3-8: EnumObjects, GetPinnableInfo, IsPinnable, Resolve,
-    /// LegacyModify, GetChangeCount.
-    pub BeforeIsPinned: [usize; 6],
-    /// Slot 9: `S_OK` = pinned, `S_FALSE` = not pinned (matches Chromium's
-    /// `taskbar_util.cc` IPinnedList3 layout).
-    pub IsPinned: unsafe extern "system" fn(
-        this: *mut c_void,
-        pidl: *const ITEMIDLIST,
-    ) -> windows::core::HRESULT,
-    /// Slots 10-15: GetPinnedItem ... GetPinnedItemForAppID.
-    pub BeforeModify: [usize; 6],
-    pub Modify: unsafe extern "system" fn(
-        this: *mut c_void,
-        unpin: *const ITEMIDLIST,
-        pin: *const ITEMIDLIST,
-        caller: i32,
-    ) -> windows::core::HRESULT,
-}
-
-#[repr(C)]
-struct IPinnedList3 {
-    pub vtbl: *const IPinnedList3Vtbl,
-}
-
-fn resolve_shell_pidl(path: &Path) -> Option<*mut ITEMIDLIST> {
-    let wide_path = wide(&path.to_string_lossy());
-    let mut pidl: *mut ITEMIDLIST = std::ptr::null_mut();
-    let hr = unsafe { SHParseDisplayName(PCWSTR(wide_path.as_ptr()), None, &mut pidl, 0, None) };
-    if hr.is_ok() && !pidl.is_null() {
-        return Some(pidl);
-    }
-    let fallback = unsafe { ILCreateFromPathW(PCWSTR(wide_path.as_ptr())) };
-    if !fallback.is_null() {
-        Some(fallback)
-    } else {
-        None
-    }
-}
-
-fn modify_taskband_pin(
-    unpin_pidl: Option<*const ITEMIDLIST>,
-    pin_pidl: Option<*const ITEMIDLIST>,
-) -> Result<(), String> {
-    let _com = ComGuard::init();
-    unsafe {
-        let unknown: windows::core::IUnknown =
-            CoCreateInstance(&CLSID_TASKBAND_PIN, None, CLSCTX_INPROC_SERVER)
-                .map_err(|error| format!("failed to instantiate TaskbandPin: {error}"))?;
-
-        let mut pinned_list_raw: *mut c_void = std::ptr::null_mut();
-        let hr = (windows::core::Interface::vtable(&unknown).QueryInterface)(
-            windows::core::Interface::as_raw(&unknown),
-            &IID_IPINNED_LIST3,
-            &mut pinned_list_raw,
-        );
-        if hr.is_err() || pinned_list_raw.is_null() {
-            return Err(format!("failed to query IPinnedList3: {hr:?}"));
-        }
-
-        let pinned_list = pinned_list_raw as *mut IPinnedList3;
-        let mut modify_hr = ((*(*pinned_list).vtbl).Modify)(
-            pinned_list_raw,
-            unpin_pidl.unwrap_or(std::ptr::null()),
-            pin_pidl.unwrap_or(std::ptr::null()),
-            4, // PLMC_SHELL_PIN_UNPIN
-        );
-        if modify_hr.is_err() {
-            modify_hr = ((*(*pinned_list).vtbl).Modify)(
-                pinned_list_raw,
-                unpin_pidl.unwrap_or(std::ptr::null()),
-                pin_pidl.unwrap_or(std::ptr::null()),
-                PLMC_INT_MAX,
-            );
-        }
-        ((*(*pinned_list).vtbl).Release)(pinned_list_raw);
-
-        modify_hr
-            .ok()
-            .map_err(|error| format!("taskbar pin modify failed: {error}"))
-    }
-}
-
-const TASKBAR_STATE_CHECKS: usize = 10;
-const TASKBAR_STATE_CHECK_INTERVAL: Duration = Duration::from_millis(75);
-
-fn wait_for_taskbar_state_with<F>(
-    pinned: bool,
-    attempts: usize,
-    delay: Duration,
-    mut current_state: F,
-) -> bool
-where
-    F: FnMut() -> bool,
-{
-    for attempt in 0..attempts {
-        if current_state() == pinned {
-            return true;
-        }
-        if attempt + 1 < attempts {
-            std::thread::sleep(delay);
-        }
-    }
-    false
-}
-
-fn wait_for_taskbar_state(path: &Path, pinned: bool) -> bool {
-    wait_for_taskbar_state_with(
-        pinned,
-        TASKBAR_STATE_CHECKS,
-        TASKBAR_STATE_CHECK_INTERVAL,
-        || is_pinned_to_taskbar(path),
-    )
-}
-
-/// Pins or unpins a launch target and returns success only after the taskbar
-/// pin store reflects the requested state.
-/// Sentinel returned when Windows refuses to pin programmatically. The
-/// frontend turns this into the manual taskbar instruction.
-
-pub fn set_taskbar_pinned(path: &Path, pinned: bool) -> Result<(), String> {
-    if !path.exists() {
-        return Err(format!("{} does not exist", path.display()));
-    }
-    // Unknown state must not be treated as "already in the desired state":
-    // that reported a successful unpin without attempting one.
-    let current = taskbar_pin_state(path);
-    if current == Some(pinned) {
-        return Ok(());
-    }
-    if current.is_none() {
-        return Err("Could not read the current taskbar pin state.".to_string());
-    }
-    crate::logs::debug_trace(&format!(
-        "set-pin begin path={} pinned={pinned}",
-        path.display()
-    ));
-
-    let _com = ComGuard::init();
-    // Unpin needs the shortcut that is actually in the taskbar store; pin uses
-    // the original shortcut.
-    let target = if pinned {
-        path.to_path_buf()
-    } else {
-        find_taskbar_pin(path).unwrap_or_else(|| path.to_path_buf())
-    };
-
-    let mut result = crate::shell_bridge::taskbar_pin(&target, pinned);
-    if result.is_ok() && wait_for_taskbar_state(path, pinned) {
-        crate::logs::debug_trace("set-pin bridge ok");
-        return Ok(());
-    }
-
-    if let Some(pidl) = resolve_shell_pidl(&target) {
-        result = if pinned {
-            modify_taskband_pin(None, Some(pidl))
-        } else {
-            modify_taskband_pin(Some(pidl), None)
-        };
-        unsafe { ILFree(Some(pidl)) };
-        if result.is_ok() && wait_for_taskbar_state(path, pinned) {
-            crate::logs::debug_trace("set-pin app-com ok");
-            return Ok(());
-        }
-    }
-
-    if pinned {
-        // Windows 11 (24H2/25H2+) blocks programmatic pinning: Modify returns
-        // S_OK but does nothing and no shell verb is exposed. Ask the user to
-        // confirm from the taskbar instead of reporting a false success.
-        crate::logs::debug_trace("set-pin manual required");
-        Err(prism_vocab::MANUAL_PIN_REQUIRED.to_string())
-    } else {
-        Err("Windows did not unpin this item.".to_string())
-    }
-}
-
-/// Finds the taskbar pin-store shortcut that represents a launch target, so
-/// callers can check pin state or remove the exact pin.
-pub fn find_taskbar_pin(path: &Path) -> Option<PathBuf> {
-    let _com = ComGuard::init();
-    let taskbar = taskbar_pins_dir()?;
-    let Ok(entries) = std::fs::read_dir(&taskbar) else {
-        return None;
-    };
-    let mut match_keys = vec![path_key(&path.to_string_lossy())];
-    let path_aumid = read_lnk_aumid(path);
-    if path
-        .extension()
-        .is_some_and(|extension| extension.eq_ignore_ascii_case("lnk"))
-    {
-        if let Some(resolved) = resolve_lnk(path) {
-            if !resolved.target.is_empty() {
-                match_keys.push(path_key(&resolved.target));
-            }
-        }
-    }
-    let requested_name = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .map(|name| name.to_ascii_lowercase());
-    for entry in entries.flatten() {
-        let link = entry.path();
-        if !link
-            .extension()
-            .is_some_and(|extension| extension.eq_ignore_ascii_case("lnk"))
-        {
-            continue;
-        }
-        if match_keys.contains(&path_key(&link.to_string_lossy())) {
-            return Some(link);
-        }
-        if let (Some(ref req_aumid), Some(link_aumid)) = (&path_aumid, read_lnk_aumid(&link)) {
-            if !req_aumid.is_empty() && req_aumid.eq_ignore_ascii_case(&link_aumid) {
-                return Some(link);
-            }
-        }
-        let Some(resolved) = resolve_lnk(&link) else {
-            continue;
-        };
-        if resolved.target.is_empty() {
-            let link_name = link
-                .file_name()
-                .and_then(|name| name.to_str())
-                .map(|name| name.to_ascii_lowercase());
-            if requested_name.is_some() && link_name == requested_name {
-                return Some(link);
-            }
-        } else if match_keys.contains(&path_key(&resolved.target)) {
-            return Some(link);
-        }
-    }
-    None
-}
-
-/// Reports whether a launch target already sits on the taskbar's pin list.
-/// Uses `IPinnedList3::IsPinned`, which is authoritative. The on-disk pin
-/// folder is NOT: it keeps stale shortcuts for items that are no longer pinned.
-pub fn is_pinned_to_taskbar(path: &Path) -> bool {
-    taskbar_pin_state(path).unwrap_or(false)
-}
-
-/// `Some(true)` = pinned, `Some(false)` = not pinned, `None` = unknown (the
-/// shell rejected the query, e.g. no PIDL for the path).
-fn taskbar_pin_state(path: &Path) -> Option<bool> {
-    let _com = ComGuard::init();
-    let unknown: windows::core::IUnknown =
-        unsafe { CoCreateInstance(&CLSID_TASKBAND_PIN, None, CLSCTX_INPROC_SERVER) }.ok()?;
-    let mut pinned_list_raw: *mut c_void = std::ptr::null_mut();
-    let hr = unsafe {
-        (windows::core::Interface::vtable(&unknown).QueryInterface)(
-            windows::core::Interface::as_raw(&unknown),
-            &IID_IPINNED_LIST3,
-            &mut pinned_list_raw,
-        )
-    };
-    if hr.is_err() || pinned_list_raw.is_null() {
-        return None;
-    }
-    let pinned_list = pinned_list_raw as *mut IPinnedList3;
-    let Some(pidl) = resolve_shell_pidl(path) else {
-        unsafe { ((*(*pinned_list).vtbl).Release)(pinned_list_raw) };
-        return None;
-    };
-    let state = unsafe { ((*(*pinned_list).vtbl).IsPinned)(pinned_list_raw, pidl) };
-    unsafe {
-        ILFree(Some(pidl));
-        ((*(*pinned_list).vtbl).Release)(pinned_list_raw);
-    }
-    match state.0 {
-        0 => Some(true),
-        1 => Some(false),
-        _ => None,
-    }
-}
-
-fn taskbar_pins_dir() -> Option<PathBuf> {
-    Some(
-        crate::win32::known_folder(&FOLDERID_RoamingAppData)?
-            .join("Microsoft")
-            .join("Internet Explorer")
-            .join("Quick Launch")
-            .join("User Pinned")
-            .join("TaskBar"),
-    )
-}
-
-/// Case-insensitive comparison key for Windows filesystem paths coming from
-/// different shell APIs: trims separators and normalizes slashes and casing.
-fn path_key(path: &str) -> String {
-    path.trim()
-        .replace('/', "\\")
-        .trim_end_matches('\\')
-        .to_ascii_lowercase()
-}
-
-fn is_executable(path: &str) -> bool {
-    Path::new(path)
-        .extension()
-        .is_some_and(|extension| extension.eq_ignore_ascii_case("exe"))
-        && Path::new(path).is_file()
-}
-
-unsafe fn shell_open(path: &str, args: Option<&str>, working_directory: Option<&str>) -> bool {
-    shell_execute("open", path, args, working_directory).is_ok()
-}
-
-unsafe fn shell_execute(
-    operation: &str,
-    path: &str,
-    args: Option<&str>,
-    working_directory: Option<&str>,
-) -> Result<(), isize> {
-    let file = wide(path);
-    let operation = wide(operation);
-    let params = args.map(wide);
-    let directory = working_directory
-        .filter(|value| !value.is_empty())
-        .map(wide);
-    let result = ShellExecuteW(
-        None,
-        Some(&PCWSTR(operation.as_ptr())),
-        PCWSTR(file.as_ptr()),
-        params.as_deref().map(|v| PCWSTR(v.as_ptr())).as_ref(),
-        directory
-            .as_deref()
-            .map(|value| PCWSTR(value.as_ptr()))
-            .as_ref(),
-        SW_SHOWNORMAL,
-    );
-    // HINSTANCE values > 32 mean success; lower values are Shell error codes.
-    let code = result.0 as isize;
-    if code > 32 {
-        Ok(())
-    } else {
-        Err(code)
-    }
-}
-
-/// Handler-backed shell verbs (taskbar pinning, Properties) only run through
-/// ShellExecuteEx with SEE_MASK_INVOKEIDLIST; `shell_execute` above uses
-/// plain ShellExecuteW, which resolves static verbs only.
-unsafe fn shell_execute_verb(verb: &str, path: &Path) -> Result<(), isize> {
-    let _com = ComGuard::init();
-    let operation = wide(verb);
-    let file = wide(&path.to_string_lossy());
-    let mut info = SHELLEXECUTEINFOW {
-        cbSize: std::mem::size_of::<SHELLEXECUTEINFOW>() as u32,
-        fMask: SEE_MASK_INVOKEIDLIST | SEE_MASK_NOASYNC,
-        hwnd: HWND::default(),
-        lpVerb: PCWSTR(operation.as_ptr()),
-        lpFile: PCWSTR(file.as_ptr()),
-        nShow: SW_SHOWNORMAL.0,
-        ..Default::default()
-    };
-    // On failure the call returns FALSE and hInstApp carries the SE_ERR_ code.
-    unsafe { ShellExecuteExW(&mut info) }.map_err(|_| info.hInstApp.0 as isize)
-}
-
-fn explorer_arg(arg: &str) -> Result<(), String> {
-    Command::new("explorer.exe")
-        .arg(arg)
-        .spawn()
-        .map(|_| ())
-        .map_err(|e| format!("failed to launch: {e}"))
 }
 
 #[cfg(test)]

@@ -257,7 +257,7 @@ impl Backend {
         // the cache lock is released before ShellExecuteW, which can block.
         let entry = self.cached_app(&id)?;
         let detail = format!("name={};source={}", entry.name, entry.source);
-        let result = crate::runtime::spawn_blocking(move || apps::launch(&entry))
+        let result = crate::runtime::spawn_blocking(move || crate::launch::launch(&entry))
             .await
             .map_err(|e| join_error("launch task failed", e))?;
         perf::finish(timer, "launch_app", move || detail.clone());
@@ -269,7 +269,7 @@ impl Backend {
 
     pub async fn launch_app_as_admin(&self, id: String) -> Result<(), String> {
         let entry = self.cached_app(&id)?;
-        crate::runtime::spawn_blocking(move || apps::launch_elevated(&entry))
+        crate::runtime::spawn_blocking(move || crate::launch::launch_elevated(&entry))
             .await
             .map_err(|e| join_error("elevated launch task failed", e))??;
         self.count_launch(&id);
@@ -299,7 +299,7 @@ impl Backend {
             return Err("path must be an existing absolute file or folder".to_string());
         }
         let kind = if path.is_dir() { "directory" } else { "file" };
-        let result = crate::runtime::spawn_blocking(move || apps::open_path(&path))
+        let result = crate::runtime::spawn_blocking(move || crate::launch::open_path(&path))
             .await
             .map_err(|e| join_error("open path task failed", e))?;
         perf::finish(timer, "open_path", move || format!("kind={kind}"));
@@ -312,7 +312,7 @@ impl Backend {
         if !path.is_absolute() || !path.exists() {
             return Err("path must be an existing absolute file or folder".to_string());
         }
-        let result = crate::runtime::spawn_blocking(move || apps::open_path_location(&path))
+        let result = crate::runtime::spawn_blocking(move || crate::launch::open_path_location(&path))
             .await
             .map_err(|e| join_error("open path location task failed", e))?;
         perf::finish(timer, "open_path_location", String::new);
@@ -324,7 +324,7 @@ impl Backend {
         if !path.is_absolute() || !path.is_file() {
             return Err("path must be an existing absolute file".to_string());
         }
-        crate::runtime::spawn_blocking(move || apps::launch_path_elevated(&path, None, None))
+        crate::runtime::spawn_blocking(move || crate::launch::launch_path_elevated(&path, None, None))
             .await
             .map_err(|e| join_error("run as administrator task failed", e))?
     }
@@ -334,7 +334,7 @@ impl Backend {
         if !path.is_absolute() {
             return false;
         }
-        crate::runtime::spawn_blocking(move || apps::is_pinned_to_taskbar(&path))
+        crate::runtime::spawn_blocking(move || crate::taskbar_pin::is_pinned_to_taskbar(&path))
             .await
             .unwrap_or(false)
     }
@@ -344,7 +344,7 @@ impl Backend {
         if !path.is_absolute() || !path.exists() {
             return Err("path must be an existing absolute file".to_string());
         }
-        crate::runtime::spawn_blocking(move || apps::set_taskbar_pinned(&path, pinned))
+        crate::runtime::spawn_blocking(move || crate::taskbar_pin::set_taskbar_pinned(&path, pinned))
             .await
             .map_err(|e| join_error("taskbar pin task failed", e))?
     }
@@ -354,7 +354,7 @@ impl Backend {
         if !path.is_absolute() || !path.exists() {
             return Err("path must be an existing absolute file or folder".to_string());
         }
-        crate::runtime::spawn_blocking(move || apps::show_properties(&path))
+        crate::runtime::spawn_blocking(move || crate::launch::show_properties(&path))
             .await
             .map_err(|e| join_error("properties task failed", e))?
     }

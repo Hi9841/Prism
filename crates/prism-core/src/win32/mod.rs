@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 
 use windows::core::{GUID, PCWSTR};
 use windows::Win32::Storage::FileSystem::{MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH};
-use windows::Win32::System::Com::CoTaskMemFree;
+use windows::Win32::System::Com::{CoInitializeEx, CoTaskMemFree, CoUninitialize, COINIT_APARTMENTTHREADED};
 use windows::Win32::UI::Shell::SHGetKnownFolderPath;
 
 /// NUL-terminated UTF-16 for a `PCWSTR` argument.
@@ -77,5 +77,29 @@ pub(crate) fn known_folder(id: &GUID) -> Option<PathBuf> {
         let text = path.to_string().unwrap_or_default();
         CoTaskMemFree(Some(path.as_ptr() as *const std::ffi::c_void));
         (!text.is_empty()).then(|| PathBuf::from(text))
+    }
+}
+
+/// COM for this thread (apartment-threaded) while the guard lives.
+pub(crate) struct ComGuard {
+    initialized: bool,
+}
+
+impl ComGuard {
+    pub(crate) fn init() -> Self {
+        Self {
+            initialized: unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) }.is_ok(),
+        }
+    }
+}
+
+impl Drop for ComGuard {
+    fn drop(&mut self) {
+        // CoUninitialize must only balance a successful CoInitializeEx call.
+        // In particular, RPC_E_CHANGED_MODE means this thread already belongs
+        // to a different apartment and must be left untouched.
+        if self.initialized {
+            unsafe { CoUninitialize() }
+        }
     }
 }
