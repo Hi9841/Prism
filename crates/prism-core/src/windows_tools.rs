@@ -105,8 +105,15 @@ pub fn snapshot() -> Arc<Vec<WindowsTool>> {
     refresh()
 }
 
-/// Runs the tool `id`; `None` when no tool has that id.
+/// The prefixes of every tool id: the built-in tools and the Control Panel items.
+const ID_PREFIXES: [&str; 2] = ["windows.", "control-panel::"];
+
+/// Runs the tool `id`; `None` when `id` is not a tool id or no tool has it. An
+/// id of another source returns before `snapshot`, which can rebuild the list.
 pub fn execute(id: &str) -> Option<Result<(), String>> {
+    if !ID_PREFIXES.iter().any(|prefix| id.starts_with(prefix)) {
+        return None;
+    }
     let tools = snapshot();
     let tool = tools.iter().find(|tool| tool.id == id)?;
     Some(execute_target(&tool.target))
@@ -1362,6 +1369,7 @@ fn target_rank(target: &ToolTarget) -> u8 {
 }
 
 fn add_tool(tools: &mut Vec<WindowsTool>, tool: WindowsTool) {
+    debug_assert!(ID_PREFIXES.iter().any(|prefix| tool.id.starts_with(prefix)), "tool id {}", tool.id);
     let new_target_rank = target_rank(&tool.target);
     if let Some(existing) = tools.iter_mut().find(|existing| {
         target_key(&existing.target) == target_key(&tool.target)
