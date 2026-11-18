@@ -13,7 +13,7 @@ use prism_core::palette_window::{
     self, DEFAULT_LOGICAL_WIDTH, PresentationAnchor, is_prism_foreground, log_foreground,
     presentation_anchor,
 };
-use prism_core::{drag, taskbar, taskbar_alignment, win_key};
+use prism_core::{drag, shell_bridge, taskbar, taskbar_alignment};
 use prism_ui::lib::bridge::{self, BackendEvent, BridgeResult};
 use windows::Win32::Foundation::{HWND, POINT, RECT};
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -260,7 +260,7 @@ impl GpuiShell {
             let open = prism_core::focus_log::OpenFocus {
                 foreground_after_ms: (at != 0).then(|| at.saturating_sub(LAST_OPEN_MS.load(Ordering::Acquire))),
                 explorer_requests: EXPLORER_REQUESTS.load(Ordering::Acquire),
-                explorer_granted: win_key::foreground_ack(),
+                explorer_granted: shell_bridge::foreground_ack(),
             };
             let owner = prism_core::focus_log::foreground_owner();
             cx.background_spawn(async move {
@@ -432,7 +432,7 @@ fn mark_took_foreground() {
 /// next input. Under load it can handle the request after the user's first
 /// typed key went to the old window, and Windows then refuses it.
 fn ask_explorer_for_foreground(hwnd: isize) {
-    if win_key::request_foreground(hwnd) {
+    if shell_bridge::request_foreground(hwnd) {
         EXPLORER_REQUESTS.fetch_add(1, Ordering::AcqRel);
     }
 }

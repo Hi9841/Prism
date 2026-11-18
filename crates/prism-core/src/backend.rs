@@ -577,7 +577,7 @@ impl Backend {
                 // Explorer can be missing for longer than the retries (a
                 // stopped shell that the user starts again): wait for it,
                 // and count only the attempts made while it runs.
-                if combo == WIN_SHORTCUT && !win_key::shell_windows_ready() {
+                if combo == WIN_SHORTCUT && !crate::shell_bridge::shell_windows_ready() {
                     continue;
                 }
                 attempts += 1;
@@ -687,7 +687,7 @@ fn schedule_startup_taskbar_alignment() {
     crate::runtime::spawn(async move {
         // A launch at sign-in can come before Explorer's taskbar exists.
         for _ in 0..STARTUP_SHELL_RETRY_ATTEMPTS {
-            if win_key::shell_windows_ready() {
+            if crate::shell_bridge::shell_windows_ready() {
                 break;
             }
             tokio::time::sleep(STARTUP_SHELL_RETRY_DELAY).await;

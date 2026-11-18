@@ -15,12 +15,12 @@ pub struct OverlayIcon {
 
 pub fn init(initial: Option<OverlayIcon>) {
     let _ = sync_file(initial.as_ref());
-    crate::win_key::notify_start_icon_changed();
+    crate::shell_bridge::notify_start_icon_changed();
 }
 
 pub fn set(icon: Option<OverlayIcon>) -> Result<(), String> {
     sync_file(icon.as_ref())?;
-    crate::win_key::notify_start_icon_changed();
+    crate::shell_bridge::notify_start_icon_changed();
     Ok(())
 }
 

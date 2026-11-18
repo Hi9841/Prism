@@ -2307,7 +2307,7 @@ pub fn set_taskbar_pinned(path: &Path, pinned: bool) -> Result<(), String> {
         find_taskbar_pin(path).unwrap_or_else(|| path.to_path_buf())
     };
 
-    let mut result = crate::win_key::shell_bridge_taskbar_pin(&target, pinned);
+    let mut result = crate::shell_bridge::taskbar_pin(&target, pinned);
     if result.is_ok() && wait_for_taskbar_state(path, pinned) {
         crate::logs::debug_trace("set-pin bridge ok");
         return Ok(());

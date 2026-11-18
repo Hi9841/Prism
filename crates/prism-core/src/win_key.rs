@@ -19,38 +19,31 @@
 //!   fail open if the observer cannot be notified.
 //! - The Start button is found by UI Automation ID (with a child-window class
 //!   fallback), and an Explorer-thread mouse hook consumes clicks in its rect.
+//!   The bridge client (install, requests, button lookup) is `shell_bridge`.
 //! - Every Win32 result is checked. Registration failures disable observation.
 //! - Disabling, quitting or failing mid-keypress resets all observation state.
 
-use std::fs::OpenOptions;
-use std::io::Write;
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{mpsc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-use windows::core::{BOOL, PCSTR, PCWSTR};
+use windows::core::PCWSTR;
 use windows::Win32::Devices::HumanInterfaceDevice::{
     HID_USAGE_GENERIC_KEYBOARD, HID_USAGE_PAGE_GENERIC, KEYBOARD_OVERRUN_MAKE_CODE,
 };
 use windows::Win32::Foundation::{
-    CloseHandle, FreeLibrary, HANDLE, HINSTANCE, HMODULE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM,
+    CloseHandle, HANDLE, HINSTANCE, HWND, LPARAM, LRESULT, POINT, WPARAM,
 };
 use windows::Win32::System::Com::{
-    CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED,
+    CoInitializeEx, CoUninitialize, COINIT_MULTITHREADED,
 };
-use windows::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress, LoadLibraryW};
+use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::RemoteDesktop::{
     WTSRegisterSessionNotification, WTSUnRegisterSessionNotification, NOTIFY_FOR_THIS_SESSION,
 };
 use windows::Win32::System::Threading::{
     CreateWaitableTimerExW, GetCurrentThreadId, SetWaitableTimer, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,
     TIMER_ALL_ACCESS,
-};
-use windows::Win32::System::Variant::VARIANT;
-use windows::Win32::UI::Accessibility::{
-    CUIAutomation, IUIAutomation, IUIAutomationCondition, IUIAutomationElement,
-    TreeScope_Descendants, UIA_AutomationIdPropertyId, UIA_ProcessIdPropertyId,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetAsyncKeyState, VK_CONTROL, VK_ESCAPE, VK_LCONTROL, VK_LMENU, VK_LSHIFT, VK_LWIN, VK_MENU,
@@ -62,27 +55,24 @@ use windows::Win32::UI::Input::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     ChangeWindowMessageFilterEx, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW,
-    EnumChildWindows, FindWindowW, GetClassNameW, GetShellWindow, GetWindowRect,
-    GetQueueStatus, GetWindowThreadProcessId, IsWindowVisible, MsgWaitForMultipleObjectsEx, PeekMessageW,
-    PostThreadMessageW, RegisterClassW, RegisterWindowMessageW, SetWindowsHookExW,
-    TranslateMessage, UnhookWindowsHookEx, HHOOK, MSG, MSGFLT_ALLOW, PM_REMOVE, QS_ALLINPUT, QS_RAWINPUT,
-    RI_KEY_BREAK, WH_GETMESSAGE, WH_MOUSE, WM_APP, WM_INPUT, WM_KEYDOWN, WM_KEYUP, WM_SYSKEYDOWN,
+    GetQueueStatus, MsgWaitForMultipleObjectsEx, PeekMessageW,
+    PostThreadMessageW, RegisterClassW, RegisterWindowMessageW,
+    TranslateMessage, MSG, MSGFLT_ALLOW, PM_REMOVE, QS_ALLINPUT, QS_RAWINPUT,
+    RI_KEY_BREAK, WM_APP, WM_INPUT, WM_KEYDOWN, WM_KEYUP, WM_SYSKEYDOWN,
     WM_SYSKEYUP, WM_WTSSESSION_CHANGE, WNDCLASSW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_POPUP,
 };
 
 use crate::win32::wide;
-use crate::shell_protocol::*;
+use crate::shell_bridge::{self, BridgeEvent, ShellBridge};
+use crate::shell_protocol::OBSERVER_CLASS_NAME;
 
-const ACTION_MESSAGE: u32 = WM_APP + 1;
+const ACTION_MESSAGE: u32 = shell_bridge::WAKE_MESSAGE;
 const TOGGLE_DEBOUNCE_MS: u64 = 80;
 const WIN_TOGGLE_RELEASE_GRACE: Duration = Duration::from_millis(30);
 /// A chord key released just before the Win-key snapshot already has its key-up queued as raw
 /// input. With no raw input queued, a plain Win tap toggles after this short margin instead of
 /// the full release grace (Win key to palette: about -27 ms, session H).
 const WIN_TOGGLE_QUIET_MIN: Duration = Duration::from_millis(3);
-/// The Start button rect only needs refreshing occasionally; the UIA query is
-/// expensive and runs on Explorer's side.
-const START_RECT_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
 /// A shell Start command toggles immediately. The normal case is already
 /// de-duplicated: a raw Win-down sets `LAST_RAW_TOGGLE_MS` ~100 ms before the
 /// Win-up shell command, and a late raw toggle is dropped by the debounce.
@@ -389,27 +379,11 @@ type StopReady = mpsc::SyncSender<()>;
 
 static START_TX: OnceLock<mpsc::Sender<HookReady>> = OnceLock::new();
 static RAW_MACHINE: Mutex<WinKeyMachine> = Mutex::new(WinKeyMachine::EMPTY);
-static SHELL_BRIDGE_ACTIVE: AtomicBool = AtomicBool::new(false);
-/// Registered once; calling RegisterWindowMessageW on every raw-input message
-/// (the window proc path) is wasteful.
-static BRIDGE_MESSAGE_ID: OnceLock<Result<u32, String>> = OnceLock::new();
-static SHELL_BRIDGE_ACK: AtomicU32 = AtomicU32::new(0);
-static SHELL_START_RECT_ACK: AtomicU32 = AtomicU32::new(0);
-static SHELL_SEARCH_RECT_ACK: AtomicU32 = AtomicU32::new(0);
-static SHELL_START_CLICK_X: AtomicI32 = AtomicI32::new(0);
-static SHELL_TASKBAR_THREAD: AtomicU32 = AtomicU32::new(0);
-static SHELL_ICON_SHUTDOWN_ACK: AtomicU32 = AtomicU32::new(0);
-static SHELL_TASKBAR_PIN_ACK: AtomicU32 = AtomicU32::new(0);
-static SHELL_FOREGROUND_ACK: AtomicU32 = AtomicU32::new(0);
 static LAST_RAW_TOGGLE_MS: AtomicU64 = AtomicU64::new(0);
 static SHELL_START_FALLBACK: Mutex<ShellStartFallback> = Mutex::new(ShellStartFallback::EMPTY);
-static SHELL_TASKBAR_PIN_REQUEST: Mutex<()> = Mutex::new(());
 static LAST_TOGGLE_MS: AtomicU64 = AtomicU64::new(0);
 static TOGGLE_CLOCK: OnceLock<Instant> = OnceLock::new();
 static PENDING_WIN_TOGGLE: Mutex<PendingWinToggle> = Mutex::new(PendingWinToggle::EMPTY);
-/// Set when taskbar geometry changes (alignment moves, resizes) so the pump
-/// refreshes the Start rect immediately instead of up to 5 seconds later.
-static START_RECT_REFRESH_REQUEST: AtomicBool = AtomicBool::new(false);
 
 enum Action {
     ToggleWin(WinSide),
@@ -517,139 +491,6 @@ pub fn set_provider_suppression(active: bool) {
     clear_queued_actions();
 }
 
-pub fn notify_start_icon_changed() {
-    let taskbar_thread = SHELL_TASKBAR_THREAD.load(Ordering::Acquire);
-    let Ok(message) = shell_bridge_message() else {
-        return;
-    };
-    if taskbar_thread != 0 {
-        unsafe {
-            let _ = PostThreadMessageW(
-                taskbar_thread,
-                message,
-                WPARAM(CONTROL_START_ICON_REFRESH),
-                LPARAM(0),
-            );
-        }
-    }
-}
-
-pub fn shell_bridge_taskbar_pin(path: &Path, pinned: bool) -> Result<(), String> {
-    if !SHELL_BRIDGE_ACTIVE.load(Ordering::Acquire) {
-        return Err("shell bridge not active".into());
-    }
-    let _request = SHELL_TASKBAR_PIN_REQUEST
-        .lock()
-        .map_err(|_| "taskbar pin request lock is poisoned".to_string())?;
-    let taskbar_thread = SHELL_TASKBAR_THREAD.load(Ordering::Acquire);
-    if taskbar_thread == 0 {
-        return Err("shell taskbar thread not available".into());
-    }
-
-    let target_file = std::env::var_os("LOCALAPPDATA")
-        .or_else(|| std::env::var_os("APPDATA"))
-        .map(PathBuf::from)
-        .map(|path| path.join(DATA_DIR_NAME).join(PIN_TARGET_FILE))
-        .unwrap_or_else(|| std::env::temp_dir().join("Prism").join(PIN_TARGET_FILE));
-    if let Some(parent) = target_file.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|error| format!("failed to create pin request directory: {error}"))?;
-    }
-    std::fs::write(&target_file, path.to_string_lossy().as_bytes())
-        .map_err(|error| format!("failed to write pin target file: {error}"))?;
-
-    SHELL_TASKBAR_PIN_ACK.store(0, Ordering::Release);
-    let control = if pinned {
-        CONTROL_TASKBAR_PIN
-    } else {
-        CONTROL_TASKBAR_UNPIN
-    };
-    unsafe {
-        PostThreadMessageW(
-            taskbar_thread,
-            shell_bridge_message()?,
-            WPARAM(control),
-            LPARAM(0),
-        )
-        .map_err(|error| {
-            let _ = std::fs::remove_file(&target_file);
-            format!("failed to post pin request to Explorer: {error}")
-        })?;
-    }
-
-    let started = Instant::now();
-    let mut outcome = Err("Explorer taskbar pin request timed out".into());
-    while started.elapsed() < Duration::from_millis(1500) {
-        match SHELL_TASKBAR_PIN_ACK.load(Ordering::Acquire) {
-            2 => {
-                outcome = Ok(());
-                break;
-            }
-            1 => {
-                outcome = Err("Explorer rejected the taskbar pin request".into());
-                break;
-            }
-            _ => std::thread::sleep(Duration::from_millis(20)),
-        }
-    }
-    let _ = std::fs::remove_file(&target_file);
-    outcome
-}
-
-/// Asks the injected Explorer bridge to hand Prism the foreground. Explorer is
-/// the shell that handled the Win key, so it may still hold activation
-/// permission that a medium-integrity Prism process cannot claim directly.
-/// This is the closest cheap analogue to Open-Shell hosting its Start menu as
-/// an Explorer-owned window.
-pub fn request_foreground(hwnd: isize) -> bool {
-    if !SHELL_BRIDGE_ACTIVE.load(Ordering::Acquire) || hwnd == 0 {
-        return false;
-    }
-    let Ok(message) = shell_bridge_message() else {
-        return false;
-    };
-    let taskbar_thread = SHELL_TASKBAR_THREAD.load(Ordering::Acquire);
-    if taskbar_thread == 0 {
-        return false;
-    }
-    SHELL_FOREGROUND_ACK.store(0, Ordering::Release);
-    unsafe {
-        PostThreadMessageW(
-            taskbar_thread,
-            message,
-            WPARAM(CONTROL_FOREGROUND_WINDOW),
-            LPARAM(hwnd),
-        )
-        .is_ok()
-    }
-}
-
-/// Explorer's answer to the last [`request_foreground`]: `None` until it
-/// replies, then whether its `SetForegroundWindow` succeeded.
-pub fn foreground_ack() -> Option<bool> {
-    match SHELL_FOREGROUND_ACK.load(Ordering::Acquire) {
-        1 => Some(false),
-        2 => Some(true),
-        _ => None,
-    }
-}
-
-/// Asks the observation pump to re-query the Start button rectangle now.
-/// Taskbar moves (alignment repair, density changes) should reposition the
-/// glyph overlay immediately rather than on the next interval tick.
-pub fn request_start_rect_refresh() {
-    if !ACTIVE.load(Ordering::Acquire) {
-        return;
-    }
-    START_RECT_REFRESH_REQUEST.store(true, Ordering::Release);
-    let thread_id = THREAD_ID.load(Ordering::SeqCst);
-    if thread_id != 0 {
-        unsafe {
-            let _ = PostThreadMessageW(thread_id, ACTION_MESSAGE, WPARAM(0), LPARAM(0));
-        }
-    }
-}
-
 /// Turns Win-key observation on or off. Disabling resets the machine and
 /// tears down native observers immediately.
 pub fn set_enabled(on: bool) -> Result<(), String> {
@@ -658,7 +499,7 @@ pub fn set_enabled(on: bool) -> Result<(), String> {
     }
     ACTIVE.store(on, Ordering::SeqCst);
     if !on {
-        SHELL_BRIDGE_ACTIVE.store(false, Ordering::Release);
+        shell_bridge::deactivate();
         RAW_MACHINE.lock().map(|mut m| m.reset()).ok();
         cancel_pending_win_toggle();
         clear_queued_actions();
@@ -717,7 +558,9 @@ pub fn set_enabled(on: bool) -> Result<(), String> {
 }
 
 fn pump_loop(rx: mpsc::Receiver<HookReady>) {
-    THREAD_ID.store(unsafe { GetCurrentThreadId() }, Ordering::SeqCst);
+    let thread = unsafe { GetCurrentThreadId() };
+    THREAD_ID.store(thread, Ordering::SeqCst);
+    shell_bridge::attach_pump(thread);
     while let Ok(ready) = rx.recv() {
         if ACTIVE.load(Ordering::SeqCst) {
             unsafe { run_pump(ready) };
@@ -725,6 +568,7 @@ fn pump_loop(rx: mpsc::Receiver<HookReady>) {
             let _ = ready.send(Err("Windows-key observation was cancelled".to_string()));
         }
     }
+    shell_bridge::attach_pump(0);
     THREAD_ID.store(0, Ordering::SeqCst);
 }
 
@@ -744,11 +588,8 @@ unsafe fn run_pump(ready: HookReady) {
     };
     OBSERVER_ACTIVE.store(true, Ordering::Release);
     let com_initialized = CoInitializeEx(None, COINIT_MULTITHREADED).is_ok();
-    let mut shell_bridge = match ShellBridge::install(!provider_mode) {
-        Ok(bridge) => {
-            SHELL_BRIDGE_ACTIVE.store(true, Ordering::Release);
-            bridge
-        }
+    let mut bridge = match ShellBridge::install(!provider_mode) {
+        Ok(bridge) => bridge,
         Err(error) => {
             crate::logs::debug_trace(&format!("bridge-install-error {error}"));
             OBSERVER_ACTIVE.store(false, Ordering::Release);
@@ -762,8 +603,8 @@ unsafe fn run_pump(ready: HookReady) {
             return;
         }
     };
-    SHELL_TASKBAR_THREAD.store(shell_bridge.taskbar_thread, Ordering::Release);
-    notify_start_icon_changed();
+    shell_bridge::connect(&bridge);
+    shell_bridge::notify_start_icon_changed();
     let _ = ready.send(Ok(()));
     crate::logs::debug_trace("bridge-install-ok");
     /// Bridge reinstall retries: the first after half a second, then doubling.
@@ -805,12 +646,12 @@ unsafe fn run_pump(ready: HookReady) {
                         Action::ToggleWin(_side) => {
                             crate::logs::debug_trace("action-toggle-win");
                             if let Some(host) = crate::host::get() {
-                                host.toggle_from_win(shell_bridge.start_rect());
+                                host.toggle_from_win(bridge.start_rect());
                             }
                         }
                         Action::ToggleTaskbar(click) => {
                             if let Some(host) = crate::host::get() {
-                                host.toggle_from_taskbar(click, shell_bridge.start_rect());
+                                host.toggle_from_taskbar(click, bridge.start_rect());
                             }
                         }
                         Action::ActivateSearch => {
@@ -828,15 +669,15 @@ unsafe fn run_pump(ready: HookReady) {
             // again. Release the old bridge first: when the same Explorer
             // still runs, its own hook must handle its icon shutdown before a
             // newer hook chains in front of it.
-            shell_bridge.release();
+            bridge.release();
             let provider_mode = PROVIDER_SUPPRESSES_START.load(Ordering::Acquire);
             match ShellBridge::install(!provider_mode) {
-                Ok(bridge) => {
-                    shell_bridge = bridge;
+                Ok(new_bridge) => {
+                    bridge = new_bridge;
                     reinstall_delay = REINSTALL_FIRST_DELAY;
                     reinstall_at = None;
-                    SHELL_TASKBAR_THREAD.store(shell_bridge.taskbar_thread, Ordering::Release);
-                    notify_start_icon_changed();
+                    shell_bridge::connect(&bridge);
+                    shell_bridge::notify_start_icon_changed();
                     crate::logs::debug_trace("bridge-reinstalled after taskbar restart");
                 }
                 Err(error) => {
@@ -849,7 +690,7 @@ unsafe fn run_pump(ready: HookReady) {
                 }
             }
         }
-        shell_bridge.refresh_start_rect();
+        bridge.refresh_start_rect();
         // The pump has no timer work faster than the Start-rect refresh
         // interval; input already wakes the loop through the message queue.
         // A long timeout removes a permanent 1 Hz wakeup from the hot path.
@@ -858,8 +699,8 @@ unsafe fn run_pump(ready: HookReady) {
             .chain(shell_start_fallback_wait())
             .chain(reinstall_at.map(|at| at.saturating_duration_since(Instant::now())))
             .min()
-            .unwrap_or(START_RECT_REFRESH_INTERVAL)
-            .min(START_RECT_REFRESH_INTERVAL);
+            .unwrap_or(shell_bridge::START_RECT_REFRESH_INTERVAL)
+            .min(shell_bridge::START_RECT_REFRESH_INTERVAL);
         let timer_armed = precise_timer.filter(|_| wait < Duration::from_secs(1)).is_some_and(|timer| {
             // A negative due time is relative, in 100 ns units.
             let due = -((wait.as_nanos() / 100).max(1) as i64);
@@ -876,14 +717,13 @@ unsafe fn run_pump(ready: HookReady) {
     if let Some(timer) = precise_timer {
         let _ = CloseHandle(timer);
     }
-    SHELL_BRIDGE_ACTIVE.store(false, Ordering::Release);
-    SHELL_TASKBAR_THREAD.store(0, Ordering::Release);
+    shell_bridge::disconnect();
     OBSERVER_ACTIVE.store(false, Ordering::Release);
     RAW_MACHINE.lock().map(|mut machine| machine.reset()).ok();
     cancel_pending_win_toggle();
     // Ask the Explorer-thread renderer to tear down its window while the hook
     // and observer are still alive, then release the bridge.
-    drop(shell_bridge);
+    drop(bridge);
     destroy_observer_window(observer_window);
     if com_initialized {
         CoUninitialize();
@@ -925,7 +765,7 @@ fn disable_observation(reason: &str, detail: &str) {
         crate::logs::append(&dir, "win-key", &record);
     }
     ACTIVE.store(false, Ordering::SeqCst);
-    SHELL_BRIDGE_ACTIVE.store(false, Ordering::Release);
+    shell_bridge::deactivate();
     RAW_MACHINE.lock().map(|mut m| m.reset()).ok();
     cancel_pending_win_toggle();
     clear_queued_actions();
@@ -940,892 +780,6 @@ fn clear_queued_actions() {
         }
     }
 }
-
-type ShellHookProc = unsafe extern "system" fn(i32, WPARAM, LPARAM) -> LRESULT;
-
-struct ShellBridge {
-    module: HMODULE,
-    progman_hook: HHOOK,
-    taskbar_message_hook: Option<HHOOK>,
-    app_manager_hook: Option<HHOOK>,
-    taskbar_mouse_hook: HHOOK,
-    taskbar_thread: u32,
-    start_button_locator: StartButtonLocator,
-    start_rect: RECT,
-    search_button_locator: SearchButtonLocator,
-    search_rect: Option<RECT>,
-    last_rect_refresh: Option<Instant>,
-    /// The hooks are gone (`release`); the struct only keeps the last rects.
-    released: bool,
-}
-
-struct StartButtonLocator {
-    taskbar: HWND,
-    automation: Option<AutomationStartButton>,
-}
-
-struct AutomationStartButton {
-    taskbar: IUIAutomationElement,
-    condition: IUIAutomationCondition,
-    /// Resolved Start button element. It stays valid while the taskbar lives,
-    /// so bounding-rectangle refreshes reuse it instead of re-running the
-    /// expensive `FindFirst` descendant traversal every interval. Re-resolved
-    /// automatically when Explorer restarts (stale elements fail gracefully).
-    cached: Option<IUIAutomationElement>,
-}
-
-impl ShellBridge {
-    unsafe fn install(release_win_hotkey: bool) -> Result<Self, String> {
-        let library_path = shell_hook_library()?;
-        let library_wide = wide(&library_path.to_string_lossy());
-        let module = LoadLibraryW(PCWSTR(library_wide.as_ptr()))
-            .map_err(|error| format!("load Explorer bridge: {error}"))?;
-        let hook_proc =
-            match GetProcAddress(module, PCSTR(c"PrismShellGetMessageHook".as_ptr().cast())) {
-                Some(proc) => {
-                    std::mem::transmute::<unsafe extern "system" fn() -> isize, ShellHookProc>(proc)
-                }
-                None => {
-                    let _ = FreeLibrary(module);
-                    return Err("Explorer bridge export is missing".to_string());
-                }
-            };
-        let mouse_hook_proc =
-            match GetProcAddress(module, PCSTR(c"PrismShellMouseHook".as_ptr().cast())) {
-                Some(proc) => {
-                    std::mem::transmute::<unsafe extern "system" fn() -> isize, ShellHookProc>(proc)
-                }
-                None => {
-                    let _ = FreeLibrary(module);
-                    return Err("Explorer mouse bridge export is missing".to_string());
-                }
-            };
-
-        let progman = match find_shell_window("Progman") {
-            Ok(window) => window,
-            Err(error) => {
-                let _ = FreeLibrary(module);
-                return Err(error);
-            }
-        };
-        let progman_thread = GetWindowThreadProcessId(progman, None);
-        if progman_thread == 0 {
-            let _ = FreeLibrary(module);
-            return Err("Explorer desktop thread is unavailable".to_string());
-        }
-        let progman_hook = match SetWindowsHookExW(
-            WH_GETMESSAGE,
-            Some(hook_proc),
-            Some(HINSTANCE(module.0)),
-            progman_thread,
-        ) {
-            Ok(hook) => hook,
-            Err(error) => {
-                let _ = FreeLibrary(module);
-                return Err(format!("hook Explorer Start command: {error}"));
-            }
-        };
-
-        let taskbar = match find_shell_window("Shell_TrayWnd") {
-            Ok(window) => window,
-            Err(error) => {
-                cleanup_shell_hook(progman_hook, module);
-                return Err(error);
-            }
-        };
-        let taskbar_thread = GetWindowThreadProcessId(taskbar, None);
-        if taskbar_thread == 0 {
-            cleanup_shell_hook(progman_hook, module);
-            return Err("Explorer taskbar thread is unavailable".to_string());
-        }
-        let taskbar_message_hook = if taskbar_thread == progman_thread {
-            None
-        } else {
-            match SetWindowsHookExW(
-                WH_GETMESSAGE,
-                Some(hook_proc),
-                Some(HINSTANCE(module.0)),
-                taskbar_thread,
-            ) {
-                Ok(hook) => Some(hook),
-                Err(error) => {
-                    cleanup_shell_hook(progman_hook, module);
-                    return Err(format!("hook Explorer taskbar command: {error}"));
-                }
-            }
-        };
-        let mut taskbar_process_id = 0;
-        if GetWindowThreadProcessId(taskbar, Some(&mut taskbar_process_id)) == 0
-            || taskbar_process_id == 0
-        {
-            if let Some(hook) = taskbar_message_hook {
-                let _ = UnhookWindowsHookEx(hook);
-            }
-            cleanup_shell_hook(progman_hook, module);
-            return Err("Explorer taskbar process is unavailable".to_string());
-        }
-        let (start_button_locator, start_rect) =
-            match StartButtonLocator::new(taskbar, taskbar_process_id) {
-                Ok(locator) => locator,
-                Err(error) => {
-                    if let Some(hook) = taskbar_message_hook {
-                        let _ = UnhookWindowsHookEx(hook);
-                    }
-                    cleanup_shell_hook(progman_hook, module);
-                    return Err(error);
-                }
-            };
-        let (search_button_locator, search_rect) =
-            SearchButtonLocator::new(taskbar, taskbar_process_id);
-        let taskbar_mouse_hook = match SetWindowsHookExW(
-            WH_MOUSE,
-            Some(mouse_hook_proc),
-            Some(HINSTANCE(module.0)),
-            taskbar_thread,
-        ) {
-            Ok(hook) => hook,
-            Err(error) => {
-                if let Some(hook) = taskbar_message_hook {
-                    let _ = UnhookWindowsHookEx(hook);
-                }
-                cleanup_shell_hook(progman_hook, module);
-                return Err(format!("hook Explorer Start-button mouse path: {error}"));
-            }
-        };
-        let bridge_message = match shell_bridge_message() {
-            Ok(message) => message,
-            Err(error) => {
-                let _ = UnhookWindowsHookEx(taskbar_mouse_hook);
-                if let Some(hook) = taskbar_message_hook {
-                    let _ = UnhookWindowsHookEx(hook);
-                }
-                cleanup_shell_hook(progman_hook, module);
-                return Err(error);
-            }
-        };
-        SHELL_START_RECT_ACK.store(0, Ordering::Release);
-        if let Err(error) = post_start_button_rect(taskbar_thread, bridge_message, start_rect) {
-            let _ = UnhookWindowsHookEx(taskbar_mouse_hook);
-            if let Some(hook) = taskbar_message_hook {
-                let _ = UnhookWindowsHookEx(hook);
-            }
-            cleanup_shell_hook(progman_hook, module);
-            return Err(error);
-        }
-        if wait_for_ack(&SHELL_START_RECT_ACK, Duration::from_secs(1)) != 2 {
-            let _ = UnhookWindowsHookEx(taskbar_mouse_hook);
-            if let Some(hook) = taskbar_message_hook {
-                let _ = UnhookWindowsHookEx(hook);
-            }
-            cleanup_shell_hook(progman_hook, module);
-            return Err("Explorer did not accept the Start-button rectangle".to_string());
-        }
-
-        SHELL_SEARCH_RECT_ACK.store(0, Ordering::Release);
-        let _ = post_search_button_rect(taskbar_thread, bridge_message, search_rect);
-        let _ = wait_for_ack(&SHELL_SEARCH_RECT_ACK, Duration::from_millis(250));
-
-        if !release_win_hotkey {
-            #[cfg(debug_assertions)]
-            eprintln!("[win-key] Explorer Start-command bridge active (Progman thread {progman_thread}, taskbar thread {taskbar_thread})");
-            return Ok(Self {
-                module,
-                progman_hook,
-                taskbar_message_hook,
-                app_manager_hook: None,
-                taskbar_mouse_hook,
-                taskbar_thread,
-                start_button_locator,
-                start_rect,
-                search_button_locator,
-                search_rect,
-                last_rect_refresh: None,
-                released: false,
-            });
-        }
-
-        let app_manager = match find_shell_window("ApplicationManager_ImmersiveShellWindow") {
-            Ok(window) => window,
-            Err(error) => {
-                let _ = UnhookWindowsHookEx(taskbar_mouse_hook);
-                if let Some(hook) = taskbar_message_hook {
-                    let _ = UnhookWindowsHookEx(hook);
-                }
-                cleanup_shell_hook(progman_hook, module);
-                return Err(error);
-            }
-        };
-        let app_manager_thread = GetWindowThreadProcessId(app_manager, None);
-        if app_manager_thread == 0 {
-            let _ = UnhookWindowsHookEx(taskbar_mouse_hook);
-            if let Some(hook) = taskbar_message_hook {
-                let _ = UnhookWindowsHookEx(hook);
-            }
-            cleanup_shell_hook(progman_hook, module);
-            return Err("Explorer application-manager thread is unavailable".to_string());
-        }
-
-        let app_manager_hook = if app_manager_thread == progman_thread {
-            None
-        } else {
-            match SetWindowsHookExW(
-                WH_GETMESSAGE,
-                Some(hook_proc),
-                Some(HINSTANCE(module.0)),
-                app_manager_thread,
-            ) {
-                Ok(hook) => Some(hook),
-                Err(error) => {
-                    let _ = UnhookWindowsHookEx(taskbar_mouse_hook);
-                    if let Some(hook) = taskbar_message_hook {
-                        let _ = UnhookWindowsHookEx(hook);
-                    }
-                    cleanup_shell_hook(progman_hook, module);
-                    return Err(format!("enter Explorer hotkey thread: {error}"));
-                }
-            }
-        };
-
-        SHELL_BRIDGE_ACK.store(0, Ordering::Release);
-        let message = match shell_bridge_message() {
-            Ok(message) => message,
-            Err(error) => {
-                if let Some(hook) = app_manager_hook {
-                    let _ = UnhookWindowsHookEx(hook);
-                }
-                let _ = UnhookWindowsHookEx(taskbar_mouse_hook);
-                if let Some(hook) = taskbar_message_hook {
-                    let _ = UnhookWindowsHookEx(hook);
-                }
-                cleanup_shell_hook(progman_hook, module);
-                return Err(error);
-            }
-        };
-        if let Err(error) = PostThreadMessageW(
-            app_manager_thread,
-            message,
-            WPARAM(CONTROL_DISABLE_WIN_HOTKEY),
-            LPARAM(0),
-        ) {
-            if let Some(hook) = app_manager_hook {
-                let _ = UnhookWindowsHookEx(hook);
-            }
-            let _ = UnhookWindowsHookEx(taskbar_mouse_hook);
-            if let Some(hook) = taskbar_message_hook {
-                let _ = UnhookWindowsHookEx(hook);
-            }
-            cleanup_shell_hook(progman_hook, module);
-            return Err(format!("ask Explorer to release bare Win: {error}"));
-        }
-
-        let acknowledged = wait_for_ack(&SHELL_BRIDGE_ACK, Duration::from_secs(1));
-        if acknowledged == 0 {
-            if let Some(hook) = app_manager_hook {
-                let _ = UnhookWindowsHookEx(hook);
-            }
-            let _ = UnhookWindowsHookEx(taskbar_mouse_hook);
-            if let Some(hook) = taskbar_message_hook {
-                let _ = UnhookWindowsHookEx(hook);
-            }
-            cleanup_shell_hook(progman_hook, module);
-            return Err("Explorer did not acknowledge the bare-Win handoff".to_string());
-        }
-
-        #[cfg(debug_assertions)]
-        eprintln!(
-            "[win-key] Explorer bridge active (Progman thread {progman_thread}, hotkey thread {app_manager_thread}, hotkey {})",
-            if acknowledged == 2 {
-                "released"
-            } else {
-                "already released"
-            }
-        );
-        Ok(Self {
-            module,
-            progman_hook,
-            taskbar_message_hook,
-            app_manager_hook,
-            taskbar_mouse_hook,
-            taskbar_thread,
-            start_button_locator,
-            start_rect,
-            search_button_locator,
-            search_rect,
-            last_rect_refresh: None,
-            released: false,
-        })
-    }
-
-    fn start_rect(&self) -> Option<RECT> {
-        valid_rect(self.start_rect).then_some(self.start_rect)
-    }
-
-    #[allow(dead_code)]
-    fn search_rect(&self) -> Option<RECT> {
-        self.search_rect.filter(|r| valid_rect(*r))
-    }
-
-    fn refresh_start_rect(&mut self) {
-        let requested = START_RECT_REFRESH_REQUEST.swap(false, Ordering::AcqRel);
-        let now = Instant::now();
-        if !requested
-            && self
-                .last_rect_refresh
-                .is_some_and(|last| now.duration_since(last) < START_RECT_REFRESH_INTERVAL)
-        {
-            return;
-        }
-        self.last_rect_refresh = Some(now);
-
-        let Ok(message) = shell_bridge_message() else {
-            return;
-        };
-
-        if let Some(rect) = self.start_button_locator.rect() {
-            if !same_rect(rect, self.start_rect)
-                && post_start_button_rect(self.taskbar_thread, message, rect).is_ok()
-            {
-                crate::logs::debug_trace(&format!(
-                    "start-rect {},{},{},{} requested={requested}",
-                    rect.left, rect.top, rect.right, rect.bottom
-                ));
-                self.start_rect = rect;
-            }
-        }
-
-        let search_rect = self.search_button_locator.rect();
-        let search_changed = match (search_rect, self.search_rect) {
-            (Some(new_r), Some(old_r)) => !same_rect(new_r, old_r),
-            (None, None) => false,
-            _ => true,
-        };
-        if search_changed
-            && post_search_button_rect(self.taskbar_thread, message, search_rect).is_ok()
-        {
-            self.search_rect = search_rect;
-        }
-    }
-}
-
-impl StartButtonLocator {
-    fn new(taskbar: HWND, process_id: u32) -> Result<(Self, RECT), String> {
-        let automation = unsafe { create_automation_start_button(taskbar, process_id).ok() };
-        let mut locator = Self {
-            taskbar,
-            automation,
-        };
-        let rect = locator.rect().ok_or_else(|| {
-            "Start button was not found by AutomationId or taskbar child class".to_string()
-        })?;
-        Ok((locator, rect))
-    }
-
-    fn rect(&mut self) -> Option<RECT> {
-        if let Some(automation) = self.automation.as_mut() {
-            let rect = if let Some(start) = automation.cached.as_ref() {
-                let rect = unsafe { start.CurrentBoundingRectangle() };
-                if let Ok(rect) = rect {
-                    if valid_rect(rect) {
-                        return Some(rect);
-                    }
-                }
-                // The element went stale (Explorer restarted). Re-resolve it.
-                automation.cached = None;
-                None
-            } else {
-                None
-            };
-            let rect = rect.or_else(|| unsafe {
-                automation
-                    .taskbar
-                    .FindFirst(TreeScope_Descendants, &automation.condition)
-                    .ok()
-                    .inspect(|start| automation.cached = Some(start.clone()))
-                    .and_then(|start| start.CurrentBoundingRectangle().ok())
-            });
-            if let Some(rect) = rect {
-                if valid_rect(rect) {
-                    return Some(rect);
-                }
-            }
-        }
-        unsafe { child_start_button_rect(self.taskbar) }
-    }
-}
-
-/// Elements of Explorer's taskbar: its process id, or 0. In a Remote Desktop session (Windows
-/// Sandbox is one) the taskbar's XAML elements report process id 0; every search starts at
-/// Explorer's own taskbar window, so 0 there is Explorer too.
-unsafe fn explorer_process_condition(
-    uia: &IUIAutomation,
-    taskbar_process_id: u32,
-) -> Result<IUIAutomationCondition, String> {
-    let process_id: VARIANT = (taskbar_process_id as i32).into();
-    let explorer = uia
-        .CreatePropertyCondition(UIA_ProcessIdPropertyId, &process_id)
-        .map_err(|error| format!("match Explorer process: {error}"))?;
-    let unreported: VARIANT = 0i32.into();
-    let unreported = uia
-        .CreatePropertyCondition(UIA_ProcessIdPropertyId, &unreported)
-        .map_err(|error| format!("match unreported process: {error}"))?;
-    uia.CreateOrCondition(&explorer, &unreported)
-        .map_err(|error| format!("combine Explorer process conditions: {error}"))
-}
-
-unsafe fn create_automation_start_button(
-    taskbar_window: HWND,
-    taskbar_process_id: u32,
-) -> Result<AutomationStartButton, String> {
-    let uia: IUIAutomation = CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER)
-        .map_err(|error| format!("create UI Automation client: {error}"))?;
-    let taskbar = uia
-        .ElementFromHandle(taskbar_window)
-        .map_err(|error| format!("resolve Explorer taskbar automation root: {error}"))?;
-    let automation_id: VARIANT = "StartButton".into();
-    let automation_id_condition = uia
-        .CreatePropertyCondition(UIA_AutomationIdPropertyId, &automation_id)
-        .map_err(|error| format!("match StartButton AutomationId: {error}"))?;
-    let process_condition = explorer_process_condition(&uia, taskbar_process_id)?;
-    let condition = uia
-        .CreateAndCondition(&automation_id_condition, &process_condition)
-        .map_err(|error| format!("combine StartButton identity conditions: {error}"))?;
-    Ok(AutomationStartButton {
-        taskbar,
-        condition,
-        cached: None,
-    })
-}
-
-unsafe fn child_start_button_rect(taskbar: HWND) -> Option<RECT> {
-    let mut rect = None;
-    let _ = EnumChildWindows(
-        Some(taskbar),
-        Some(find_start_button_child),
-        LPARAM((&mut rect as *mut Option<RECT>) as isize),
-    );
-    rect
-}
-
-unsafe extern "system" fn find_start_button_child(window: HWND, detail: LPARAM) -> BOOL {
-    if !IsWindowVisible(window).as_bool() {
-        return BOOL(1);
-    }
-    let mut class_name = [0u16; 64];
-    let length = GetClassNameW(window, &mut class_name);
-    let class_name = &class_name[..length.max(0) as usize];
-    if is_start_button_class(class_name) {
-        let mut rect = RECT::default();
-        if GetWindowRect(window, &mut rect).is_ok() && valid_rect(rect) {
-            *(detail.0 as *mut Option<RECT>) = Some(rect);
-            return BOOL(0);
-        }
-    }
-    BOOL(1)
-}
-
-fn is_start_button_class(class_name: &[u16]) -> bool {
-    ascii_class_eq(class_name, "Start") || ascii_class_eq(class_name, "StartButton")
-}
-
-fn ascii_class_eq(class_name: &[u16], expected: &str) -> bool {
-    class_name.len() == expected.len()
-        && class_name
-            .iter()
-            .zip(expected.bytes())
-            .all(|(actual, expected)| (*actual as u8).eq_ignore_ascii_case(&expected))
-}
-
-fn valid_rect(rect: RECT) -> bool {
-    rect.right > rect.left && rect.bottom > rect.top
-}
-
-fn same_rect(left: RECT, right: RECT) -> bool {
-    left.left == right.left
-        && left.top == right.top
-        && left.right == right.right
-        && left.bottom == right.bottom
-}
-
-fn post_start_button_rect(thread: u32, message: u32, rect: RECT) -> Result<(), String> {
-    for (control, coordinate) in [
-        (CONTROL_START_RECT_LEFT, rect.left),
-        (CONTROL_START_RECT_TOP, rect.top),
-        (CONTROL_START_RECT_RIGHT, rect.right),
-        (CONTROL_START_RECT_BOTTOM, rect.bottom),
-    ] {
-        unsafe {
-            PostThreadMessageW(
-                thread,
-                message,
-                WPARAM(control),
-                LPARAM(coordinate as isize),
-            )
-            .map_err(|error| format!("configure Explorer Start-button rectangle: {error}"))?;
-        }
-    }
-    Ok(())
-}
-
-fn post_search_button_rect(thread: u32, message: u32, rect: Option<RECT>) -> Result<(), String> {
-    let rect = rect.unwrap_or_default();
-    for (control, coordinate) in [
-        (CONTROL_SEARCH_RECT_LEFT, rect.left),
-        (CONTROL_SEARCH_RECT_TOP, rect.top),
-        (CONTROL_SEARCH_RECT_RIGHT, rect.right),
-        (CONTROL_SEARCH_RECT_BOTTOM, rect.bottom),
-    ] {
-        unsafe {
-            PostThreadMessageW(
-                thread,
-                message,
-                WPARAM(control),
-                LPARAM(coordinate as isize),
-            )
-            .map_err(|error| format!("configure Explorer Search-button rectangle: {error}"))?;
-        }
-    }
-    Ok(())
-}
-
-struct SearchButtonLocator {
-    taskbar: HWND,
-    automation: Option<AutomationSearchButton>,
-}
-
-struct AutomationSearchButton {
-    taskbar: IUIAutomationElement,
-    condition: IUIAutomationCondition,
-    cached: Option<IUIAutomationElement>,
-}
-
-impl SearchButtonLocator {
-    fn new(taskbar: HWND, process_id: u32) -> (Self, Option<RECT>) {
-        let automation = unsafe { create_automation_search_button(taskbar, process_id).ok() };
-        let mut locator = Self {
-            taskbar,
-            automation,
-        };
-        let rect = locator.rect();
-        (locator, rect)
-    }
-
-    fn rect(&mut self) -> Option<RECT> {
-        if let Some(automation) = self.automation.as_mut() {
-            let rect = if let Some(search) = automation.cached.as_ref() {
-                let rect = unsafe { search.CurrentBoundingRectangle() };
-                if let Ok(rect) = rect {
-                    if valid_rect(rect) {
-                        return Some(rect);
-                    }
-                }
-                // The element went stale (Explorer restarted). Re-resolve it.
-                automation.cached = None;
-                None
-            } else {
-                None
-            };
-            let rect = rect.or_else(|| unsafe {
-                automation
-                    .taskbar
-                    .FindFirst(TreeScope_Descendants, &automation.condition)
-                    .ok()
-                    .inspect(|search| automation.cached = Some(search.clone()))
-                    .and_then(|search| search.CurrentBoundingRectangle().ok())
-            });
-            if let Some(rect) = rect {
-                if valid_rect(rect) {
-                    return Some(rect);
-                }
-            }
-        }
-        unsafe { child_search_button_rect(self.taskbar) }
-    }
-}
-
-unsafe fn create_automation_search_button(
-    taskbar_window: HWND,
-    taskbar_process_id: u32,
-) -> Result<AutomationSearchButton, String> {
-    let uia: IUIAutomation = CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER)
-        .map_err(|error| format!("create UI Automation client: {error}"))?;
-    let taskbar = uia
-        .ElementFromHandle(taskbar_window)
-        .map_err(|error| format!("resolve Explorer taskbar automation root: {error}"))?;
-    let id_search_button: VARIANT = "SearchButton".into();
-    let cond_search_button = uia
-        .CreatePropertyCondition(UIA_AutomationIdPropertyId, &id_search_button)
-        .map_err(|error| format!("match SearchButton AutomationId: {error}"))?;
-    let id_search_box: VARIANT = "SearchBox".into();
-    let cond_search_box = uia
-        .CreatePropertyCondition(UIA_AutomationIdPropertyId, &id_search_box)
-        .map_err(|error| format!("match SearchBox AutomationId: {error}"))?;
-    let id_search_box_button: VARIANT = "SearchBoxButton".into();
-    let cond_search_box_button = uia
-        .CreatePropertyCondition(UIA_AutomationIdPropertyId, &id_search_box_button)
-        .map_err(|error| format!("match SearchBoxButton AutomationId: {error}"))?;
-    let id_search: VARIANT = "Search".into();
-    let cond_search = uia
-        .CreatePropertyCondition(UIA_AutomationIdPropertyId, &id_search)
-        .map_err(|error| format!("match Search AutomationId: {error}"))?;
-    let id_search_flyout: VARIANT = "SearchButtonFlyout".into();
-    let cond_search_flyout = uia
-        .CreatePropertyCondition(UIA_AutomationIdPropertyId, &id_search_flyout)
-        .map_err(|error| format!("match SearchButtonFlyout AutomationId: {error}"))?;
-    let id_taskbar_search: VARIANT = "TaskbarSearchButton".into();
-    let cond_taskbar_search = uia
-        .CreatePropertyCondition(UIA_AutomationIdPropertyId, &id_taskbar_search)
-        .map_err(|error| format!("match TaskbarSearchButton AutomationId: {error}"))?;
-
-    let id_or1 = uia
-        .CreateOrCondition(&cond_search_button, &cond_search_box)
-        .map_err(|error| format!("combine SearchButton or SearchBox: {error}"))?;
-    let id_or2 = uia
-        .CreateOrCondition(&id_or1, &cond_search_box_button)
-        .map_err(|error| format!("combine Search conditions: {error}"))?;
-    let id_or3 = uia
-        .CreateOrCondition(&id_or2, &cond_search)
-        .map_err(|error| format!("combine Search conditions: {error}"))?;
-    let id_or4 = uia
-        .CreateOrCondition(&id_or3, &cond_search_flyout)
-        .map_err(|error| format!("combine Search conditions: {error}"))?;
-    let id_condition = uia
-        .CreateOrCondition(&id_or4, &cond_taskbar_search)
-        .map_err(|error| format!("combine Search conditions: {error}"))?;
-
-    let process_condition = explorer_process_condition(&uia, taskbar_process_id)?;
-    let condition = uia
-        .CreateAndCondition(&id_condition, &process_condition)
-        .map_err(|error| format!("combine SearchButton identity conditions: {error}"))?;
-    Ok(AutomationSearchButton {
-        taskbar,
-        condition,
-        cached: None,
-    })
-}
-
-unsafe fn child_search_button_rect(taskbar: HWND) -> Option<RECT> {
-    let mut rect = None;
-    let _ = EnumChildWindows(
-        Some(taskbar),
-        Some(find_search_button_child),
-        LPARAM((&mut rect as *mut Option<RECT>) as isize),
-    );
-    rect
-}
-
-unsafe extern "system" fn find_search_button_child(window: HWND, detail: LPARAM) -> BOOL {
-    if !IsWindowVisible(window).as_bool() {
-        return BOOL(1);
-    }
-    let mut class_name = [0u16; 64];
-    let length = GetClassNameW(window, &mut class_name);
-    let class_name = &class_name[..length.max(0) as usize];
-    if is_search_button_class(class_name) {
-        let mut rect = RECT::default();
-        if GetWindowRect(window, &mut rect).is_ok() && valid_rect(rect) {
-            *(detail.0 as *mut Option<RECT>) = Some(rect);
-            return BOOL(0);
-        }
-    }
-    BOOL(1)
-}
-
-fn is_search_button_class(class_name: &[u16]) -> bool {
-    ascii_class_eq(class_name, "TraySearch")
-        || ascii_class_eq(class_name, "TraySearchBox")
-        || ascii_class_eq(class_name, "TraySearchButton")
-        || ascii_class_eq(class_name, "SearchButton")
-        || ascii_class_eq(class_name, "SearchBox")
-        || ascii_class_eq(class_name, "UniversalSearchBand")
-        || ascii_class_eq(class_name, "SearchControl")
-}
-
-impl Drop for ShellBridge {
-    fn drop(&mut self) {
-        self.release();
-    }
-}
-
-impl ShellBridge {
-    /// Removes the hooks from Explorer. Safe to call more than once.
-    fn release(&mut self) {
-        if std::mem::replace(&mut self.released, true) {
-            return;
-        }
-        request_start_icon_shutdown(self.taskbar_thread);
-        unsafe {
-            let _ = UnhookWindowsHookEx(self.progman_hook);
-            if let Some(hook) = self.taskbar_message_hook {
-                let _ = UnhookWindowsHookEx(hook);
-            }
-            if let Some(hook) = self.app_manager_hook {
-                let _ = UnhookWindowsHookEx(hook);
-            }
-            let _ = UnhookWindowsHookEx(self.taskbar_mouse_hook);
-            let _ = FreeLibrary(self.module);
-        }
-        #[cfg(debug_assertions)]
-        eprintln!("[win-key] Explorer bridge released");
-    }
-}
-
-fn request_start_icon_shutdown(thread: u32) {
-    let Ok(message) = shell_bridge_message() else {
-        return;
-    };
-    SHELL_ICON_SHUTDOWN_ACK.store(0, Ordering::Release);
-    unsafe {
-        let _ = PostThreadMessageW(
-            thread,
-            message,
-            WPARAM(CONTROL_START_ICON_SHUTDOWN),
-            LPARAM(0),
-        );
-    }
-    let _ = wait_for_ack(&SHELL_ICON_SHUTDOWN_ACK, Duration::from_millis(250));
-}
-
-unsafe fn cleanup_shell_hook(hook: HHOOK, module: HMODULE) {
-    let _ = UnhookWindowsHookEx(hook);
-    let _ = FreeLibrary(module);
-}
-
-fn shell_bridge_message() -> Result<u32, String> {
-    BRIDGE_MESSAGE_ID
-        .get_or_init(|| {
-            let name = wide(BRIDGE_MESSAGE_NAME);
-            let message = unsafe { RegisterWindowMessageW(PCWSTR(name.as_ptr())) };
-            if message == 0 {
-                Err("register Explorer bridge message failed".to_string())
-            } else {
-                Ok(message)
-            }
-        })
-        .clone()
-}
-
-/// Explorer's desktop and taskbar windows exist (the bridge can install).
-/// A cheap check for startup retries: a sign-in launch can run before
-/// Explorer has created its taskbar.
-pub fn shell_windows_ready() -> bool {
-    unsafe {
-        let taskbar = wide("Shell_TrayWnd");
-        !GetShellWindow().0.is_null()
-            && FindWindowW(PCWSTR(taskbar.as_ptr()), PCWSTR::null()).is_ok_and(|window| !window.0.is_null())
-    }
-}
-
-unsafe fn find_shell_window(class_name: &str) -> Result<HWND, String> {
-    if class_name.eq_ignore_ascii_case("Progman") {
-        let shell_wnd = GetShellWindow();
-        if !shell_wnd.0.is_null() {
-            return Ok(shell_wnd);
-        }
-    }
-    let class_name_wide = wide(class_name);
-    let mut last_error = None;
-    for _ in 0..20 {
-        match FindWindowW(PCWSTR(class_name_wide.as_ptr()), PCWSTR::null()) {
-            Ok(window) if !window.0.is_null() => return Ok(window),
-            Ok(_) => last_error = Some("window handle was null".to_string()),
-            Err(error) => last_error = Some(error.to_string()),
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    }
-    Err(format!(
-        "Explorer window '{class_name}' is unavailable: {}",
-        last_error.unwrap_or_else(|| "timed out".to_string())
-    ))
-}
-
-fn wait_for_ack(acknowledgement: &AtomicU32, timeout: Duration) -> u32 {
-    let started = Instant::now();
-    let mut msg = MSG::default();
-    while started.elapsed() < timeout {
-        unsafe {
-            while PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
-                let _ = TranslateMessage(&msg);
-                let _ = DispatchMessageW(&msg);
-            }
-        }
-        let acknowledged = acknowledgement.load(Ordering::Acquire);
-        if acknowledged != 0 {
-            return acknowledged;
-        }
-        unsafe {
-            let _ = MsgWaitForMultipleObjectsEx(None, 25, QS_ALLINPUT, Default::default());
-        }
-    }
-    acknowledgement.load(Ordering::Acquire)
-}
-
-/// The Explorer bridge DLL: one fixed file for each build of it, at
-/// `%LOCALAPPDATA%\app.prism.launcher\shell-hook\prism-shell-hook-<hash>.dll`.
-/// Before 1.0.30, each start wrote a new file with a random name to `%TEMP%` and loaded it into
-/// Explorer. Antivirus tools flag that pattern. The uninstaller removes this folder.
-fn shell_hook_library() -> Result<PathBuf, String> {
-    let local = std::env::var_os("LOCALAPPDATA").ok_or("LOCALAPPDATA is not set")?;
-    let directory = PathBuf::from(local).join(DATA_DIR_NAME).join("shell-hook");
-    // Files that versions before 1.0.30 left in %TEMP%.
-    remove_stale_shell_hooks(&std::env::temp_dir().join("Prism").join("shell-hooks"), "");
-    install_shell_hook_library(&directory, include_bytes!(env!("PRISM_SHELL_HOOK_DLL")))
-}
-
-/// Puts `bytes` at `<directory>\prism-shell-hook-<hash>.dll` and returns the path. A file with the
-/// same bytes stays as it is. A new build has a new name, so an update never has to replace a file
-/// that Explorer holds locked.
-fn install_shell_hook_library(directory: &Path, bytes: &[u8]) -> Result<PathBuf, String> {
-    std::fs::create_dir_all(directory).map_err(|error| format!("create Explorer bridge directory: {error}"))?;
-    let name = format!("prism-shell-hook-{:016x}.dll", crate::fnv1a_64(bytes));
-    remove_stale_shell_hooks(directory, &name);
-    let path = directory.join(&name);
-    if std::fs::read(&path).is_ok_and(|existing| existing == bytes) {
-        return Ok(path);
-    }
-    // Write a private file, then rename it: a second Prism that starts at the same time never
-    // loads a DLL that is not fully written.
-    let staging = directory.join(format!("{name}.{}.tmp", std::process::id()));
-    let written = OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .open(&staging)
-        .and_then(|mut file| file.write_all(bytes).and_then(|_| file.sync_all()));
-    if let Err(error) = written {
-        let _ = std::fs::remove_file(&staging);
-        return Err(format!("write Explorer bridge DLL: {error}"));
-    }
-    match std::fs::rename(&staging, &path) {
-        Ok(()) => Ok(path),
-        Err(error) => {
-            let _ = std::fs::remove_file(&staging);
-            // Another Prism can have put the same file there first.
-            if std::fs::read(&path).is_ok_and(|existing| existing == bytes) {
-                Ok(path)
-            } else {
-                Err(format!("install Explorer bridge DLL: {error}"))
-            }
-        }
-    }
-}
-
-/// Removes bridge DLLs other than `keep`. Explorer holds a loaded DLL locked, so this removes
-/// only files that no Explorer uses now.
-fn remove_stale_shell_hooks(directory: &Path, keep: &str) {
-    let Ok(entries) = std::fs::read_dir(directory) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let file_name = entry.file_name();
-        let Some(name) = file_name.to_str() else {
-            continue;
-        };
-        if name != keep && name.starts_with("prism-shell-hook-") && name.ends_with(".dll") {
-            let _ = std::fs::remove_file(entry.path());
-        }
-    }
-}
-
 
 unsafe fn ensure_raw_input_class() -> Result<(), String> {
     RAW_INPUT_CLASS
@@ -1874,7 +828,7 @@ unsafe fn create_observer_window(watch_keyboard: bool) -> Result<HWND, String> {
         None,
     )
     .map_err(|error| format!("create raw keyboard observer window: {error}"))?;
-    let bridge_message = match shell_bridge_message() {
+    let bridge_message = match shell_bridge::message_id() {
         Ok(message) => message,
         Err(error) => {
             let _ = DestroyWindow(window);
@@ -2021,7 +975,7 @@ impl ShellStartFallback {
 fn note_shell_search_command() {
     if !ACTIVE.load(Ordering::Acquire)
         || !OBSERVER_ACTIVE.load(Ordering::Acquire)
-        || !SHELL_BRIDGE_ACTIVE.load(Ordering::Acquire)
+        || !shell_bridge::is_active()
     {
         return;
     }
@@ -2046,7 +1000,7 @@ fn win_keys_physically_down() -> bool {
 fn note_shell_start_command() {
     if !ACTIVE.load(Ordering::Acquire)
         || !OBSERVER_ACTIVE.load(Ordering::Acquire)
-        || !SHELL_BRIDGE_ACTIVE.load(Ordering::Acquire)
+        || !shell_bridge::is_active()
     {
         return;
     }
@@ -2081,7 +1035,7 @@ fn flush_shell_start_fallback() {
     if ready
         && ACTIVE.load(Ordering::Acquire)
         && OBSERVER_ACTIVE.load(Ordering::Acquire)
-        && SHELL_BRIDGE_ACTIVE.load(Ordering::Acquire)
+        && shell_bridge::is_active()
     {
         crate::logs::debug_trace("shell-start-fallback-toggle");
         queue_action(Action::ToggleWin(WinSide::Left));
@@ -2105,7 +1059,7 @@ fn flush_pending_win_toggle() {
             // queues before their final drain or observes inactive.
             if ACTIVE.load(Ordering::Acquire)
                 && OBSERVER_ACTIVE.load(Ordering::Acquire)
-                && SHELL_BRIDGE_ACTIVE.load(Ordering::Acquire)
+                && shell_bridge::is_active()
             {
                 queue_action(Action::ToggleWin(side));
                 crate::logs::debug_trace("pending-toggle-queued");
@@ -2186,52 +1140,19 @@ unsafe extern "system" fn raw_input_window_proc(
         cancel_pending_win_toggle();
         return LRESULT(0);
     }
-    if shell_bridge_message().is_ok_and(|bridge_message| message == bridge_message) {
-        match wparam.0 {
-            EVENT_HOTKEY_DISABLED => {
-                SHELL_BRIDGE_ACK.store(if lparam.0 != 0 { 2 } else { 1 }, Ordering::Release);
-            }
-            EVENT_START_RECT_CONFIGURED => {
-                SHELL_START_RECT_ACK.store(if lparam.0 != 0 { 2 } else { 1 }, Ordering::Release);
-            }
-            EVENT_SEARCH_RECT_CONFIGURED => {
-                SHELL_SEARCH_RECT_ACK.store(if lparam.0 != 0 { 2 } else { 1 }, Ordering::Release);
-            }
-            EVENT_START_ICON_SHUTDOWN => {
-                SHELL_ICON_SHUTDOWN_ACK.store(if lparam.0 != 0 { 2 } else { 1 }, Ordering::Release);
-            }
-            EVENT_START_ICON_REFRESHED => {
-                crate::logs::debug_trace(&format!("start-icon-refresh {}", lparam.0));
-            }
-            EVENT_TASKBAR_PIN_COMPLETED => {
-                SHELL_TASKBAR_PIN_ACK.store(if lparam.0 != 0 { 2 } else { 1 }, Ordering::Release);
-            }
-            EVENT_FOREGROUND_RESULT => {
-                SHELL_FOREGROUND_ACK.store(if lparam.0 != 0 { 2 } else { 1 }, Ordering::Release);
-            }
-            EVENT_SHELL_START_COMMAND => {
-                note_shell_start_command();
-            }
-            EVENT_SHELL_SEARCH_COMMAND => {
-                note_shell_search_command();
-            }
-            EVENT_TASKBAR_POINTER => {
-                request_start_rect_refresh();
-            }
-            EVENT_TASKBAR_START_CLICK_X => {
-                SHELL_START_CLICK_X.store(lparam.0 as i32, Ordering::Release);
-            }
-            EVENT_TASKBAR_START_CLICK_Y
+    if shell_bridge::message_id().is_ok_and(|bridge_message| message == bridge_message) {
+        match shell_bridge::handle_event(wparam.0, lparam.0) {
+            BridgeEvent::StartCommand => note_shell_start_command(),
+            BridgeEvent::SearchCommand => note_shell_search_command(),
+            BridgeEvent::TaskbarPointer => shell_bridge::request_start_rect_refresh(),
+            BridgeEvent::StartClick(click)
                 if ACTIVE.load(Ordering::Acquire)
                     && OBSERVER_ACTIVE.load(Ordering::Acquire)
-                    && SHELL_BRIDGE_ACTIVE.load(Ordering::Acquire) =>
+                    && shell_bridge::is_active() =>
             {
-                queue_action(Action::ToggleTaskbar(POINT {
-                    x: SHELL_START_CLICK_X.load(Ordering::Acquire),
-                    y: lparam.0 as i32,
-                }));
+                queue_action(Action::ToggleTaskbar(click));
             }
-            _ => {}
+            BridgeEvent::StartClick(_) | BridgeEvent::None => {}
         }
         return LRESULT(0);
     }
@@ -2294,15 +1215,6 @@ fn toggle_clock_ms() -> u64 {
     TOGGLE_CLOCK.get_or_init(Instant::now).elapsed().as_millis() as u64 + 1
 }
 
-#[allow(dead_code)]
-fn point_from_message(detail: isize) -> POINT {
-    let packed = detail as u32;
-    POINT {
-        x: (packed as u16 as i16) as i32,
-        y: ((packed >> 16) as u16 as i16) as i32,
-    }
-}
-
 fn queue_action(action: Action) {
     if !ACTIVE.load(Ordering::Acquire) {
         return;
@@ -2336,58 +1248,3 @@ fn queue_action(action: Action) {
 /*  Unit tests - the full shortcut matrix                              */
 /* ------------------------------------------------------------------ */
 
-#[cfg(test)]
-mod tests {
-    use super::install_shell_hook_library;
-    use std::path::{Path, PathBuf};
-
-    fn scratch(label: &str) -> PathBuf {
-        let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../target/tmp")
-            .join(format!("shell-hook-test-{}-{label}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        dir
-    }
-
-    fn file_names(dir: &Path) -> Vec<String> {
-        let mut names: Vec<String> = std::fs::read_dir(dir)
-            .unwrap()
-            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
-            .collect();
-        names.sort();
-        names
-    }
-
-    #[test]
-    fn the_same_build_keeps_one_file_with_a_stable_name() {
-        let dir = scratch("stable");
-        let first = install_shell_hook_library(&dir, b"build one").unwrap();
-        let second = install_shell_hook_library(&dir, b"build one").unwrap();
-        assert_eq!(first, second);
-        assert_eq!(std::fs::read(&first).unwrap(), b"build one");
-        assert_eq!(file_names(&dir), [first.file_name().unwrap().to_str().unwrap()]);
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn a_new_build_gets_a_new_name_and_the_old_file_goes() {
-        let dir = scratch("update");
-        let old = install_shell_hook_library(&dir, b"build one").unwrap();
-        let new = install_shell_hook_library(&dir, b"build two").unwrap();
-        assert_ne!(old, new);
-        assert!(!old.exists());
-        assert_eq!(file_names(&dir).len(), 1);
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn a_damaged_file_is_written_again() {
-        let dir = scratch("damaged");
-        let path = install_shell_hook_library(&dir, b"build one").unwrap();
-        std::fs::write(&path, b"half").unwrap();
-        assert_eq!(install_shell_hook_library(&dir, b"build one").unwrap(), path);
-        assert_eq!(std::fs::read(&path).unwrap(), b"build one");
-        assert_eq!(file_names(&dir).len(), 1);
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-}
