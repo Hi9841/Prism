@@ -50,13 +50,14 @@ static OSD_REQUEST_GENERATION: AtomicU64 = AtomicU64::new(0);
 /// palette; defaults to iris.
 static OSD_ACCENT: AtomicU64 = AtomicU64::new(0x98_7C_F2);
 
-/// Sets the level-bar accent from the frontend accent presets.
+/// Sets the level-bar accent from a frontend accent preset or a custom `#rrggbb`.
 pub fn set_accent(name: &str) {
     let rgb: u64 = match name {
         "azure" => 0x31_99_E4,
         "mint" => 0x46_C2_9A,
         "amber" => 0xE6A732,
         "rose" => 0xE8_5F_78,
+        custom if prism_vocab::settings::is_hex_color(custom) => u64::from_str_radix(&custom[1..], 16).unwrap_or(0x98_7C_F2),
         // "iris" and any unknown value keep the default violet.
         _ => 0x98_7C_F2,
     };

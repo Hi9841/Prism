@@ -46,6 +46,18 @@ fn to_oklab(c: Rgba) -> [f32; 3] {
     ]
 }
 
+/// `(l, c, h)`: the inverse of `oklch`.
+fn to_oklch(color: Rgba) -> (f32, f32, f32) {
+    let [l, a, b] = to_oklab(color);
+    (l, a.hypot(b), b.atan2(a).to_degrees())
+}
+
+/// `#rrggbb`, without the alpha.
+pub fn to_hex(color: Rgba) -> String {
+    let channel = |value: f32| (value.clamp(0.0, 1.0) * 255.0).round() as u8;
+    format!("#{:02x}{:02x}{:02x}", channel(color.r), channel(color.g), channel(color.b))
+}
+
 /// `color-mix(in oklab, first <percent>, second)` with premultiplied alpha.
 pub fn mix(first: Rgba, percent: f32, second: Rgba) -> Rgba {
     let p = percent / 100.0;
@@ -163,6 +175,16 @@ impl Accent {
     }
 }
 
+/// `Accent::colors` for a custom accent, in the presets' family: the lightness stays
+/// where the accent reads as text and as a fill on both themes, and a light accent
+/// takes dark text.
+fn custom_accent_colors(color: Rgba) -> (Rgba, Rgba, Rgba) {
+    let (l, c, h) = to_oklch(color);
+    let l = l.clamp(0.55, 0.8);
+    let fg = if l >= 0.7 { oklch(0.2, 0.03, h, 1.0) } else { oklch(0.985, 0.004, h, 1.0) };
+    (oklch(l, c, h, 1.0), oklch(l + 0.05, c, h, 1.0), fg)
+}
+
 /// A two-stop vertical or angled gradient.
 #[derive(Clone, Copy, Debug)]
 pub struct Gradient {
@@ -214,11 +236,13 @@ impl Gradient {
     }
 }
 
-/// Every resolved token for one theme mode and accent.
+/// Every resolved token for one theme mode, accent, and custom colors.
 #[derive(Clone, Debug)]
 pub struct Theme {
     pub mode: Mode,
     pub accent_id: Accent,
+    pub custom_accent: Option<Rgba>,
+    pub custom_background: Option<Rgba>,
     pub shell_solid: Gradient,
     pub shell_line: Rgba,
     pub shell_hi: Rgba,
@@ -256,8 +280,8 @@ pub struct Theme {
 }
 
 impl Theme {
-    pub fn new(mode: Mode, accent_id: Accent) -> Self {
-        let (accent, accent_strong, accent_fg) = accent_id.colors();
+    pub fn new(mode: Mode, accent_id: Accent, custom_accent: Option<Rgba>, custom_background: Option<Rgba>) -> Self {
+        let (accent, accent_strong, accent_fg) = custom_accent.map_or_else(|| accent_id.colors(), custom_accent_colors);
         let common = |t: Theme| Theme {
             accent,
             accent_strong,
@@ -267,10 +291,12 @@ impl Theme {
             accent_ring: fade(accent, 45.0),
             ..t
         };
-        common(match mode {
+        let theme = common(match mode {
             Mode::Dark => Theme {
                 mode,
                 accent_id,
+                custom_accent,
+                custom_background,
                 shell_solid: Gradient::oklch(180.0, (0.17, 0.009, 268.0, 1.0), (0.152, 0.008, 268.0, 1.0)),
                 shell_line: white(0.08),
                 shell_hi: white(0.06),
@@ -309,6 +335,8 @@ impl Theme {
             Mode::Light => Theme {
                 mode,
                 accent_id,
+                custom_accent,
+                custom_background,
                 shell_solid: Gradient::oklch(180.0, (0.995, 0.002, 268.0, 1.0), (0.965, 0.004, 268.0, 1.0)),
                 shell_line: black(0.08),
                 shell_hi: white(0.85),
@@ -344,7 +372,29 @@ impl Theme {
                 accent_softer: accent,
                 accent_ring: accent,
             },
-        })
+        });
+        match custom_background {
+            Some(color) => theme.with_background(color),
+            None => theme,
+        }
+    }
+
+    /// The opaque surfaces on a custom background: the shell starts at the color and
+    /// falls off as the default does, and toasts and raised panels keep their offsets.
+    /// The lightness stays on the mode's side, so the text tokens keep their contrast
+    /// and the translucent tokens (fields, surfaces, lines) still read over it.
+    fn with_background(self, color: Rgba) -> Self {
+        let (l, c, h) = to_oklch(color);
+        let (l, fall, toast, raised) = match self.mode {
+            Mode::Dark => (l.min(0.3), 0.018, -0.01, 0.02),
+            Mode::Light => (l.max(0.9), 0.03, 0.0, 0.0),
+        };
+        Theme {
+            shell_solid: Gradient::oklch(180.0, (l, c, h, 1.0), ((l - fall).max(0.0), c, h, 1.0)),
+            toast: oklch(l + toast, c, h, self.toast.a),
+            bg_raised: oklch(l + raised, c, h, self.bg_raised.a),
+            ..self
+        }
     }
 
     pub fn is_light(&self) -> bool {

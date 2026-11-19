@@ -8,7 +8,7 @@ use std::rc::Rc;
 
 use futures::FutureExt;
 use futures::future::BoxFuture;
-use gpui::{App, Global};
+use gpui::{App, Global, Rgba};
 use prism_core::backend::backend;
 pub use prism_core::catalog::{FileStamp, Thumbnail};
 use serde::{Deserialize, Serialize};
@@ -71,6 +71,8 @@ pub trait Shell: 'static {
     fn set_taskbar_alignment(&self, alignment: &str, cx: &mut App) -> BridgeResult<()>;
     /// Runs the OLE drag from a foreground task (A7) and resolves when it ends.
     fn start_file_drag(&self, paths: Vec<String>, cx: &mut App) -> gpui::Task<BridgeResult<bool>>;
+    /// Runs the Windows color dialog from a foreground task (A7): the chosen color, or `None` when canceled.
+    fn choose_color(&self, initial: Rgba, cx: &mut App) -> gpui::Task<Option<Rgba>>;
     fn quit(&self, cx: &mut App) -> gpui::Task<BridgeResult<()>>;
     fn app_version(&self) -> String;
     /// The window gained or lost activation (the native `Focused` window event).
