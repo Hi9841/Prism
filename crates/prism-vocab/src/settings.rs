@@ -47,6 +47,18 @@ pub const ID_MAX: usize = 4096;
 pub const HISTORY_LIMIT: usize = 20;
 pub const HISTORY_TITLE_MAX: usize = 512;
 
+/// A custom color (`accentColor`, `backgroundColor`): `#rrggbb`.
+pub fn is_hex_color(value: &str) -> bool {
+    value.len() == 7 && value.starts_with('#') && value[1..].bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+/// Typed `rrggbb`, with or without the `#`, as a lowercase `#rrggbb`.
+pub fn parse_hex_color(input: &str) -> Option<String> {
+    let input = input.trim();
+    let color = format!("#{}", input.strip_prefix('#').unwrap_or(input).to_ascii_lowercase());
+    is_hex_color(&color).then_some(color)
+}
+
 /// A width between the smallest and the largest of `WIDTHS`: the native
 /// window takes each step of the width animation.
 pub fn is_window_width(width: u32) -> bool {

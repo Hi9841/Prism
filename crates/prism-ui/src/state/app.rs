@@ -6,7 +6,7 @@ use std::collections::HashSet;
 
 use prism_vocab::settings::{
     ACCENTS, APP_GROUP_ID_MAX, APP_GROUP_NAME_MAX, HISTORY_LIMIT as HISTORY_CAP, HISTORY_TITLE_MAX, ID_MAX,
-    SHORTCUTS, TASKBAR_ALIGNMENTS, THEMES, WIDTHS, WIN_SHORTCUT,
+    SHORTCUTS, TASKBAR_ALIGNMENTS, THEMES, WIDTHS, WIN_SHORTCUT, is_hex_color,
 };
 use serde_json::Value;
 
@@ -44,6 +44,10 @@ fn pick_bool(value: Option<&Value>, fallback: bool) -> bool {
     value.and_then(Value::as_bool).unwrap_or(fallback)
 }
 
+fn pick_color(value: Option<&Value>) -> Option<String> {
+    value.and_then(Value::as_str).filter(|color| is_hex_color(color)).map(str::to_ascii_lowercase)
+}
+
 /// Validates loaded settings against the known value sets; anything
 /// unexpected falls back to the default. Mirrors the backend validator.
 /// `None` is "nothing persisted" (`undefined`).
@@ -55,6 +59,8 @@ pub fn sanitize_settings(raw: Option<&Value>) -> Settings {
     let widths = WIDTHS.map(f64::from);
     Settings {
         accent: pick_str(field("accent"), &ACCENTS, &defaults.accent),
+        accent_color: pick_color(field("accentColor")),
+        background_color: pick_color(field("backgroundColor")),
         width: pick_num(field("width"), &widths, defaults.width),
         view_zoom: pick_num(field("viewZoom"), &VIEW_ZOOM_LEVELS, defaults.view_zoom),
         shortcut: pick_str(field("shortcut"), &SHORTCUTS, &defaults.shortcut),
@@ -236,7 +242,7 @@ mod provider {
     use crate::gfx::reduced_motion;
     use crate::lib::bridge::{self, BackendEvent};
     use crate::lib::types::{DEFAULT_SECTION_ORDER, HistoryEntry, Settings, step_view_zoom};
-    use crate::theme::{Accent, Mode, Theme};
+    use crate::theme::{Accent, Mode, Rgba, Theme, to_hex};
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub enum ToastKind {
@@ -377,7 +383,7 @@ mod provider {
             let settings = Settings::default();
             Self {
                 ready: false,
-                theme: Theme::new(Mode::Dark, Accent::parse(&settings.accent)),
+                theme: Theme::new(Mode::Dark, Accent::parse(&settings.accent), None, None),
                 settings,
                 history: Vec::new(),
                 open_settings: false,
@@ -408,7 +414,7 @@ mod provider {
             // Follow the OS theme live (only relevant in "system" mode).
             self.system_theme = bridge::get_system_theme();
             self.update_theme(cx);
-            bridge::set_osd_accent(&self.settings.accent);
+            bridge::set_osd_accent(&self.osd_accent());
             self.apply_window_style(cx);
             self.apply_width(cx);
             self.apply_always_on_top(cx);
@@ -425,21 +431,32 @@ mod provider {
         fn refresh_theme(&mut self, cx: &mut Context<Self>) {
             let (changed, changed_mode) = self.update_theme(cx);
             if self.ready && changed {
-                bridge::set_osd_accent(&self.settings.accent);
+                bridge::set_osd_accent(&self.osd_accent());
                 if changed_mode {
                     self.apply_window_style(cx);
                 }
             }
         }
 
+        /// The volume pill's accent: the preset id, or the custom accent as `#rrggbb`.
+        fn osd_accent(&self) -> String {
+            if self.theme.custom_accent.is_some() { to_hex(self.theme.accent) } else { self.settings.accent.clone() }
+        }
+
         /// Rebuilds the palette theme; returns (anything changed, the mode changed).
         fn update_theme(&mut self, cx: &mut Context<Self>) -> (bool, bool) {
             let mode = if self.effective_theme() == "light" { Mode::Light } else { Mode::Dark };
             let accent = Accent::parse(&self.settings.accent);
+            let color = |hex: &Option<String>| hex.as_deref().and_then(|hex| Rgba::try_from(hex).ok());
+            let custom_accent = color(&self.settings.accent_color);
+            let custom_background = color(&self.settings.background_color);
             let changed_mode = self.theme.mode != mode;
-            let changed = changed_mode || self.theme.accent_id != accent;
+            let changed = changed_mode
+                || self.theme.accent_id != accent
+                || self.theme.custom_accent != custom_accent
+                || self.theme.custom_background != custom_background;
             if changed {
-                self.theme = Theme::new(mode, accent);
+                self.theme = Theme::new(mode, accent, custom_accent, custom_background);
                 cx.notify();
             }
             (changed, changed_mode)
@@ -538,7 +555,11 @@ mod provider {
             if !self.ready {
                 return;
             }
-            if previous.accent != self.settings.accent || previous.theme != self.settings.theme {
+            if previous.accent != self.settings.accent
+                || previous.accent_color != self.settings.accent_color
+                || previous.background_color != self.settings.background_color
+                || previous.theme != self.settings.theme
+            {
                 self.refresh_theme(cx);
             }
             if previous.width != self.settings.width {
@@ -695,8 +716,12 @@ mod provider {
                 return;
             }
             if !self.state_read_complete || self.state_load_error.is_some() {
-                let before = settings_json(&previous);
-                for (key, value) in settings_json(&next) {
+                let (before, after) = (settings_json(&previous), settings_json(&next));
+                for key in before.keys().filter(|key| !after.contains_key(*key)) {
+                    // A cleared custom color is left out of the JSON; null clears it in the merge.
+                    self.settings_changed_after_load_error.insert(key.clone(), Value::Null);
+                }
+                for (key, value) in after {
                     if before.get(&key) != Some(&value) {
                         self.settings_changed_after_load_error.insert(key, value);
                     }

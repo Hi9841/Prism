@@ -133,6 +133,10 @@ impl bridge::Shell for ParityShell {
         Task::ready(Ok(false))
     }
 
+    fn choose_color(&self, _initial: gpui::Rgba, _cx: &mut App) -> Task<Option<gpui::Rgba>> {
+        Task::ready(None)
+    }
+
     fn quit(&self, _cx: &mut App) -> Task<BridgeResult<()>> {
         fixture::record("quit_app", serde_json::json!({}));
         Task::ready(Ok(()))

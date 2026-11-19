@@ -98,6 +98,11 @@ pub fn validate_state(state: &Value) -> Result<(), String> {
     if let Some(theme) = settings.get("theme").and_then(Value::as_str).filter(|theme| !THEMES.contains(theme)) {
         return Err(format!("unknown theme '{theme}'"));
     }
+    for key in ["accentColor", "backgroundColor"] {
+        if settings.get(key).is_some_and(|color| !color.as_str().is_some_and(is_hex_color)) {
+            return Err(format!("state.settings.{key} must be a #rrggbb color"));
+        }
+    }
     validate_bool(settings, "alwaysOnTop")?;
     validate_bool(settings, "taskbarScrollVolume")?;
     if let Some(alignment) = settings.get("taskbarAlignment") {

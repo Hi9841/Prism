@@ -22,8 +22,11 @@ use crate::lib::types::{
 };
 use crate::state::app::{AppEvent, AppState, THEME_LABELS, ToastKind, app_state, shortcut_label};
 use crate::state::palette::{PaletteState, palette_state};
-use crate::theme::{Accent, Rgba, TRANSPARENT, Theme, fade, hsla, motion, shadow, tabular_nums, white};
+use crate::theme::{Accent, Rgba, TRANSPARENT, Theme, fade, hsla, motion, shadow, tabular_nums, to_hex, white};
 use crate::transition::{self, Timing};
+
+/// A custom color setting (`accent_color`, `background_color`).
+type ColorField = fn(&mut Settings) -> &mut Option<String>;
 
 /// "Ctrl+Alt+Space" -> "Ctrl + Alt + Space"
 pub fn display_shortcut(combo: &str) -> String {
@@ -104,6 +107,8 @@ pub struct SettingsSheet {
     app_query: Entity<TextInput>,
     picker_scroll: ScrollHandle,
     picker_wheel: std::rc::Rc<std::cell::RefCell<crate::gfx::WheelScroll>>,
+    accent_hex: Entity<TextInput>,
+    background_hex: Entity<TextInput>,
     _subscriptions: Vec<gpui::Subscription>,
 }
 
@@ -114,6 +119,12 @@ impl SettingsSheet {
         let (t, _) = theme(cx);
         let new_name = cx.new(|cx| TextInput::new("New collection", field_style(&t), cx).with_max_len(64));
         let app_query = cx.new(|cx| TextInput::new("Filter apps", field_style(&t), cx));
+        let accent_hex = cx.new(|cx| TextInput::new("Custom", field_style(&t), cx).with_max_len(7));
+        let background_hex = cx.new(|cx| TextInput::new("Default", field_style(&t), cx).with_max_len(7));
+        let accent_sub =
+            cx.subscribe(&accent_hex, |this, _, event: &Changed, cx| this.type_color(|s| &mut s.accent_color, &event.0, cx));
+        let background_sub =
+            cx.subscribe(&background_hex, |this, _, event: &Changed, cx| this.type_color(|s| &mut s.background_color, &event.0, cx));
         let app_sub = cx.subscribe_in(&app, window, |this, app, event: &AppEvent, window, cx| {
             if matches!(event, AppEvent::OpenSettingsChanged) {
                 if app.read(cx).open_settings {
@@ -164,7 +175,9 @@ impl SettingsSheet {
             app_query,
             picker_scroll: ScrollHandle::new(),
             picker_wheel: Default::default(),
-            _subscriptions: vec![app_sub, query_sub, palette_obs],
+            accent_hex,
+            background_hex,
+            _subscriptions: vec![app_sub, query_sub, palette_obs, accent_sub, background_sub],
         }
     }
 
@@ -391,6 +404,76 @@ impl SettingsSheet {
             return apps;
         }
         apps.into_iter().filter(|entry| entry.name.to_lowercase().contains(&normalized)).collect()
+    }
+
+    /// A typed color applies once it is a whole `#rrggbb`; an empty field clears it.
+    fn type_color(&mut self, field: ColorField, text: &str, cx: &mut Context<Self>) {
+        let color = prism_vocab::settings::parse_hex_color(text);
+        if color.is_none() && !text.trim().is_empty() {
+            return;
+        }
+        self.app.update(cx, |app, cx| app.update_settings(cx, |s| *field(s) = color));
+    }
+
+    fn pick_color(&mut self, field: ColorField, initial: Rgba, cx: &mut Context<Self>) {
+        let chosen = bridge::shell(cx).choose_color(initial, cx);
+        let app = self.app.clone();
+        cx.spawn(async move |_, cx| {
+            let Some(color) = chosen.await else { return };
+            let _ = app.update(cx, |app, cx| app.update_settings(cx, |s| *field(s) = Some(to_hex(color))));
+        })
+        .detach();
+    }
+
+    /// A hex field led by its color; the swatch opens the Windows color dialog.
+    #[allow(clippy::too_many_arguments)]
+    fn color_field(
+        &self,
+        id: &'static str,
+        input: &Entity<TextInput>,
+        field: ColorField,
+        stored: Option<&str>,
+        color: Rgba,
+        t: &Theme,
+        zoom: f32,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
+        let focused = input.read(cx).focus_handle(cx).is_focused(window);
+        input.update(cx, |input, cx| {
+            input.style = field_style(t);
+            // Off focus the field shows the saved color, so a partial entry reverts.
+            if !focused {
+                input.set_text(stored.unwrap_or_default().to_owned(), cx);
+            }
+        });
+        let key = gpui::ElementId::Name(id.into());
+        let swatch = transition::press(div().id(key.clone()), &key, true, window, cx);
+        div()
+            .flex()
+            .items_center()
+            .gap(r(8.))
+            .w(r(104.))
+            .rounded(r(8.))
+            .bg(hsla(t.surface))
+            .pl(r(7.))
+            .pr(r(10.))
+            .py(r(6.))
+            .text_size(r(12.))
+            .line_height(relative(1.45))
+            .when(focused, |d| d.shadow(field_ring(t, zoom)))
+            .child(
+                focus::button(swatch, true, t)
+                    .tooltip(title_tooltip("Pick a color", t.mode))
+                    .flex_none()
+                    .size(r(16.))
+                    .rounded_full()
+                    .bg(hsla(color))
+                    .border_1()
+                    .border_color(hsla(t.divider))
+                    .on_click(cx.listener(move |this, _, _, cx| this.pick_color(field, color, cx))),
+            )
+            .child(div().flex_1().min_w_0().child(input.clone()))
     }
 
     fn group_name_input(&mut self, group: &AppGroup, focused: bool, t: &Theme, cx: &mut Context<Self>) -> Entity<TextInput> {
@@ -1204,8 +1287,8 @@ impl Render for SettingsSheet {
             let app = app_entity.clone();
             move |value, _, cx| app.update(cx, |app, cx| app.update_settings(cx, |s| s.always_on_top = value))
         });
-        let accents = div().flex().gap(r(8.)).children(Accent::ALL.iter().enumerate().map(|(index, accent)| {
-            let active = settings.accent == accent.id();
+        let accents = div().flex().items_center().gap(r(8.)).children(Accent::ALL.iter().enumerate().map(|(index, accent)| {
+            let active = settings.accent_color.is_none() && settings.accent == accent.id();
             let app = app_entity.clone();
             let id = accent.id().to_owned();
             // The inline `box-shadow` beats `.focus-ring` (the focus ring never shows). The active value,
@@ -1231,11 +1314,56 @@ impl Render for SettingsSheet {
                 })
                 .on_click(move |_, _, cx| {
                     let id = id.clone();
-                    app.update(cx, |app, cx| app.update_settings(cx, |s| s.accent = id))
+                    app.update(cx, |app, cx| {
+                        app.update_settings(cx, |s| {
+                            s.accent = id;
+                            s.accent_color = None;
+                        })
+                    })
                 })
                 // `after:-inset-1`: the pseudo-element is part of the button's `:hover`.
                 .child(hover.top(r(-4.)).right(r(-4.)).bottom(r(-4.)).left(r(-4.)))
         }));
+        let accents = accents.child(self.color_field(
+            "accent-color",
+            &self.accent_hex,
+            |s| &mut s.accent_color,
+            settings.accent_color.as_deref(),
+            t.accent,
+            &t,
+            zoom,
+            window,
+            cx,
+        ));
+        let background = div()
+            .flex()
+            .items_center()
+            .gap(r(4.))
+            .child(self.color_field(
+                "background-color",
+                &self.background_hex,
+                |s| &mut s.background_color,
+                settings.background_color.as_deref(),
+                t.shell_solid.from,
+                &t,
+                zoom,
+                window,
+                cx,
+            ))
+            .when(settings.background_color.is_some(), |d| {
+                let app = app_entity.clone();
+                d.child(self.small_icon_button(
+                    "reset-background",
+                    "Reset background",
+                    "rotate-ccw",
+                    false,
+                    false,
+                    &t,
+                    move |_, _, cx| app.update(cx, |app, cx| app.update_settings(cx, |s| s.background_color = None)),
+                    window,
+                    cx,
+                ))
+            });
         // `.press` (150ms `--ease-out-soft`) for the buttons below.
         let button_paint = |id: &'static str, text: (Rgba, Rgba), bg: (Rgba, Rgba), window: &mut Window, cx: &mut App| {
             transition::hover_paint(&gpui::ElementId::Name(id.into()), text, bg, Timing::PRESS, window, cx)
@@ -1528,6 +1656,7 @@ impl Render for SettingsSheet {
                     .child(section_title("Appearance", true, &t))
                     .child(settings_row("Appearance", Some("Follows Windows light/dark mode"), appearance, &t))
                     .child(settings_row("Accent color", Some("Colors highlights, focus, and the volume pill"), accents, &t))
+                    .child(settings_row("Background", Some("Match the launcher to your desktop"), background, &t))
                     .child(settings_row("Window width", None, width, &t))
                     .child(settings_row("View zoom", Some("Ctrl + Up/Down or Ctrl + wheel"), zoom_control, &t))
                     .child(section_title("Taskbar", false, &t))

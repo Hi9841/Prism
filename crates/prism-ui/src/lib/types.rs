@@ -342,6 +342,12 @@ pub fn step_view_zoom(current: f64, direction: i32) -> f64 {
 #[serde(rename_all = "camelCase")]
 pub struct Settings {
     pub accent: String,
+    /// A custom accent (`#rrggbb`) in place of the preset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accent_color: Option<String>,
+    /// A custom launcher background (`#rrggbb`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub background_color: Option<String>,
     pub width: f64,
     pub view_zoom: f64,
     pub shortcut: String,
@@ -360,6 +366,8 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             accent: settings::ACCENTS[0].into(),
+            accent_color: None,
+            background_color: None,
             width: f64::from(settings::DEFAULT_WIDTH),
             view_zoom: f64::from(settings::DEFAULT_VIEW_ZOOM),
             shortcut: settings::SHORTCUTS[0].into(),
