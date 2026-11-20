@@ -185,6 +185,14 @@ fn custom_accent_colors(color: Rgba) -> (Rgba, Rgba, Rgba) {
     (oklch(l, c, h, 1.0), oklch(l + 0.05, c, h, 1.0), fg)
 }
 
+pub const BACKGROUND_PRESETS: [(&str, f32, f32); 5] =
+    [("Graphite", 0.0, 0.0), ("Ocean", 0.05, 240.0), ("Forest", 0.045, 158.0), ("Plum", 0.05, 318.0), ("Ember", 0.05, 38.0)];
+
+pub fn background_preset(index: usize) -> Rgba {
+    let (_, c, h) = BACKGROUND_PRESETS[index];
+    oklch(0.3, c, h, 1.0)
+}
+
 /// A two-stop vertical or angled gradient.
 #[derive(Clone, Copy, Debug)]
 pub struct Gradient {
@@ -395,6 +403,14 @@ impl Theme {
             bg_raised: oklch(l + raised, c, h, self.bg_raised.a),
             ..self
         }
+    }
+
+    pub fn background_tone(&self, color: Rgba) -> Rgba {
+        self.clone().with_background(color).shell_solid.from
+    }
+
+    pub fn default_background(&self) -> Rgba {
+        Theme::new(self.mode, self.accent_id, self.custom_accent, None).shell_solid.from
     }
 
     pub fn is_light(&self) -> bool {

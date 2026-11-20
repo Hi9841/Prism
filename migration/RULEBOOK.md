@@ -164,7 +164,8 @@ another app, Esc cancels, a click works after the drag, and a release over the p
 ## Deviation log
 
 - 2026-11-20: Custom colors. Appearance takes any `#rrggbb` accent in place of a preset and a launcher background,
-  typed or from the Windows color dialog. They persist as `accentColor` and `backgroundColor`, absent until set, so
+  from presets (Default, Graphite, Ocean, Forest, Plum, Ember) or an in-app picker (saturation/brightness plane, hue
+  track, hex field; it edits live, Esc restores the color it opened on). They persist as `accentColor` and `backgroundColor`, absent until set, so
   the default theme is unchanged. A custom accent keeps its hue and chroma with OKLCH lightness held to 0.55-0.8. A
   background stays on the mode's side (L at most 0.3 dark, at least 0.9 light) and moves only the opaque tokens
   (shell, toast, raised); the translucent ones layer over it. The original had neither. No golden changed.
