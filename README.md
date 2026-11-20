@@ -4,23 +4,19 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 ![Platform: Windows 10 | 11](https://img.shields.io/badge/platform-Windows%2010%20%7C%2011-0078D4)
 
-Prism is a fast, keyboard-first command palette and taskbar companion for Windows. Use it to find
-applications, files, folders, and Windows tools, and to change the Windows 11 taskbar. Prism is a native
-Rust app with a [GPUI](https://www.gpui.rs/) interface. It does not use a web view.
-
-[Demo attachment](https://github.com/user-attachments/assets/ec4ac19a-8868-4a01-b9f4-10008c297b6c)
+Prism is a keyboard-first launcher for Windows. Use it to find apps, files, folders, and Windows tools.
+On Windows 11, you can also customize the taskbar. Prism uses Rust and [GPUI](https://www.gpui.rs/).
 
 ## Features
 
 - Search installed desktop apps and packaged (Microsoft Store) apps.
 - Search Windows tools, Control Panel applets, and installed power plans.
-- Find local files and folders with fuzzy matching and direct path browsing.
+- Find local files and folders by name or path.
 - Pin and reorder apps, and keep up to six Quick Access folders.
 - Open Prism with a global shortcut or the Windows Start button.
 - Run eligible apps and scripts as administrator from the context menu.
-- Change taskbar alignment, icon density, button grouping, auto-hide, and the Start button icon.
-- Follow the Windows theme, or select a light or dark appearance and an accent color.
-- Install signed updates from the launcher footer.
+- Follow the Windows theme or select the light or dark theme. Set the accent and background colors
+  with presets or the color picker.
 
 ## Install
 
@@ -28,21 +24,18 @@ Download the latest `Prism_<version>_x64-setup.exe` from
 [GitHub Releases](https://github.com/Hi9841/Prism/releases/latest).
 
 - Windows 10 or Windows 11, x64.
-- Installs for the current user. Administrator access is not necessary.
-- WebView2 is not necessary.
+- Install Prism for the current user. The installer requires no administrator access.
 
-The installer does not have an Authenticode signature, so SmartScreen can show a warning. Prism verifies
-in-app updates with its own updater key (minisign).
+SmartScreen can show a warning because the installer has no Authenticode signature. Prism verifies
+in-app updates with its minisign public key.
 
 ## Usage
 
 1. Open Prism with the Windows key or your shortcut.
-2. Type an app name, a file name, a folder path, a Windows tool, or a calculation. For example:
-   `device manager`, `performance options`, or `power plan`.
-3. Use the arrow keys to select a result, then push Enter.
+2. Type an app name, a file name, a folder path, a Windows tool, or a calculation.
+3. Use the arrow keys to select a result. Press Enter.
 
-Prism starts hidden when you sign in to Windows, so the shortcut is ready immediately. To change this,
-open **Task Manager > Startup apps**.
+Prism starts in the background when you sign in to Windows. To change this, open **Task Manager > Startup apps**.
 
 ### Run as administrator
 
@@ -60,42 +53,40 @@ Microsoft Store apps start through Windows app activation, so they do not show t
 
 ### Taskbar customization
 
-Prism changes the taskbar directly through Windows. StartAllBack is not necessary.
-
 - Align the taskbar apps to the left or to the center.
+- If you use the StartAllBack classic taskbar, you can also align the apps to the right.
 - Select Compact, Default, or When full icon density.
-- Set auto-hide and taskbar button grouping.
+- Set auto-hide and choose when to combine taskbar buttons.
 - Select the System, Gem, or Diamond Start button icon, or add your own PNG (`96 x 96`, transparent
   background).
 
-Windows 11 controls the height of the taskbar. The density setting changes the icon scale only.
+Windows 11 controls the height of the taskbar. Taskbar density changes the icon scale only.
 
 ### Updates
 
-Prism checks GitHub Releases when it starts, when the menu opens, and one time each hour. When a newer
-signed build is available, an update control shows in the launcher footer.
+When Prism finds an update, use the update control in the launcher footer to install it.
 
 ## Build from source
 
-Requirements:
+### Requirements
 
 - Windows 10 or Windows 11, x64
 - Rust stable with the MSVC toolchain, Clippy, and rustfmt
 - Visual Studio Build Tools with the **Desktop development with C++** workload
-- [Bun](https://bun.sh/) 1.3.14 (behavior judge and installer signing)
+- [Bun](https://bun.sh/) 1.3.14 for the behavior judge and installer scripts
 
-Build and run:
+### Build and run
 
 ```powershell
-cargo run -p prism-app            # builds target\debug\prism.exe and starts it
+cargo run -p prism-app
 ```
 
-Check:
+### Check the workspace and launcher behavior
 
 ```powershell
 cargo check --workspace --all-targets
 cargo build -p prism-judge
-bun migration/judge/judge.mjs     # 269 behavior scenarios
+bun migration/judge/judge.mjs
 ```
 
 `PRISM_ADAPTER_CMD=<exe>` runs the judge against a different adapter.
@@ -107,11 +98,11 @@ crates/
   prism-app/      prism.exe: window, global hotkey, tray, updater host
   prism-ui/       views and state
   prism-core/     backend: Windows integration, file index, search, taskbar, audio
-  prism-judge/    JSON adapter that the behavior judge drives
-  prism-vocab/    values the backend and the UI share (settings lists, app sources, markers)
+  prism-judge/    JSON adapter for the behavior judge
+  prism-vocab/    shared settings values and app source names
 vendor/gpui/      GPUI 0.2.2 with Prism's patches (PRISM-PATCHES.md)
 packaging/        installer build, NSIS script, version check, release publisher
-migration/        behavior judge, design rulebook, records of the port from React/Tauri
+migration/        behavior judge and rulebook
 oploop/           performance ledger, benchmarks, functional test of the real app
 ```
 
@@ -119,8 +110,8 @@ oploop/           performance ledger, benchmarks, functional test of the real ap
 
 To publish a release, increase the workspace version in `Cargo.toml` and run
 `cargo update --workspace`. Include both changes in the PR. When the repository owner
-approves the final PR commit and merges it into `main`, GitHub Actions tags the merged commit
-and publishes the signed Windows installer and updater manifest.
+approves the final PR commit and merges it into `main`, GitHub Actions tags the merged commit.
+It publishes the Windows installer, updater signature, and updater manifest.
 
 ### Manual release
 
@@ -151,11 +142,6 @@ manifest and the installer.
 > [!WARNING]
 > Keep `updater.key` and its password in a safe backup. Installed copies of Prism reject updates that
 > a different key signs. Only the public key goes in the repository.
-
-## History
-
-Prism 1.0.0 to 1.0.11 replaced the original React/Tauri app with this native port. The original app
-left the repository after 1.0.11. Git history keeps it, and `migration/` keeps the records of the port.
 
 ## License
 
