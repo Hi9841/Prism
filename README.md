@@ -117,6 +117,13 @@ oploop/           performance ledger, benchmarks, functional test of the real ap
 
 ## Release
 
+To publish a release, increase the workspace version in `Cargo.toml` and run
+`cargo update --workspace`. Include both changes in the PR. When the repository owner
+approves the final PR commit and merges it into `main`, GitHub Actions tags the merged commit
+and publishes the signed Windows installer and updater manifest.
+
+### Manual release
+
 1. Set the version in `Cargo.toml` (`[workspace.package]`), then run `cargo update --workspace` to update
    `Cargo.lock`.
 2. Build the installer. The script writes the exe, the NSIS installer, and its updater signature to

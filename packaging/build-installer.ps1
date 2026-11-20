@@ -15,6 +15,10 @@ param(
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
 
+$signingKey = $env:TAURI_SIGNING_PRIVATE_KEY
+$signingPassword = $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD
+Remove-Item Env:TAURI_SIGNING_PRIVATE_KEY, Env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD -ErrorAction SilentlyContinue
+
 # Windows PowerShell turns native stderr (cargo progress) into errors under
 # "Stop"; native tools are checked through their exit codes instead.
 function Invoke-Native([scriptblock]$Command, [string]$Failure) {
@@ -53,7 +57,7 @@ if ($UpdatePublicKey) { $env:PRISM_UPDATE_PUBKEY = $UpdatePublicKey } else { Rem
 
 Push-Location $repoRoot
 try {
-  Invoke-Native { cargo build --release -p prism-app } "cargo build failed."
+  Invoke-Native { cargo build --release --locked -p prism-app } "cargo build failed."
 } finally {
   Pop-Location
   Remove-Item Env:CARGO_TARGET_DIR, Env:PRISM_VERSION_OVERRIDE, Env:PRISM_UPDATE_ENDPOINT, Env:PRISM_UPDATE_PUBKEY -ErrorAction SilentlyContinue
@@ -88,8 +92,12 @@ Invoke-Native { & $makensis -V2 -INPUTCHARSET UTF8 `
 # Same signer as the Tauri release (tauri signer sign, minisign format).
 $tauri = Join-Path $repoRoot "node_modules\.bin\tauri.exe"
 if (-not (Test-Path -LiteralPath $tauri)) { throw "Tauri CLI not found at $tauri (run 'bun install' in the repo root)." }
-$env:TAURI_SIGNING_PRIVATE_KEY = Get-Content -LiteralPath $PrivateKeyPath -Raw
-$env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = if (Test-Path -LiteralPath $PasswordPath) { (Get-Content -LiteralPath $PasswordPath -Raw).Trim() } else { "" }
+if (-not $signingKey) {
+  $signingKey = Get-Content -LiteralPath $PrivateKeyPath -Raw
+  $signingPassword = if (Test-Path -LiteralPath $PasswordPath) { (Get-Content -LiteralPath $PasswordPath -Raw).Trim() } else { "" }
+}
+$env:TAURI_SIGNING_PRIVATE_KEY = $signingKey
+$env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = $signingPassword
 try {
   Invoke-Native { & $tauri signer sign $installerPath } "Signing failed."
 } finally {
