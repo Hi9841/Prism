@@ -145,7 +145,11 @@ if (-not $publicManifest.platforms."windows-x86_64-nsis") {
 
 $localSize = (Get-Item -LiteralPath $installerPath).Length
 $remoteInstaller = Invoke-WebRequest -Uri $downloadUrl -Method Head -UseBasicParsing
-$remoteSize = [long]$remoteInstaller.Headers["Content-Length"]
+$contentLength = @($remoteInstaller.Headers["Content-Length"])
+if ($contentLength.Count -ne 1 -or $contentLength[0] -notmatch '^\d+$') {
+  throw "The published installer response does not contain one valid Content-Length header."
+}
+$remoteSize = [long]$contentLength[0]
 if ($remoteSize -ne $localSize) {
   throw "Published installer size $remoteSize does not match local installer size $localSize."
 }

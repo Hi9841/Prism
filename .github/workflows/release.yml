@@ -111,7 +111,7 @@ jobs:
           RELEASE_TAG: ${{ steps.version.outputs.tag }}
           PREVIOUS_TAG: ${{ steps.version.outputs.previous_tag }}
         run: |
-          git -c 'credential.helper=!gh auth git-credential' push origin "refs/tags/$env:RELEASE_TAG"
+          git -c 'credential.helper=' -c 'credential.helper=!gh auth git-credential' push origin "refs/tags/$env:RELEASE_TAG"
           if ($LASTEXITCODE -ne 0) { throw 'Could not push the release tag.' }
 
           $notes = gh api --method POST "repos/$env:GITHUB_REPOSITORY/releases/generate-notes" -f "tag_name=$env:RELEASE_TAG" -f "previous_tag_name=$env:PREVIOUS_TAG" --jq .body
