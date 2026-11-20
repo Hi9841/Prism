@@ -1,17 +1,10 @@
-//! The in-app color picker of the Appearance settings: a saturation/brightness
-//! plane over a hue track. This module holds the color math and the painted
-//! parts; the settings sheet owns the state, the drag, and the keys.
-
 use gpui::{Div, ParentElement, Styled, div, linear_color_stop, linear_gradient, prelude::*, relative};
 
 use crate::gfx::{r, zoomed};
 use crate::theme::{Rgba, Theme, black, hsla, shadow, white};
 
-/// A color as the picker edits it. The hue and saturation live here, not in
-/// the RGB value, so they survive a drag through gray or black.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Hsv {
-    /// Degrees, 0..360.
     pub h: f32,
     pub s: f32,
     pub v: f32,
@@ -50,8 +43,6 @@ impl Hsv {
         Rgba { r: r + m, g: g + m, b: b + m, a: 1.0 }
     }
 
-    /// `next` from a typed or chosen color, keeping this hue (and saturation)
-    /// where the new color has none to give.
     pub fn retarget(self, next: Rgba) -> Self {
         let mut hsv = Hsv::from_rgba(next);
         if hsv.v <= f32::EPSILON {
@@ -64,13 +55,11 @@ impl Hsv {
     }
 }
 
-/// The full-saturation color of a hue.
 fn hue_color(h: f32) -> Rgba {
     Hsv { h, s: 1.0, v: 1.0 }.to_rgba()
 }
 
-/// The plane's three layers: the hue, white fading right to left, black rising
-/// from the bottom. Each layer carries the radius (GPUI clips rectangles only).
+/// GPUI clips rectangles, so each layer carries the radius.
 pub fn plane_layers(h: f32, radius: f32) -> [Div; 3] {
     let layer = || div().absolute().inset_0().rounded(r(radius));
     [
@@ -80,7 +69,7 @@ pub fn plane_layers(h: f32, radius: f32) -> [Div; 3] {
     ]
 }
 
-/// The hue track: six two-stop segments, red to red (GPUI gradients take two stops).
+/// GPUI gradients take two stops, so the track is six segments.
 pub fn hue_track(height: f32) -> Div {
     div().absolute().inset_0().flex().children((0..6).map(|i| {
         let from = hue_color(i as f32 * 60.0);
@@ -94,8 +83,6 @@ pub fn hue_track(height: f32) -> Div {
     }))
 }
 
-/// A thumb centered on `(x, y)`, both fractions of the parent. White ring, a
-/// shadow to lift it off light colors, filled with the color under it.
 pub fn thumb(x: f32, y: f32, fill: Rgba, size: f32, t: &Theme, zoom: f32) -> Div {
     div()
         .absolute()

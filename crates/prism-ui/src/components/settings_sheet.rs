@@ -31,7 +31,6 @@ use crate::theme::{
 };
 use crate::transition::{self, Timing};
 
-/// The setting a color picker edits.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ColorTarget {
     Accent,
@@ -53,7 +52,6 @@ impl ColorTarget {
         }
     }
 
-    /// What the setting paints now: the accent, or the top of the shell.
     fn painted(self, t: &Theme) -> Rgba {
         match self {
             ColorTarget::Accent => t.accent,
@@ -68,12 +66,10 @@ enum DragPart {
     Hue,
 }
 
-/// An open color picker. It edits the setting live; Esc puts `original` back.
 struct ColorPicker {
     target: ColorTarget,
     hsv: Hsv,
     original: Option<String>,
-    /// What the setting painted when the picker opened (the left half of the preview).
     original_paint: Rgba,
     drag: Option<DragPart>,
     opened_at: Instant,
@@ -164,7 +160,6 @@ pub struct SettingsSheet {
     hue_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
     plane_focus: FocusHandle,
     hue_focus: FocusHandle,
-    /// The custom swatches: focus returns here when their picker closes.
     accent_custom_focus: FocusHandle,
     background_custom_focus: FocusHandle,
     _subscriptions: Vec<gpui::Subscription>,
@@ -469,7 +464,6 @@ impl SettingsSheet {
         apps.into_iter().filter(|entry| entry.name.to_lowercase().contains(&normalized)).collect()
     }
 
-    /* ---------------- color picker ---------------- */
 
     fn custom_focus(&self, target: ColorTarget) -> &FocusHandle {
         match target {
@@ -478,8 +472,6 @@ impl SettingsSheet {
         }
     }
 
-    /// The custom swatch toggles its picker. It opens on the stored color, or on
-    /// what the setting paints now, and changes nothing until the color moves.
     fn toggle_picker(&mut self, target: ColorTarget, window: &mut Window, cx: &mut Context<Self>) {
         if self.color_picker.as_ref().is_some_and(|picker| picker.target == target) {
             self.close_picker(false, true, window, cx);
@@ -501,8 +493,6 @@ impl SettingsSheet {
         cx.notify();
     }
 
-    /// Closes the picker. `revert` puts back the color it opened on (Esc);
-    /// `refocus` returns focus to the custom swatch (a keyboard or button close).
     fn close_picker(&mut self, revert: bool, refocus: bool, window: &mut Window, cx: &mut Context<Self>) {
         let Some(picker) = self.color_picker.take() else { return };
         if revert {
@@ -515,7 +505,6 @@ impl SettingsSheet {
         cx.notify();
     }
 
-    /// A preset clears the custom color; it also closes that row's picker.
     fn choose_preset(&mut self, target: ColorTarget, window: &mut Window, cx: &mut Context<Self>, patch: impl FnOnce(&mut Settings)) {
         if self.color_picker.as_ref().is_some_and(|picker| picker.target == target) {
             self.close_picker(false, false, window, cx);
@@ -523,7 +512,6 @@ impl SettingsSheet {
         self.app.update(cx, |app, cx| app.update_settings(cx, patch));
     }
 
-    /// Moves the picker to `hsv` and saves it (the save is debounced).
     fn set_hsv(&mut self, hsv: Hsv, cx: &mut Context<Self>) {
         let Some(picker) = self.color_picker.as_mut() else { return };
         picker.hsv = hsv;
@@ -533,7 +521,6 @@ impl SettingsSheet {
         cx.notify();
     }
 
-    /// A typed color applies once it is a whole `#rrggbb`, with or without the `#`.
     fn type_hex(&mut self, text: &str, cx: &mut Context<Self>) {
         let Some(picker) = self.color_picker.as_ref() else { return };
         let Some(color) = prism_vocab::settings::parse_hex_color(text).and_then(|hex| Rgba::try_from(hex.as_str()).ok()) else {
@@ -585,7 +572,6 @@ impl SettingsSheet {
         }
     }
 
-    /// Arrows move the plane's thumb or the hue by a small step; Shift takes ten.
     fn nudge(&mut self, part: DragPart, event: &KeyDownEvent, cx: &mut Context<Self>) {
         let Some(picker) = self.color_picker.as_ref() else { return };
         let (dx, dy) = match event.keystroke.key.as_str() {
@@ -614,14 +600,12 @@ impl SettingsSheet {
         }
     }
 
-    /// A round swatch: the presets' look (lift, top highlight, `scale-110` when
-    /// chosen) with a check on the chosen one, so near-identical tones still read.
     #[allow(clippy::too_many_arguments)]
     fn swatch(
         &self,
         key: gpui::ElementId,
         fill: Rgba,
-        mark: Rgba,
+        ring: Rgba,
         active: bool,
         edge: bool,
         label: &str,
@@ -630,11 +614,12 @@ impl SettingsSheet {
         window: &mut Window,
         cx: &mut App,
     ) -> gpui::Stateful<gpui::Div> {
-        // `transition-transform duration-150`: `scale-110` when active, else `hover:scale-105`.
         let (hovered, hover) = transition::hover(&key, window, cx);
-        let target = if active { 1.1 } else if hovered { 1.05 } else { 1.0 };
+        let target = if hovered && !active { 1.05 } else { 1.0 };
         let scale = transition::number(&key, "scale", target, Timing::tw(150), window, cx);
-        let check = transition::number(&key, "check", if active { 1.0 } else { 0.0 }, Timing::tw(150), window, cx);
+        let shown = transition::number(&key, "ring", if active { 1.0 } else { 0.0 }, Timing::tw(150), window, cx);
+        let gap = Rgba { a: shown, ..t.bg_raised };
+        let ring = Rgba { a: ring.a * shown, ..ring };
         focus::button(div().id(key), true, t)
             .tooltip(title_tooltip(label.to_owned(), t.mode))
             .relative()
@@ -647,17 +632,15 @@ impl SettingsSheet {
             .rounded_full()
             .bg(hsla(fill))
             .when(edge, |d| d.border_1().border_color(hsla(t.divider)))
+            // GPUI paints the list bottom-up: the ring first, the gap over it.
+            .when(shown > 0.0, |d| d.shadow(zoomed(vec![shadow(0., 0., 0., 3.5, ring), shadow(0., 0., 0., 2., gap)], zoom)))
             .when(!active, |d| {
-                d.shadow(zoomed(vec![shadow(0., 1., 3., 0., t.shade(0.4))], zoom))
+                d.when(shown <= 0.0, |d| d.shadow(zoomed(vec![shadow(0., 1., 3., 0., t.shade(0.4))], zoom)))
                     .child(crate::components::ui::inset_top_highlight(white(0.2), 12.))
             })
-            .child(icon_stroke("check", 2.5, 12., Rgba { a: mark.a * check, ..mark }))
-            // `after:-inset-1`: the pseudo-element is part of the button's `:hover`.
             .child(hover.top(r(-4.)).right(r(-4.)).bottom(r(-4.)).left(r(-4.)))
     }
 
-    /// The last swatch of a row: the custom color once there is one, else a plus.
-    /// It opens and closes the picker.
     fn custom_swatch(
         &self,
         target: ColorTarget,
@@ -676,8 +659,8 @@ impl SettingsSheet {
         let toggle = cx.listener(move |this, _: &gpui::ClickEvent, window, cx| this.toggle_picker(target, window, cx));
         let swatch = match custom {
             Some(fill) => {
-                let mark = if target == ColorTarget::Accent { t.accent_fg } else { t.fg };
-                self.swatch(key, fill, mark, true, target == ColorTarget::Background, "Custom color", t, zoom, window, cx)
+                let ring = if target == ColorTarget::Accent { t.accent } else { fade(t.fg, 70.) };
+                self.swatch(key, fill, ring, true, target == ColorTarget::Background, "Custom color", t, zoom, window, cx)
             }
             None => {
                 let (hovered, hover) = transition::hover(&key, window, cx);
@@ -703,8 +686,6 @@ impl SettingsSheet {
         swatch.track_focus(&handle).on_click(toggle).into_any_element()
     }
 
-    /// A color setting: its row, and under it the picker while open. A press
-    /// anywhere else closes the picker and keeps the color; Esc puts it back.
     fn color_block(&self, target: ColorTarget, row: gpui::Div, t: &Theme, zoom: f32, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let open = self.color_picker.as_ref().is_some_and(|picker| picker.target == target);
         div()
@@ -726,8 +707,6 @@ impl SettingsSheet {
         let Some(picker) = self.color_picker.as_ref() else { return div().into_any_element() };
         let hsv = picker.hsv;
         let color = hsv.to_rgba();
-        // Enter: opacity with a short drop from the swatches, `--ease-out-soft`. It opens
-        // a few times a session, from a click; Esc and outside presses close it at once.
         let reduced = reduced_motion();
         let p = if reduced { 1.0 } else { (picker.opened_at.elapsed().as_millis() as f32 / 160.0).min(1.0) };
         if p < 1.0 {
@@ -736,7 +715,6 @@ impl SettingsSheet {
         let eased = motion::ease_out_soft(p);
         let shift = -6.0 * (1.0 - eased);
 
-        // A drag follows the pointer anywhere in the window until the button comes up.
         let drag = canvas(|_, _, _| {}, {
             let entity = cx.entity().downgrade();
             let part = picker.drag;
@@ -791,7 +769,6 @@ impl SettingsSheet {
         .child(hue_layer)
         .child(white_layer)
         .child(black_layer)
-        // A hairline keeps the white corner off a light panel.
         .child(div().absolute().inset_0().rounded(r(8.)).border_1().border_color(hsla(t.line)))
         .child(color_picker::thumb(hsv.s, 1.0 - hsv.v, color, 14., t, zoom));
 
@@ -815,8 +792,6 @@ impl SettingsSheet {
         .child(color_picker::hue_track(10.))
         .child(color_picker::thumb(hsv.h / 360.0, 0.5, Hsv { s: 1.0, v: 1.0, ..hsv }.to_rgba(), 14., t, zoom));
 
-        // Before and after: the left half is the color it opened on, the right half
-        // what the setting paints now (a custom accent keeps a readable lightness).
         let now = picker.target.painted(t);
         let preview = div()
             .flex()
@@ -831,7 +806,6 @@ impl SettingsSheet {
         let input_focused = self.hex_input.read(cx).focus_handle(cx).is_focused(window);
         self.hex_input.update(cx, |input, cx| {
             input.style = field_style(t);
-            // Off focus the field follows the picker, so a partial entry reverts.
             if !input_focused {
                 input.set_text(to_hex(color), cx);
             }
@@ -884,9 +858,8 @@ impl SettingsSheet {
             .border_1()
             .border_color(hsla(t.line))
             .p(r(10.))
-            // Enter in the field or on the plane keeps the color and closes. On the
-            // release, as GPUI clicks: closing on the press would move focus to the
-            // swatch, and the release would click it open again.
+            // GPUI clicks the focused element on Enter release: closing on press would move
+            // focus to the swatch and the release would reopen the picker.
             .on_key_up(cx.listener(|this, event: &gpui::KeyUpEvent, window, cx| {
                 if event.keystroke.key == "enter" && !this.hex_input.read(cx).is_composing() {
                     cx.stop_propagation();
@@ -1711,16 +1684,14 @@ impl Render for SettingsSheet {
             let app = app_entity.clone();
             move |value, _, cx| app.update(cx, |app, cx| app.update_settings(cx, |s| s.always_on_top = value))
         });
-        // Accent: the five presets, then the custom swatch.
         let custom_accent = settings.accent_color.as_ref().map(|_| t.accent);
         let mut accents = div().flex().items_center().gap(r(8.));
         for (index, accent) in Accent::ALL.iter().enumerate() {
             let active = settings.accent_color.is_none() && settings.accent == accent.id();
             let id = accent.id().to_owned();
-            let (_, _, mark) = accent.colors();
             let label = format!("{}{}", &id[..1].to_uppercase(), &id[1..]);
             accents = accents.child(
-                self.swatch(("accent", index).into(), accent.swatch(), mark, active, false, &label, &t, zoom, window, cx).on_click(
+                self.swatch(("accent", index).into(), accent.swatch(), accent.swatch(), active, false, &label, &t, zoom, window, cx).on_click(
                     cx.listener(move |this, _, window, cx| {
                         let id = id.clone();
                         this.choose_preset(ColorTarget::Accent, window, cx, |s| {
@@ -1733,12 +1704,10 @@ impl Render for SettingsSheet {
         }
         let accents = accents.child(self.custom_swatch(ColorTarget::Accent, custom_accent, &t, zoom, window, cx));
 
-        // Background: the default, five tones, then the custom swatch. Each swatch shows
-        // the shell it paints in this mode, not the stored color.
         let preset_hexes: Vec<String> = (0..BACKGROUND_PRESETS.len()).map(|index| to_hex(background_preset(index))).collect();
         let stored_background = settings.background_color.clone();
         let mut backgrounds = div().flex().items_center().gap(r(8.)).child(
-            self.swatch("background-default".into(), t.default_background(), t.fg, stored_background.is_none(), true, "Default", &t, zoom, window, cx)
+            self.swatch("background-default".into(), t.default_background(), fade(t.fg, 70.), stored_background.is_none(), true, "Default", &t, zoom, window, cx)
                 .on_click(cx.listener(|this, _, window, cx| {
                     this.choose_preset(ColorTarget::Background, window, cx, |s| s.background_color = None)
                 })),
@@ -1748,7 +1717,7 @@ impl Render for SettingsSheet {
             let active = stored_background.as_deref() == Some(hex.as_str());
             let fill = t.background_tone(background_preset(index));
             backgrounds = backgrounds.child(
-                self.swatch(("background", index).into(), fill, t.fg, active, true, label, &t, zoom, window, cx).on_click(
+                self.swatch(("background", index).into(), fill, fade(t.fg, 70.), active, true, label, &t, zoom, window, cx).on_click(
                     cx.listener(move |this, _, window, cx| {
                         let hex = hex.clone();
                         this.choose_preset(ColorTarget::Background, window, cx, |s| s.background_color = Some(hex))

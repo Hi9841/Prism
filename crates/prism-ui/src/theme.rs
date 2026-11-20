@@ -153,7 +153,7 @@ impl Accent {
     }
 
     /// `--accent`, `--accent-strong`, `--accent-fg`.
-    pub fn colors(self) -> (Rgba, Rgba, Rgba) {
+    fn colors(self) -> (Rgba, Rgba, Rgba) {
         match self {
             Accent::Iris => (oklch(0.665, 0.17, 292.0, 1.0), oklch(0.72, 0.17, 292.0, 1.0), oklch(0.985, 0.004, 292.0, 1.0)),
             Accent::Azure => {
@@ -185,13 +185,9 @@ fn custom_accent_colors(color: Rgba) -> (Rgba, Rgba, Rgba) {
     (oklch(l, c, h, 1.0), oklch(l + 0.05, c, h, 1.0), fg)
 }
 
-/// The background presets beside the default: `(label, chroma, hue)` at OKLCH lightness 0.3.
-/// Each mode moves the lightness to its side (`Theme::with_background`), so one
-/// stored color reads as a deep tone on dark and a pale tint on light.
 pub const BACKGROUND_PRESETS: [(&str, f32, f32); 5] =
     [("Graphite", 0.0, 0.0), ("Ocean", 0.05, 240.0), ("Forest", 0.045, 158.0), ("Plum", 0.05, 318.0), ("Ember", 0.05, 38.0)];
 
-/// The color a background preset stores.
 pub fn background_preset(index: usize) -> Rgba {
     let (_, c, h) = BACKGROUND_PRESETS[index];
     oklch(0.3, c, h, 1.0)
@@ -409,12 +405,10 @@ impl Theme {
         }
     }
 
-    /// The shell color `color` paints in this mode: what a background swatch shows.
     pub fn background_tone(&self, color: Rgba) -> Rgba {
         self.clone().with_background(color).shell_solid.from
     }
 
-    /// The shell color with no custom background.
     pub fn default_background(&self) -> Rgba {
         Theme::new(self.mode, self.accent_id, self.custom_accent, None).shell_solid.from
     }
