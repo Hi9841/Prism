@@ -108,10 +108,12 @@ oploop/           performance ledger, benchmarks, functional test of the real ap
 
 ## Release
 
-To publish a release, increase the workspace version in `Cargo.toml` and run
-`cargo update --workspace`. Include both changes in the PR. When the repository owner
-approves the final PR commit and merges it into `main`, GitHub Actions tags the merged commit.
-It publishes the Windows installer, updater signature, and updater manifest.
+When the repository owner approves the final PR commit and merges it into `main`, GitHub Actions
+builds and publishes the signed Windows installer and updater manifest. It uses the next patch version
+after the latest release, or the workspace version if it is higher. For an automatic version increase,
+the release tag points to a commit with the new version in `Cargo.toml` and `Cargo.lock`.
+
+The repository owner can also run **Release Prism** on `main` from the Actions tab.
 
 ### Manual release
 
