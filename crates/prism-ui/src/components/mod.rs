@@ -1,3 +1,4 @@
+pub mod color_picker;
 pub mod focus;
 pub mod menu;
 pub mod power_menu;

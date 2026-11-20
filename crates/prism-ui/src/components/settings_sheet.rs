@@ -1,13 +1,17 @@
 //! The settings sheet (`src/components/SettingsSheet.tsx`).
 
+use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use gpui::{
-    AnyElement, App, Context, Entity, FocusHandle, Focusable, KeyDownEvent, MouseButton, ParentElement, Render,
-    ScrollHandle, SharedString, Styled, Task, Timer, Window, div, prelude::*, px, relative,
+    AnyElement, App, Bounds, Context, DispatchPhase, Entity, FocusHandle, Focusable, KeyDownEvent, MouseButton, MouseDownEvent,
+    MouseMoveEvent, MouseUpEvent, ParentElement, Pixels, Point, Render, ScrollHandle, SharedString, Styled, Task, Timer, Window,
+    canvas, div, prelude::*, px, relative,
 };
 
+use crate::components::color_picker::{self, Hsv};
 use crate::components::taskbar_customization::TaskbarCustomization;
 use crate::components::text_input::{Changed, InputStyle, TextInput};
 use crate::components::focus;
@@ -22,11 +26,58 @@ use crate::lib::types::{
 };
 use crate::state::app::{AppEvent, AppState, THEME_LABELS, ToastKind, app_state, shortcut_label};
 use crate::state::palette::{PaletteState, palette_state};
-use crate::theme::{Accent, Rgba, TRANSPARENT, Theme, fade, hsla, motion, shadow, tabular_nums, to_hex, white};
+use crate::theme::{
+    Accent, BACKGROUND_PRESETS, Rgba, TRANSPARENT, Theme, background_preset, fade, hsla, motion, shadow, tabular_nums, to_hex, white,
+};
 use crate::transition::{self, Timing};
 
-/// A custom color setting (`accent_color`, `background_color`).
-type ColorField = fn(&mut Settings) -> &mut Option<String>;
+/// The setting a color picker edits.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ColorTarget {
+    Accent,
+    Background,
+}
+
+impl ColorTarget {
+    fn stored(self, s: &Settings) -> Option<&String> {
+        match self {
+            ColorTarget::Accent => s.accent_color.as_ref(),
+            ColorTarget::Background => s.background_color.as_ref(),
+        }
+    }
+
+    fn field(self, s: &mut Settings) -> &mut Option<String> {
+        match self {
+            ColorTarget::Accent => &mut s.accent_color,
+            ColorTarget::Background => &mut s.background_color,
+        }
+    }
+
+    /// What the setting paints now: the accent, or the top of the shell.
+    fn painted(self, t: &Theme) -> Rgba {
+        match self {
+            ColorTarget::Accent => t.accent,
+            ColorTarget::Background => t.shell_solid.from,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DragPart {
+    Plane,
+    Hue,
+}
+
+/// An open color picker. It edits the setting live; Esc puts `original` back.
+struct ColorPicker {
+    target: ColorTarget,
+    hsv: Hsv,
+    original: Option<String>,
+    /// What the setting painted when the picker opened (the left half of the preview).
+    original_paint: Rgba,
+    drag: Option<DragPart>,
+    opened_at: Instant,
+}
 
 /// "Ctrl+Alt+Space" -> "Ctrl + Alt + Space"
 pub fn display_shortcut(combo: &str) -> String {
@@ -107,8 +158,15 @@ pub struct SettingsSheet {
     app_query: Entity<TextInput>,
     picker_scroll: ScrollHandle,
     picker_wheel: std::rc::Rc<std::cell::RefCell<crate::gfx::WheelScroll>>,
-    accent_hex: Entity<TextInput>,
-    background_hex: Entity<TextInput>,
+    color_picker: Option<ColorPicker>,
+    hex_input: Entity<TextInput>,
+    plane_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
+    hue_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
+    plane_focus: FocusHandle,
+    hue_focus: FocusHandle,
+    /// The custom swatches: focus returns here when their picker closes.
+    accent_custom_focus: FocusHandle,
+    background_custom_focus: FocusHandle,
     _subscriptions: Vec<gpui::Subscription>,
 }
 
@@ -119,12 +177,8 @@ impl SettingsSheet {
         let (t, _) = theme(cx);
         let new_name = cx.new(|cx| TextInput::new("New collection", field_style(&t), cx).with_max_len(64));
         let app_query = cx.new(|cx| TextInput::new("Filter apps", field_style(&t), cx));
-        let accent_hex = cx.new(|cx| TextInput::new("Custom", field_style(&t), cx).with_max_len(7));
-        let background_hex = cx.new(|cx| TextInput::new("Default", field_style(&t), cx).with_max_len(7));
-        let accent_sub =
-            cx.subscribe(&accent_hex, |this, _, event: &Changed, cx| this.type_color(|s| &mut s.accent_color, &event.0, cx));
-        let background_sub =
-            cx.subscribe(&background_hex, |this, _, event: &Changed, cx| this.type_color(|s| &mut s.background_color, &event.0, cx));
+        let hex_input = cx.new(|cx| TextInput::new("#rrggbb", field_style(&t), cx).with_max_len(7));
+        let hex_sub = cx.subscribe(&hex_input, |this, _, event: &Changed, cx| this.type_hex(&event.0, cx));
         let app_sub = cx.subscribe_in(&app, window, |this, app, event: &AppEvent, window, cx| {
             if matches!(event, AppEvent::OpenSettingsChanged) {
                 if app.read(cx).open_settings {
@@ -138,10 +192,12 @@ impl SettingsSheet {
                     *this.wheel.borrow_mut() = Default::default();
                     this.new_name.update(cx, |input, cx| input.set_text("", cx));
                     this.app_query.update(cx, |input, cx| input.set_text("", cx));
+                    this.color_picker = None;
                     window.focus(&this.close_focus);
                 } else {
                     this.reset_confirming = false;
                     this.open_group_id = None;
+                    this.color_picker = None;
                     // Focus returns to the settings button in the search field.
                     window.focus(&focus::settings_trigger(cx));
                 }
@@ -175,9 +231,15 @@ impl SettingsSheet {
             app_query,
             picker_scroll: ScrollHandle::new(),
             picker_wheel: Default::default(),
-            accent_hex,
-            background_hex,
-            _subscriptions: vec![app_sub, query_sub, palette_obs, accent_sub, background_sub],
+            color_picker: None,
+            hex_input,
+            plane_bounds: Rc::default(),
+            hue_bounds: Rc::default(),
+            plane_focus: cx.focus_handle().tab_stop(true),
+            hue_focus: cx.focus_handle().tab_stop(true),
+            accent_custom_focus: cx.focus_handle().tab_stop(true),
+            background_custom_focus: cx.focus_handle().tab_stop(true),
+            _subscriptions: vec![app_sub, query_sub, palette_obs, hex_sub],
         }
     }
 
@@ -206,6 +268,7 @@ impl SettingsSheet {
             return;
         }
         self.reset_busy = true;
+        self.color_picker = None;
         cx.notify();
         let task = self.app.update(cx, |app, cx| app.reset_settings(cx));
         let app = self.app.clone();
@@ -406,74 +469,435 @@ impl SettingsSheet {
         apps.into_iter().filter(|entry| entry.name.to_lowercase().contains(&normalized)).collect()
     }
 
-    /// A typed color applies once it is a whole `#rrggbb`; an empty field clears it.
-    fn type_color(&mut self, field: ColorField, text: &str, cx: &mut Context<Self>) {
-        let color = prism_vocab::settings::parse_hex_color(text);
-        if color.is_none() && !text.trim().is_empty() {
+    /* ---------------- color picker ---------------- */
+
+    fn custom_focus(&self, target: ColorTarget) -> &FocusHandle {
+        match target {
+            ColorTarget::Accent => &self.accent_custom_focus,
+            ColorTarget::Background => &self.background_custom_focus,
+        }
+    }
+
+    /// The custom swatch toggles its picker. It opens on the stored color, or on
+    /// what the setting paints now, and changes nothing until the color moves.
+    fn toggle_picker(&mut self, target: ColorTarget, window: &mut Window, cx: &mut Context<Self>) {
+        if self.color_picker.as_ref().is_some_and(|picker| picker.target == target) {
+            self.close_picker(false, true, window, cx);
             return;
         }
-        self.app.update(cx, |app, cx| app.update_settings(cx, |s| *field(s) = color));
+        let (t, _) = theme(cx);
+        let original = target.stored(&self.app.read(cx).settings).cloned();
+        let seed = original.as_deref().and_then(|hex| Rgba::try_from(hex).ok()).unwrap_or_else(|| target.painted(&t));
+        self.color_picker = Some(ColorPicker {
+            target,
+            hsv: Hsv::from_rgba(seed),
+            original,
+            original_paint: target.painted(&t),
+            drag: None,
+            opened_at: Instant::now(),
+        });
+        self.hex_input.update(cx, |input, cx| input.set_text(to_hex(seed), cx));
+        window.focus(&self.plane_focus);
+        cx.notify();
     }
 
-    fn pick_color(&mut self, field: ColorField, initial: Rgba, cx: &mut Context<Self>) {
-        let chosen = bridge::shell(cx).choose_color(initial, cx);
-        let app = self.app.clone();
-        cx.spawn(async move |_, cx| {
-            let Some(color) = chosen.await else { return };
-            let _ = app.update(cx, |app, cx| app.update_settings(cx, |s| *field(s) = Some(to_hex(color))));
-        })
-        .detach();
+    /// Closes the picker. `revert` puts back the color it opened on (Esc);
+    /// `refocus` returns focus to the custom swatch (a keyboard or button close).
+    fn close_picker(&mut self, revert: bool, refocus: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(picker) = self.color_picker.take() else { return };
+        if revert {
+            let target = picker.target;
+            self.app.update(cx, |app, cx| app.update_settings(cx, |s| *target.field(s) = picker.original));
+        }
+        if refocus {
+            window.focus(&self.custom_focus(picker.target).clone());
+        }
+        cx.notify();
     }
 
-    /// A hex field led by its color; the swatch opens the Windows color dialog.
+    /// A preset clears the custom color; it also closes that row's picker.
+    fn choose_preset(&mut self, target: ColorTarget, window: &mut Window, cx: &mut Context<Self>, patch: impl FnOnce(&mut Settings)) {
+        if self.color_picker.as_ref().is_some_and(|picker| picker.target == target) {
+            self.close_picker(false, false, window, cx);
+        }
+        self.app.update(cx, |app, cx| app.update_settings(cx, patch));
+    }
+
+    /// Moves the picker to `hsv` and saves it (the save is debounced).
+    fn set_hsv(&mut self, hsv: Hsv, cx: &mut Context<Self>) {
+        let Some(picker) = self.color_picker.as_mut() else { return };
+        picker.hsv = hsv;
+        let target = picker.target;
+        let hex = to_hex(hsv.to_rgba());
+        self.app.update(cx, |app, cx| app.update_settings(cx, |s| *target.field(s) = Some(hex)));
+        cx.notify();
+    }
+
+    /// A typed color applies once it is a whole `#rrggbb`, with or without the `#`.
+    fn type_hex(&mut self, text: &str, cx: &mut Context<Self>) {
+        let Some(picker) = self.color_picker.as_ref() else { return };
+        let Some(color) = prism_vocab::settings::parse_hex_color(text).and_then(|hex| Rgba::try_from(hex.as_str()).ok()) else {
+            return;
+        };
+        let hsv = picker.hsv.retarget(color);
+        self.set_hsv(hsv, cx);
+    }
+
+    fn begin_drag(&mut self, part: DragPart, position: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(picker) = self.color_picker.as_mut() else { return };
+        picker.drag = Some(part);
+        let handle = match part {
+            DragPart::Plane => self.plane_focus.clone(),
+            DragPart::Hue => self.hue_focus.clone(),
+        };
+        window.focus(&handle);
+        self.drag_to(part, position, cx);
+        cx.notify();
+    }
+
+    fn drag_to(&mut self, part: DragPart, position: Point<Pixels>, cx: &mut Context<Self>) {
+        let Some(picker) = self.color_picker.as_ref() else { return };
+        let bounds = match part {
+            DragPart::Plane => self.plane_bounds.get(),
+            DragPart::Hue => self.hue_bounds.get(),
+        };
+        let Some(bounds) = bounds else { return };
+        let x = ((position.x - bounds.left()) / bounds.size.width).clamp(0.0, 1.0);
+        let y = ((position.y - bounds.top()) / bounds.size.height).clamp(0.0, 1.0);
+        let mut hsv = picker.hsv;
+        match part {
+            DragPart::Plane => {
+                hsv.s = x;
+                hsv.v = 1.0 - y;
+            }
+            DragPart::Hue => hsv.h = x * 360.0,
+        }
+        if hsv != picker.hsv {
+            self.set_hsv(hsv, cx);
+        }
+    }
+
+    fn end_drag(&mut self, cx: &mut Context<Self>) {
+        if let Some(picker) = self.color_picker.as_mut()
+            && picker.drag.take().is_some()
+        {
+            cx.notify();
+        }
+    }
+
+    /// Arrows move the plane's thumb or the hue by a small step; Shift takes ten.
+    fn nudge(&mut self, part: DragPart, event: &KeyDownEvent, cx: &mut Context<Self>) {
+        let Some(picker) = self.color_picker.as_ref() else { return };
+        let (dx, dy) = match event.keystroke.key.as_str() {
+            "left" => (-1.0, 0.0),
+            "right" => (1.0, 0.0),
+            "up" => (0.0, 1.0),
+            "down" => (0.0, -1.0),
+            _ => return,
+        };
+        cx.stop_propagation();
+        let big = event.keystroke.modifiers.shift;
+        let mut hsv = picker.hsv;
+        match part {
+            DragPart::Plane => {
+                let step = if big { 0.1 } else { 0.01 };
+                hsv.s = (hsv.s + dx * step).clamp(0.0, 1.0);
+                hsv.v = (hsv.v + dy * step).clamp(0.0, 1.0);
+            }
+            DragPart::Hue => {
+                let step = if big { 10.0 } else { 1.0 };
+                hsv.h = (hsv.h + (dx + dy) * step).clamp(0.0, 360.0);
+            }
+        }
+        if hsv != picker.hsv {
+            self.set_hsv(hsv, cx);
+        }
+    }
+
+    /// A round swatch: the presets' look (lift, top highlight, `scale-110` when
+    /// chosen) with a check on the chosen one, so near-identical tones still read.
     #[allow(clippy::too_many_arguments)]
-    fn color_field(
+    fn swatch(
         &self,
-        id: &'static str,
-        input: &Entity<TextInput>,
-        field: ColorField,
-        stored: Option<&str>,
-        color: Rgba,
+        key: gpui::ElementId,
+        fill: Rgba,
+        mark: Rgba,
+        active: bool,
+        edge: bool,
+        label: &str,
+        t: &Theme,
+        zoom: f32,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> gpui::Stateful<gpui::Div> {
+        // `transition-transform duration-150`: `scale-110` when active, else `hover:scale-105`.
+        let (hovered, hover) = transition::hover(&key, window, cx);
+        let target = if active { 1.1 } else if hovered { 1.05 } else { 1.0 };
+        let scale = transition::number(&key, "scale", target, Timing::tw(150), window, cx);
+        let check = transition::number(&key, "check", if active { 1.0 } else { 0.0 }, Timing::tw(150), window, cx);
+        focus::button(div().id(key), true, t)
+            .tooltip(title_tooltip(label.to_owned(), t.mode))
+            .relative()
+            .flex()
+            .flex_none()
+            .items_center()
+            .justify_center()
+            .size(r(24.))
+            .scale(scale)
+            .rounded_full()
+            .bg(hsla(fill))
+            .when(edge, |d| d.border_1().border_color(hsla(t.divider)))
+            .when(!active, |d| {
+                d.shadow(zoomed(vec![shadow(0., 1., 3., 0., t.shade(0.4))], zoom))
+                    .child(crate::components::ui::inset_top_highlight(white(0.2), 12.))
+            })
+            .child(icon_stroke("check", 2.5, 12., Rgba { a: mark.a * check, ..mark }))
+            // `after:-inset-1`: the pseudo-element is part of the button's `:hover`.
+            .child(hover.top(r(-4.)).right(r(-4.)).bottom(r(-4.)).left(r(-4.)))
+    }
+
+    /// The last swatch of a row: the custom color once there is one, else a plus.
+    /// It opens and closes the picker.
+    fn custom_swatch(
+        &self,
+        target: ColorTarget,
+        custom: Option<Rgba>,
         t: &Theme,
         zoom: f32,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> gpui::Div {
-        let focused = input.read(cx).focus_handle(cx).is_focused(window);
-        input.update(cx, |input, cx| {
-            input.style = field_style(t);
-            // Off focus the field shows the saved color, so a partial entry reverts.
-            if !focused {
-                input.set_text(stored.unwrap_or_default().to_owned(), cx);
+    ) -> AnyElement {
+        let open = self.color_picker.as_ref().is_some_and(|picker| picker.target == target);
+        let key: gpui::ElementId = match target {
+            ColorTarget::Accent => "accent-custom".into(),
+            ColorTarget::Background => "background-custom".into(),
+        };
+        let handle = self.custom_focus(target).clone();
+        let toggle = cx.listener(move |this, _: &gpui::ClickEvent, window, cx| this.toggle_picker(target, window, cx));
+        let swatch = match custom {
+            Some(fill) => {
+                let mark = if target == ColorTarget::Accent { t.accent_fg } else { t.fg };
+                self.swatch(key, fill, mark, true, target == ColorTarget::Background, "Custom color", t, zoom, window, cx)
             }
-        });
-        let key = gpui::ElementId::Name(id.into());
-        let swatch = transition::press(div().id(key.clone()), &key, true, window, cx);
-        div()
-            .flex()
-            .items_center()
-            .gap(r(8.))
-            .w(r(104.))
-            .rounded(r(8.))
-            .bg(hsla(t.surface))
-            .pl(r(7.))
-            .pr(r(10.))
-            .py(r(6.))
-            .text_size(r(12.))
-            .line_height(relative(1.45))
-            .when(focused, |d| d.shadow(field_ring(t, zoom)))
-            .child(
-                focus::button(swatch, true, t)
-                    .tooltip(title_tooltip("Pick a color", t.mode))
+            None => {
+                let (hovered, hover) = transition::hover(&key, window, cx);
+                let scale = transition::number(&key, "scale", if hovered || open { 1.05 } else { 1.0 }, Timing::tw(150), window, cx);
+                let bg = transition::color(&key, "bg", if open { t.surface_active } else { t.surface }, Timing::PRESS, window, cx);
+                focus::button(div().id(key), true, t)
+                    .tooltip(title_tooltip("Custom color", t.mode))
+                    .relative()
+                    .flex()
                     .flex_none()
-                    .size(r(16.))
+                    .items_center()
+                    .justify_center()
+                    .size(r(24.))
+                    .scale(scale)
                     .rounded_full()
-                    .bg(hsla(color))
+                    .bg(hsla(bg))
                     .border_1()
                     .border_color(hsla(t.divider))
-                    .on_click(cx.listener(move |this, _, _, cx| this.pick_color(field, color, cx))),
-            )
-            .child(div().flex_1().min_w_0().child(input.clone()))
+                    .child(icon("plus", 12., if open { t.fg } else { t.fg_tertiary }))
+                    .child(hover.top(r(-4.)).right(r(-4.)).bottom(r(-4.)).left(r(-4.)))
+            }
+        };
+        swatch.track_focus(&handle).on_click(toggle).into_any_element()
+    }
+
+    /// A color setting: its row, and under it the picker while open. A press
+    /// anywhere else closes the picker and keeps the color; Esc puts it back.
+    fn color_block(&self, target: ColorTarget, row: gpui::Div, t: &Theme, zoom: f32, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let open = self.color_picker.as_ref().is_some_and(|picker| picker.target == target);
+        div()
+            .when(open, |d| {
+                d.on_mouse_down_out(cx.listener(|this, _, window, cx| this.close_picker(false, false, window, cx)))
+                    .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                        if event.keystroke.key == "escape" && !this.hex_input.read(cx).is_composing() {
+                            cx.stop_propagation();
+                            this.close_picker(true, true, window, cx);
+                        }
+                    }))
+            })
+            .child(row)
+            .when(open, |d| d.child(self.picker_panel(t, zoom, window, cx)))
+            .into_any_element()
+    }
+
+    fn picker_panel(&self, t: &Theme, zoom: f32, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let Some(picker) = self.color_picker.as_ref() else { return div().into_any_element() };
+        let hsv = picker.hsv;
+        let color = hsv.to_rgba();
+        // Enter: opacity with a short drop from the swatches, `--ease-out-soft`. It opens
+        // a few times a session, from a click; Esc and outside presses close it at once.
+        let reduced = reduced_motion();
+        let p = if reduced { 1.0 } else { (picker.opened_at.elapsed().as_millis() as f32 / 160.0).min(1.0) };
+        if p < 1.0 {
+            window.request_animation_frame();
+        }
+        let eased = motion::ease_out_soft(p);
+        let shift = -6.0 * (1.0 - eased);
+
+        // A drag follows the pointer anywhere in the window until the button comes up.
+        let drag = canvas(|_, _, _| {}, {
+            let entity = cx.entity().downgrade();
+            let part = picker.drag;
+            move |_, _, window, _| {
+                let Some(part) = part else { return };
+                let moved = entity.clone();
+                window.on_mouse_event(move |event: &MouseMoveEvent, phase, _, cx| {
+                    if phase != DispatchPhase::Bubble {
+                        return;
+                    }
+                    let _ = moved.update(cx, |this, cx| {
+                        if event.pressed_button == Some(MouseButton::Left) {
+                            this.drag_to(part, event.position, cx)
+                        } else {
+                            this.end_drag(cx)
+                        }
+                    });
+                });
+                window.on_mouse_event(move |_: &MouseUpEvent, phase, _, cx| {
+                    if phase == DispatchPhase::Bubble {
+                        let _ = entity.update(cx, |this, cx| this.end_drag(cx));
+                    }
+                });
+            }
+        })
+        .absolute()
+        .size_0();
+
+        let bounds_probe = |cell: &Rc<Cell<Option<Bounds<Pixels>>>>| {
+            let cell = cell.clone();
+            canvas(move |bounds, _, _| cell.set(Some(bounds)), |_, _, _, _| {}).absolute().size_full()
+        };
+
+        let [hue_layer, white_layer, black_layer] = color_picker::plane_layers(hsv.h, 8.);
+        let plane = focus::focus_ring(
+            div()
+                .id("color-plane")
+                .track_focus(&self.plane_focus)
+                .relative()
+                .w_full()
+                .h(r(128.))
+                .rounded(r(8.))
+                .cursor(gpui::CursorStyle::Crosshair)
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, event: &MouseDownEvent, window, cx| this.begin_drag(DragPart::Plane, event.position, window, cx)),
+                )
+                .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| this.nudge(DragPart::Plane, event, cx))),
+            t,
+        )
+        .child(bounds_probe(&self.plane_bounds))
+        .child(hue_layer)
+        .child(white_layer)
+        .child(black_layer)
+        // A hairline keeps the white corner off a light panel.
+        .child(div().absolute().inset_0().rounded(r(8.)).border_1().border_color(hsla(t.line)))
+        .child(color_picker::thumb(hsv.s, 1.0 - hsv.v, color, 14., t, zoom));
+
+        let hue = focus::focus_ring(
+            div()
+                .id("color-hue")
+                .track_focus(&self.hue_focus)
+                .relative()
+                .w_full()
+                .h(r(10.))
+                .rounded_full()
+                .cursor_pointer()
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, event: &MouseDownEvent, window, cx| this.begin_drag(DragPart::Hue, event.position, window, cx)),
+                )
+                .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| this.nudge(DragPart::Hue, event, cx))),
+            t,
+        )
+        .child(bounds_probe(&self.hue_bounds))
+        .child(color_picker::hue_track(10.))
+        .child(color_picker::thumb(hsv.h / 360.0, 0.5, Hsv { s: 1.0, v: 1.0, ..hsv }.to_rgba(), 14., t, zoom));
+
+        // Before and after: the left half is the color it opened on, the right half
+        // what the setting paints now (a custom accent keeps a readable lightness).
+        let now = picker.target.painted(t);
+        let preview = div()
+            .flex()
+            .flex_none()
+            .size(r(28.))
+            .rounded(r(7.))
+            .border_1()
+            .border_color(hsla(t.divider))
+            .child(div().flex_1().h_full().rounded_l(r(6.)).bg(hsla(picker.original_paint)))
+            .child(div().flex_1().h_full().rounded_r(r(6.)).bg(hsla(now)));
+
+        let input_focused = self.hex_input.read(cx).focus_handle(cx).is_focused(window);
+        self.hex_input.update(cx, |input, cx| {
+            input.style = field_style(t);
+            // Off focus the field follows the picker, so a partial entry reverts.
+            if !input_focused {
+                input.set_text(to_hex(color), cx);
+            }
+        });
+        let hex = div()
+            .flex()
+            .flex_1()
+            .min_w_0()
+            .h(r(28.))
+            .items_center()
+            .rounded(r(7.))
+            .bg(hsla(t.field_bg))
+            .border_1()
+            .border_color(hsla(if input_focused { t.accent_ring } else { t.field_line }))
+            .px(r(8.))
+            .text_size(r(12.))
+            .line_height(relative(1.45))
+            .child(tabular_nums(div().w_full().child(self.hex_input.clone())));
+
+        let done = {
+            let key = gpui::ElementId::Name("color-done".into());
+            let paint = transition::hover_paint(&key, (t.fg, t.fg), (t.accent_soft, t.surface_hover), Timing::PRESS, window, cx);
+            let button = transition::press(div().id(key.clone()), &key, true, window, cx);
+            focus::button(button, true, t)
+                .flex_none()
+                .rounded(r(7.))
+                .bg(hsla(paint.bg))
+                .px(r(10.))
+                .py(r(4.))
+                .text_size(r(11.))
+                .font_weight(weight(600.))
+                .line_height(relative(1.45))
+                .text_color(hsla(paint.text))
+                .on_click(cx.listener(|this, _, window, cx| this.close_picker(false, true, window, cx)))
+                .child("Done")
+                .child(paint.tracker)
+        };
+
+        div()
+            .id("color-picker")
+            .relative()
+            .top(r(shift))
+            .opacity(eased)
+            .mb(r(12.))
+            .flex()
+            .flex_col()
+            .gap(r(10.))
+            .rounded(r(10.))
+            .bg(hsla(t.surface))
+            .border_1()
+            .border_color(hsla(t.line))
+            .p(r(10.))
+            // Enter in the field or on the plane keeps the color and closes. On the
+            // release, as GPUI clicks: closing on the press would move focus to the
+            // swatch, and the release would click it open again.
+            .on_key_up(cx.listener(|this, event: &gpui::KeyUpEvent, window, cx| {
+                if event.keystroke.key == "enter" && !this.hex_input.read(cx).is_composing() {
+                    cx.stop_propagation();
+                    this.close_picker(false, true, window, cx);
+                }
+            }))
+            .child(drag)
+            .child(plane)
+            .child(div().px(r(7.)).child(hue))
+            .child(div().flex().items_center().gap(r(8.)).child(preview).child(hex).child(done))
+            .into_any_element()
     }
 
     fn group_name_input(&mut self, group: &AppGroup, focused: bool, t: &Theme, cx: &mut Context<Self>) -> Entity<TextInput> {
@@ -1287,83 +1711,72 @@ impl Render for SettingsSheet {
             let app = app_entity.clone();
             move |value, _, cx| app.update(cx, |app, cx| app.update_settings(cx, |s| s.always_on_top = value))
         });
-        let accents = div().flex().items_center().gap(r(8.)).children(Accent::ALL.iter().enumerate().map(|(index, accent)| {
+        // Accent: the five presets, then the custom swatch.
+        let custom_accent = settings.accent_color.as_ref().map(|_| t.accent);
+        let mut accents = div().flex().items_center().gap(r(8.));
+        for (index, accent) in Accent::ALL.iter().enumerate() {
             let active = settings.accent_color.is_none() && settings.accent == accent.id();
-            let app = app_entity.clone();
             let id = accent.id().to_owned();
-            // The inline `box-shadow` beats `.focus-ring` (the focus ring never shows). The active value,
-            // `0 0 0 2px var(--t-bg), 0 0 0 4px var(--accent)`, is invalid at computed-value time because
-            // `--t-bg` is a gradient: it computes to `none`.
-            // `transition-transform duration-150`: `scale-110` when active, else `hover:scale-105`.
-            let key: gpui::ElementId = ("accent", index).into();
-            let (hovered, hover) = transition::hover(&key, window, cx);
-            let target = if active { 1.1 } else if hovered { 1.05 } else { 1.0 };
-            let scale = transition::number(&key, "scale", target, Timing::tw(150), window, cx);
-            div()
-                .id(key)
-                .tab_index(0)
-                .tab_stop(true)
-                .relative()
-                .size(r(24.))
-                .scale(scale)
-                .rounded_full()
-                .bg(hsla(accent.swatch()))
-                .when(!active, |d| {
-                    d.shadow(zoomed(vec![shadow(0., 1., 3., 0., t.shade(0.4))], zoom))
-                        .child(crate::components::ui::inset_top_highlight(white(0.2), 12.))
-                })
-                .on_click(move |_, _, cx| {
-                    let id = id.clone();
-                    app.update(cx, |app, cx| {
-                        app.update_settings(cx, |s| {
+            let (_, _, mark) = accent.colors();
+            let label = format!("{}{}", &id[..1].to_uppercase(), &id[1..]);
+            accents = accents.child(
+                self.swatch(("accent", index).into(), accent.swatch(), mark, active, false, &label, &t, zoom, window, cx).on_click(
+                    cx.listener(move |this, _, window, cx| {
+                        let id = id.clone();
+                        this.choose_preset(ColorTarget::Accent, window, cx, |s| {
                             s.accent = id;
                             s.accent_color = None;
                         })
-                    })
-                })
-                // `after:-inset-1`: the pseudo-element is part of the button's `:hover`.
-                .child(hover.top(r(-4.)).right(r(-4.)).bottom(r(-4.)).left(r(-4.)))
-        }));
-        let accents = accents.child(self.color_field(
-            "accent-color",
-            &self.accent_hex,
-            |s| &mut s.accent_color,
-            settings.accent_color.as_deref(),
-            t.accent,
+                    }),
+                ),
+            );
+        }
+        let accents = accents.child(self.custom_swatch(ColorTarget::Accent, custom_accent, &t, zoom, window, cx));
+
+        // Background: the default, five tones, then the custom swatch. Each swatch shows
+        // the shell it paints in this mode, not the stored color.
+        let preset_hexes: Vec<String> = (0..BACKGROUND_PRESETS.len()).map(|index| to_hex(background_preset(index))).collect();
+        let stored_background = settings.background_color.clone();
+        let mut backgrounds = div().flex().items_center().gap(r(8.)).child(
+            self.swatch("background-default".into(), t.default_background(), t.fg, stored_background.is_none(), true, "Default", &t, zoom, window, cx)
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.choose_preset(ColorTarget::Background, window, cx, |s| s.background_color = None)
+                })),
+        );
+        for (index, (label, _, _)) in BACKGROUND_PRESETS.iter().enumerate() {
+            let hex = preset_hexes[index].clone();
+            let active = stored_background.as_deref() == Some(hex.as_str());
+            let fill = t.background_tone(background_preset(index));
+            backgrounds = backgrounds.child(
+                self.swatch(("background", index).into(), fill, t.fg, active, true, label, &t, zoom, window, cx).on_click(
+                    cx.listener(move |this, _, window, cx| {
+                        let hex = hex.clone();
+                        this.choose_preset(ColorTarget::Background, window, cx, |s| s.background_color = Some(hex))
+                    }),
+                ),
+            );
+        }
+        let custom_background = stored_background
+            .as_deref()
+            .filter(|hex| !preset_hexes.iter().any(|preset| preset == hex))
+            .map(|_| t.shell_solid.from);
+        let backgrounds = backgrounds.child(self.custom_swatch(ColorTarget::Background, custom_background, &t, zoom, window, cx));
+        let accent_block = self.color_block(
+            ColorTarget::Accent,
+            settings_row("Accent color", Some("Colors highlights, focus, and the volume pill"), accents, &t),
             &t,
             zoom,
             window,
             cx,
-        ));
-        let background = div()
-            .flex()
-            .items_center()
-            .gap(r(4.))
-            .child(self.color_field(
-                "background-color",
-                &self.background_hex,
-                |s| &mut s.background_color,
-                settings.background_color.as_deref(),
-                t.shell_solid.from,
-                &t,
-                zoom,
-                window,
-                cx,
-            ))
-            .when(settings.background_color.is_some(), |d| {
-                let app = app_entity.clone();
-                d.child(self.small_icon_button(
-                    "reset-background",
-                    "Reset background",
-                    "rotate-ccw",
-                    false,
-                    false,
-                    &t,
-                    move |_, _, cx| app.update(cx, |app, cx| app.update_settings(cx, |s| s.background_color = None)),
-                    window,
-                    cx,
-                ))
-            });
+        );
+        let background_block = self.color_block(
+            ColorTarget::Background,
+            settings_row("Background", Some("Match the launcher to your desktop"), backgrounds, &t),
+            &t,
+            zoom,
+            window,
+            cx,
+        );
         // `.press` (150ms `--ease-out-soft`) for the buttons below.
         let button_paint = |id: &'static str, text: (Rgba, Rgba), bg: (Rgba, Rgba), window: &mut Window, cx: &mut App| {
             transition::hover_paint(&gpui::ElementId::Name(id.into()), text, bg, Timing::PRESS, window, cx)
@@ -1655,8 +2068,8 @@ impl Render for SettingsSheet {
                     .child(div().line_height(relative(1.45)).px(r(20.)).pb(r(24.))
                     .child(section_title("Appearance", true, &t))
                     .child(settings_row("Appearance", Some("Follows Windows light/dark mode"), appearance, &t))
-                    .child(settings_row("Accent color", Some("Colors highlights, focus, and the volume pill"), accents, &t))
-                    .child(settings_row("Background", Some("Match the launcher to your desktop"), background, &t))
+                    .child(accent_block)
+                    .child(background_block)
                     .child(settings_row("Window width", None, width, &t))
                     .child(settings_row("View zoom", Some("Ctrl + Up/Down or Ctrl + wheel"), zoom_control, &t))
                     .child(section_title("Taskbar", false, &t))
