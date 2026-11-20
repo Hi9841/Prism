@@ -57,7 +57,7 @@ if ($UpdatePublicKey) { $env:PRISM_UPDATE_PUBKEY = $UpdatePublicKey } else { Rem
 
 Push-Location $repoRoot
 try {
-  Invoke-Native { cargo build --release -p prism-app } "cargo build failed."
+  Invoke-Native { cargo build --release --locked -p prism-app } "cargo build failed."
 } finally {
   Pop-Location
   Remove-Item Env:CARGO_TARGET_DIR, Env:PRISM_VERSION_OVERRIDE, Env:PRISM_UPDATE_ENDPOINT, Env:PRISM_UPDATE_PUBKEY -ErrorAction SilentlyContinue

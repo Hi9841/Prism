@@ -117,10 +117,10 @@ oploop/           performance ledger, benchmarks, functional test of the real ap
 
 ## Release
 
-GitHub Actions publishes a release when the repository owner approves the final commit of a PR
-and merges the PR into `main`. A new commit after approval requires a new approval. The workflow
-uses the next patch version, builds the signed installer, and publishes the updater manifest.
-It puts the version bump in the release tag's commit. It does not push that commit to `main`.
+To publish a release, increase the workspace version in `Cargo.toml` and run
+`cargo update --workspace`. Include both changes in the PR. When the repository owner
+approves the final PR commit and merges it into `main`, GitHub Actions tags the merged commit
+and publishes the signed Windows installer and updater manifest.
 
 ### Manual release
 
