@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU32, AtomicU64, Ordering}
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use gpui::{App, AppContext, AsyncApp, Rgba, Task, Timer};
+use gpui::{App, AppContext, AsyncApp, Task, Timer};
 use prism_core::backend::backend;
 use prism_core::palette_window::{
     self, DEFAULT_LOGICAL_WIDTH, PresentationAnchor, is_prism_foreground, log_foreground,
@@ -15,8 +15,7 @@ use prism_core::palette_window::{
 };
 use prism_core::{drag, shell_bridge, taskbar, taskbar_alignment};
 use prism_ui::lib::bridge::{self, BackendEvent, BridgeResult};
-use windows::Win32::Foundation::{COLORREF, HWND, POINT, RECT};
-use windows::Win32::UI::Controls::Dialogs::{CC_FULLOPEN, CC_RGBINIT, CHOOSECOLORW, ChooseColorW};
+use windows::Win32::Foundation::{HWND, POINT, RECT};
 use windows::Win32::UI::WindowsAndMessaging::{
     GetWindowRect, HWND_NOTOPMOST, HWND_TOPMOST, IsWindowVisible, SW_HIDE, SW_SHOW, SW_SHOWNA, SWP_NOACTIVATE, SWP_NOMOVE,
     SWP_NOSIZE, SWP_NOZORDER, SetWindowPos, ShowWindow,
@@ -554,28 +553,6 @@ impl bridge::Shell for GpuiShell {
                 });
             }
             Ok(dropped)
-        })
-    }
-
-    fn choose_color(&self, initial: Rgba, cx: &mut App) -> Task<Option<Rgba>> {
-        let owner = self.hwnd();
-        // From a foreground task: the dialog runs a modal loop (A7). Prism owns
-        // it, so the palette's focus loss to it is not a click-away.
-        cx.spawn(async move |_: &mut AsyncApp| {
-            let channel = |value: f32| u32::from((value.clamp(0.0, 1.0) * 255.0).round() as u8);
-            let mut custom_colors = [COLORREF(0); 16];
-            let mut dialog = CHOOSECOLORW {
-                lStructSize: std::mem::size_of::<CHOOSECOLORW>() as u32,
-                hwndOwner: owner,
-                rgbResult: COLORREF(channel(initial.r) | channel(initial.g) << 8 | channel(initial.b) << 16),
-                lpCustColors: custom_colors.as_mut_ptr(),
-                Flags: CC_RGBINIT | CC_FULLOPEN,
-                ..Default::default()
-            };
-            unsafe { ChooseColorW(&mut dialog) }.as_bool().then(|| {
-                let [r, g, b, _] = dialog.rgbResult.0.to_le_bytes();
-                prism_ui::theme::rgb_a(r, g, b, 1.0)
-            })
         })
     }
 
