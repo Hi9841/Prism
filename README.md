@@ -117,6 +117,13 @@ oploop/           performance ledger, benchmarks, functional test of the real ap
 
 ## Release
 
+GitHub Actions publishes a release when the repository owner approves the final commit of a PR
+and merges the PR into `main`. A new commit after approval requires a new approval. The workflow
+uses the next patch version, builds the signed installer, and publishes the updater manifest.
+It puts the version bump in the release tag's commit. It does not push that commit to `main`.
+
+### Manual release
+
 1. Set the version in `Cargo.toml` (`[workspace.package]`), then run `cargo update --workspace` to update
    `Cargo.lock`.
 2. Build the installer. The script writes the exe, the NSIS installer, and its updater signature to
