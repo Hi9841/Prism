@@ -358,3 +358,16 @@ another app, Esc cancels, a click works after the drag, and a release over the p
 - 2026-10-09: Step 2 spike, runs 1-2: synthetic input (`SendInput`) and a topmost window while the owner used
   the machine. Windows blocked the input. Later runs posted messages to the spike's own window only.
 - 2026-10-09: Step 1 gap inventory, first 20 rows: the two skeptic reviewers were stopped at the owner's request (fewer subagents). One in-context review replaced them; it revised 3 rows (runItem evidence, prism:close broadcast, context-menu clamp). Owner instruction: review inline by default and ask before spawning.
+
+
+## Launcher alignment (2026-11-26)
+
+Codex set these guides. Measure from the inside edge of the window frame at
+100 percent zoom.
+
+- The search and footer start 20 px from the frame. The results use the same
+  line for the leading edge of a tile and for plain section labels.
+- The search icon shares the center of the 40 px result tile. Search text and
+  result labels start at 72 px.
+- A section grip and the last square row control share a center. Measure
+  their inset from the right edge of the results, inside the scrollbar gutter.

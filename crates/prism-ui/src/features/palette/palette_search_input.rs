@@ -51,7 +51,12 @@ pub struct SearchInputProps<'a> {
     pub settings_open: bool,
 }
 
-/// The rendered field. Key handling is the palette's (`search_key`).
+use super::{FRAME_INSET, RESULT_ICON_SIZE, RESULT_LABEL_GAP};
+
+const SEARCH_ICON_SIZE: f32 = 18.;
+const SEARCH_ICON_INSET: f32 = (RESULT_ICON_SIZE - SEARCH_ICON_SIZE) / 2.;
+
+/// The rendered field. Key handling stays in the palette.
 pub fn render_search_input(
     props: SearchInputProps,
     t: &Theme,
@@ -63,14 +68,15 @@ pub fn render_search_input(
     let focused = props.input.read(cx).shows_focus(window);
     props.input.update(cx, |input, _| input.style = input_style(t));
     let field_shadow = if focused { zoomed(vec![shadow(0., 4., 16., 0., fade(t.accent, 5.0))], zoom) } else { vec![] };
-    div().px(r(20.)).pb(r(4.)).pt(r(20.)).child(
+    div().px(r(FRAME_INSET)).pb(r(4.)).pt(r(20.)).child(
         div()
             .relative()
             .flex()
             .items_center()
             .gap(r(12.))
             // The CSS ring is an inset shadow (no layout); a GPUI border takes 1px.
-            .px(r(15.))
+            .pl(r(SEARCH_ICON_INSET - 1. / zoom))
+            .pr(r(15.))
             .py(r(11.))
             .rounded(r(14.))
             .bg(hsla(if focused { t.field_bg_focus } else { t.field_bg }))
@@ -80,15 +86,23 @@ pub fn render_search_input(
             .child(crate::components::ui::inset_top_highlight(t.field_hi, 14.))
             // The focus tint (`.search-field:has(input:focus) > svg`) never applies in the
             // original: the `text-fg-tertiary` utility layer outranks the components layer.
-            .child(icon("search", 18., t.fg_tertiary))
             .child(
                 div()
+                    .flex()
                     .flex_1()
                     .min_w_0()
-                    .text_size(r(15.))
-                    .font_weight(weight(500.))
-                    .line_height(relative(1.45))
-                    .child(props.input.clone()),
+                    .items_center()
+                    .gap(r(RESULT_LABEL_GAP + SEARCH_ICON_INSET))
+                    .child(div().flex_none().child(icon("search", SEARCH_ICON_SIZE, t.fg_tertiary)))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .text_size(r(15.))
+                            .font_weight(weight(500.))
+                            .line_height(relative(1.45))
+                            .child(props.input.clone()),
+                    ),
             )
             .child(kbd(&props.shortcut, t))
             .child(icon_button(

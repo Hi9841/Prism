@@ -247,7 +247,6 @@ pub fn lucide_file(display_name: &str) -> String {
 
 pub fn section_label(label: &str, t: &Theme) -> gpui::Div {
     div()
-        .px(r(14.))
         .pb(r(6.))
         .pt(r(16.))
         .text_size(r(11.))

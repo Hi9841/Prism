@@ -39,6 +39,11 @@ use crate::state::palette::{PaletteEvent, PaletteState, palette_state, run_actio
 use crate::theme::{Rgba, TRANSPARENT, Theme, fade, hsla, motion, shadow, tabular_nums, white};
 use crate::transition::{self, Timing};
 
+use super::{FRAME_INSET, RESULT_ICON_SIZE, RESULT_LABEL_GAP, RESULT_ROW_INSET};
+
+const CATEGORY_GRIP_INSET: f32 = RESULT_ROW_INSET + 2.;
+const CATEGORY_CHEVRON_INSET: f32 = RESULT_ROW_INSET - 3.;
+
 /// Palette.tsx: `Math.hypot(dx, dy) >= 4`.
 const DRAG_THRESHOLD: f32 = 4.0;
 /// animatePreviewOut.
@@ -912,10 +917,10 @@ impl Palette {
             .relative()
             .flex()
             .items_center()
-            .gap(r(12.))
+            .gap(r(RESULT_LABEL_GAP))
             .w_full()
             .py(r(7.))
-            .px(r(10.))
+            .px(r(RESULT_ROW_INSET))
             .rounded(r(14.))
             .bg(hsla(background))
             .map(|d| {
@@ -942,7 +947,7 @@ impl Palette {
             }));
         if selected || drop_target {
             // The selected/drop ring is an inset shadow in CSS; compensate the 1px border.
-            row = row.py(r(6.)).px(r(9.));
+            row = row.py(r(6.)).px(r(RESULT_ROW_INSET - 1.));
         }
         let run_item = item.clone();
         row = row
@@ -1000,7 +1005,7 @@ impl Palette {
         // Icon cell. The original gives the icon a drag handler, but the row's
         // full-size open button paints above it (z-0 positioned inside the z-[1]
         // cell), so Chromium never routes a press to it: the icon acts as the row.
-        let icon_cell = div().flex_none().child(row_icon(&item.icon, 40., t, zoom, window, cx));
+        let icon_cell = div().flex_none().child(row_icon(&item.icon, RESULT_ICON_SIZE, t, zoom, window, cx));
 
         // `transition-colors duration-150`.
         let title_color = if selected { t.fg } else { Rgba { a: t.fg.a * 0.9, ..t.fg } };
@@ -1278,7 +1283,6 @@ impl Palette {
         kind: CategoryKind,
         id: &str,
         label: &str,
-        margin_right: bool,
         t: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -1293,7 +1297,6 @@ impl Palette {
             .justify_center()
             .size(r(28.))
             .rounded(r(7.))
-            .when(margin_right, |d| d.mr(r(14.)))
             .tooltip(title_tooltip(format!("Reorder {label}"), t.mode))
             .cursor_grab()
             .hover(|s| s.bg(hsla(t.surface_hover)))
@@ -1448,7 +1451,7 @@ impl Palette {
             .pr(self.wheel.borrow().gutter())
             .key_context("PaletteResults")
             .line_height(px(crate::gfx::CHROMIUM_LINE_PX));
-        let mut list = div().flex().flex_col().line_height(relative(1.45)).px(r(10.)).pb(r(8.));
+        let mut list = div().flex().flex_col().line_height(relative(1.45)).px(r(FRAME_INSET - RESULT_ROW_INSET)).pb(r(8.));
 
         if let Some(error) = file_error.clone().filter(|_| !sections_empty) {
             list = list.child(self.file_error_notice(&error, t, window, cx));
@@ -1514,12 +1517,13 @@ impl Palette {
                         .flex()
                         .items_center()
                         .gap(r(4.))
-                        .px(r(14.))
+                        .pl(r(CATEGORY_CHEVRON_INSET))
+                        .pr(r(CATEGORY_GRIP_INSET))
                         .pb(r(6.))
                         .pt(r(16.))
                         .child(div().flex_1().min_w_0().child(header))
                         .when(section_reorderable, |d| {
-                            d.child(self.category_grip(CategoryKind::Section, &section.id, &section.label, false, t, cx))
+                            d.child(self.category_grip(CategoryKind::Section, &section.id, &section.label, t, cx))
                         }),
                 );
             } else {
@@ -1528,9 +1532,11 @@ impl Palette {
                         .flex()
                         .items_center()
                         .gap(r(4.))
+                        .pl(r(RESULT_ROW_INSET))
+                        .pr(r(CATEGORY_GRIP_INSET))
                         .child(div().flex_1().min_w_0().child(section_label(&section.label, t)))
                         .when(section_reorderable, |d| {
-                            d.child(self.category_grip(CategoryKind::Section, &section.id, &section.label, true, t, cx))
+                            d.child(self.category_grip(CategoryKind::Section, &section.id, &section.label, t, cx))
                         }),
                 );
             }
@@ -1586,12 +1592,13 @@ impl Palette {
                             .flex()
                             .items_center()
                             .gap(r(4.))
-                            .px(r(14.))
+                            .pl(r(CATEGORY_CHEVRON_INSET))
+                            .pr(r(CATEGORY_GRIP_INSET))
                             .pb(r(6.))
                             .pt(r(8.))
                             .child(div().flex_1().min_w_0().child(header))
                             .when(section_reorderable, |d| {
-                                d.child(self.category_grip(CategoryKind::Group, &group.group_id, &group.label, false, t, cx))
+                                d.child(self.category_grip(CategoryKind::Group, &group.group_id, &group.label, t, cx))
                             }),
                     );
                 let mut rows = div().flex().flex_col().gap(r(2.));
@@ -1623,7 +1630,7 @@ impl Palette {
                         .flex()
                         .items_center()
                         .gap(r(8.))
-                        .px(r(14.))
+                        .px(r(RESULT_ROW_INSET))
                         .pb(r(4.))
                         .pt(r(8.))
                         .text_size(r(10.))
@@ -1853,7 +1860,7 @@ impl Palette {
                     .shadow(zoomed(vec![shadow(0., 8., 22., 0., t.shade(0.34))], zoom))
                     .opacity(opacity)
                     .child(crate::components::ui::inset_top_highlight(t.preview_hi(), 14.))
-                    .child(row_icon(&item.icon, 40., t, zoom, window, cx))
+                    .child(row_icon(&item.icon, RESULT_ICON_SIZE, t, zoom, window, cx))
                     .child(
                         div()
                             .flex_1()
@@ -1979,7 +1986,7 @@ impl Palette {
             .items_center()
             .justify_between()
             .gap_x(r(12.))
-            .px(r(20.))
+            .px(r(FRAME_INSET))
             .border_t_1()
             .border_color(hsla(t.footer_line()))
             .bg(gpui::linear_gradient(
